@@ -1,0 +1,55 @@
+// Add the following to the bottom of shared/schema.ts file
+
+// Orders schema
+export const orders = pgTable("orders", {
+  id: serial("id").primaryKey(),
+  orderNumber: text("order_number").notNull(),
+  dealer: text("dealer").notNull(),
+  plant: text("plant"),
+  vehicleNumber: text("vehicle_number"),
+  orderDate: text("order_date").default(() => new Date().toISOString().split('T')[0]),
+  status: text("status").default("DRAFT"),
+  createdById: integer("created_by_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+  notes: text("notes"),
+  sentToProforma: boolean("sent_to_proforma").default(false),
+  proformaId: integer("proforma_id"),
+});
+
+export const insertOrderSchema = createInsertSchema(orders).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  sentToProforma: true,
+  proformaId: true
+});
+
+export type Order = typeof orders.$inferSelect;
+export type InsertOrder = z.infer<typeof insertOrderSchema>;
+
+// Order Items schema
+export const orderItems = pgTable("order_items", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
+  productId: integer("product_id").references(() => products.id),
+  srNo: text("sr_no"),
+  name: text("name").notNull(),
+  barcode: text("barcode"),
+  quantity: integer("quantity").notNull().default(0),
+  unitPrice: text("unit_price").default("0"),
+  totalPrice: text("total_price"),
+  category: text("category"),
+  hsn: text("hsn"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow()
+});
+
+export const insertOrderItemSchema = createInsertSchema(orderItems).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true
+});
+
+export type OrderItem = typeof orderItems.$inferSelect;
+export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;

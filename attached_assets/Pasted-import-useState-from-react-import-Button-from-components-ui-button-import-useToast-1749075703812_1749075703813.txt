@@ -1,0 +1,157 @@
+import { useState } from 'react';
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
+
+interface LoginProps {
+  onLogin: () => void;
+}
+
+const Login = ({ onLogin }: LoginProps) => {
+  const [isLoading, setIsLoading] = useState(false);
+  const { toast } = useToast();
+
+  const handleAdminLogin = async () => {
+    setIsLoading(true);
+    
+    try {
+      const response = await fetch('/api/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          username: "pin-login",
+          password: "9999" // Vraj's admin PIN
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.message || 'Login failed');
+      }
+      
+      toast({
+        title: "Login successful",
+        description: `Welcome back, ${data.name}`,
+      });
+      
+      localStorage.setItem('currentUser', JSON.stringify({
+        id: data.id,
+        username: data.username,
+        name: data.name,
+        role: data.role,
+        department: data.department
+      }));
+      
+      localStorage.setItem('userId', data.id.toString());
+      
+      onLogin();
+      
+    } catch (error) {
+      console.error('Login error:', error);
+      toast({
+        title: "Login failed",
+        description: error instanceof Error ? error.message : "Login failed",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleTestUserLogin = async () => {
+    setIsLoading(true);
+    
+    try {
+      const response = await fetch('/api/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          username: "pin-login",
+          password: "1234" // Test user PIN
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.message || 'Login failed');
+      }
+      
+      toast({
+        title: "Login successful",
+        description: `Welcome back, ${data.name}`,
+      });
+      
+      localStorage.setItem('currentUser', JSON.stringify({
+        id: data.id,
+        username: data.username,
+        name: data.name,
+        role: data.role,
+        department: data.department
+      }));
+      
+      localStorage.setItem('userId', data.id.toString());
+      
+      onLogin();
+      
+    } catch (error) {
+      console.error('Login error:', error);
+      toast({
+        title: "Login failed",
+        description: error instanceof Error ? error.message : "Login failed",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-white p-4">
+      <div className="w-full max-w-md py-8 flex flex-col items-center">
+        <h1 className="text-2xl font-bold text-center mb-3">KM Tribe Login</h1>
+        <p className="text-center text-muted-foreground mb-6">
+          Select user to login
+        </p>
+        
+        <div className="w-full space-y-3">
+          <Button
+            onClick={handleAdminLogin}
+            disabled={isLoading}
+            className="w-full p-4 h-auto"
+            variant="default"
+          >
+            <div className="text-center">
+              <div className="font-medium">Vraj (Admin)</div>
+              <div className="text-sm opacity-80">Full access to all data</div>
+            </div>
+          </Button>
+          
+          <Button
+            onClick={handleTestUserLogin}
+            disabled={isLoading}
+            className="w-full p-4 h-auto"
+            variant="outline"
+          >
+            <div className="text-center">
+              <div className="font-medium">Test User</div>
+              <div className="text-sm text-muted-foreground">Read access</div>
+            </div>
+          </Button>
+        </div>
+
+        {isLoading && (
+          <div className="text-center mt-4">
+            <p className="text-sm text-muted-foreground animate-pulse">Logging in...</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default Login;

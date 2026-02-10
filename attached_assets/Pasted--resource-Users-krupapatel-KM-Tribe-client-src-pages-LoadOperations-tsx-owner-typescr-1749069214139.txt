@@ -1,0 +1,1297 @@
+[{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '{ signal: AbortSignal; }' is not assignable to parameter of type 'boolean | undefined'.",
+	"source": "ts",
+	"startLineNumber": 312,
+	"startColumn": 61,
+	"endLineNumber": 312,
+	"endColumn": 90
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2322",
+	"severity": 8,
+	"message": "Type '(number | null)[]' is not assignable to type 'number[]'.\n  Type 'number | null' is not assignable to type 'number'.\n    Type 'null' is not assignable to type 'number'.",
+	"source": "ts",
+	"startLineNumber": 1129,
+	"startColumn": 21,
+	"endLineNumber": 1129,
+	"endColumn": 31
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'selectedOperation' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1245,
+	"startColumn": 30,
+	"endLineNumber": 1245,
+	"endColumn": 47
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'map' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 1252,
+	"startColumn": 48,
+	"endLineNumber": 1252,
+	"endColumn": 51
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'item' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 1252,
+	"startColumn": 53,
+	"endLineNumber": 1252,
+	"endColumn": 57
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'mobileCard' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1369,
+	"startColumn": 17,
+	"endLineNumber": 1369,
+	"endColumn": 27
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'mobileCard' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1371,
+	"startColumn": 17,
+	"endLineNumber": 1371,
+	"endColumn": 27
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'string | null' is not assignable to parameter of type 'string'.\n  Type 'null' is not assignable to type 'string'.",
+	"source": "ts",
+	"startLineNumber": 1400,
+	"startColumn": 44,
+	"endLineNumber": 1400,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'string | null' is not assignable to parameter of type 'string'.\n  Type 'null' is not assignable to type 'string'.",
+	"source": "ts",
+	"startLineNumber": 1422,
+	"startColumn": 53,
+	"endLineNumber": 1422,
+	"endColumn": 63
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'string | null' is not assignable to parameter of type 'string'.\n  Type 'null' is not assignable to type 'string'.",
+	"source": "ts",
+	"startLineNumber": 1508,
+	"startColumn": 44,
+	"endLineNumber": 1508,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'string | null' is not assignable to parameter of type 'string'.\n  Type 'null' is not assignable to type 'string'.",
+	"source": "ts",
+	"startLineNumber": 1529,
+	"startColumn": 53,
+	"endLineNumber": 1529,
+	"endColumn": 63
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'mobileItemsContainer' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1570,
+	"startColumn": 15,
+	"endLineNumber": 1570,
+	"endColumn": 35
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'mobileItemsContainer' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1570,
+	"startColumn": 62,
+	"endLineNumber": 1570,
+	"endColumn": 82
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'desktopItemsContainer' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1592,
+	"startColumn": 19,
+	"endLineNumber": 1592,
+	"endColumn": 40
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'desktopItemsContainer' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1593,
+	"startColumn": 17,
+	"endLineNumber": 1593,
+	"endColumn": 38
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'desktopItemsContainer' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1593,
+	"startColumn": 85,
+	"endLineNumber": 1593,
+	"endColumn": 106
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'ChildNode | null | undefined' is not assignable to parameter of type 'Node | null'.\n  Type 'undefined' is not assignable to type 'Node | null'.",
+	"source": "ts",
+	"startLineNumber": 1593,
+	"startColumn": 85,
+	"endLineNumber": 1593,
+	"endColumn": 141
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'desktopItemsContainer' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1595,
+	"startColumn": 17,
+	"endLineNumber": 1595,
+	"endColumn": 38
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'desktopItemsContainer' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1595,
+	"startColumn": 61,
+	"endLineNumber": 1595,
+	"endColumn": 82
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'selectedOperation' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1607,
+	"startColumn": 37,
+	"endLineNumber": 1607,
+	"endColumn": 54
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'selectedOperation' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1607,
+	"startColumn": 72,
+	"endLineNumber": 1607,
+	"endColumn": 89
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'vehicleNumber' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 1637,
+	"startColumn": 62,
+	"endLineNumber": 1637,
+	"endColumn": 75
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'driverName' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 1638,
+	"startColumn": 56,
+	"endLineNumber": 1638,
+	"endColumn": 66
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'selectedOperation' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1681,
+	"startColumn": 36,
+	"endLineNumber": 1681,
+	"endColumn": 53
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'selectedOperation' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 1682,
+	"startColumn": 31,
+	"endLineNumber": 1682,
+	"endColumn": 48
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18048",
+	"severity": 8,
+	"message": "'operation' is possibly 'undefined'.",
+	"source": "ts",
+	"startLineNumber": 1688,
+	"startColumn": 33,
+	"endLineNumber": 1688,
+	"endColumn": 42
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2686",
+	"severity": 8,
+	"message": "'React' refers to a UMD global, but the current file is a module. Consider adding an import instead.",
+	"source": "ts",
+	"startLineNumber": 2047,
+	"startColumn": 5,
+	"endLineNumber": 2047,
+	"endColumn": 10
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'filters' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 2261,
+	"startColumn": 41,
+	"endLineNumber": 2261,
+	"endColumn": 48
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'assignedToId' does not exist on type '{ id: number; status: string | null; referenceNumber: string | null; partyName: string | null; plant: string | null; vehicleNumber: string | null; driverName: string | null; createdById: number | null; ... 4 more ...; isBackedUp: boolean | null; }'.",
+	"source": "ts",
+	"startLineNumber": 2376,
+	"startColumn": 59,
+	"endLineNumber": 2376,
+	"endColumn": 71
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'assignedToId' does not exist on type '{ id: number; status: string | null; referenceNumber: string | null; partyName: string | null; plant: string | null; vehicleNumber: string | null; driverName: string | null; createdById: number | null; ... 4 more ...; isBackedUp: boolean | null; }'.",
+	"source": "ts",
+	"startLineNumber": 2561,
+	"startColumn": 59,
+	"endLineNumber": 2561,
+	"endColumn": 71
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '(prev: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { items: (ProformaSlipItem | { ...; })[]; slip: ProformaSlip; operation?: { ...; } | undefined; } | null' is not assignable to parameter of type 'SetStateAction<{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null>'.\n  Type '(prev: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { items: (ProformaSlipItem | { ...; })[]; slip: ProformaSlip; operation?: { ...; } | undefined; } | null' is not assignable to type '(prevState: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { ...; } | undefined; } | null'.\n    Type '{ items: (ProformaSlipItem | { id: any; productId: number; loadOperationsId: number; quantity: any; originalQuantity: number; extraQuantity: any; loaded: boolean; loadedQuantity: number; ... 6 more ...; unit: any; })[]; slip: ProformaSlip; operation?: { ...; } | undefined; } | null' is not assignable to type '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null'.\n      Type '{ items: (ProformaSlipItem | { id: any; productId: number; loadOperationsId: number; quantity: any; originalQuantity: number; extraQuantity: any; loaded: boolean; loadedQuantity: number; ... 6 more ...; unit: any; })[]; slip: ProformaSlip; operation?: { status: string; }; }' is not assignable to type '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; }'.\n        Types of property 'items' are incompatible.\n          Type '(ProformaSlipItem | { id: any; productId: number; loadOperationsId: number; quantity: any; originalQuantity: number; extraQuantity: any; loaded: boolean; loadedQuantity: number; ... 6 more ...; unit: any; })[]' is not assignable to type 'ProformaSlipItem[]'.\n            Type 'ProformaSlipItem | { id: any; productId: number; loadOperationsId: number; quantity: any; originalQuantity: number; extraQuantity: any; loaded: boolean; loadedQuantity: number; ... 6 more ...; unit: any; }' is not assignable to type 'ProformaSlipItem'.\n              Type '{ id: any; productId: number; loadOperationsId: number; quantity: any; originalQuantity: number; extraQuantity: any; loaded: boolean; loadedQuantity: number; srNo: string; barcode: string; itemName: string; productName: any; sku: any; price: any; unit: any; }' is missing the following properties from type 'ProformaSlipItem': createdAt, proformaSlipId",
+	"source": "ts",
+	"startLineNumber": 2689,
+	"startColumn": 34,
+	"endLineNumber": 2689,
+	"endColumn": 43
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'vehicleNumber' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 3306,
+	"startColumn": 34,
+	"endLineNumber": 3306,
+	"endColumn": 47
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'driverName' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 3323,
+	"startColumn": 26,
+	"endLineNumber": 3323,
+	"endColumn": 36
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'plant' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 3325,
+	"startColumn": 21,
+	"endLineNumber": 3325,
+	"endColumn": 26
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'partyName' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 3326,
+	"startColumn": 25,
+	"endLineNumber": 3326,
+	"endColumn": 34
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'i' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 3428,
+	"startColumn": 62,
+	"endLineNumber": 3428,
+	"endColumn": 63
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18046",
+	"severity": 8,
+	"message": "'quantity' is of type 'unknown'.",
+	"source": "ts",
+	"startLineNumber": 4152,
+	"startColumn": 30,
+	"endLineNumber": 4152,
+	"endColumn": 38
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18046",
+	"severity": 8,
+	"message": "'quantity' is of type 'unknown'.",
+	"source": "ts",
+	"startLineNumber": 4152,
+	"startColumn": 51,
+	"endLineNumber": 4152,
+	"endColumn": 59
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2353",
+	"severity": 8,
+	"message": "Object literal may only specify known properties, and 'originalQuantity' does not exist in type '{ id: number; quantity: number; }'.",
+	"source": "ts",
+	"startLineNumber": 4292,
+	"startColumn": 17,
+	"endLineNumber": 4292,
+	"endColumn": 33
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'text' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 4314,
+	"startColumn": 49,
+	"endLineNumber": 4314,
+	"endColumn": 53
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types 'boolean | null' and 'string' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 4874,
+	"startColumn": 45,
+	"endLineNumber": 4874,
+	"endColumn": 67
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'original_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'originalQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4876,
+	"startColumn": 34,
+	"endLineNumber": 4876,
+	"endColumn": 51,
+	"relatedInformation": [
+		{
+			"startLineNumber": 10,
+			"startColumn": 3,
+			"endLineNumber": 10,
+			"endColumn": 19,
+			"message": "'originalQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'original_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'originalQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4876,
+	"startColumn": 73,
+	"endLineNumber": 4876,
+	"endColumn": 90,
+	"relatedInformation": [
+		{
+			"startLineNumber": 10,
+			"startColumn": 3,
+			"endLineNumber": 10,
+			"endColumn": 19,
+			"message": "'originalQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'loaded_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'loadedQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4880,
+	"startColumn": 33,
+	"endLineNumber": 4880,
+	"endColumn": 48,
+	"relatedInformation": [
+		{
+			"startLineNumber": 12,
+			"startColumn": 3,
+			"endLineNumber": 12,
+			"endColumn": 17,
+			"message": "'loadedQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'loaded_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'loadedQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4880,
+	"startColumn": 70,
+	"endLineNumber": 4880,
+	"endColumn": 85,
+	"relatedInformation": [
+		{
+			"startLineNumber": 12,
+			"startColumn": 3,
+			"endLineNumber": 12,
+			"endColumn": 17,
+			"message": "'loadedQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'extra_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'extraQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4883,
+	"startColumn": 32,
+	"endLineNumber": 4883,
+	"endColumn": 46,
+	"relatedInformation": [
+		{
+			"startLineNumber": 11,
+			"startColumn": 3,
+			"endLineNumber": 11,
+			"endColumn": 16,
+			"message": "'extraQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'extra_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'extraQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4883,
+	"startColumn": 68,
+	"endLineNumber": 4883,
+	"endColumn": 82,
+	"relatedInformation": [
+		{
+			"startLineNumber": 11,
+			"startColumn": 3,
+			"endLineNumber": 11,
+			"endColumn": 16,
+			"message": "'extraQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'loaded_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'loadedQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4886,
+	"startColumn": 33,
+	"endLineNumber": 4886,
+	"endColumn": 48,
+	"relatedInformation": [
+		{
+			"startLineNumber": 12,
+			"startColumn": 3,
+			"endLineNumber": 12,
+			"endColumn": 17,
+			"message": "'loadedQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'loaded_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'loadedQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4886,
+	"startColumn": 70,
+	"endLineNumber": 4886,
+	"endColumn": 85,
+	"relatedInformation": [
+		{
+			"startLineNumber": 12,
+			"startColumn": 3,
+			"endLineNumber": 12,
+			"endColumn": 17,
+			"message": "'loadedQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'extra_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'extraQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4889,
+	"startColumn": 33,
+	"endLineNumber": 4889,
+	"endColumn": 47,
+	"relatedInformation": [
+		{
+			"startLineNumber": 11,
+			"startColumn": 3,
+			"endLineNumber": 11,
+			"endColumn": 16,
+			"message": "'extraQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'extra_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'extraQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4889,
+	"startColumn": 69,
+	"endLineNumber": 4889,
+	"endColumn": 83,
+	"relatedInformation": [
+		{
+			"startLineNumber": 11,
+			"startColumn": 3,
+			"endLineNumber": 11,
+			"endColumn": 16,
+			"message": "'extraQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'original_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'originalQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4891,
+	"startColumn": 36,
+	"endLineNumber": 4891,
+	"endColumn": 53,
+	"relatedInformation": [
+		{
+			"startLineNumber": 10,
+			"startColumn": 3,
+			"endLineNumber": 10,
+			"endColumn": 19,
+			"message": "'originalQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2551",
+	"severity": 8,
+	"message": "Property 'original_quantity' does not exist on type 'ProformaSlipItem'. Did you mean 'originalQuantity'?",
+	"source": "ts",
+	"startLineNumber": 4891,
+	"startColumn": 75,
+	"endLineNumber": 4891,
+	"endColumn": 92,
+	"relatedInformation": [
+		{
+			"startLineNumber": 10,
+			"startColumn": 3,
+			"endLineNumber": 10,
+			"endColumn": 19,
+			"message": "'originalQuantity' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/lib/productLoaderHelper.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'id' does not exist on type '{ status: string; }'.",
+	"source": "ts",
+	"startLineNumber": 4925,
+	"startColumn": 66,
+	"endLineNumber": 4925,
+	"endColumn": 68
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'quantity' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 5348,
+	"startColumn": 26,
+	"endLineNumber": 5348,
+	"endColumn": 34
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'quantity' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 5350,
+	"startColumn": 47,
+	"endLineNumber": 5350,
+	"endColumn": 55
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'partyName' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 6031,
+	"startColumn": 85,
+	"endLineNumber": 6031,
+	"endColumn": 94
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'plant' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 6035,
+	"startColumn": 103,
+	"endLineNumber": 6035,
+	"endColumn": 108
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'vehicleNumber' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 6039,
+	"startColumn": 85,
+	"endLineNumber": 6039,
+	"endColumn": 98
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'driverName' does not exist on type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 6043,
+	"startColumn": 85,
+	"endLineNumber": 6043,
+	"endColumn": 95
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2322",
+	"severity": 8,
+	"message": "Type '{ date: Date | null; placeholder: string; className: string; }' is not assignable to type 'IntrinsicAttributes & DateDisplayProps'.\n  Property 'placeholder' does not exist on type 'IntrinsicAttributes & DateDisplayProps'.",
+	"source": "ts",
+	"startLineNumber": 6439,
+	"startColumn": 29,
+	"endLineNumber": 6439,
+	"endColumn": 40
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'totalLoadedQuantity' does not exist on type '{ id: number; status: string | null; referenceNumber: string | null; partyName: string | null; plant: string | null; vehicleNumber: string | null; driverName: string | null; createdById: number | null; ... 4 more ...; isBackedUp: boolean | null; }'.",
+	"source": "ts",
+	"startLineNumber": 6715,
+	"startColumn": 32,
+	"endLineNumber": 6715,
+	"endColumn": 51
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'totalLoadedQuantity' does not exist on type '{ id: number; status: string | null; referenceNumber: string | null; partyName: string | null; plant: string | null; vehicleNumber: string | null; driverName: string | null; createdById: number | null; ... 4 more ...; isBackedUp: boolean | null; }'.",
+	"source": "ts",
+	"startLineNumber": 6715,
+	"startColumn": 79,
+	"endLineNumber": 6715,
+	"endColumn": 98
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'totalLoadedQuantity' does not exist on type '{ id: number; status: string | null; referenceNumber: string | null; partyName: string | null; plant: string | null; vehicleNumber: string | null; driverName: string | null; createdById: number | null; ... 4 more ...; isBackedUp: boolean | null; }'.",
+	"source": "ts",
+	"startLineNumber": 6716,
+	"startColumn": 35,
+	"endLineNumber": 6716,
+	"endColumn": 54
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'items' does not exist on type '{ id: number; status: string | null; referenceNumber: string | null; partyName: string | null; plant: string | null; vehicleNumber: string | null; driverName: string | null; createdById: number | null; ... 4 more ...; isBackedUp: boolean | null; }'.",
+	"source": "ts",
+	"startLineNumber": 6717,
+	"startColumn": 35,
+	"endLineNumber": 6717,
+	"endColumn": 40
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'items' does not exist on type '{ id: number; status: string | null; referenceNumber: string | null; partyName: string | null; plant: string | null; vehicleNumber: string | null; driverName: string | null; createdById: number | null; ... 4 more ...; isBackedUp: boolean | null; }'.",
+	"source": "ts",
+	"startLineNumber": 6717,
+	"startColumn": 54,
+	"endLineNumber": 6717,
+	"endColumn": 59
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'items' does not exist on type '{ id: number; status: string | null; referenceNumber: string | null; partyName: string | null; plant: string | null; vehicleNumber: string | null; driverName: string | null; createdById: number | null; ... 4 more ...; isBackedUp: boolean | null; }'.",
+	"source": "ts",
+	"startLineNumber": 6718,
+	"startColumn": 37,
+	"endLineNumber": 6718,
+	"endColumn": 42
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'total' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 6718,
+	"startColumn": 51,
+	"endLineNumber": 6718,
+	"endColumn": 56
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'item' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 6718,
+	"startColumn": 58,
+	"endLineNumber": 6718,
+	"endColumn": 62
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2304",
+	"severity": 8,
+	"message": "Cannot find name 'initializeWebSocket'.",
+	"source": "ts",
+	"startLineNumber": 6759,
+	"startColumn": 31,
+	"endLineNumber": 6759,
+	"endColumn": 50
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '(prevDetails: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { items: any[]; slip?: ProformaSlip | undefined; operation?: { ...; } | undefined; }' is not assignable to parameter of type 'SetStateAction<{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null>'.\n  Type '(prevDetails: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { items: any[]; slip?: ProformaSlip | undefined; operation?: { ...; } | undefined; }' is not assignable to type '(prevState: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { ...; } | undefined; } | null'.\n    Call signature return types '{ items: any[]; slip?: ProformaSlip | undefined; operation?: { status: string; } | undefined; }' and '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null' are incompatible.\n      The types of 'slip' are incompatible between these types.\n        Type 'ProformaSlip | undefined' is not assignable to type 'ProformaSlip'.\n          Type 'undefined' is not assignable to type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 6850,
+	"startColumn": 62,
+	"endLineNumber": 6853,
+	"endColumn": 41
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2353",
+	"severity": 8,
+	"message": "Object literal may only specify known properties, and 'vehicleNumber' does not exist in type 'ProformaSlip'.",
+	"source": "ts",
+	"startLineNumber": 7221,
+	"startColumn": 45,
+	"endLineNumber": 7221,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2552",
+	"severity": 8,
+	"message": "Cannot find name 'getNewlyAddedItems'. Did you mean 'newlyAddedItems'?",
+	"source": "ts",
+	"startLineNumber": 7542,
+	"startColumn": 75,
+	"endLineNumber": 7542,
+	"endColumn": 93,
+	"relatedInformation": [
+		{
+			"startLineNumber": 7557,
+			"startColumn": 55,
+			"endLineNumber": 7557,
+			"endColumn": 70,
+			"message": "'newlyAddedItems' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'item.originalQuantity' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 7548,
+	"startColumn": 52,
+	"endLineNumber": 7548,
+	"endColumn": 73
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '(prev: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { slip: { vehicleNumber: string; driverName: string; id: number; orderNumber: string; orderDate: string | null; totalQuantity: number | null; }; items?: ProformaSlipItem[] | undefined; operation?: { ...;...' is not assignable to parameter of type 'SetStateAction<{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null>'.\n  Type '(prev: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { slip: { vehicleNumber: string; driverName: string; id: number; orderNumber: string; orderDate: string | null; totalQuantity: number | null; }; items?: ProformaSlipItem[] | undefined; operation?: { ...;...' is not assignable to type '(prevState: { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null) => { slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { ...; } | undefined; } | null'.\n    Call signature return types '{ slip: { vehicleNumber: string; driverName: string; id: number; orderNumber: string; orderDate: string | null; totalQuantity: number | null; }; items?: ProformaSlipItem[] | undefined; operation?: { ...; } | undefined; }' and '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null' are incompatible.\n      The types of 'items' are incompatible between these types.\n        Type 'ProformaSlipItem[] | undefined' is not assignable to type 'ProformaSlipItem[]'.\n          Type 'undefined' is not assignable to type 'ProformaSlipItem[]'.",
+	"source": "ts",
+	"startLineNumber": 8355,
+	"startColumn": 70,
+	"endLineNumber": 8362,
+	"endColumn": 49
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'prev' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 8358,
+	"startColumn": 54,
+	"endLineNumber": 8358,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2554",
+	"severity": 8,
+	"message": "Expected 1 arguments, but got 4.",
+	"source": "ts",
+	"startLineNumber": 8377,
+	"startColumn": 49,
+	"endLineNumber": 8385,
+	"endColumn": 50
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'error' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 8383,
+	"startColumn": 50,
+	"endLineNumber": 8383,
+	"endColumn": 55
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2538",
+	"severity": 8,
+	"message": "Type 'null' cannot be used as an index type.",
+	"source": "ts",
+	"startLineNumber": 8620,
+	"startColumn": 45,
+	"endLineNumber": 8620,
+	"endColumn": 70
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'num' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 8630,
+	"startColumn": 79,
+	"endLineNumber": 8630,
+	"endColumn": 82
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'selectedDate' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 8644,
+	"startColumn": 45,
+	"endLineNumber": 8644,
+	"endColumn": 57
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'selectedDate' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 8645,
+	"startColumn": 47,
+	"endLineNumber": 8645,
+	"endColumn": 59
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "18047",
+	"severity": 8,
+	"message": "'selectedDate' is possibly 'null'.",
+	"source": "ts",
+	"startLineNumber": 8646,
+	"startColumn": 46,
+	"endLineNumber": 8646,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"all\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8658,
+	"startColumn": 32,
+	"endLineNumber": 8658,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"today\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8666,
+	"startColumn": 31,
+	"endLineNumber": 8666,
+	"endColumn": 59
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"tomorrow\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8667,
+	"startColumn": 31,
+	"endLineNumber": 8667,
+	"endColumn": 62
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"yesterday\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8668,
+	"startColumn": 31,
+	"endLineNumber": 8668,
+	"endColumn": 63
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"all\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8771,
+	"startColumn": 32,
+	"endLineNumber": 8771,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"today\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8779,
+	"startColumn": 31,
+	"endLineNumber": 8779,
+	"endColumn": 59
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"tomorrow\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8780,
+	"startColumn": 31,
+	"endLineNumber": 8780,
+	"endColumn": 62
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"yesterday\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8781,
+	"startColumn": 31,
+	"endLineNumber": 8781,
+	"endColumn": 63
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"all\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8890,
+	"startColumn": 32,
+	"endLineNumber": 8890,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"today\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8898,
+	"startColumn": 31,
+	"endLineNumber": 8898,
+	"endColumn": 59
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"tomorrow\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8899,
+	"startColumn": 31,
+	"endLineNumber": 8899,
+	"endColumn": 62
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"yesterday\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 8900,
+	"startColumn": 31,
+	"endLineNumber": 8900,
+	"endColumn": 63
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"all\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 9008,
+	"startColumn": 32,
+	"endLineNumber": 9008,
+	"endColumn": 58
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"today\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 9016,
+	"startColumn": 31,
+	"endLineNumber": 9016,
+	"endColumn": 59
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"tomorrow\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 9017,
+	"startColumn": 31,
+	"endLineNumber": 9017,
+	"endColumn": 62
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"yesterday\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 9018,
+	"startColumn": 31,
+	"endLineNumber": 9018,
+	"endColumn": 63
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'item' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 9083,
+	"startColumn": 35,
+	"endLineNumber": 9083,
+	"endColumn": 39
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'itemTotal' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 9084,
+	"startColumn": 36,
+	"endLineNumber": 9084,
+	"endColumn": 45
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'item' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 9084,
+	"startColumn": 47,
+	"endLineNumber": 9084,
+	"endColumn": 51
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"all\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 9160,
+	"startColumn": 30,
+	"endLineNumber": 9160,
+	"endColumn": 56
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"today\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 9176,
+	"startColumn": 29,
+	"endLineNumber": 9176,
+	"endColumn": 57
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"tomorrow\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 9177,
+	"startColumn": 29,
+	"endLineNumber": 9177,
+	"endColumn": 60
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2367",
+	"severity": 8,
+	"message": "This comparison appears to be unintentional because the types '\"none\"' and '\"yesterday\"' have no overlap.",
+	"source": "ts",
+	"startLineNumber": 9178,
+	"startColumn": 29,
+	"endLineNumber": 9178,
+	"endColumn": 61
+}]

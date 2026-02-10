@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>x<%= orderNo %></title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inconsolata:wght@200..900&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        color: black;
+        padding: 1rem;
+        padding-top: 0;
+      }
+
+      html {
+        /* border: 1px solid rgba(0, 0, 0, 0.5); */
+      }
+
+      h1 {
+        text-align: center;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 20px;
+        border-spacing: 0px 1rem;
+        /* border: 1px solid black; */
+      }
+
+      th,
+      td {
+        border: 2px solid black;
+        padding: 8px;
+        text-align: left;
+      }
+
+      .times-new-roman {
+        font-family: "Times New Roman", Times, serif;
+      }
+
+      .courier-new {
+        font-family: "Courier New", Courier, monospace;
+        font-weight: bold;
+        color: #000000;
+      }
+
+      .inconsolata {
+        font-family: "Inconsolata", monospace;
+        font-optical-sizing: auto;
+        font-weight: bold;
+        font-style: normal;
+        font-variation-settings: "wdth" 100;
+      }
+
+      .text-35 {
+        font-size: 35px;
+      }
+      .text-40 {
+        font-size: 45px;
+      }
+      .text-16 {
+        font-size: 16px;
+      }
+
+      .text-15 {
+        font-size: 15px;
+      }
+
+      .text-10 {
+        font-size: 10px;
+      }
+
+      .text-12 {
+        font-size: 12px;
+      }
+
+      .text-18 {
+        font-size: 20px;
+      }
+      .text-lg {
+        font-size: 24px;
+      }
+
+      .text-purple {
+        color: #792bad;
+      }
+
+      .text-red {
+        color: #cc0000;
+      }
+
+      .text-white {
+        color: #ffffff;
+      }
+
+      .text-black {
+        color: #000000;
+      }
+
+      .padding-heading {
+        padding: 0.5rem 0;
+      }
+
+      .text-27 {
+        font-size: 35px;
+      }
+
+      table {
+        page-break-inside: auto;
+      }
+
+      tr {
+        page-break-inside: avoid;
+        page-break-after: auto;
+      }
+
+      /* thead { display: table-header-group; } tfoot { display: table-row-group; } tr { page-break-inside: avoid; } */
+      /* table {
+            page-break-inside: avoid;
+            display: block;
+            width: 100%;
+        } */
+
+      /* tr {
+            display: block;
+            page-break-inside: avoid !important;
+            page-break-after: auto !important;
+        }
+
+        thead, tbody, tr, th, td {
+            width: 100%;
+        }
+
+        .tr-1 {
+            width: 10% !important;
+        } 
+
+        .tr-2 {
+            width: 40% !important;
+        }
+
+        /* .tr-3 {
+            width: 90% !important;
+        }
+
+        .tr-4 {
+            width: 20% !important;
+        }
+
+        @media print {
+            tr {
+                display: block;
+                page-break-inside: avoid !important;
+                -webkit-column-break-inside: avoid;
+                break-inside: avoid;
+                -webkit-region-break-inside: avoid;
+            }
+        } */
+
+      /* tr,
+        td,
+        th,
+        table {
+            page-break-inside: avoid !important;
+            -webkit-column-break-inside: avoid;
+            break-inside: avoid;
+            -webkit-region-break-inside: avoid;
+        } */
+
+      /* @media print {
+            table {
+                table-layout: fixed;
+                page-break-inside: avoid !important;
+                page-break-after: auto
+            }
+
+            tr {
+                page-break-inside: avoid;
+                page-break-after: auto
+            }
+
+            thead {
+                display: table-header-group
+            }
+
+            tfoot {
+                display: tenter code hereable-footer-group
+            }
+
+            table,
+            tr,
+            td {
+                page-break-inside: avoid;
+            }
+        } */
+    </style>
+  </head>
+
+  <body>
+    <div style="position: relative">
+      <% var backgroundColor=plant==="VALSAD" ? "#274E13" : plant==="INDORE" ?
+      "#783f04" : plant==="RAJKOT" ? "#C4554D" : plant==="BARODA" ? "#477DA5" :
+      plant==="LUCKNOW" ? "#CC772F" : "#548064" ; %>
+      <h1
+        class="times-new-roman text-lg text-white padding-heading"
+        style="background-color: <%= backgroundColor %>"
+      >
+        KRUPA MARKETING - <%= plant %>
+      </h1>
+      <img
+        src="https://sulok-dev.s3.ap-south-1.amazonaws.com/notion_tracking/uploads/logo1.jpg"
+        height="120px"
+        width="120px"
+        style="float: left; position: absolute; top: 5px; left: 5px"
+      />
+    </div>
+
+    <div style="display: flex; justify-content: flex-end; position: relative">
+      <div
+        style="
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 0px;
+          position: absolute;
+          top: 0;
+          right: 0;
+        "
+      >
+        <span class="courier-new text-10 text-red" style="margin: 0 !important ;font-size: 20px;font-weight: bold; "
+          >Date:</span
+        >
+        <p class="times-new-roman text-18 text-black" style="font-size: 24px; font-weight: bold;"><%= created_at %></p>
+      </div>
+    </div>
+    <!-- <div style="display: flex; ">
+      <h2 style="color: rgb(105, 24, 110); font-size: 30px; margin-inline-start: auto;">42357</h2>
+      <p> <span style="color: red;">Date:</span>
+          <br><br>
+          07/03/2024
+      </p>
+
+  </div> -->
+
+    <div>
+      <div
+        class="times-new-roman text-18 text-red"
+        style="text-align: center; margin-bottom: 20px"
+      >
+        <h2
+          class="times-new-roman text-40 text-purple"
+          style="text-align: center"
+        >
+          <!-- <%= pdfStatus %>  -->
+          #<%= orderNo %>
+        </h2>
+        <h2> <%= partyName %></h2>
+       
+      </div>
+    </div>
+    <div>
+      <table>
+        <thead>
+          <tr>
+            <th class="courier-new text-18 tr-1">Sr No.</th>
+            <th class="courier-new text-18 tr-2">Products</th>
+            <th class="courier-new text-18 tr-3">Qty</th>
+            <!-- <th class="courier-new text-10 tr-4">Type</th> -->
+          </tr>
+        </thead>
+        <tbody>
+          <% result.forEach((item, index)=> { %>
+          <tr>
+            <td class="courier-new text-lg tr-1" style="text-align: center;"><%= item.sequence %></td>
+
+            <% 
+  let backgroundColor = item.product.includes('300GM') ? '#000000' : // Black
+    item.product.includes('ADVT') ? '#1155cc' : // Blue
+    item.product.includes('135GM') ? '#46bdc6' : // Cyan
+    item.product.includes('13GM') ? '#FF5733' : // Cyan
+    item.product.includes('200GM') ? '#49e160' : // Green
+    item.product.includes('24GM') ? '#792bad' : // Purple
+    item.product.includes('NIMBU PANI CANDY (3.5GM') ? '#792bad' : // Purple
+    item.product.includes('SOFT IMLI CANDY (3.5GM') ? '#792bad' : // Purple
+    item.product.includes('50GM') ? '#85d69a' : // Light Green
+    item.product.includes('45GM') ? '#a4c2f4' : // Light Blue
+    item.product.includes('65GM') ? '#b4a7d6' : // Lavender
+    item.product.includes('20GM') ? '#b7b7b7' : // Grey
+    item.product.includes('25GM') ? '#b7e1cd' : // Light Aqua
+    item.product.includes('250GM') ? '#c27ba0' : // Pink
+    item.product.includes('500GM') ? '#c9daf8' : // Light Sky Blue
+    item.product.includes('210GM') ? '#cccccc' : // Silver
+    item.product.includes('40GM') ? '#e06666' : // Red
+    item.product.includes('15GM') ? '#e6b8af' : // Light Red
+    item.product.includes('16GM') ? '#e6b8af' : // Light Red
+    item.product.includes('420GM') ? '#ead1dc' : // Pale Pink
+    item.product.includes('280GM') ? '#f1c232' : // Gold
+    item.product.includes('400GM') ? '#f6b26b' : // Orange
+    item.product.includes('30GM') ? '#fbbc04' : // Yellow
+    item.product.includes('240GM') ? '#ff6d01' : // Dark Orange
+    item.product.includes('22GM') ? '#ffe599' : // Light Yellow
+    item.product.includes('230GM') ? '#ffffff' : // White
+    item.product.includes('235GM') ? '#ffffff' : // White
+    item.product.includes('450GM') ? '#ffffff' : // White
+    item.product.includes('70GM') ? '#ffffff' : // White
+    'white'; // Default White
+%>
+            <td
+              class="inconsolata text-lg tr-2"
+              style="background-color: <%= backgroundColor %>; color: <%= ['#000000', '#1155cc', '#792bad','#FF5733'].includes(backgroundColor) ? 'white' : 'black' %>;"
+            >
+              <%= item.product %> [<%= item.type %>]
+            </td>
+            
+            <td class="courier-new text-lg text-red tr-3" style="text-align: center;">
+              <%= item.quantity %>.
+            </td>
+            <!-- <td class="courier-new text-15 text-black tr-4">
+            
+          </td> -->
+          </tr>
+          <!-- <% if ((index + 1) % 25===0 || index===result.length - 1) { %>
+                      <div style="page-break-after: always; display: block;"></div>
+                      <% } %> -->
+          <% }); %>
+        </tbody>
+      </table>
+    </div>
+    <p
+      class="courier-new text-red text-27"
+      style="font-weight: bold; text-align: end;"
+    >
+      Total: <%= total %>
+    </p>
+  </body>
+</html>

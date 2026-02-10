@@ -1,0 +1,53 @@
+{
+  "name": "KM Finny",
+  "short_name": "KM Finny",
+  "description": "KM Finny inventory management system",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#001d6e",
+  "categories": ["business", "inventory", "logistics"],
+  "lang": "en-US",
+  "dir": "ltr",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/icons/icon-512-maskable.png?force=1759045045",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable any"
+    },
+    {
+      "src": "/icons/icon-512.png?force=1759045045",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-192-maskable.png?force=1759045045",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable any"
+    },
+    {
+      "src": "/icons/icon-192.png?force=1759045045",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Load Operations",
+      "url": "/load-operations",
+      "description": "View and manage load operations"
+    },
+    {
+      "name": "Proforma Slips",
+      "url": "/proforma-slips",
+      "description": "View and manage proforma slips"
+    }
+  ]
+}

@@ -1,0 +1,355 @@
+[{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2440",
+	"severity": 8,
+	"message": "Import declaration conflicts with local declaration of 'formatDateToDDMMYYYY'.",
+	"source": "ts",
+	"startLineNumber": 18,
+	"startColumn": 10,
+	"endLineNumber": 18,
+	"endColumn": 30
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'selectedDate' does not exist on type '{ date: Date | null; setDate: (newDate: string | Date | null) => void; apiFormattedDate: string | null; setToday: () => void; setYesterday: () => void; setTomorrow: () => void; reset: () => void; isInitialized: boolean; savedDate: Date | null; isLocked: boolean; setLocked: (locked: boolean) => void; }'.",
+	"source": "ts",
+	"startLineNumber": 129,
+	"startColumn": 11,
+	"endLineNumber": 129,
+	"endColumn": 23
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'handleDateChange' does not exist on type '{ date: Date | null; setDate: (newDate: string | Date | null) => void; apiFormattedDate: string | null; setToday: () => void; setYesterday: () => void; setTomorrow: () => void; reset: () => void; isInitialized: boolean; savedDate: Date | null; isLocked: boolean; setLocked: (locked: boolean) => void; }'.",
+	"source": "ts",
+	"startLineNumber": 129,
+	"startColumn": 25,
+	"endLineNumber": 129,
+	"endColumn": 41
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2554",
+	"severity": 8,
+	"message": "Expected 1 arguments, but got 0.",
+	"source": "ts",
+	"startLineNumber": 129,
+	"startColumn": 46,
+	"endLineNumber": 129,
+	"endColumn": 65,
+	"relatedInformation": [
+		{
+			"startLineNumber": 54,
+			"startColumn": 37,
+			"endLineNumber": 60,
+			"endColumn": 28,
+			"message": "An argument matching this binding pattern was not provided.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/hooks/useSingleDateFilter.ts"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'Date | null' is not assignable to parameter of type 'Date'.\n  Type 'null' is not assignable to type 'Date'.",
+	"source": "ts",
+	"startLineNumber": 338,
+	"startColumn": 28,
+	"endLineNumber": 338,
+	"endColumn": 41
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'string' is not assignable to parameter of type 'Date'.",
+	"source": "ts",
+	"startLineNumber": 441,
+	"startColumn": 64,
+	"endLineNumber": 441,
+	"endColumn": 78
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'ProformaSlipItem' is not assignable to parameter of type 'boolean'.",
+	"source": "ts",
+	"startLineNumber": 596,
+	"startColumn": 63,
+	"endLineNumber": 596,
+	"endColumn": 74
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2554",
+	"severity": 8,
+	"message": "Expected 1 arguments, but got 4.",
+	"source": "ts",
+	"startLineNumber": 651,
+	"startColumn": 11,
+	"endLineNumber": 653,
+	"endColumn": 13
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'items' does not exist on type 'any[]'.",
+	"source": "ts",
+	"startLineNumber": 664,
+	"startColumn": 49,
+	"endLineNumber": 664,
+	"endColumn": 54
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '{ items: any; operation: { status: string; }; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' is not assignable to parameter of type 'SetStateAction<{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null>'.\n  Property 'slip' is missing in type '{ items: any; operation: { status: string; }; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' but required in type '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; }'.",
+	"source": "ts",
+	"startLineNumber": 676,
+	"startColumn": 36,
+	"endLineNumber": 680,
+	"endColumn": 14,
+	"relatedInformation": [
+		{
+			"startLineNumber": 141,
+			"startColumn": 5,
+			"endLineNumber": 141,
+			"endColumn": 9,
+			"message": "'slip' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '{ operation: { status: string; }; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' is not assignable to parameter of type 'SetStateAction<{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null>'.\n  Type '{ operation: { status: string; }; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: (NumberFormatOptions & DateTimeFormatOptions) | undefined): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' is missing the following properties from type '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; }': slip, items",
+	"source": "ts",
+	"startLineNumber": 682,
+	"startColumn": 36,
+	"endLineNumber": 685,
+	"endColumn": 14
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '{ operation: { status: string; }; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' is not assignable to parameter of type 'SetStateAction<{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null>'.\n  Type '{ operation: { status: string; }; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: (NumberFormatOptions & DateTimeFormatOptions) | undefined): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' is missing the following properties from type '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; }': slip, items",
+	"source": "ts",
+	"startLineNumber": 689,
+	"startColumn": 34,
+	"endLineNumber": 692,
+	"endColumn": 12
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2554",
+	"severity": 8,
+	"message": "Expected 1 arguments, but got 4.",
+	"source": "ts",
+	"startLineNumber": 826,
+	"startColumn": 9,
+	"endLineNumber": 828,
+	"endColumn": 24
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2802",
+	"severity": 8,
+	"message": "Type 'Set<number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.",
+	"source": "ts",
+	"startLineNumber": 940,
+	"startColumn": 36,
+	"endLineNumber": 940,
+	"endColumn": 72
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'string' is not assignable to parameter of type 'Date'.",
+	"source": "ts",
+	"startLineNumber": 1070,
+	"startColumn": 64,
+	"endLineNumber": 1070,
+	"endColumn": 78
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2554",
+	"severity": 8,
+	"message": "Expected 1 arguments, but got 4.",
+	"source": "ts",
+	"startLineNumber": 1173,
+	"startColumn": 65,
+	"endLineNumber": 1173,
+	"endColumn": 95
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '{ slip: any; operation: undefined; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' is not assignable to parameter of type 'SetStateAction<{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null>'.\n  Property 'items' is missing in type '{ slip: any; operation: undefined; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' but required in type '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; }'.",
+	"source": "ts",
+	"startLineNumber": 1175,
+	"startColumn": 30,
+	"endLineNumber": 1179,
+	"endColumn": 8,
+	"relatedInformation": [
+		{
+			"startLineNumber": 142,
+			"startColumn": 5,
+			"endLineNumber": 142,
+			"endColumn": 10,
+			"message": "'items' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2554",
+	"severity": 8,
+	"message": "Expected 1 arguments, but got 4.",
+	"source": "ts",
+	"startLineNumber": 1216,
+	"startColumn": 67,
+	"endLineNumber": 1216,
+	"endColumn": 97
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type '{ slip: any; operation: undefined; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' is not assignable to parameter of type 'SetStateAction<{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; } | null>'.\n  Property 'items' is missing in type '{ slip: any; operation: undefined; length: number; toString(): string; toLocaleString(): string; toLocaleString(locales: string | string[], options?: Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more ...; [Symbol.unscopables]: { ...; }; }' but required in type '{ slip: ProformaSlip; items: ProformaSlipItem[]; operation?: { status: string; } | undefined; }'.",
+	"source": "ts",
+	"startLineNumber": 1218,
+	"startColumn": 32,
+	"endLineNumber": 1222,
+	"endColumn": 10,
+	"relatedInformation": [
+		{
+			"startLineNumber": 142,
+			"startColumn": 5,
+			"endLineNumber": 142,
+			"endColumn": 10,
+			"message": "'items' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'role' does not exist on type 'Permissions'.",
+	"source": "ts",
+	"startLineNumber": 1293,
+	"startColumn": 44,
+	"endLineNumber": 1293,
+	"endColumn": 48
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'string | boolean' is not assignable to parameter of type 'boolean'.\n  Type 'string' is not assignable to type 'boolean'.",
+	"source": "ts",
+	"startLineNumber": 1462,
+	"startColumn": 48,
+	"endLineNumber": 1462,
+	"endColumn": 55
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2741",
+	"severity": 8,
+	"message": "Property '$$typeof' is missing in type '({ className }: Omit<LucideProps, \"ref\"> & RefAttributes<SVGSVGElement>) => Element' but required in type 'ForwardRefExoticComponent<Omit<LucideProps, \"ref\"> & RefAttributes<SVGSVGElement>>'.",
+	"source": "ts",
+	"startLineNumber": 1534,
+	"startColumn": 9,
+	"endLineNumber": 1534,
+	"endColumn": 13,
+	"relatedInformation": [
+		{
+			"startLineNumber": 636,
+			"startColumn": 18,
+			"endLineNumber": 636,
+			"endColumn": 26,
+			"message": "'$$typeof' is declared here.",
+			"resource": "/Users/krupapatel/KM-Tribe/node_modules/@types/react/index.d.ts"
+		},
+		{
+			"startLineNumber": 5,
+			"startColumn": 3,
+			"endLineNumber": 5,
+			"endColumn": 7,
+			"message": "The expected type comes from property 'icon' which is declared here on type 'IntrinsicAttributes & PageHeaderProps'",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/components/PageHeader.tsx"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2322",
+	"severity": 8,
+	"message": "Type '{ data: any[]; isLoading: boolean; onStatusClick: (status: any) => void; selectedStatus: string | null; }' is not assignable to type 'IntrinsicAttributes & OperationSummaryCardsProps'.\n  Property 'data' does not exist on type 'IntrinsicAttributes & OperationSummaryCardsProps'.",
+	"source": "ts",
+	"startLineNumber": 1592,
+	"startColumn": 9,
+	"endLineNumber": 1592,
+	"endColumn": 13
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "7006",
+	"severity": 8,
+	"message": "Parameter 'status' implicitly has an 'any' type.",
+	"source": "ts",
+	"startLineNumber": 1594,
+	"startColumn": 25,
+	"endLineNumber": 1594,
+	"endColumn": 31
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2322",
+	"severity": 8,
+	"message": "Type 'Dispatch<SetStateAction<string | null>>' is not assignable to type '(plants: string[]) => void'.\n  Types of parameters 'value' and 'plants' are incompatible.\n    Type 'string[]' is not assignable to type 'SetStateAction<string | null>'.",
+	"source": "ts",
+	"startLineNumber": 1605,
+	"startColumn": 17,
+	"endLineNumber": 1605,
+	"endColumn": 30,
+	"relatedInformation": [
+		{
+			"startLineNumber": 20,
+			"startColumn": 3,
+			"endLineNumber": 20,
+			"endColumn": 16,
+			"message": "The expected type comes from property 'onPlantChange' which is declared here on type 'IntrinsicAttributes & PlantFilterProps'",
+			"resource": "/Users/krupapatel/KM-Tribe/client/src/components/PlantFilter.tsx"
+		}
+	]
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2322",
+	"severity": 8,
+	"message": "Type '{ selectedStatus: string | null; onStatusChange: Dispatch<SetStateAction<string | null>>; statuses: any[]; }' is not assignable to type 'IntrinsicAttributes & SimpleOperationsFilterProps'.\n  Property 'selectedStatus' does not exist on type 'IntrinsicAttributes & SimpleOperationsFilterProps'.",
+	"source": "ts",
+	"startLineNumber": 1610,
+	"startColumn": 17,
+	"endLineNumber": 1610,
+	"endColumn": 31
+}]

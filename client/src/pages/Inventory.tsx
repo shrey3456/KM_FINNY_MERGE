@@ -1,0 +1,1251 @@
+import { useLocation } from 'wouter';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { 
+  Table, 
+  TableBody, 
+  TableCell, 
+  TableHead, 
+  TableHeader, 
+  TableRow,
+  TableFooter
+} from '@/components/ui/table';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { 
+  Card, 
+  CardContent, 
+  CardHeader, 
+  CardTitle 
+} from '@/components/ui/card';
+import PageHeader from '../components/PageHeader';
+import { getCurrentUserPermissions, isAdminOrSuperAdmin } from '../lib/permissions';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { useToast } from '@/hooks/use-toast';
+import { useForm } from "react-hook-form";
+import { CategoryBadge } from '@/components/CategoryBadge';
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import {
+  Form,
+  FormControl,
+  FormDescription,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { 
+  Search, Plus, Package, Pencil, Trash, Upload, FileUp, Loader2, Database, RefreshCw,
+  ChevronLeft, ChevronRight, ChevronFirst, ChevronLast 
+} from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
+import { apiRequest } from '@/lib/queryClient';
+import { InsertProduct, Product } from '@shared/schema';
+
+// Form schema for product creation/editing
+const productFormSchema = z.object({
+  srNo: z.string().optional(),
+  itemNo: z.string().optional(),
+  barcode: z.string().min(1, "Barcode is required"),
+  name: z.string().min(1, "Product name is required"),
+  category: z.string().optional(),
+  volumeInCuFt: z.string().optional(),
+  hsnCode: z.string().optional(),
+  sapCode: z.string().optional(),
+  purchased: z.number().optional().default(0),
+  sold: z.number().optional().default(0),
+  inStock: z.number().optional().default(0),
+  itemsPerPallet: z.number().optional().default(0),
+  pallets: z.number().optional().default(0),
+  purchasePrice: z.string().optional(),
+  sellingPrice: z.string().optional(),
+  description: z.string().optional(),
+  status: z.string().optional().default("in stock"),
+});
+
+const Inventory = () => {
+  const [location] = useLocation();
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
+  const [isAddProductDialogOpen, setIsAddProductDialogOpen] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [currentProduct, setCurrentProduct] = useState<Product | null>(null);
+  
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [entriesLimit, setEntriesLimit] = useState(15);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  // Get current user permissions
+  const userPermissions = getCurrentUserPermissions();
+  const currentUserStr = localStorage.getItem('currentUser');
+  const currentUser = currentUserStr ? JSON.parse(currentUserStr) : null;
+  const isAdmin = currentUser && isAdminOrSuperAdmin(currentUser.role);
+
+  // Add product form initialization with zod resolver
+  const addProductForm = useForm<z.infer<typeof productFormSchema>>({
+    resolver: zodResolver(productFormSchema),
+    defaultValues: {
+      srNo: '',
+      name: '',
+      barcode: '',
+      category: '',
+      volumeInCuFt: '',
+      hsnCode: '',
+      sapCode: '',
+      itemsPerPallet: 0,
+      purchased: 0,
+      sold: 0,
+      inStock: 0,
+      purchasePrice: '',
+      sellingPrice: '',
+      description: '',
+    }
+  });
+
+  // Edit form initialization with zod resolver
+  const editForm = useForm<z.infer<typeof productFormSchema>>({
+    resolver: zodResolver(productFormSchema),
+    defaultValues: {
+      srNo: '',
+      name: '',
+      barcode: '',
+      category: '',
+      volumeInCuFt: '',
+      hsnCode: '',
+      sapCode: '',
+      itemsPerPallet: 0,
+      purchasePrice: '',
+      sellingPrice: '',
+      description: '',
+    }
+  });
+
+  // Reset form values when a product is selected for editing
+  useEffect(() => {
+    if (currentProduct) {
+      editForm.reset({
+        srNo: currentProduct.srNo || '',
+        name: currentProduct.name || '',
+        barcode: currentProduct.barcode || '',
+        category: currentProduct.category || '',
+        volumeInCuFt: currentProduct.volumeInCuFt || '',
+        hsnCode: currentProduct.hsnCode || '',
+        sapCode: currentProduct.sapCode || '',
+        itemsPerPallet: currentProduct.itemsPerPallet || 0,
+        purchasePrice: currentProduct.purchasePrice ? currentProduct.purchasePrice.toString() : '',
+        sellingPrice: currentProduct.sellingPrice ? currentProduct.sellingPrice.toString() : '',
+        description: currentProduct.description || '',
+      });
+    }
+  }, [currentProduct, editForm]);
+
+  // Handle form submission for editing
+  const handleSubmitEdit = (data: z.infer<typeof productFormSchema>) => {
+    if (!currentProduct) return;
+
+    const updatedProduct = {
+      ...data,
+      id: currentProduct.id,
+      // Preserve values that are not editable through the form
+      purchased: currentProduct.purchased,
+      sold: currentProduct.sold,
+      inStock: currentProduct.inStock,
+      pallets: currentProduct.pallets,
+      // Use current date for last updated - make sure to use a standard format 
+      // that the backend can process properly
+      lastUpdated: new Date().toISOString(),
+      // Keep prices as strings as defined in the schema
+      purchasePrice: data.purchasePrice ? data.purchasePrice.toString() : '',
+      sellingPrice: data.sellingPrice ? data.sellingPrice.toString() : '',
+    };
+
+    // Remove any undefined or null values that might cause issues
+    const cleanedProduct = Object.fromEntries(
+      Object.entries(updatedProduct).filter(([_, v]) => v !== undefined && v !== null)
+    );
+
+    console.log('Submitting update with data:', cleanedProduct);
+    updateProductMutation.mutate(cleanedProduct);
+  };
+
+  const { data: products, isLoading, error, refetch: refetchProducts } = useQuery({
+    queryKey: ['/api/products'],
+    queryFn: async () => {
+      // Base URL with high limit (100000) to tell the server we want all products
+      // Add timestamp to prevent browser caching
+      const url = `/api/products?limit=100000&_t=${Date.now()}`;
+      const res = await apiRequest('GET', url);
+      return res.json();
+    },
+    staleTime: 5000, // Only 5 seconds stale time
+    refetchInterval: 15000, // Refetch every 15 seconds
+    refetchOnWindowFocus: false,
+  });
+
+  // Add a refetching mechanism
+  const handleRefresh = () => {
+    console.log('Manual refresh of product data requested');
+    refetchProducts();
+  };
+
+  // Import CSV mutation
+  const importMutation = useMutation({
+    mutationFn: async (formData: FormData) => {
+      const response = await apiRequest('POST', '/api/products/import-csv', formData, true);
+      const data = await response.json();
+      return data;
+    },
+    onSuccess: async (data) => {
+      const count = data?.successCount ?? data?.totalCount ?? 'multiple';
+      toast({
+        title: 'Import Successful ✅',
+        description: `${count} products have been imported successfully.`,
+        variant: 'default',
+        className: 'bg-green-50 border-green-200 text-green-900',
+      });
+      setIsImportDialogOpen(false);
+      setImportFile(null);
+      
+      // Invalidate queries to ensure cache is cleared
+      await queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      
+      // Directly refetch the products to update the UI immediately
+      await refetchProducts();
+    },
+    onError: (error) => {
+      toast({
+        title: 'Import Failed',
+        description: error.message || 'An error occurred during import.',
+        variant: 'destructive',
+      });
+    },
+    onSettled: () => {
+      setIsImporting(false);
+    }
+  });
+
+
+
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      setImportFile(e.target.files[0]);
+    }
+  };
+
+  const handleImport = () => {
+    if (!importFile) {
+      toast({
+        title: 'No File Selected',
+        description: 'Please select a CSV file to import.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setIsImporting(true);
+    const formData = new FormData();
+    formData.append('file', importFile);
+    importMutation.mutate(formData);
+  };
+
+
+
+  // Add product mutation
+  const addProductMutation = useMutation({
+    mutationFn: async (data: z.infer<typeof productFormSchema>) => {
+      return apiRequest('POST', '/api/products', data);
+    },
+    onSuccess: async () => {
+      toast({
+        title: 'Product Added',
+        description: 'The new product has been successfully added to inventory.',
+        variant: 'default',
+        className: 'bg-green-50 border-green-200 text-green-900',
+      });
+      setIsAddProductDialogOpen(false);
+      addProductForm.reset({
+        srNo: '',
+        name: '',
+        barcode: '',
+        category: '',
+        volumeInCuFt: '',
+        hsnCode: '',
+        sapCode: '',
+        itemsPerPallet: 0,
+        purchased: 0,
+        sold: 0,
+        inStock: 0,
+        purchasePrice: '',
+        sellingPrice: '',
+        description: '',
+      });
+      // Explicitly invalidate the specific list query
+      await queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Add Product Failed',
+        description: error.message || 'An error occurred while adding the product.',
+        variant: 'destructive',
+      });
+    }
+  });
+
+  // Handle form submission for adding a new product
+  const handleSubmitAddProduct = (data: z.infer<typeof productFormSchema>) => {
+    console.log('Submitting new product with data:', data);
+    addProductMutation.mutate(data);
+  };
+
+  // Update product mutation
+  const updateProductMutation = useMutation({
+    mutationFn: async (data: any) => {
+      return apiRequest('PUT', `/api/products/${data.id}`, data);
+    },
+    onSuccess: async () => {
+      toast({
+        title: 'Product Updated',
+        description: 'The product details have been successfully updated.',
+        variant: 'default',
+        className: 'bg-green-50 border-green-200 text-green-900',
+      });
+      setIsEditDialogOpen(false);
+      setCurrentProduct(null);
+      // Explicitly invalidate the specific list query
+      await queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Update Failed',
+        description: error.message || 'An error occurred while updating the product.',
+        variant: 'destructive',
+      });
+    }
+  });
+
+  // Delete product mutation
+  const deleteProductMutation = useMutation({
+    mutationFn: async (id: number) => {
+      return apiRequest('DELETE', `/api/products/${id}`);
+    },
+    onSuccess: async () => {
+      toast({
+        title: 'Product Deleted',
+        description: 'The product has been successfully removed from inventory.',
+        variant: 'default',
+        className: 'bg-blue-50 border-blue-200 text-blue-900',
+      });
+      // Explicitly invalidate the specific list query
+      await queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Delete Failed',
+        description: error.message || 'An error occurred while deleting the product.',
+        variant: 'destructive',
+      });
+    }
+  });
+
+  // Handle edit product button click
+  const handleEditProduct = (product: Product) => {
+    setCurrentProduct(product);
+    setIsEditDialogOpen(true);
+  };
+
+  // Handle delete product
+  const [productToDelete, setProductToDelete] = useState<Product | null>(null);
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+
+  const handleDeleteProduct = (product: Product) => {
+    setProductToDelete(product);
+    setIsDeleteDialogOpen(true);
+  };
+
+  const confirmDeleteProduct = () => {
+    if (productToDelete) {
+      deleteProductMutation.mutate(productToDelete.id);
+      setIsDeleteDialogOpen(false);
+      setProductToDelete(null);
+    }
+  };
+
+  // Format price in Indian Rupees (₹)
+  const formatIndianRupees = (price: string | number | undefined): string => {
+    if (!price) return '₹0.00';
+    const numPrice = typeof price === 'string' ? parseFloat(price) : price;
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(numPrice);
+  };
+
+  // Query sales data for the inventory page
+  const { data: salesData } = useQuery({
+    queryKey: ['/api/sales'],
+    queryFn: async () => {
+      const res = await apiRequest('GET', '/api/sales');
+      return res.json();
+    }
+  });
+
+  // Calculate totals
+  const calculateTotals = (products: any[]) => {
+    if (!Array.isArray(products) || products.length === 0) {
+      return {
+        totalPurchased: 0,
+        totalSold: 0,
+        totalInStock: 0,
+        totalPurchaseValue: 0,
+        totalSellingValue: 0,
+        totalSales: 0,
+        totalSalesAmount: 0,
+        totalItemsSold: 0,
+        latestSaleDate: 'N/A'
+      };
+    }
+
+    // Calculate inventory totals
+    const inventoryTotals = products.reduce((acc, product) => {
+      const purchased = parseInt(product.purchased) || 0;
+      const sold = parseInt(product.sold) || 0;
+      const inStock = parseInt(product.inStock) || 0;
+      const purchasePrice = parseFloat(product.purchasePrice) || 0;
+      const sellingPrice = parseFloat(product.sellingPrice) || 0;
+      const salesCount = parseInt(product.salesCount) || 0;
+
+      return {
+        totalPurchased: acc.totalPurchased + purchased,
+        totalSold: acc.totalSold + sold,
+        totalInStock: acc.totalInStock + inStock,
+        totalPurchaseValue: acc.totalPurchaseValue + (inStock * purchasePrice),
+        totalSellingValue: acc.totalSellingValue + (sold * sellingPrice)
+      };
+    }, {
+      totalPurchased: 0,
+      totalSold: 0,
+      totalInStock: 0,
+      totalPurchaseValue: 0,
+      totalSellingValue: 0
+    });
+
+    // Calculate sales totals from sales data
+    let salesTotals = {
+      totalSales: 0,
+      totalSalesAmount: 0,
+      totalItemsSold: 0,
+      latestSaleDate: 'N/A'
+    };
+
+    if (salesData && Array.isArray(salesData)) {
+      const totalSales = salesData.length;
+      const totalSalesAmount = salesData.reduce((sum, sale) => sum + (parseFloat(sale.amount) || 0), 0);
+      const totalItemsSold = salesData.reduce((sum, sale) => sum + (parseInt(sale.quantity) || 0), 0);
+
+      // Find latest sale date
+      let latestDate: Date | null = null;
+      salesData.forEach(sale => {
+        if (sale.date) {
+          const saleDate = new Date(sale.date);
+          if (!latestDate || saleDate > latestDate) {
+            latestDate = saleDate;
+          }
+        }
+      });
+
+      salesTotals = {
+        totalSales,
+        totalSalesAmount,
+        totalItemsSold,
+        latestSaleDate: latestDate ? (latestDate as Date).toLocaleDateString() : 'N/A'
+      };
+    }
+
+    // Combine both totals
+    return {
+      ...inventoryTotals,
+      ...salesTotals
+    };
+  };
+
+  // Filter products based on search term
+  const filteredProducts = Array.isArray(products) ? products.filter((product: any) => 
+    (product.name?.toLowerCase().includes(searchTerm.toLowerCase())) ||
+    (product.barcode?.includes(searchTerm)) ||
+    (product.sapCode?.includes(searchTerm)) ||
+    (product.category?.toLowerCase().includes(searchTerm.toLowerCase()))
+  ) : [];
+
+  // Sort products by Sr.No.
+  const sortedProducts = [...filteredProducts].sort((a, b) => {
+    // Convert to strings in case they're numbers, and use localeCompare 
+    const aValue = (a.srNo || '').toString();
+    const bValue = (b.srNo || '').toString();
+
+    // If sorting in ascending order
+    if (sortOrder === 'asc') {
+      return aValue.localeCompare(bValue, undefined, { numeric: true });
+    }
+    // If sorting in descending order
+    return bValue.localeCompare(aValue, undefined, { numeric: true });
+  });
+
+  // Pagination logic
+  const totalPages = Math.ceil(sortedProducts.length / entriesLimit);
+  
+  // Ensure current page is valid when entries limit changes or data changes
+  useEffect(() => {
+    if (totalPages > 0 && currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    } else if (currentPage < 1) {
+      setCurrentPage(1);
+    }
+  }, [entriesLimit, sortedProducts.length, totalPages, currentPage]);
+
+  const paginatedProducts = sortedProducts.slice(
+    (currentPage - 1) * entriesLimit,
+    currentPage * entriesLimit
+  );
+
+  // Calculate totals for the filtered products
+  const totals = calculateTotals(filteredProducts);
+
+  return (
+    <>
+      {/* Mobile Header removed as requested */}
+
+      <div className="flex-1 overflow-y-auto p-4 lg:p-6">
+        <div className="max-w-[1800px] mx-auto">
+          <PageHeader 
+            icon={Package} 
+            title="Inventory"
+          />
+
+          <Card className="mb-6 overflow-hidden w-full">
+            <CardHeader className="pb-3">
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
+                <CardTitle>Product List</CardTitle>
+                <div className="flex gap-2">
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-gray-500" />
+                    <Input
+                      type="search"
+                      placeholder="Search products..."
+                      className="pl-8 w-full sm:w-[250px]"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                    />
+                  </div>
+                  <Button 
+                    variant="outline" 
+                    size="icon"
+                    onClick={handleRefresh}
+                    title="Refresh inventory"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                  <Dialog open={isImportDialogOpen} onOpenChange={setIsImportDialogOpen}>
+                    <DialogTrigger asChild>
+                      <Button variant="outline" className="flex items-center gap-1">
+                        <Upload className="h-4 w-4" />
+                        <span>Import CSV</span>
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent>
+                      <DialogHeader>
+                        <DialogTitle>Import Products from CSV</DialogTitle>
+                        <DialogDescription>
+                          Upload a CSV file to import products into your inventory.
+                          <div className="mt-2 text-sm text-gray-500">
+                            The CSV should have headers matching the expected format:
+                            <ul className="list-disc pl-5 mt-1 space-y-1">
+                              <li>Sr.No.</li>
+                              <li>ItemName</li> 
+                              <li>SKU</li>
+                              <li>Category</li>
+                              <li>HSNCode</li>
+                              <li>SAPCode</li>
+                              <li>Purchased</li>
+                              <li>Sold</li>
+                              <li>InStock</li>
+                              <li>ItemsPerPallet</li>
+                              <li>Pallets</li>
+                              <li>PurchasePrice</li>
+                              <li>SellingPrice</li>
+                            </ul>
+                          </div>
+                        </DialogDescription>
+                      </DialogHeader>
+                      <div className="mt-4 space-y-4">
+                        <div className="flex flex-col space-y-2">
+                          <label htmlFor="csv-file" className="text-sm font-medium">
+                            CSV File
+                          </label>
+                          <Input
+                            id="csv-file"
+                            type="file"
+                            accept=".csv"
+                            ref={fileInputRef}
+                            onChange={handleFileChange}
+                          />
+                          {importFile && (
+                            <p className="text-sm text-gray-500">
+                              Selected file: {importFile.name}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <DialogFooter>
+                        <Button
+                          variant="outline"
+                          onClick={() => setIsImportDialogOpen(false)}
+                          disabled={isImporting}
+                        >
+                          Cancel
+                        </Button>
+                        <Button onClick={handleImport} disabled={isImporting}>
+                          {isImporting ? (
+                            <>
+                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                              Importing...
+                            </>
+                          ) : 'Import'}
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                  {/* Only admin and super-admin can add products */}
+                  {isAdmin ? (
+                    <Dialog open={isAddProductDialogOpen} onOpenChange={setIsAddProductDialogOpen}>
+                      <DialogTrigger asChild>
+                        <Button className="flex items-center gap-1">
+                          <Plus className="h-4 w-4" />
+                          <span>Add Product</span>
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent className="max-w-2xl">
+                      <DialogHeader>
+                        <DialogTitle>Add New Product</DialogTitle>
+                        <DialogDescription>
+                          Enter the details of the new product to add to inventory.
+                        </DialogDescription>
+                      </DialogHeader>
+                      <Form {...addProductForm}>
+                        <form onSubmit={addProductForm.handleSubmit(handleSubmitAddProduct)} className="space-y-6">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <FormField
+                              control={addProductForm.control}
+                              name="srNo"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Sr. No.</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter SR number (e.g. A001)" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="barcode"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Barcode *</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter barcode" {...field} required />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="name"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Product Name *</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter product name" {...field} required />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="category"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Category</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter product category" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="volumeInCuFt"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Volume (cu ft)</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter volume" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="hsnCode"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>HSN Code</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter HSN code" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="sapCode"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>SAP Code</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter SAP code" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="itemsPerPallet"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Items Per Pallet</FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type="number"
+                                      placeholder="0"
+                                      {...field}
+                                      onChange={(e) => field.onChange(e.target.valueAsNumber)}
+                                    />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="purchasePrice"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Purchase Price</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter purchase price" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="sellingPrice"
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>Selling Price</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter selling price" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={addProductForm.control}
+                              name="description"
+                              render={({ field }) => (
+                                <FormItem className="md:col-span-2">
+                                  <FormLabel>Description</FormLabel>
+                                  <FormControl>
+                                    <Input placeholder="Enter product description" {...field} />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                          </div>
+                          <DialogFooter>
+                            <Button type="button" variant="outline" onClick={() => setIsAddProductDialogOpen(false)}>
+                              Cancel
+                            </Button>
+                            <Button type="submit">
+                              Add Product
+                            </Button>
+                          </DialogFooter>
+                        </form>
+                      </Form>
+                    </DialogContent>
+                  </Dialog>
+                  ) : null}
+
+
+
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {isLoading ? (
+                <div className="text-center py-8">
+                  <p className="text-gray-500">Loading products...</p>
+                </div>
+              ) : error ? (
+                <div className="text-center py-8">
+                  <p className="text-red-500">Error loading products</p>
+                </div>
+              ) : filteredProducts.length === 0 ? (
+                <div className="text-center py-12">
+                  <Package className="mx-auto h-12 w-12 text-gray-400" />
+                  <h3 className="mt-2 text-lg font-medium">No products found</h3>
+                  {searchTerm ? (
+                    <p className="mt-1 text-gray-500">
+                      No products match your search criteria. Try a different search term.
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-gray-500">
+                      You haven't added any products yet. Scan a barcode or add one manually.
+                    </p>
+                  )}
+                  <div className="mt-6">
+                    <Button asChild>
+                      <a href="/scan">Start Scanning</a>
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="inventory-table-container w-full max-w-[95vw] md:max-w-[95vw] lg:max-w-[98vw] overflow-x-auto">
+                  <Table className="inventory-table w-max min-w-full">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="whitespace-nowrap frozen-header">
+                          <div className="flex items-center gap-1 cursor-pointer" onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}>
+                            Sr. No.
+                            {sortOrder === 'asc' ? ' ↑' : ' ↓'}
+                          </div>
+                        </TableHead>
+                        <TableHead className="whitespace-nowrap frozen-header">Item Name</TableHead>
+                        <TableHead className="break-words max-w-[150px]">SKU</TableHead>
+                        <TableHead className="break-words max-w-[120px]">Category</TableHead>
+                        <TableHead className="break-words max-w-[120px]">Volume (cu. ft.)</TableHead>
+                        <TableHead className="break-words max-w-[100px]">HSNCode</TableHead>
+                        <TableHead className="break-words max-w-[100px]">SAPCode</TableHead>
+                        <TableHead className="break-words max-w-[100px]">
+                          Items Per<br />Pallet
+                        </TableHead>
+                        <TableHead className="break-words max-w-[80px]">Pallets</TableHead>
+                        <TableHead className="break-words max-w-[130px]">Purchase Price</TableHead>
+                        <TableHead className="break-words max-w-[130px]">Selling Price</TableHead>
+                        <TableHead className="break-words max-w-[120px]">Last Updated</TableHead>
+                        <TableHead className="text-right min-w-[120px]">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {paginatedProducts.map((product: any) => (
+                        <TableRow key={product.id}>
+                          <TableCell>{product.srNo}</TableCell>
+                          <TableCell className="font-medium">{product.name}</TableCell>
+                          <TableCell className="break-words max-w-[150px]">{product.barcode || 'N/A'}</TableCell>
+                          <TableCell>
+                            {product.category ? (
+                              <CategoryBadge category={product.category} />
+                            ) : '—'}
+                          </TableCell>
+                          <TableCell>{product.volumeInCuFt || '—'}</TableCell>
+                          <TableCell>{product.hsnCode || '—'}</TableCell>
+                          <TableCell>{product.sapCode || '—'}</TableCell>
+                          <TableCell>{product.itemsPerPallet || 0}</TableCell>
+                          <TableCell>{product.pallets || 0}</TableCell>
+                          <TableCell>{formatIndianRupees(product.purchasePrice)}</TableCell>
+                          <TableCell>{formatIndianRupees(product.sellingPrice)}</TableCell>
+                          <TableCell>
+                            {product.lastUpdated ? new Date(product.lastUpdated).toLocaleDateString() : '—'}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex justify-end gap-2">
+                              <Button 
+                                variant="ghost" 
+                                size="icon"
+                                className="h-8 w-8" 
+                                title="Edit product"
+                                onClick={() => handleEditProduct(product)}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button 
+                                variant="ghost" 
+                                size="icon"
+                                className="h-8 w-8 text-red-500 hover:text-red-700 hover:bg-red-50" 
+                                title="Delete product"
+                                onClick={() => handleDeleteProduct(product)}
+                              >
+                                <Trash className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                    <TableFooter className="bg-muted/30">
+                      <TableRow>
+                        <TableCell colSpan={13} className="p-2">
+                          <div className="flex flex-col sm:flex-row items-center justify-between w-full gap-4">
+                             <div className="flex items-center gap-2">
+                                <span className="text-xs whitespace-nowrap">Show entries:</span>
+                                <select 
+                                  className="h-8 text-xs border rounded px-1 bg-background"
+                                  value={entriesLimit}
+                                  onChange={(e) => {
+                                    setEntriesLimit(Number(e.target.value));
+                                    setCurrentPage(1);
+                                  }}
+                                >
+                                  <option value={15}>15</option>
+                                  <option value={25}>25</option>
+                                  <option value={50}>50</option>
+                                  <option value={100}>100</option>
+                                </select>
+                             </div>
+
+                            <div className="text-sm text-muted-foreground">
+                              Showing {sortedProducts.length > 0 ? (currentPage - 1) * entriesLimit + 1 : 0} to {Math.min(currentPage * entriesLimit, sortedProducts.length)} of {sortedProducts.length} entries
+                            </div>
+                            
+                            <div className="flex items-center space-x-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1}
+                              >
+                                <ChevronFirst className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1}
+                              >
+                                <ChevronLeft className="h-4 w-4" />
+                              </Button>
+                              <span className="text-sm text-muted-foreground px-2">
+                                Page {currentPage} of {totalPages || 1}
+                              </span>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                                disabled={currentPage === totalPages || totalPages === 0}
+                              >
+                                <ChevronRight className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setCurrentPage(totalPages)}
+                                disabled={currentPage === totalPages || totalPages === 0}
+                              >
+                                <ChevronLast className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    </TableFooter>
+                  </Table>
+
+                  {/* Table Totals */}
+                  <div className="mt-6 border-t pt-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-lg font-semibold">Table Totals</h3>
+                      <div className="bg-gray-50 p-3 rounded-md">
+                        <p className="text-sm text-gray-500">Total Products</p>
+                        <p className="text-lg font-semibold">
+                          {filteredProducts.length}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {/* Edit Product Dialog */}
+      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Edit Product Details</DialogTitle>
+            <DialogDescription>
+              Update the information for this product.
+            </DialogDescription>
+          </DialogHeader>
+
+          {currentProduct && (
+            <Form {...editForm}>
+              <form onSubmit={editForm.handleSubmit(handleSubmitEdit)} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <FormField
+                    control={editForm.control}
+                    name="srNo"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Sr. No.</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Sr. No." {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="name"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Product Name</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Product name" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="barcode"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>SKU / Barcode</FormLabel>
+                        <FormControl>
+                          <Input placeholder="SKU or barcode" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="category"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Category</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Category" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="volumeInCuFt"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Volume (cu. ft.)</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Volume in cubic feet" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="hsnCode"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>HSN Code</FormLabel>
+                        <FormControl>
+                          <Input placeholder="HSN Code" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="sapCode"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>SAP Code</FormLabel>
+                        <FormControl>
+                          <Input placeholder="SAP Code" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="itemsPerPallet"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Items Per Pallet</FormLabel>
+                        <FormControl>
+                          <Input 
+                            type="number" 
+                            placeholder="Items per pallet" 
+                            {...field}
+                            onChange={(e) => field.onChange(e.target.value === '' ? undefined : parseInt(e.target.value, 10))}
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="purchasePrice"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Purchase Price (₹)</FormLabel>
+                        <FormControl>
+                          <Input 
+                            placeholder="Purchase price" 
+                            {...field} 
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={editForm.control}
+                    name="sellingPrice"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Selling Price (₹)</FormLabel>
+                        <FormControl>
+                          <Input 
+                            placeholder="Selling price" 
+                            {...field} 
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setIsEditDialogOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button 
+                    type="submit"
+                    disabled={updateProductMutation.isPending}
+                  >
+                    {updateProductMutation.isPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Saving...
+                      </>
+                    ) : 'Save Changes'}
+                  </Button>
+                </DialogFooter>
+              </form>
+            </Form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Product Confirmation Dialog */}
+      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Product</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete the product: {productToDelete?.name}?
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={confirmDeleteProduct} 
+              className="bg-[#001d6e] hover:bg-red-700"
+              disabled={deleteProductMutation.isPending}
+            >
+              {deleteProductMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : 'Delete Product'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+};
+
+export default Inventory;

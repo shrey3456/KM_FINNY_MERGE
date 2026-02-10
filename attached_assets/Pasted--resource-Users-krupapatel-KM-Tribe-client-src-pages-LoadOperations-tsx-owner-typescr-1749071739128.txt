@@ -1,0 +1,89 @@
+[{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2358",
+	"severity": 8,
+	"message": "The left-hand side of an 'instanceof' expression must be of type 'any', an object type or a type parameter.",
+	"source": "ts",
+	"startLineNumber": 397,
+	"startColumn": 64,
+	"endLineNumber": 397,
+	"endColumn": 78
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2345",
+	"severity": 8,
+	"message": "Argument of type 'ProformaSlipItem' is not assignable to parameter of type 'boolean'.",
+	"source": "ts",
+	"startLineNumber": 542,
+	"startColumn": 63,
+	"endLineNumber": 542,
+	"endColumn": 74
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'items' does not exist on type 'any[]'.",
+	"source": "ts",
+	"startLineNumber": 599,
+	"startColumn": 49,
+	"endLineNumber": 599,
+	"endColumn": 54
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2358",
+	"severity": 8,
+	"message": "The left-hand side of an 'instanceof' expression must be of type 'any', an object type or a type parameter.",
+	"source": "ts",
+	"startLineNumber": 946,
+	"startColumn": 64,
+	"endLineNumber": 946,
+	"endColumn": 78
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2339",
+	"severity": 8,
+	"message": "Property 'role' does not exist on type 'Permissions'.",
+	"source": "ts",
+	"startLineNumber": 1149,
+	"startColumn": 44,
+	"endLineNumber": 1149,
+	"endColumn": 48
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2322",
+	"severity": 8,
+	"message": "Type '{ operations: any[]; isLoading: boolean; onStatusClick: (status: string) => void; selectedStatus: string | null; }' is not assignable to type 'IntrinsicAttributes & OperationSummaryCardsProps'.\n  Property 'operations' does not exist on type 'IntrinsicAttributes & OperationSummaryCardsProps'.",
+	"source": "ts",
+	"startLineNumber": 1428,
+	"startColumn": 9,
+	"endLineNumber": 1428,
+	"endColumn": 19
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2322",
+	"severity": 8,
+	"message": "Type '{ selectedPlants: string[]; onPlantChange: (plants: string[]) => void; plants: any[]; }' is not assignable to type 'IntrinsicAttributes & PlantFilterProps'.\n  Property 'plants' does not exist on type 'IntrinsicAttributes & PlantFilterProps'.",
+	"source": "ts",
+	"startLineNumber": 1441,
+	"startColumn": 17,
+	"endLineNumber": 1441,
+	"endColumn": 23
+},{
+	"resource": "/Users/krupapatel/KM-Tribe/client/src/pages/LoadOperations.tsx",
+	"owner": "typescript",
+	"code": "2322",
+	"severity": 8,
+	"message": "Type '{ selectedStatuses: string[]; onStatusChange: (statuses: string[]) => void; availableStatuses: any[]; }' is not assignable to type 'IntrinsicAttributes & SimpleOperationsFilterProps'.\n  Property 'selectedStatuses' does not exist on type 'IntrinsicAttributes & SimpleOperationsFilterProps'. Did you mean 'selectedDate'?",
+	"source": "ts",
+	"startLineNumber": 1445,
+	"startColumn": 17,
+	"endLineNumber": 1445,
+	"endColumn": 33
+}]

@@ -1,0 +1,7 @@
+      // Add page wrapper with header
+      pagesHTML += `
+        <div class="print-page" style="break-inside: avoid; page-break-inside: avoid; ${isLastPage ? '' : 'page-break-after: always;'}">
+          <div class="print-content">
+            <div style="text-align: center; font-weight: bold; font-size: 10pt; background-color: ${bgColor}; color: ${textColor}; padding: 3px 0; margin-bottom: 3mm; border-radius: 0; border-bottom: 1px solid ${borderColor};">
+              KRUPA MARKETING - ${proformaData.slip.plant?.toUpperCase() || ''}
+            </div>

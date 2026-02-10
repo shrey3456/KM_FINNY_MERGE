@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KM Finny</title>
+    <meta name="description" content="KM Finny inventory management system" />
+    <meta name="theme-color" content="#001d6e" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta name="msapplication-config" content="none" />
+    <meta name="theme-color" content="#001d6e" />
+    
+    <!-- Ensure manifest is properly loaded -->
+    <link rel="manifest" href="/manifest-final.json" crossorigin="use-credentials" />
+    
+    <!-- PWA icons -->
+    <link rel="icon" href="/favicon-new-v2.ico" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-new-v2.ico" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-new-v2.ico" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192-v2.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512-v2.png" />
+    <link rel="apple-touch-startup-image" href="/icons/icon-512-v2.png" />
+    
+    <!-- iOS specific PWA meta tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="KM Finny" />
+    
+    <!-- Prevent telephone number detection -->
+    <meta name="format-detection" content="telephone=no" />
+    
+    <!-- Ensure proper Android display -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="KM Finny" />
+    
+    <!-- Add splash screen for Android -->
+    <meta name="msapplication-TileImage" content="/icons/icon-512-maskable.png" />
+    <meta name="msapplication-TileColor" content="#001d6e" />
+    
+    <!-- Fix for white screen on Android -->
+    <style>
+      html, body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        background-color: #ffffff;
+      }
+      #root {
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- Add a noscript message for users without JavaScript -->
+    <noscript>
+      <div style="padding: 20px; text-align: center;">
+        You need to enable JavaScript to run this app.
+      </div>
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
