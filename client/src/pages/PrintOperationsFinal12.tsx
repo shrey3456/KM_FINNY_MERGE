@@ -368,7 +368,7 @@ const PrintOperations: React.FC = () => {
       pagesHTML = `
         <div class="print-page">
           ${pageIndicatorHTML}
-          ${createHeaderHTML()}
+          ${pageNumber === 1 ? createHeaderHTML() : '<div style="height: 5mm;"></div>'}
           
           <div class="print-table-container">
             <table class="print-table" style="width: 100%; border-collapse: collapse;">
@@ -396,12 +396,6 @@ const PrintOperations: React.FC = () => {
       
       pagesHTML += `
                 <tr>
-                  <td colspan="2" style="text-align: right; font-weight: bold; padding: 0; font-size: 9pt; padding-top: 3px;">
-                    Page ${pageNumber}/${totalPages} | Page Total :
-                  </td>
-                  <td class="qty-col" style="font-weight: bold; color: #8766e3; padding: 0; font-size: 14pt; padding-top: 3px; padding-right: 8px;">
-                    ${pageTotal}
-                  </td>
                 </tr>
       `;
       
@@ -414,6 +408,14 @@ const PrintOperations: React.FC = () => {
                   </td>
                   <td class="qty-col" style="font-weight: bold; color: #ff0000; padding: 0; font-size: 16pt; padding-top: 5px; padding-right: 8px; border-top: 1px solid #000;">
                     ${grandTotal}
+                  </td>
+                </tr>
+        `;
+      } else {
+        pagesHTML += `
+                <tr>
+                  <td colspan="3" style="text-align: center; font-weight: bold; font-style: italic; padding-top: 5px; border-top: 1px solid #000; font-size: 9pt;">
+                    Continued on next page...
                   </td>
                 </tr>
         `;
@@ -442,7 +444,7 @@ const PrintOperations: React.FC = () => {
         
         pagesHTML += `
           <div class="print-page ${pageNum > 0 ? 'page-break' : ''}">
-            ${createHeaderHTML()}
+            ${pageNum === 0 ? createHeaderHTML() : '<div style="height: 5mm;"></div>'}
             
             <div class="print-table-container">
               <table class="print-table" style="width: 100%; border-collapse: collapse;">
@@ -471,7 +473,7 @@ const PrintOperations: React.FC = () => {
                     <td colspan="2" style="text-align: right; font-weight: bold; padding: 0; font-size: 9pt; padding-top: 3px;">
                       ${isLastPage 
                         ? `Items: ${proformaData.items.length} | Total :` 
-                        : `Page ${pageNum + 1}/${totalPages} | Subtotal :`}
+                        : `Page ${pageNum + 1}/${totalPagesCount} | Subtotal :`}
                     </td>
                     <td class="qty-col" style="font-weight: bold; color: ${isLastPage ? '#ff0000' : '#000000'}; padding: 0; font-size: 14pt; padding-top: 3px; padding-right: 8px;">
                       ${isLastPage 
@@ -479,6 +481,19 @@ const PrintOperations: React.FC = () => {
                         : pageTotal}
                     </td>
                   </tr>
+        `;
+        
+        if (!isLastPage) {
+          pagesHTML += `
+                  <tr>
+                    <td colspan="3" style="text-align: center; font-style: italic; font-size: 8pt; padding-top: 2px;">
+                      Continued on next page...
+                    </td>
+                  </tr>
+          `;
+        }
+
+        pagesHTML += `
                 </tbody>
               </table>
             </div>
