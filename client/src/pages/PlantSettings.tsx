@@ -30,9 +30,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Trash2, Edit, Plus, Factory } from "lucide-react";
+import { Trash2, Edit, Plus, Factory, Printer, Lock, Unlock, FileText, ScrollText } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
+import { Link } from "wouter";
 
 // Schema matching shared/schema.ts
 const plantFormSchema = z.object({
@@ -69,7 +70,7 @@ export default function PlantSettings() {
   console.log('🔍 Current form values:', formValues);
 
   // Fetch plants
-  const { data: plants, isLoading } = useQuery({
+  const { data: plants, isLoading } = useQuery<any[]>({
     queryKey: ["/api/plants"],
   });
 
@@ -189,162 +190,170 @@ export default function PlantSettings() {
             <Factory className="h-6 w-6" />
             Plant Management
         </h1>
-        <Dialog open={isDialogOpen} onOpenChange={handleDialogChange}>
-          <DialogTrigger asChild>
-            <Button onClick={handleAddNew}>
-              <Plus className="mr-2 h-4 w-4" /> Add New Plant
+        <div className="flex gap-2">
+          <Link href="/print-operations">
+            <Button variant="outline">
+              <Printer className="mr-2 h-4 w-4" />
+              Print Operations
             </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>{editingPlant ? "Edit Plant" : "Add New Plant"}</DialogTitle>
-            </DialogHeader>
-            <Form {...form}>
-              <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-                <FormField
-                  control={form.control}
-                  name="name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Plant Name (ID)</FormLabel>
-                      <FormControl>
-                        <Input placeholder="e.g. VALSAD" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+          </Link>
+          <Dialog open={isDialogOpen} onOpenChange={handleDialogChange}>
+            <DialogTrigger asChild>
+              <Button onClick={handleAddNew}>
+                <Plus className="mr-2 h-4 w-4" /> Add New Plant
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>{editingPlant ? "Edit Plant" : "Add New Plant"}</DialogTitle>
+              </DialogHeader>
+              <Form {...form}>
+                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+                  <FormField
+                    control={form.control}
+                    name="name"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Plant Name (ID)</FormLabel>
+                        <FormControl>
+                          <Input placeholder="e.g. VALSAD" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
 
-                {/* ADD THIS: Print Locking Toggle */}
-                <FormField
-                  control={form.control}
-                  name="isLockingEnabled"
-                  render={({ field }) => (
-                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4 bg-muted/50">
-                      <div className="space-y-0.5">
-                        <FormLabel className="text-base">🔒 Print Locking</FormLabel>
-                        <div className="text-sm text-muted-foreground">
-                          {field.value 
-                            ? "Slips can only be printed once (locked after first print)" 
-                            : "⚠️ Unlimited prints allowed (no locking)"}
+                  {/* ADD THIS: Print Locking Toggle */}
+                  <FormField
+                    control={form.control}
+                    name="isLockingEnabled"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4 bg-muted/50">
+                        <div className="space-y-0.5">
+                          <FormLabel className="text-base">🔒 Print Locking</FormLabel>
+                          <div className="text-sm text-muted-foreground">
+                            {field.value 
+                              ? "Slips can only be printed once (locked after first print)" 
+                              : "⚠️ Unlimited prints allowed (no locking)"}
+                          </div>
                         </div>
-                      </div>
-                      <Switch
-                        checked={field.value}
-                        onCheckedChange={field.onChange}
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name="isSplitPagesEnabled"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                        <div className="space-y-0.5">
+                          <FormLabel>📄 Split Pages</FormLabel>
+                          <div className="text-xs text-muted-foreground">
+                            {field.value 
+                              ? "Print will be split across multiple pages" 
+                              : "Print will be continuous (single long page)"}
+                          </div>
+                        </div>
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormItem>
+                    )}
+                  />
+
+                  <div className="grid grid-cols-3 gap-4">
+                      <FormField
+                      control={form.control}
+                      name="bgColor"
+                      render={({ field }) => (
+                          <FormItem>
+                          <FormLabel>Background</FormLabel>
+                          <div className="flex gap-2">
+                              <FormControl>
+                              <Input type="color" className="w-12 p-1 h-9" {...field} />
+                              </FormControl>
+                              <Input {...field} placeholder="#ffffff" />
+                          </div>
+                          <FormMessage />
+                          </FormItem>
+                      )}
                       />
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={form.control}
-                  name="isSplitPagesEnabled"
-                  render={({ field }) => (
-                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
-                      <div className="space-y-0.5">
-                        <FormLabel>📄 Split Pages</FormLabel>
-                        <div className="text-xs text-muted-foreground">
-                          {field.value 
-                            ? "Print will be split across multiple pages" 
-                            : "Print will be continuous (single long page)"}
-                        </div>
-                      </div>
-                      <Switch
-                        checked={field.value}
-                        onCheckedChange={field.onChange}
+                      
+                      <FormField
+                      control={form.control}
+                      name="textColor"
+                      render={({ field }) => (
+                          <FormItem>
+                          <FormLabel>Text Color</FormLabel>
+                          <div className="flex gap-2">
+                              <FormControl>
+                              <Input type="color" className="w-12 p-1 h-9" {...field} />
+                              </FormControl>
+                               <Input {...field} placeholder="#000000" />
+                          </div>
+                          <FormMessage />
+                          </FormItem>
+                      )}
                       />
-                    </FormItem>
-                  )}
-                />
 
-                <div className="grid grid-cols-3 gap-4">
-                    <FormField
-                    control={form.control}
-                    name="bgColor"
-                    render={({ field }) => (
-                        <FormItem>
-                        <FormLabel>Background</FormLabel>
-                        <div className="flex gap-2">
-                            <FormControl>
-                            <Input type="color" className="w-12 p-1 h-9" {...field} />
-                            </FormControl>
-                            <Input {...field} placeholder="#ffffff" />
-                        </div>
-                        <FormMessage />
-                        </FormItem>
-                    )}
-                    />
-                    
-                    <FormField
-                    control={form.control}
-                    name="textColor"
-                    render={({ field }) => (
-                        <FormItem>
-                        <FormLabel>Text Color</FormLabel>
-                        <div className="flex gap-2">
-                            <FormControl>
-                            <Input type="color" className="w-12 p-1 h-9" {...field} />
-                            </FormControl>
-                             <Input {...field} placeholder="#000000" />
-                        </div>
-                        <FormMessage />
-                        </FormItem>
-                    )}
-                    />
+                      <FormField
+                      control={form.control}
+                      name="borderColor"
+                      render={({ field }) => (
+                          <FormItem>
+                          <FormLabel>Border Color</FormLabel>
+                          <div className="flex gap-2">
+                              <FormControl>
+                              <Input type="color" className="w-12 p-1 h-9" {...field} />
+                              </FormControl>
+                               <Input {...field} placeholder="#cccccc" />
+                          </div>
+                          <FormMessage />
+                          </FormItem>
+                      )}
+                      />
+                  </div>
 
-                    <FormField
-                    control={form.control}
-                    name="borderColor"
-                    render={({ field }) => (
-                        <FormItem>
-                        <FormLabel>Border Color</FormLabel>
-                        <div className="flex gap-2">
-                            <FormControl>
-                            <Input type="color" className="w-12 p-1 h-9" {...field} />
-                            </FormControl>
-                             <Input {...field} placeholder="#cccccc" />
-                        </div>
-                        <FormMessage />
-                        </FormItem>
-                    )}
-                    />
-                </div>
+                  <div className="bg-muted p-4 rounded-md mt-4">
+                      <p className="text-sm font-medium mb-2">Preview:</p>
+                      <div 
+                          className="p-4 border text-center font-bold rounded"
+                          style={{
+                              backgroundColor: form.watch("bgColor"),
+                              color: form.watch("textColor"),
+                              borderColor: form.watch("borderColor"),
+                              borderWidth: "2px"
+                          }}
+                      >
+                          KRUPA MARKETING - {form.watch("name")?.toUpperCase() || "PLANT NAME"}
+                          <div className="text-xs mt-2 opacity-75 space-y-1">
+                              <div>
+                                {form.watch("isLockingEnabled") 
+                                  ? '🔒 Print once only' 
+                                  : '⚠️ Unlimited prints'}
+                              </div>
+                              <div>
+                                {form.watch("isSplitPagesEnabled") 
+                                  ? '📄 Multi-page mode' 
+                                  : '📜 Continuous mode'}
+                              </div>
+                          </div>
+                      </div>
+                  </div>
 
-                <div className="bg-muted p-4 rounded-md mt-4">
-                    <p className="text-sm font-medium mb-2">Preview:</p>
-                    <div 
-                        className="p-4 border text-center font-bold rounded"
-                        style={{
-                            backgroundColor: form.watch("bgColor"),
-                            color: form.watch("textColor"),
-                            borderColor: form.watch("borderColor"),
-                            borderWidth: "2px"
-                        }}
-                    >
-                        KRUPA MARKETING - {form.watch("name")?.toUpperCase() || "PLANT NAME"}
-                        <div className="text-xs mt-2 opacity-75 space-y-1">
-                            <div>
-                              {form.watch("isLockingEnabled") 
-                                ? '🔒 Print once only' 
-                                : '⚠️ Unlimited prints'}
-                            </div>
-                            <div>
-                              {form.watch("isSplitPagesEnabled") 
-                                ? '📄 Multi-page mode' 
-                                : '📜 Continuous mode'}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <Button type="submit" className="w-full" disabled={createMutation.isPending || updateMutation.isPending}>
-                  {editingPlant ? "Update Plant" : "Create Plant"}
-                </Button>
-              </form>
-            </Form>
-          </DialogContent>
-        </Dialog>
+                  <Button type="submit" className="w-full" disabled={createMutation.isPending || updateMutation.isPending}>
+                    {editingPlant ? "Update Plant" : "Create Plant"}
+                  </Button>
+                </form>
+              </Form>
+            </DialogContent>
+          </Dialog>
+        </div>
       </div>
 
       <Card>
@@ -375,24 +384,24 @@ export default function PlantSettings() {
                   {/* ADD THIS: Locking Status Column */}
                   <TableCell>
                     {plant.isLockingEnabled ? (
-                      <span className="text-green-600 text-xs flex items-center gap-1">
-                        🔒 <span>Once</span>
+                      <span className="text-green-600 font-medium text-xs flex items-center gap-1">
+                        <Lock className="h-3.5 w-3.5" /> <span>Locked</span>
                       </span>
                     ) : (
-                      <span className="text-orange-600 text-xs flex items-center gap-1">
-                        ⚠️ <span>Unlimited</span>
+                      <span className="text-orange-600 font-medium text-xs flex items-center gap-1">
+                        <Unlock className="h-3.5 w-3.5" /> <span>Unlimited</span>
                       </span>
                     )}
                   </TableCell>
                   {/* ADD THIS: Split Pages Status Column */}
                   <TableCell>
                     {plant.isSplitPagesEnabled ? (
-                      <span className="text-blue-600 text-xs flex items-center gap-1">
-                        📄 <span>Multi</span>
+                      <span className="text-blue-600 font-medium text-xs flex items-center gap-1">
+                        <FileText className="h-3.5 w-3.5" /> <span>Splited</span>
                       </span>
                     ) : (
-                      <span className="text-gray-600 text-xs flex items-center gap-1">
-                        📜 <span>Continuous</span>
+                      <span className="text-gray-600 font-medium text-xs flex items-center gap-1">
+                        <ScrollText className="h-3.5 w-3.5" /> <span>Continuous</span>
                       </span>
                     )}
                   </TableCell>

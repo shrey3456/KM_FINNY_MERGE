@@ -189,7 +189,7 @@ export default function ProformaSlips() {
       return '';
     }
   })();
-  const isAdminOrSuper = ['admin', 'superadmin', 'super admin', 'super_admin'].includes(currentUserRole);
+  const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
   // Define users who have edit access (Read-Write permissions)
   const isReadWriteUser = ['readwrite', 'read-write', 'editor', 'edit', 'rw', 'write'].includes(currentUserRole);
   const canEditSlips = isAdminOrSuper || isReadWriteUser;
