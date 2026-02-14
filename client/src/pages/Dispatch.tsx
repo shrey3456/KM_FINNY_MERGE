@@ -230,6 +230,16 @@ export default function Dispatch() {
       logoDataUrl = logoPath;
     }
     
+    // Calculate dynamic font size for driver text to keep it on one line
+    const driverText = editableVehicleDriver || data.orderInfo?.['Vehi x Dri :'] || ((data.orderInfo?.['Vehicle No. :'] || 'N/A') + ' x ' + (data.orderInfo?.['Driver :'] || 'N/A'));
+    let driverFontSize = '14px';
+    const dLen = driverText.length;
+    if (dLen > 50) driverFontSize = '9px';
+    else if (dLen > 40) driverFontSize = '10px';
+    else if (dLen > 35) driverFontSize = '11px';
+    else if (dLen > 30) driverFontSize = '12px';
+    else if (dLen > 25) driverFontSize = '13px';
+
      const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -383,7 +393,7 @@ export default function Dispatch() {
           <div class="middle-section">
             <div style="flex:0 0 35%; min-width:0;">
               <div style="font-weight:800;font-size:14px;">Vehi x Dri:</div>
-              <div style="font-size:14px; word-break:break-word;">${editableVehicleDriver || data.orderInfo?.['Vehi x Dri :'] || ((data.orderInfo?.['Vehicle No. :'] || 'N/A') + ' x ' + (data.orderInfo?.['Driver :'] || 'N/A'))}</div>
+              <div style="font-size:${driverFontSize}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${driverText}">${driverText}</div>
             </div>
             <div style="flex:1; text-align:right; min-width:0; font-size:14px;">
               <div class="invoice-no" style="word-break:break-word; line-height:1.3; margin-bottom:2px;"><strong>Invoice No:</strong> ${data.orderInfo?.['Invoice No :'] || 'N/A'}</div>

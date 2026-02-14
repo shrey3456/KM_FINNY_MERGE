@@ -660,9 +660,9 @@ export default function ExpenseVoucher() {
                 <td class="avg-value">${(() => {
                     const avg = voucherInfo["Average :"];
                     if (avg && avg !== "N/A" && !isNaN(parseFloat(avg))) {
-                      return parseFloat(avg).toFixed(1);
+                      return parseFloat(avg).toFixed(2);
                     }
-                    return "0.0";
+                    return "0.00";
                   })()}</td>
               </tr>
 
@@ -1175,7 +1175,7 @@ export default function ExpenseVoucher() {
                           const avg =
                             expenseVoucherData.data.voucherInfo?.["Average :"];
                           if (avg && avg !== "N/A" && !isNaN(parseFloat(avg))) {
-                            return parseFloat(avg).toFixed(1);
+                            return parseFloat(avg).toFixed(2);
                           }
                           return "N/A";
                         })()}
