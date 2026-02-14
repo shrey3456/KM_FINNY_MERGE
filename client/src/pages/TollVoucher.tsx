@@ -175,13 +175,12 @@ export default function TollVoucher() {
     
     // Better calculation based on actual character length
     let partyFontPt = 16; // default large size
-    if (length > 800) partyFontPt = 6;
-    else if (length > 600) partyFontPt = 10;
-    else if (length > 400) partyFontPt = 11; // This case will apply (506 > 400)
-    else if (length > 300) partyFontPt = 12;
-    else if (length > 200) partyFontPt = 13;
-    else if (length > 100) partyFontPt = 14;
-
+    if (length > 800) partyFontPt = 8;
+    else if (length > 600) partyFontPt = 9;
+    else if (length > 400) partyFontPt = 10;
+    else if (length > 300) partyFontPt = 11;
+    else if (length > 200)   partyFontPt = 12;
+console.log(length, partyFontPt);
     let logoDataUrl = "";
     try {
       const response = await fetch(logoPath);
