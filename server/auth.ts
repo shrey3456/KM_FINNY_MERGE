@@ -373,6 +373,7 @@ export function setupAuth(app: Express) {
     }
     
     console.log(`User info requested for: ${req.user.username}`);
+    console.log(`Sending user object:`, JSON.stringify(req.user, null, 2));
     res.json(req.user);
   });
 

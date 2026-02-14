@@ -64,18 +64,50 @@ const PrintOperations: React.FC = () => {
   // This allows us to lock it only when moving to the next slip
   const [hasPrintedCurrentSlip, setHasPrintedCurrentSlip] = useState(false);
 
-  // NEW: current user + role
-  const currentUser = JSON.parse(localStorage.getItem('km-user') || localStorage.getItem('currentUser') || '{}');
-  const currentUserRole = currentUser?.role || '';
-  const normalizedRole = String(currentUserRole).toLowerCase().replace(/[\s_-]/g, '');
-  const isAdminOrSuper = normalizedRole === 'admin' || normalizedRole === 'superadmin';
+  // Fetch fresh user data to ensure permissions are up to date
+  const { data: remoteUser } = useQuery<any>({
+    queryKey: ['/api/user'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/user');
+        if (res.ok) return await res.json();
+        return null; 
+      } catch (e) {
+        return null;
+      }
+    },
+    staleTime: 60000 
+  });
+  
+  const currentUser = (() => {
+    if (remoteUser && (remoteUser.id || remoteUser.userCode)) return remoteUser;
+    
+    try {
+      const raw = localStorage.getItem('km-user') || localStorage.getItem('currentUser');
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  })();
+  
+  const currentUserRole = String(currentUser?.role || '').toLowerCase();
+  const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
+
+  const rawDepartment = String(currentUser?.department || '').trim().toLowerCase();
+  const rawDesignation = String(currentUser?.designation || '').trim().toLowerCase();
+  
+  // Department: Billing, Designation: Head
+  const canUnlockSlips = isAdminOrSuper || (rawDepartment === 'billing' && rawDesignation === 'head');
 
   // Add debug console log
-  console.log('🔍 Debug Plant Management Button:', {
-    currentUser,
-    currentUserRole,
-    normalizedRole,
-    isAdminOrSuper
+  console.log('🔍 Debug Print Operations:', {
+    source: remoteUser ? 'remote' : 'local',
+    role: currentUserRole, 
+    dept: rawDepartment,
+    desig: rawDesignation, 
+    isAdminOrSuper, 
+    canUnlockSlips,
+    rawUser: currentUser 
   });
 
   // Query to fetch proforma data by activeOrderNumber (NOT inputValue)
@@ -1097,7 +1129,9 @@ const PrintOperations: React.FC = () => {
                       });
                       const pages = splitItemsIntoPages(sortedItems);
                       const totalPages = pages.length;
-                      const isPrintLocked = proformaData.slip?.isPrintLocked && isLockingEnabled && !isAdminOrSuper;
+                      const isPrintLocked = proformaData.slip?.isPrintLocked && isLockingEnabled;
+                      // Don't disable button if user has unlock permissions
+                      const isButtonDisabled = isPrintLocked && !canUnlockSlips;
                       
                       // If split pages enabled and multiple pages, show individual page print buttons
                       if (isSplitPagesEnabled && totalPages > 1) {
@@ -1111,10 +1145,10 @@ const PrintOperations: React.FC = () => {
                                 key={pageNum}
                                 onClick={() => handlePrint(pageNum)} 
                                 className="w-full bg-[#8766e3] hover:bg-[#7656d3] text-white"
-                                disabled={isPrintLocked || isLoading}
+                                disabled={isButtonDisabled || isLoading}
                               >
                                 <PrinterCheck className="mr-2 h-4 w-4" /> 
-                                {isPrintLocked ? 'Locked' : `Print Page ${pageNum}`}
+                                {isPrintLocked ? 'Locked (Unlock below)' : `Print Page ${pageNum}`}
                               </Button>
                             ))}
                           </div>
@@ -1126,10 +1160,10 @@ const PrintOperations: React.FC = () => {
                         <Button 
                           onClick={() => handlePrint()} 
                           className="w-full bg-[#8766e3] hover:bg-[#7656d3] text-white"
-                          disabled={isPrintLocked || isLoading}
+                          disabled={isButtonDisabled || isLoading}
                         >
                           <PrinterCheck className="mr-2 h-4 w-4" /> 
-                          {isPrintLocked ? 'Locked' : 'Print Order'}
+                          {isPrintLocked ? 'Locked (Unlock below)' : 'Print Order'}
                         </Button>
                       );
                     })()}
@@ -1150,9 +1184,17 @@ const PrintOperations: React.FC = () => {
                       </div>
                     )} */}
 
-                    {proformaData.slip?.isPrintLocked && isAdminOrSuper && (
+                    {/* DEBUG: Show reasons if not showing */
+                      <div className="hidden">
+                        DEBUG STATUS: 
+                        Locked: {String(proformaData.slip?.isPrintLocked)}
+                        CanUnlock: {String(canUnlockSlips)}
+                      </div>
+                    }
+
+                    {proformaData.slip?.isPrintLocked && canUnlockSlips && (
                       <Button onClick={handleUnlock} variant="outline" className="w-full mt-1">
-                        Unlock Slip (Admin)
+                        Unlock Slip ({isAdminOrSuper ? 'Admin' : 'Head'})
                       </Button>
                     )}
                   </>

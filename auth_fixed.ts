@@ -234,15 +234,15 @@ export function setupAuth(app: Express) {
     )
   );
 
-  passport.serializeUser((user, done) => {
-    console.log(`Serializing user: ${user.id}`);
-    done(null, user.id);
+  passport.serializeUser((user: any, done) => {
+    console.log(`Serializing user: ${user.userCode}`);
+    done(null, user.userCode);
   });
   
-  passport.deserializeUser(async (id: number, done) => {
+  passport.deserializeUser(async (userCode: string, done) => {
     try {
-      console.log(`Deserializing user ID: ${id}`);
-      const user = await storage.getUser(id);
+      console.log(`Deserializing user ID: ${userCode}`);
+      const user = await storage.getUser(userCode);
       done(null, user);
     } catch (err) {
       console.error("Error deserializing user:", err);
@@ -291,11 +291,12 @@ export function setupAuth(app: Express) {
         
         console.log(`=== LOGIN SUCCESS: ${user.username} ===`);
         return res.status(200).json({
-          id: user.id,
+          id: user.userCode,
           username: user.username,
           name: user.name,
           role: user.role,
-          department: user.department
+          department: user.department,
+          designation: user.designation
         });
       });
     })(req, res, next);
@@ -331,11 +332,12 @@ export function setupAuth(app: Express) {
       req.login(user, (err) => {
         if (err) return next(err);
         res.status(201).json({
-          id: user.id,
+          id: user.userCode,
           username: user.username,
           name: user.name,
           role: user.role,
-          department: user.department
+          department: user.department,
+          designation: user.designation
         });
       });
     } catch (err) {
@@ -373,13 +375,14 @@ export function setupAuth(app: Express) {
       return res.status(401).json({ message: "Not authenticated" });
     }
     
-    console.log(`User info requested for: ${req.user.username}`);
+    console.log(`User info requested for: ${(req.user as any).username}`);
     res.json({
-      id: req.user.id,
-      username: req.user.username,
-      name: req.user.name,
-      role: req.user.role,
-      department: req.user.department
+      id: (req.user as any).userCode,
+      username: (req.user as any).username,
+      name: (req.user as any).name,
+      role: (req.user as any).role,
+      department: (req.user as any).department,
+      designation: (req.user as any).designation
     });
   });
 

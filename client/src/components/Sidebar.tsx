@@ -149,6 +149,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
           path: "/print-operations",
         },
         {
+          label: "Proforma Slips",
+          icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/proforma-slips",
+        },
+        {
           label: "Dispatch",
           icon: (
             <Truck
@@ -199,11 +204,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
           label: "Inventory",
           icon: <Package className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/inventory",
-        },
-        {
-          label: "Proforma Slips",
-          icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/proforma-slips",
         },
         {
           label: "Purchases",

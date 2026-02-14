@@ -47,7 +47,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       
       // Store user info in localStorage for compatibility with existing code
       localStorage.setItem('currentUser', JSON.stringify({
-        id: user.id,
         userCode: user.userCode,
         username: user.username,
         name: user.name,
@@ -78,7 +77,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     onSuccess: () => {
       queryClient.setQueryData(["/api/user"], null);
       localStorage.removeItem('currentUser');
+      localStorage.removeItem('km-user');
       localStorage.removeItem('userCode');
+      localStorage.removeItem('userId');
       navigate('/');
       
       toast({

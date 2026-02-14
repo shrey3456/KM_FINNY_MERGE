@@ -10,6 +10,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
 import logoPath from '@assets/logo_wo_bg_1757152661130.png';
 import { borderBottomLeftRadius } from 'html2canvas/dist/types/css/property-descriptors/border-radius';
+import { text } from 'stream/consumers';
 
 interface TollVoucherData {
   orderNumber: string;
@@ -68,6 +69,18 @@ function useAccessControl() {
 
   return { hasAccess, isLoading };
 }
+
+
+const getFontSize = (text: string) => {
+  if (!text) return 12;
+  const length = text.length;
+  
+  if (length < 100) return 18;
+  if (length < 200) return 16;
+  if (length < 300) return 12;
+  if (length < 400) return 10;
+  return 6;
+};
 
 export default function TollVoucher() {
   const [selectedPlant, setSelectedPlant] = useState('valsad');
@@ -158,8 +171,16 @@ export default function TollVoucher() {
     if (!tollVoucherData?.data) return;
 
     const partyText = tollVoucherData.data.party || "";
-    const partyCount = countParties(partyText);
-    const partyFontPt = fontSizeForPartyCount(partyCount);
+    const length = partyText.length;
+    
+    // Better calculation based on actual character length
+    let partyFontPt = 16; // default large size
+    if (length > 800) partyFontPt = 6;
+    else if (length > 600) partyFontPt = 9;
+    else if (length > 400) partyFontPt = 10; // This case will apply (506 > 400)
+    else if (length > 300) partyFontPt = 11;
+    else if (length > 200) partyFontPt = 13;
+    else if (length > 100) partyFontPt = 14;
 
     let logoDataUrl = "";
     try {
@@ -305,10 +326,13 @@ export default function TollVoucher() {
               if (!element || !element.parentElement) return;
               
               const parent = element.parentElement;
-              let size = 12;
+              let size = ${partyFontPt}; // Start with the calculated size
+              
+              // Ensure we start applying from this size
               element.style.fontSize = size + 'pt';
               
-              while (element.scrollHeight > parent.clientHeight && size > 10) {
+              // Allow shrinking further if it still overflows, down to 5pt
+              while (element.scrollHeight > parent.clientHeight && size > 4) {
                 size -= 0.5;
                 element.style.fontSize = size + 'pt';
               }
@@ -613,3 +637,4 @@ const fontSizeForPartyCount = (count: number) => {
   if (count <= 20) return 12;   // small
   return 10;                    // extra small
 };
+

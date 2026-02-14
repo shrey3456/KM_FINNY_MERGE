@@ -540,15 +540,14 @@ export default function ExpenseVoucher() {
             .order-details-header { background: #4f2f88ff !important; color: white !important; font-weight: 800; font-size: 12pt; text-align: center; padding: 2px; height: 9mm; }
             .order-date-header, .party-name-header { padding: 3px; font-weight: 700; font-size: 12pt; height: 9mm;text-align: center; }
             .party-details-cell {
-              font-size: clamp(14px, 3.5vw, 8px) !important;
-              // font-size: 8pt;
-              line-height: 1.15;
-              height: 47mm;
-              // max-height: 45mm;
-              overflow: hidden;
-              position: relative;
-              vertical-align: top;
-            }
+  font-size: clamp(8px, 1.2vw, 16 px) !important;
+  line-height: 1.15;
+  height: 47mm;
+  overflow: hidden;
+  position: relative;
+  vertical-align: top;
+}
+
 
             .diesel-header { background: #fbbf24 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 9pt; height: 6mm; }
             .route-kms-header, .avg-header { text-align: center; padding: 3px; font-weight: 800; font-size: 9pt; height: 6mm; }

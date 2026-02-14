@@ -180,18 +180,56 @@ export default function ProformaSlips() {
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [isDateFilterActive, setIsDateFilterActive] = useState(false);
   
-  const currentUserRole = (() => {
+  // Fetch fresh user data to ensure permissions are up to date
+  const { data: remoteUser } = useQuery<any>({
+    queryKey: ['/api/user'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/user');
+        if (res.ok) return await res.json();
+        return null; 
+      } catch (e) {
+        return null;
+      }
+    },
+    // Don't refetch too often, but ensure we have it
+    staleTime: 60000 
+  });
+
+  const currentUserInfo = (() => {
+    // Priority to remote user data which has latest fields
+    if (remoteUser && remoteUser.userCode) return remoteUser;
+    
     try {
-      const raw = localStorage.getItem('currentUser');
-      const user = raw ? JSON.parse(raw) : null;
-      return String(user?.role ?? '').toLowerCase();
+      const raw = localStorage.getItem('km-user') || localStorage.getItem('currentUser');
+      return raw ? JSON.parse(raw) : null;
     } catch {
-      return '';
+      return null;
     }
   })();
+  
+  const currentUserRole = String(currentUserInfo?.role || '').toLowerCase();
+  
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
+console.log(currentUserRole);
+  const userDept = String(currentUserInfo?.department || '').toLowerCase().trim();
+  const userDesig = String(currentUserInfo?.designation || '').toLowerCase().trim();
+  
   // Define users who have edit access (Read-Write permissions)
-  const isReadWriteUser = ['readwrite', 'read-write', 'editor', 'edit', 'rw', 'write'].includes(currentUserRole);
+  const isReadWriteUser = ['read/write', 'read-write', 'editor', 'edit', 'rw', 'write'].includes(currentUserRole);
+
+  // Department: Billing, Designation: Head (Case insensitive check)
+  const canUnlockSlips = isAdminOrSuper || (userDept === 'billing' && userDesig === 'head' && isReadWriteUser);
+
+  console.log('DEBUG PROFORMA PERMISSIONS:', { 
+    source: remoteUser ? 'remote' : 'local',
+    role: currentUserRole, 
+    dept: userDept, 
+    desig: userDesig, 
+    isAdminOrSuper, 
+    canUnlockSlips
+  });
+  
   const canEditSlips = isAdminOrSuper || isReadWriteUser;
 
   
@@ -1476,7 +1514,7 @@ export default function ProformaSlips() {
                               )}
 
                               {/* Admin Unlock Option */}
-                              {slip.isPrintLocked && isAdminOrSuper && (
+                              {slip.isPrintLocked && canUnlockSlips && (
                                 <DropdownMenuItem 
                                   onClick={async () => {
                                     try {

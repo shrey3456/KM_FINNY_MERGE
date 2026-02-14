@@ -90,7 +90,16 @@ const Login = ({ onLogin }: LoginProps) => {
         username: data.username,
         name: data.name,
         role: data.role,
-        department: data.department
+        department: data.department,
+        designation: data.designation
+      }));
+      localStorage.setItem('km-user', JSON.stringify({
+        id: data.id,
+        username: data.username,
+        name: data.name,
+        role: data.role,
+        department: data.department,
+        designation: data.designation
       }));
       
       localStorage.setItem('userId', data.id.toString());

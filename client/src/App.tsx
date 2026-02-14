@@ -31,7 +31,7 @@ import { useToast } from "@/hooks/use-toast";
 import { getCurrentUserPermissions } from "./lib/permissions";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { initializeStatePreservation } from "./utils/statePreservationInit.tsx";
-import { AuthProvider } from "@/hooks/use-auth";
+import { useAuth, AuthProvider } from "@/hooks/use-auth";
 import PlantSettings from "./pages/PlantSettings";
 
 // Loading indicator component for Suspense fallback
@@ -43,6 +43,9 @@ const LoadingIndicator = () => (
 
 // Router component with improved PWA support
 function Router() {
+  const { user, logoutMutation } = useAuth();
+  // We can derive isAuthenticated from user presence in useAuth context
+  // But we'll keep local state for now to minimize disruption, syncing it with useAuth
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [showSplash, setShowSplash] = useState(true);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -51,14 +54,23 @@ function Router() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
 
+  // Sync authentication state with useAuth
+  useEffect(() => {
+    if (user) {
+      setIsAuthenticated(true);
+    } else {
+      // Check localStorage as backup for initial load before query resolves
+      const userStr = localStorage.getItem('currentUser');
+      if (userStr) {
+        setIsAuthenticated(true);
+      } else {
+        setIsAuthenticated(false);
+      }
+    }
+  }, [user]);
+
   // Check for existing user on mount and PWA status
   useEffect(() => {
-    // Check authentication
-    const userStr = localStorage.getItem('currentUser');
-    if (userStr) {
-      setIsAuthenticated(true);
-    }
-
     // Check if already installed
     const isInStandaloneMode = () => 
       (window.matchMedia('(display-mode: standalone)').matches) || 
@@ -123,18 +135,24 @@ function Router() {
   // Handle Login
   const handleLogin = () => {
     setIsAuthenticated(true);
+    // Force a reload of user data
+    queryClient.invalidateQueries({ queryKey: ["/api/user"] });
   };
 
   // Handle Logout
   const handleLogout = useCallback(() => {
+    // Call the API logout
+    logoutMutation.mutate();
+    
+    // Also perform local cleanup immediately for better UX
     localStorage.removeItem('currentUser');
+    localStorage.removeItem('km-user');
+    localStorage.removeItem('userCode');
+    localStorage.removeItem('userId');
+    
     setIsAuthenticated(false);
-    toast({
-      title: "Logged out successfully",
-      description: "You have been logged out",
-    });
-    navigate('/');
-  }, [navigate, toast]);
+    // Toast is handled in use-auth onSuccess
+  }, [logoutMutation]);
 
   // Logout route handler
   useEffect(() => {

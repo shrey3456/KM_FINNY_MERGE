@@ -646,14 +646,24 @@ router.post('/proforma-slips/order/:orderNumber/lock', async (req: Request, res:
   }
 });
 
-// Unlock a proforma slip (admin/super-admin only)
+// Unlock a proforma slip (admin/super-admin OR Head-Billing)
 router.post('/proforma-slips/order/:orderNumber/unlock', async (req: Request, res: Response) => {
   try {
     const user = (req as any).user || (req as any).session?.user;
-    const role = String(user?.role || '').toLowerCase();
+    if (!user) {
+      return res.status(403).json({ success: false, message: 'Not authenticated' });
+    }
+
+    const role = String(user.role || '').toLowerCase();
+    const dept = String(user.department || '').toLowerCase();
+    const desig = String(user.designation || '').toLowerCase();
+
     const isAdminOrSuper = ['admin', 'superadmin', 'super admin', 'super-admin'].includes(role);
-    if (!user || !isAdminOrSuper) {
-      return res.status(403).json({ success: false, message: 'Admin privileges required' });
+    // User requested "department is billing and designation is head"
+    const isHeadBilling = dept === 'billing' && desig === 'head';
+
+    if (!isAdminOrSuper && !isHeadBilling) {
+      return res.status(403).json({ success: false, message: 'Access denied: Requires Admin or Billing-Head' });
     }
 
     const orderNumber = String(req.params.orderNumber).trim();
