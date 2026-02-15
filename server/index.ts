@@ -1,12 +1,11 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
-import session from "express-session";
-import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 
 
 const app = express();
+app.set("trust proxy", 1);
 
 // Add CORS and security headers for deployment
 app.use((req, res, next) => {
@@ -55,26 +54,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// register session store using the pg Pool
-const PgSession = connectPgSimple(session);
-
-app.use(
-  session({
-    store: new PgSession({
-      pool, // use the Pool exported from server/db.ts
-      tableName: "session",
-      createTableIfMissing: true,
-    }),
-    secret: process.env.SESSION_SECRET || "change-this-secret",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-      maxAge: 24 * 60 * 60 * 1000,
-    },
-  })
-);
 
 (async () => {
 
