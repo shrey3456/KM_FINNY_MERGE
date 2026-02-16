@@ -217,9 +217,10 @@ console.log(currentUserRole);
   
   // Define users who have edit access (Read-Write permissions)
   const isReadWriteUser = ['read/write', 'read-write', 'editor', 'edit', 'rw', 'write'].includes(currentUserRole);
-
+  const isITDep= ['IT', 'information technology', 'it'].includes(userDept);
+  const ismanagment = ['management', 'manager', 'head', 'director'].includes(userDept);
   // Department: Billing, Designation: Head (Case insensitive check)
-  const canUnlockSlips = isAdminOrSuper || (userDept === 'billing' && userDesig === 'head' && isReadWriteUser);
+  const canUnlockSlips = isAdminOrSuper || isITDep || ismanagment || (userDept === 'billing' && userDesig === 'head' && isReadWriteUser);
 
   console.log('DEBUG PROFORMA PERMISSIONS:', { 
     source: remoteUser ? 'remote' : 'local',

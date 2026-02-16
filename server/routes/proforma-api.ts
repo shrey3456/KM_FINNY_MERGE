@@ -661,9 +661,12 @@ router.post('/proforma-slips/order/:orderNumber/unlock', async (req: Request, re
     const isAdminOrSuper = ['admin', 'superadmin', 'super admin', 'super-admin'].includes(role);
     // User requested "department is billing and designation is head"
     const isHeadBilling = dept === 'billing' && desig === 'head';
+    const isITDep= ['IT', 'information technology', 'it'].includes(dept);
+    const ismanagment = ['management', 'manager', 'head', 'director'].includes(dept);
 
-    if (!isAdminOrSuper && !isHeadBilling) {
-      return res.status(403).json({ success: false, message: 'Access denied: Requires Admin or Billing-Head' });
+    console.log(`🔐 Unlock request by ${user.name || user.username} (Role: ${role}, Dept: ${dept}, Desig: ${desig}) - Admin/Super: ${isAdminOrSuper}, Head-Billing: ${isHeadBilling}, IT: ${isITDep}, Management: ${ismanagment}`)  ;
+    if (!isAdminOrSuper && !isHeadBilling && !isITDep && !ismanagment) {
+      return res.status(403).json({ success: false, message: 'Access denied: Requires Admin or Billing-Head or IT or Management' });
     }
 
     const orderNumber = String(req.params.orderNumber).trim();

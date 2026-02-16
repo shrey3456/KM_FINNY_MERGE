@@ -89,15 +89,18 @@ const PrintOperations: React.FC = () => {
       return {};
     }
   })();
-  
   const currentUserRole = String(currentUser?.role || '').toLowerCase();
+  const isread = ['read-only', 'readonly', 'read', 'r'].includes(currentUserRole);
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
 
   const rawDepartment = String(currentUser?.department || '').trim().toLowerCase();
   const rawDesignation = String(currentUser?.designation || '').trim().toLowerCase();
   
+  const isITDep= ['IT', 'information technology', 'it'].includes(rawDepartment);
+  const ismanagment = ['management', 'manager', 'head', 'director'].includes(rawDepartment);
   // Department: Billing, Designation: Head
-  const canUnlockSlips = isAdminOrSuper || (rawDepartment === 'billing' && rawDesignation === 'head');
+  console.log(isITDep,ismanagment)
+  const canUnlockSlips = !isread && (isAdminOrSuper || isITDep || ismanagment || (rawDepartment === 'billing' && rawDesignation === 'head'));
 
   // Add debug console log
   console.log('🔍 Debug Print Operations:', {
@@ -839,8 +842,55 @@ const PrintOperations: React.FC = () => {
 
     try {
       setTimeout(async () => {
+        // Fetch the slip data
         await refetch();
-        await refetchPlantConfig(); // Refetch plant config to get latest locking settings
+        
+        // NEW: Immediately check the latest lock status after fetching
+        const currentData = proformaData;
+        if (currentData) {
+          try {
+            // Fetch fresh slip data to check latest lock status
+            const latestSlipResponse = await axios.get(`/api/proforma-slips/order/${newOrderNumber}`);
+            const latestSlip = latestSlipResponse.data?.slip;
+            
+            // Refetch plant config to get latest locking settings
+            await refetchPlantConfig();
+            const isLockingEnabledForPlant = plantConfig?.isLockingEnabled ?? true;
+            
+            console.log('🔍 Latest slip status check:', {
+              orderNumber: newOrderNumber,
+              isPrintLocked: latestSlip?.isPrintLocked,
+              isLockingEnabled: isLockingEnabledForPlant,
+              printedBy: latestSlip?.printedByCode,
+              printedAt: latestSlip?.printedAt,
+              printCount: latestSlip?.printCount
+            });
+            
+            // Show lock status warning if locked and locking is enabled
+            if (latestSlip?.isPrintLocked && isLockingEnabledForPlant && !canUnlockSlips) {
+              toast({
+                title: "⚠️ Slip Locked",
+                description: `This slip was printed ${latestSlip.printCount || 1} time(s). Contact admin to unlock.`,
+                variant: "destructive",
+              });
+            } else if (latestSlip?.isPrintLocked && isLockingEnabledForPlant && canUnlockSlips) {
+              toast({
+                title: "🔒 Slip Locked",
+                description: "This slip is locked. You can unlock it using the button below.",
+                variant: "default",
+              });
+            } else if (!isLockingEnabledForPlant) {
+              toast({
+                title: "✅ Unlimited Printing",
+                description: `Locking is disabled for ${currentData.slip.plant}. You can print multiple times.`,
+                variant: "default",
+              });
+            }
+          } catch (err) {
+            console.error('Failed to fetch latest slip status:', err);
+          }
+        }
+        
         setShowPreview(true);
       }, 0);
     } catch (err) {
