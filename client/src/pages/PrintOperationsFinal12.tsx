@@ -102,6 +102,15 @@ const PrintOperations: React.FC = () => {
   console.log(isITDep,ismanagment)
   const canUnlockSlips = !isread && (isAdminOrSuper || isITDep || ismanagment || (rawDepartment === 'billing' && rawDesignation === 'head'));
 
+  // NEW: Get current user info and time for use in both print function and preview
+  // CHANGED: Use Name instead of Role
+  const printUser = currentUser?.username;
+  const printTime = new Date().toLocaleString('en-IN', { 
+      day: '2-digit', month: '2-digit', year: '2-digit', 
+      hour: '2-digit', minute: '2-digit', hour12: true 
+  });
+  console.log(currentUser?.name, currentUser?.username, currentUser?.userCode);
+
   // Add debug console log
   console.log('🔍 Debug Print Operations:', {
     source: remoteUser ? 'remote' : 'local',
@@ -251,7 +260,7 @@ const PrintOperations: React.FC = () => {
     const bgColor = plantConfig?.bgColor || '#e5e7eb'; // gray-200 default
     const textColor = plantConfig?.textColor || '#1a202c'; // gray-900 default
     const borderColor = plantConfig?.borderColor || '#9ca3af'; // gray-400 default
-    
+
     console.log('🎨 Plant config at print time:', { 
       plant: proformaData.slip.plant, 
       bgColor, 
@@ -439,11 +448,19 @@ const PrintOperations: React.FC = () => {
         pagesHTML += `
                 <tr>
                   <td colspan="2" style="text-align: right; font-weight: bold; padding: 0; font-size: 10pt; padding-top: 5px; border-top: 1px solid #000;">
-                    Grand Total (${sortedItems.length} items) :
+                     Total Quantity (${sortedItems.length} items) :
                   </td>
                   <td class="qty-col" style="font-weight: bold; color: #ff0000; padding: 0; font-size: 16pt; padding-top: 5px; padding-right: 8px; border-top: 1px solid #000;">
                     ${grandTotal}
                   </td>
+                </tr>
+                <tr>
+                   <td colspan="3" style="padding-top: 5px; color: #000000ff; font-size: 7pt; font-style: italic;">
+                     <div style="display: flex; justify-content: space-between; width: 100%;">
+                       <span> ${printUser}</span>
+                       <span>${printTime}</span>
+                     </div>
+                   </td>
                 </tr>
         `;
       } else {
@@ -501,7 +518,7 @@ const PrintOperations: React.FC = () => {
         
         // Add page totals (show page total and overall total on last page)
         const pageTotal = pageItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
-        const isLastPage = pageNum === totalPages - 1;
+        const isLastPage = pageNum === totalPagesCount - 1; // Fix logic for split pages loop
         
         pagesHTML += `
                   <tr>
@@ -517,6 +534,19 @@ const PrintOperations: React.FC = () => {
                     </td>
                   </tr>
         `;
+
+        if (isLastPage) {
+           pagesHTML += `
+                  <tr>
+                     <td colspan="3" style="padding-top: 5px; color: #555; font-size: 7pt; font-style: italic;">
+                       <div style="display: flex; justify-content: space-between; width: 100%;">
+                         <span>Printed by: ${printUser}</span>
+                         <span>${printTime}</span>
+                       </div>
+                     </td>
+                  </tr>
+          `;
+        }
         
         if (!isLastPage) {
           pagesHTML += `
@@ -569,6 +599,14 @@ const PrintOperations: React.FC = () => {
                 <td class="qty-col" style="font-weight: bold; color: #ff0000; padding: 0; font-size: 14pt; padding-top: 3px; padding-right: 8px;">
                   ${proformaData.items.reduce((sum, item) => sum + (item.quantity || 0), 0)}
                 </td>
+              </tr>
+              <tr>
+                 <td colspan="3" style="padding-top: 5px; color: #555; font-size: 7pt; font-style: italic;">
+                   <div style="display: flex; justify-content: space-between; width: 100%">
+                     <span>Printed by: ${printUser}</span>
+                     <span>${printTime}</span>
+                   </div>
+                 </td>
               </tr>
               </tbody>
             </table>
@@ -700,7 +738,7 @@ const PrintOperations: React.FC = () => {
               thead {
                 display: table-header-group !important;
               }
-              tbody {
+              tbody
                 page-break-inside: ${isSplitPagesEnabled ? 'avoid' : 'auto'} !important;
                 break-inside: ${isSplitPagesEnabled ? 'avoid' : 'auto'} !important;
               }
@@ -1120,6 +1158,14 @@ const PrintOperations: React.FC = () => {
                           <td className="qty-col" style={{ fontWeight: 'bold', padding: '0', color: '#ff0000', fontSize: '14pt', paddingTop: '3px', paddingRight: '8px' }}>
                             {proformaData.items.reduce((sum, item) => sum + (item.quantity || 0), 0)}
                           </td>
+                        </tr>
+                        <tr>
+                           <td colSpan={3} style={{ paddingTop: '5px', color: '#555', fontSize: '7pt', fontStyle: 'italic' }}>
+                             <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                               <span>Printed by: {printUser}</span>
+                               <span>{printTime}</span>
+                             </div>
+                           </td>
                         </tr>
                       </tbody>
                     </table>
