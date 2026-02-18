@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
@@ -95,6 +94,7 @@ import {
   FilterX,
   FileText,
   Calculator,
+  RefreshCw,
 } from "lucide-react";
 import { format, isWithinInterval, startOfDay, endOfDay, parseISO } from "date-fns";
 import { type ProformaSlip, type ProformaSlipItem, type Product } from "@shared/schema";
@@ -140,6 +140,17 @@ async function unlockSlip(orderNumber: string) {
     const text = await res.text();
     throw new Error(text || 'Failed to unlock');
   }
+}
+
+async function lockSlip(orderNumber: string, printedByCode?: string) {
+  const res = await apiRequest('POST', `/api/proforma-slips/order/${orderNumber}/lock`, {
+    printedByCode
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || 'Failed to lock');
+  }
+  return res.json();
 }
 
 type ProformaSlipItemFormValues = z.infer<typeof proformaSlipItemFormSchema>;
@@ -220,18 +231,31 @@ console.log(currentUserRole);
   const isITDep= ['IT', 'information technology', 'it'].includes(userDept);
   const ismanagment = ['management', 'manager', 'head', 'director'].includes(userDept);
   // Department: Billing, Designation: Head (Case insensitive check)
-  const canUnlockSlips = isAdminOrSuper || isITDep || ismanagment || (userDept === 'billing' && userDesig === 'head' && isReadWriteUser);
+  const isBillingHead = userDept === 'billing' && userDesig === 'head';
+  
+  // Lock/Unlock permissions: Admin, Super-Admin, IT, Management, Billing Head
+  const canLockUnlockSlips = isAdminOrSuper || isITDep || ismanagment || isBillingHead;
+
+  // Add new slips: Admin, Super-Admin, and Read-Write users
+  const canAddSlips = isAdminOrSuper || isReadWriteUser;
+  
+  // Only Admin/Super-Admin can edit and delete slips
+  const canEditSlips = isAdminOrSuper;
 
   console.log('DEBUG PROFORMA PERMISSIONS:', { 
     source: remoteUser ? 'remote' : 'local',
     role: currentUserRole, 
     dept: userDept, 
     desig: userDesig, 
-    isAdminOrSuper, 
-    canUnlockSlips
+    isAdminOrSuper,
+    isReadWriteUser,
+    canLockUnlockSlips,
+    canAddSlips,
+    canEditSlips,
+    isITDep,
+    ismanagment,
+    isBillingHead
   });
-  
-  const canEditSlips = isAdminOrSuper || isReadWriteUser;
 
   
   // Initialize date filter based on saved filter
@@ -288,8 +312,8 @@ console.log(currentUserRole);
   // Entries limit state - Default to 15 entries
   const [entriesLimit, setEntriesLimit] = useState<number>(15);
   
-  // Auto-refresh interval in milliseconds (60 seconds)
-  const AUTO_REFRESH_INTERVAL = 60000;
+  // Auto-refresh interval in milliseconds (10 seconds for real-time collaboration)
+  const AUTO_REFRESH_INTERVAL = 10000;
   
   // Track if user is currently interacting with the page
   const [userInteracting, setUserInteracting] = useState(false);
@@ -299,35 +323,49 @@ console.log(currentUserRole);
   
   // Setup user interaction tracking for the auto-refresh feature
   useEffect(() => {
-    // Events that indicate user interaction
-    const interactionEvents = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart'];
+    // Only pause auto-refresh when user is actively typing/editing, not just viewing
+    // Focus on input/textarea = user is typing
+    // Click on dialog/button = user is interacting
+    let interactionTimer: ReturnType<typeof setTimeout>;
     
-    // Function to indicate user started interacting
     const handleInteractionStart = () => {
       setUserInteracting(true);
     };
     
-    // Function to indicate user stopped interacting (with debounce)
-    let interactionTimer: ReturnType<typeof setTimeout>;
     const handleInteractionEnd = () => {
       clearTimeout(interactionTimer);
       interactionTimer = setTimeout(() => {
         setUserInteracting(false);
-      }, 5000); // 5 second debounce
+      }, 2000); // 2 second debounce - shorter for faster auto-refresh resume
+    };
+
+    // Only pause on actual editing actions - typing and clicking
+    const handleFocus = (e: FocusEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
+        handleInteractionStart();
+      }
+    };
+
+    const handleBlur = () => {
+      handleInteractionEnd();
+    };
+
+    const handleKeyDown = () => {
+      handleInteractionStart();
+      handleInteractionEnd();
     };
     
-    // Add event listeners for user interaction
-    interactionEvents.forEach(event => {
-      window.addEventListener(event, handleInteractionStart);
-      window.addEventListener(event, handleInteractionEnd);
-    });
+    // Add event listeners
+    window.addEventListener('focusin', handleFocus);
+    window.addEventListener('focusout', handleBlur);
+    window.addEventListener('keydown', handleKeyDown);
     
     // Clean up event listeners on unmount
     return () => {
-      interactionEvents.forEach(event => {
-        window.removeEventListener(event, handleInteractionStart);
-        window.removeEventListener(event, handleInteractionEnd);
-      });
+      window.removeEventListener('focusin', handleFocus);
+      window.removeEventListener('focusout', handleBlur);
+      window.removeEventListener('keydown', handleKeyDown);
       clearTimeout(interactionTimer);
     };
   }, []);
@@ -354,7 +392,7 @@ console.log(currentUserRole);
     },
     // Enable auto-refresh with React Query's refetchInterval
     refetchInterval: userInteracting ? false : AUTO_REFRESH_INTERVAL,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true, // Refresh when user focuses window/tab
     staleTime: AUTO_REFRESH_INTERVAL / 2,
   });
   
@@ -367,7 +405,7 @@ console.log(currentUserRole);
     },
     // Apply the same auto-refresh settings
     refetchInterval: userInteracting ? false : AUTO_REFRESH_INTERVAL,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true, // Refresh when user focuses window/tab
     staleTime: AUTO_REFRESH_INTERVAL / 2,
   });
   
@@ -1132,8 +1170,11 @@ console.log(currentUserRole);
             icon={FileText}
             title="Proforma Slips"
           />
-          <div className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
-            <span>Auto-refresh {userInteracting ? 'paused' : 'active'}</span>
+          <div className="text-xs text-muted-foreground flex items-center gap-2 mt-1">
+            <span className="flex items-center gap-1">
+              {!userInteracting && <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>}
+              Auto-refresh {userInteracting ? 'paused' : 'active'} (every 10s)
+            </span>
             <span>·</span>
             <span title={`Next refresh in ${Math.max(0, Math.floor((AUTO_REFRESH_INTERVAL - (Date.now() - lastRefreshTimeRef.current)) / 1000))} seconds`}>
               Last updated: {new Date(lastRefreshTimeRef.current).toLocaleTimeString()}
@@ -1141,13 +1182,31 @@ console.log(currentUserRole);
           </div>
         </div>
         <div className="flex gap-2">
+          {/* Refresh Button */}
+          <Button 
+            variant="outline" 
+            size="sm"
+            onClick={() => {
+              queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
+              queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+              lastRefreshTimeRef.current = Date.now();
+              toast({ 
+                title: "Refreshed", 
+                description: "Data has been updated from server" 
+              });
+            }}
+            title="Refresh now"
+          >
+            <RefreshCw className="mr-2 h-4 w-4" /> Refresh
+          </Button>
+
           {/* Admin/Super Admin only */}
           {isAdminOrSuper && (
             <>
               <Dialog>
                 <DialogTrigger asChild>
-                  <Button variant="outline">
-                    <FileUp className="mr-2 h-4 w-4" /> Import from Notion
+                  <Button variant="outline" size="sm">
+                    <FileUp className="mr-2 h-4 w-4" /> Import Notion
                   </Button>
                 </DialogTrigger>
                 <DialogContent className="max-w-2xl">
@@ -1167,7 +1226,7 @@ console.log(currentUserRole);
 
               <Dialog>
                 <DialogTrigger asChild>
-                  <Button variant="outline">
+                  <Button variant="outline" size="sm">
                     <FileUp className="mr-2 h-4 w-4" /> Import CSV
                   </Button>
                 </DialogTrigger>
@@ -1188,6 +1247,7 @@ console.log(currentUserRole);
 
               <Button 
                 variant="outline" 
+                size="sm"
                 onClick={handleRecalculateVolumes}
                 disabled={isRecalculatingVolumes}
               >
@@ -1197,23 +1257,23 @@ console.log(currentUserRole);
                   </>
                 ) : (
                   <>
-                    <Calculator className="mr-2 h-4 w-4" /> Recalculate Volumes
+                    <Calculator className="mr-2 h-4 w-4" /> Recalc Volumes
                   </>
                 )}
               </Button>
             </>
           )}
 
-          {/* New Slips: available to all edit-capable users (admins/editors) */}
-          {canEditSlips && (
-            <Button onClick={() => setIsNewSlipDialogOpen(true)}>
-              <Plus className="mr-2 h-4 w-4" /> New Proforma Slip
+          {/* New Slips: available to admins and read-write users */}
+          {canAddSlips && (
+            <Button onClick={() => setIsNewSlipDialogOpen(true)} size="sm">
+              <Plus className="mr-2 h-4 w-4" /> New Slip
             </Button>
           )}
 
           {/* Visible to all */}
-          <Button variant="outline" onClick={handleExportCSV}>
-            <FileDown className="mr-2 h-4 w-4" /> Export All Slips
+          <Button variant="outline" size="sm" onClick={handleExportCSV}>
+            <FileDown className="mr-2 h-4 w-4" /> Export All
           </Button>
         </div>
       </div>
@@ -1483,7 +1543,7 @@ console.log(currentUserRole);
                               <DropdownMenuItem 
                                 onClick={() => toggleRowExpansion(slip)}
                               >
-                                {canEditSlips ? (
+                                {canAddSlips ? (
                                   <>
                                     <Edit className="mr-2 h-4 w-4" /> Manage Items
                                   </>
@@ -1514,16 +1574,47 @@ console.log(currentUserRole);
                                 </DropdownMenuItem>
                               )}
 
-                              {/* Admin Unlock Option */}
-                              {slip.isPrintLocked && canUnlockSlips && (
+                              {/* Lock Option - Available to Admin, Super-Admin, IT, Management, Billing Head */}
+                              {!slip.isPrintLocked && canLockUnlockSlips && (
+                                <DropdownMenuItem 
+                                  onClick={async () => {
+                                    try {
+                                      await lockSlip(slip.orderNumber, currentUserInfo?.userCode);
+                                      queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
+                                      toast({ 
+                                        title: "Locked", 
+                                        description: `Slip #${slip.orderNumber} has been locked.` 
+                                      });
+                                    } catch (err: any) {
+                                      toast({ 
+                                        title: "Error", 
+                                        description: err.message || "Failed to lock", 
+                                        variant: "destructive" 
+                                      });
+                                    }
+                                  }}
+                                >
+                                  <Lock className="mr-2 h-4 w-4" /> Lock Slip
+                                </DropdownMenuItem>
+                              )}
+
+                              {/* Unlock Option - Available to Admin, Super-Admin, IT, Management, Billing Head */}
+                              {slip.isPrintLocked && canLockUnlockSlips && (
                                 <DropdownMenuItem 
                                   onClick={async () => {
                                     try {
                                       await unlockSlip(slip.orderNumber);
                                       queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
-                                      toast({ title: "Unlocked", description: `Slip #${slip.orderNumber} unlocked.` });
+                                      toast({ 
+                                        title: "Unlocked", 
+                                        description: `Slip #${slip.orderNumber} unlocked.` 
+                                      });
                                     } catch (err: any) {
-                                      toast({ title: "Error", description: err.message || "Failed to unlock", variant: "destructive" });
+                                      toast({ 
+                                        title: "Error", 
+                                        description: err.message || "Failed to unlock", 
+                                        variant: "destructive" 
+                                      });
                                     }
                                   }}
                                 >
@@ -1565,7 +1656,7 @@ console.log(currentUserRole);
                                   <h3 className="text-lg font-medium">Inventory Items</h3>
                                 </div>
                                 
-                                {canEditSlips && (
+                                {canAddSlips && (
                                   <div className="rounded-lg border p-4 bg-white">
                                     <h4 className="text-sm font-semibold mb-2">Add Items to Proforma Slip</h4>
                                     <div className="relative">
@@ -1696,9 +1787,9 @@ console.log(currentUserRole);
                                                 variant="outline"
                                                 size="sm"
                                                 className="h-8 w-8 p-0"
-                                                disabled={!canEditSlips}
+                                                disabled={!canAddSlips}
                                                 onClick={() => {
-                                                  if (!canEditSlips) return;
+                                                  if (!canAddSlips) return;
                                                   const currentQuantity = item.quantity || 1;
                                                   if (currentQuantity > 1) {
                                                     handleSaveItem(item.id, { quantity: currentQuantity - 1 });
@@ -1714,9 +1805,9 @@ console.log(currentUserRole);
                                                 variant="outline"
                                                 size="sm"
                                                 className="h-8 w-8 p-0"
-                                                disabled={!canEditSlips}
+                                                disabled={!canAddSlips}
                                                 onClick={() => {
-                                                  if (!canEditSlips) return;
+                                                  if (!canAddSlips) return;
                                                   const currentQuantity = item.quantity || 1;
                                                   handleSaveItem(item.id, { quantity: currentQuantity + 1 });
                                                 }}
@@ -1726,7 +1817,7 @@ console.log(currentUserRole);
                                             </div>
                                           </TableCell>
                                           <TableCell>
-                                            {canEditSlips && (
+                                            {canAddSlips && (
                                               <div className="flex justify-end gap-2">
                                                 <Button
                                                   variant="ghost"
@@ -1747,7 +1838,7 @@ console.log(currentUserRole);
                                     {(!slipItems[slip.id] || slipItems[slip.id].length === 0) && (
                                       <TableRow>
                                         <TableCell colSpan={5} className="h-24 text-center">
-                                          {canEditSlips ? "No items in this slip. Use the search bar above to add items." : "No items in this slip."}
+                                          {canAddSlips ? "No items in this slip. Use the search bar above to add items." : "No items in this slip."}
                                         </TableCell>
                                       </TableRow>
                                     )}

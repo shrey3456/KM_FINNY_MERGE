@@ -619,7 +619,7 @@ router.post('/proforma-slips/order/:orderNumber/lock', async (req: Request, res:
 
     const sessionUser = (req as any).user || (req as any).session?.user;
     const printedByCode = req.body?.printedByCode ?? sessionUser?.userCode ?? null;
-
+    
     const updated = await storage.updateProformaSlip(slip.id, {
       isPrintLocked: true,
       printedByCode,
