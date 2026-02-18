@@ -1024,7 +1024,7 @@ const PrintOperations: React.FC = () => {
                           </div>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1mm' }}>
-                          <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808' }}>#{proformaData.slip.orderNumber}</div>
+                          <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808' }}>#${proformaData.slip.orderNumber}</div>
                           <div style={{ fontSize: '10pt', fontWeight: 'bold', lineHeight: '1.2', textAlign: 'right' }}>{formatDate(proformaData.slip.orderDate)}</div>
                         </div>
                       </div>
@@ -1230,6 +1230,36 @@ const PrintOperations: React.FC = () => {
                       const isButtonDisabled = isPrintLocked && !canUnlockSlips;
                       
                       // If split pages enabled and multiple pages, show individual page print buttons
+                      if (isPrintLocked) {
+                        return (
+                          <div className="space-y-4">
+                            <div className="flex flex-col items-center justify-center p-6 bg-red-50 border border-red-200 rounded-lg text-center">
+                              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mb-3">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                              </div>
+                              <h3 className="text-lg font-bold text-red-700 mb-1">Print Locked</h3>
+                              <p className="text-sm text-red-600 mb-4">
+                                This order has already been printed.
+                              </p>
+                              
+                              {canUnlockSlips ? (
+                                <Button 
+                                  onClick={handleUnlock} 
+                                  className="w-full bg-red-600 hover:bg-red-700 text-white"
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2 h-4 w-4"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                                  Unlock Order
+                                </Button>
+                              ) : (
+                                <div className="text-xs text-red-500 italic">
+                                  Contact your Admin/Super-Admin to unlock.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      }
+
                       if (isSplitPagesEnabled && totalPages > 1) {
                         return (
                           <div className="space-y-2">
@@ -1240,11 +1270,11 @@ const PrintOperations: React.FC = () => {
                               <Button 
                                 key={pageNum}
                                 onClick={() => handlePrint(pageNum)} 
-                                className="w-full bg-[#8766e3] hover:bg-[#7656d3] text-white"
-                                disabled={isButtonDisabled || isLoading}
+                                className="w-full text-white bg-[#8766e3] hover:bg-[#7656d3]"
+                                disabled={isLoading}
                               >
                                 <PrinterCheck className="mr-2 h-4 w-4" /> 
-                                {isPrintLocked ? 'Locked (Unlock below)' : `Print Page ${pageNum}`}
+                                Print Page {pageNum}
                               </Button>
                             ))}
                           </div>
@@ -1255,11 +1285,11 @@ const PrintOperations: React.FC = () => {
                       return (
                         <Button 
                           onClick={() => handlePrint()} 
-                          className="w-full bg-[#8766e3] hover:bg-[#7656d3] text-white"
-                          disabled={isButtonDisabled || isLoading}
+                          className="w-full text-white bg-[#8766e3] hover:bg-[#7656d3]"
+                          disabled={isLoading}
                         >
-                          <PrinterCheck className="mr-2 h-4 w-4" /> 
-                          {isPrintLocked ? 'Locked (Unlock below)' : 'Print Order'}
+                            <PrinterCheck className="mr-2 h-4 w-4" /> 
+                            Print Order
                         </Button>
                       );
                     })()}
