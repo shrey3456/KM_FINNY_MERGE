@@ -1535,46 +1535,8 @@ console.log(currentUserRole);
                             <DropdownMenuContent align="end">
                               <DropdownMenuLabel>Actions</DropdownMenuLabel>
                               <DropdownMenuSeparator />
-                              {canEditSlips && (
-                                <DropdownMenuItem onClick={() => openEditDialog(slip)}>
-                                  <FileEdit className="mr-2 h-4 w-4" /> Edit Details
-                                </DropdownMenuItem>
-                              )}
-                              <DropdownMenuItem 
-                                onClick={() => toggleRowExpansion(slip)}
-                              >
-                                {canAddSlips ? (
-                                  <>
-                                    <Edit className="mr-2 h-4 w-4" /> Manage Items
-                                  </>
-                                ) : (
-                                  <>
-                                    <FileText className="mr-2 h-4 w-4" /> View Items
-                                  </>
-                                )}
-                              </DropdownMenuItem>
-                              <DropdownMenuItem 
-                                onClick={() => {
-                                  window.open(`/api/proforma-slips/export-csv/${slip.id}`, '_blank');
-                                  toast({
-                                    title: "Export Started",
-                                    description: `Exporting proforma slip #${slip.orderNumber}`,
-                                  });
-                                }}
-                              >
-                                <FileDown className="mr-2 h-4 w-4" /> Export This Slip
-                              </DropdownMenuItem>
                               
-                              {canEditSlips && (
-                                <DropdownMenuItem 
-                                  onClick={() => openDeleteDialog(slip)}
-                                  className="text-destructive focus:text-destructive"
-                                >
-                                  <Trash className="mr-2 h-4 w-4" /> Delete
-                                </DropdownMenuItem>
-                              )}
-
-                              {/* Lock Option - Available to Admin, Super-Admin, IT, Management, Billing Head */}
+                              {/* Lock/Unlock Options First - Available to Admin, Super-Admin, IT, Management, Billing Head */}
                               {!slip.isPrintLocked && canLockUnlockSlips && (
                                 <DropdownMenuItem 
                                   onClick={async () => {
@@ -1619,6 +1581,51 @@ console.log(currentUserRole);
                                   }}
                                 >
                                   <Unlock className="mr-2 h-4 w-4" /> Unlock Slip
+                                </DropdownMenuItem>
+                              )}
+
+                              {/* Edit Details - Admin/Super-Admin only */}
+                              {canEditSlips && (
+                                <DropdownMenuItem onClick={() => openEditDialog(slip)}>
+                                  <FileEdit className="mr-2 h-4 w-4" /> Edit Details
+                                </DropdownMenuItem>
+                              )}
+
+                              {/* Manage/View Items */}
+                              <DropdownMenuItem 
+                                onClick={() => toggleRowExpansion(slip)}
+                              >
+                                {canAddSlips ? (
+                                  <>
+                                    <Edit className="mr-2 h-4 w-4" /> Manage Items
+                                  </>
+                                ) : (
+                                  <>
+                                    <FileText className="mr-2 h-4 w-4" /> View Items
+                                  </>
+                                )}
+                              </DropdownMenuItem>
+
+                              {/* Export This Slip */}
+                              <DropdownMenuItem 
+                                onClick={() => {
+                                  window.open(`/api/proforma-slips/export-csv/${slip.id}`, '_blank');
+                                  toast({
+                                    title: "Export Started",
+                                    description: `Exporting proforma slip #${slip.orderNumber}`,
+                                  });
+                                }}
+                              >
+                                <FileDown className="mr-2 h-4 w-4" /> Export This Slip
+                              </DropdownMenuItem>
+                              
+                              {/* Delete - Admin/Super-Admin only */}
+                              {canEditSlips && (
+                                <DropdownMenuItem 
+                                  onClick={() => openDeleteDialog(slip)}
+                                  className="text-destructive focus:text-destructive"
+                                >
+                                  <Trash className="mr-2 h-4 w-4" /> Delete
                                 </DropdownMenuItem>
                               )}
                             </DropdownMenuContent>
@@ -1782,39 +1789,41 @@ console.log(currentUserRole);
                                             {item.itemName || `Product #${item.productId}`}
                                           </TableCell>
                                           <TableCell className="text-center">
-                                            <div className="flex items-center justify-center">
-                                              <Button
-                                                variant="outline"
-                                                size="sm"
-                                                className="h-8 w-8 p-0"
-                                                disabled={!canAddSlips}
-                                                onClick={() => {
-                                                  if (!canAddSlips) return;
-                                                  const currentQuantity = item.quantity || 1;
-                                                  if (currentQuantity > 1) {
-                                                    handleSaveItem(item.id, { quantity: currentQuantity - 1 });
-                                                  }
-                                                }}
-                                              >
-                                                <span>-</span>
-                                              </Button>
-                                              <span className="min-w-[3rem] text-center mx-1">
+                                            {canAddSlips ? (
+                                              <div className="flex items-center justify-center">
+                                                <Button
+                                                  variant="outline"
+                                                  size="sm"
+                                                  className="h-8 w-8 p-0"
+                                                  onClick={() => {
+                                                    const currentQuantity = item.quantity || 1;
+                                                    if (currentQuantity > 1) {
+                                                      handleSaveItem(item.id, { quantity: currentQuantity - 1 });
+                                                    }
+                                                  }}
+                                                >
+                                                  <span>-</span>
+                                                </Button>
+                                                <span className="min-w-[3rem] text-center mx-1">
+                                                  {item.quantity ?? 0}
+                                                </span>
+                                                <Button
+                                                  variant="outline"
+                                                  size="sm"
+                                                  className="h-8 w-8 p-0"
+                                                  onClick={() => {
+                                                    const currentQuantity = item.quantity || 1;
+                                                    handleSaveItem(item.id, { quantity: currentQuantity + 1 });
+                                                  }}
+                                                >
+                                                  <span>+</span>
+                                                </Button>
+                                              </div>
+                                            ) : (
+                                              <span className="text-center">
                                                 {item.quantity ?? 0}
                                               </span>
-                                              <Button
-                                                variant="outline"
-                                                size="sm"
-                                                className="h-8 w-8 p-0"
-                                                disabled={!canAddSlips}
-                                                onClick={() => {
-                                                  if (!canAddSlips) return;
-                                                  const currentQuantity = item.quantity || 1;
-                                                  handleSaveItem(item.id, { quantity: currentQuantity + 1 });
-                                                }}
-                                              >
-                                                <span>+</span>
-                                              </Button>
-                                            </div>
+                                            )}
                                           </TableCell>
                                           <TableCell>
                                             {canAddSlips && (
