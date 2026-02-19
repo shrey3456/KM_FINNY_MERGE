@@ -389,7 +389,7 @@ export default function PlantSettings() {
                       </span>
                     ) : (
                       <span className="text-green-600 font-medium text-xs flex items-center gap-1">
-                        <Unlock className="h-3.5 w-3.5" /> <span>Unlimited</span>
+                        <Unlock className="h-3.5 w-3.5" /> <span>Unlocked</span>
                       </span>
                     )}
                   </TableCell>
