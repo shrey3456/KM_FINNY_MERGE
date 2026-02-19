@@ -234,7 +234,7 @@ console.log(currentUserRole);
   const isBillingHead = userDept === 'billing' && userDesig === 'head';
   
   // Lock/Unlock permissions: Admin, Super-Admin, IT, Management, Billing Head
-  const canLockUnlockSlips = isAdminOrSuper || isITDep || ismanagment || isBillingHead;
+  const canLockUnlockSlips = (isAdminOrSuper || isITDep || ismanagment || isBillingHead) && (isReadWriteUser || isAdminOrSuper);
 
   // Add new slips: Admin, Super-Admin, and Read-Write users
   const canAddSlips = isAdminOrSuper || isReadWriteUser;

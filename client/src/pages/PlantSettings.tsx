@@ -384,11 +384,11 @@ export default function PlantSettings() {
                   {/* ADD THIS: Locking Status Column */}
                   <TableCell>
                     {plant.isLockingEnabled ? (
-                      <span className="text-green-600 font-medium text-xs flex items-center gap-1">
+                      <span className="text-red-600 font-medium text-xs flex items-center gap-1">
                         <Lock className="h-3.5 w-3.5" /> <span>Locked</span>
                       </span>
                     ) : (
-                      <span className="text-orange-600 font-medium text-xs flex items-center gap-1">
+                      <span className="text-green-600 font-medium text-xs flex items-center gap-1">
                         <Unlock className="h-3.5 w-3.5" /> <span>Unlimited</span>
                       </span>
                     )}

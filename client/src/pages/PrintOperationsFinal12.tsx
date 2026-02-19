@@ -104,7 +104,7 @@ const PrintOperations: React.FC = () => {
 
   // NEW: Get current user info and time for use in both print function and preview
   // CHANGED: Use Name instead of Role
-  const printUser = currentUser?.username;
+  const printUser = currentUser?.name;
   const printTime = new Date().toLocaleString('en-IN', { 
       day: '2-digit', month: '2-digit', year: '2-digit', 
       hour: '2-digit', minute: '2-digit', hour12: true 
@@ -448,7 +448,7 @@ const PrintOperations: React.FC = () => {
         pagesHTML += `
                 <tr>
                   <td colspan="2" style="text-align: right; font-weight: bold; padding: 0; font-size: 10pt; padding-top: 5px; border-top: 1px solid #000;">
-                     Total Quantity (${sortedItems.length} items) :
+                     Total:${sortedItems.length} | items :
                   </td>
                   <td class="qty-col" style="font-weight: bold; color: #ff0000; padding: 0; font-size: 16pt; padding-top: 5px; padding-right: 8px; border-top: 1px solid #000;">
                     ${grandTotal}
@@ -540,7 +540,7 @@ const PrintOperations: React.FC = () => {
                   <tr>
                      <td colspan="3" style="padding-top: 5px; color: #555; font-size: 7pt; font-style: italic;">
                        <div style="display: flex; justify-content: space-between; width: 100%;">
-                         <span>Printed by: ${printUser}</span>
+                         <span>${printUser}</span>
                          <span>${printTime}</span>
                        </div>
                      </td>
@@ -603,7 +603,7 @@ const PrintOperations: React.FC = () => {
               <tr>
                  <td colspan="3" style="padding-top: 5px; color: #555; font-size: 7pt; font-style: italic;">
                    <div style="display: flex; justify-content: space-between; width: 100%">
-                     <span>Printed by: ${printUser}</span>
+                     <span>${printUser}</span>
                      <span>${printTime}</span>
                    </div>
                  </td>
@@ -915,12 +915,6 @@ const PrintOperations: React.FC = () => {
               toast({
                 title: "🔒 Slip Locked",
                 description: "This slip is locked. You can unlock it using the button below.",
-                variant: "default",
-              });
-            } else if (!isLockingEnabledForPlant) {
-              toast({
-                title: "✅ Unlimited Printing",
-                description: `Locking is disabled for ${currentData.slip.plant}. You can print multiple times.`,
                 variant: "default",
               });
             }
@@ -1317,12 +1311,6 @@ const PrintOperations: React.FC = () => {
                         CanUnlock: {String(canUnlockSlips)}
                       </div>
                     }
-
-                    {proformaData.slip?.isPrintLocked && canUnlockSlips && (
-                      <Button onClick={handleUnlock} variant="outline" className="w-full mt-1">
-                        Unlock Slip ({isAdminOrSuper ? 'Admin' : 'Head'})
-                      </Button>
-                    )}
                   </>
                 )}
 
