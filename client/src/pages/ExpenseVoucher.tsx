@@ -401,7 +401,15 @@ export default function ExpenseVoucher() {
     const partyText = getPartyTextFromVoucherInfo(voucherInfo);
 
     const partyCount = countParties(partyText);
-    const partyFontPt = fontSizeForPartyCount(partyCount);
+    
+    // CHANGED: Logic based on character length instead of party count
+    const partyTextLength = (voucherInfo["For Party x Ord Date"] || "").length;
+    let partyFontPt = 10; // default large size
+
+    if (partyTextLength > 800) partyFontPt = 7;
+    else if (partyTextLength > 600) partyFontPt = 9;
+    else if (partyTextLength > 400) partyFontPt = 10;
+    else if (partyTextLength > 300) partyFontPt = 11;
 
     const voucherDate =
       voucherInfo["Voucher Date :"] ||
@@ -540,13 +548,13 @@ export default function ExpenseVoucher() {
             .order-details-header { background: #4f2f88ff !important; color: white !important; font-weight: 800; font-size: 12pt; text-align: center; padding: 2px; height: 9mm; }
             .order-date-header, .party-name-header { padding: 3px; font-weight: 700; font-size: 12pt; height: 9mm;text-align: center; }
             .party-details-cell {
-  font-size: clamp(8px, 1.2vw, 16 px) !important;
-  line-height: 1.15;
-  height: 47mm;
-  overflow: hidden;
-  position: relative;
-  vertical-align: top;
-}
+              font-size: ${partyFontPt}pt !important;
+              line-height: 1.15;
+              height: 47mm;
+              overflow: hidden;
+              position: relative;
+              vertical-align: top;
+            }
 
 
             .diesel-header { background: #fbbf24 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 9pt; height: 6mm; }

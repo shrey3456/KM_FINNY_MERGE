@@ -175,7 +175,7 @@ export default function TollVoucher() {
     
     // Better calculation based on actual character length
     let partyFontPt = 16; // default large size
-    if (length > 800) partyFontPt = 8;
+    if (length > 800) partyFontPt = 7;
     else if (length > 600) partyFontPt = 9;
     else if (length > 400) partyFontPt = 10;
     else if (length > 300) partyFontPt = 11;
