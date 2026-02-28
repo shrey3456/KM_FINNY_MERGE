@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,7 +11,6 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Progress } from "@/components/ui/progress";
 import {
   Printer,
   Search,
@@ -34,6 +33,7 @@ import {
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { TruckLoadingAnimation } from "@/components/TruckLoadingAnimation";
 import * as QRCode from "qrcode";
 import logoPath from "@assets/logo_wo_bg_1757152661130.png";
 
@@ -173,16 +173,13 @@ export default function ExpenseVoucher() {
     isFetching,
     error,
     refetch,
-    isError, // Add this line
+    isError,
   } = useQuery<ExpenseVoucherResponse>({
     queryKey: ["/api/expense-voucher", selectedOrder],
     enabled: !!selectedOrder && hasAccess,
     queryFn: async () => {
       if (!selectedOrder) throw new Error("No order selected");
       try {
-        setSearchProgress(80);
-        setSearchStage("Loading...");
-
         const response = await apiRequest(
           "POST",
           "/api/expense-voucher",
@@ -190,14 +187,9 @@ export default function ExpenseVoucher() {
           false,
           true
         );
-
-        setSearchProgress(100);
-        setSearchStage("Ready!");
-
         if (response && typeof response === "object") {
           return response as ExpenseVoucherResponse;
         }
-
         throw new Error("Invalid response format");
       } catch (error: any) {
         setSearchProgress(0);
@@ -209,6 +201,26 @@ export default function ExpenseVoucher() {
       }
     },
   });
+
+  useEffect(() => {
+    if (expenseVoucherLoading || isFetching) {
+      setSearchProgress(0);
+      const interval = setInterval(() => {
+        setSearchProgress((prev) => {
+          if (prev >= 75) {
+            clearInterval(interval);
+            return 75;
+          }
+          return prev + 1;
+        });
+      }, 80);
+      return () => clearInterval(interval);
+    } else if (searchProgress > 0) {
+      setSearchProgress(100);
+      const timer = setTimeout(() => setSearchProgress(0), 800);
+      return () => clearTimeout(timer);
+    }
+  }, [expenseVoucherLoading, isFetching]);
 
   useEffect(() => {
     if (expenseVoucherData?.data?.voucherInfo) {
@@ -532,7 +544,7 @@ export default function ExpenseVoucher() {
               font-size: 15pt;
               text-align: center;
               width: 18%; 
-              writing-mode: vertical-rl;
+              writing-mode: vertical-rl;  
               text-orientation: mixed;
               transform: rotate(180deg);
               height: 15mm;
@@ -561,7 +573,7 @@ export default function ExpenseVoucher() {
             .route-kms-header, .avg-header { text-align: center; padding: 3px; font-weight: 800; font-size: 9pt; height: 6mm; }
 
             .diesel-bills { background: #fef3c7 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 8pt; height: 7mm; }
-            .route-value, .avg-value { text-align: center; padding: 3px; font-weight: 700; font-size: 11pt; height: 7mm; }
+            .route-value, .avg-value { text-align: center; padding: 3px; font-weight: 700, font-size: 11pt; height: 7mm; }
             .diesel-amount { background: #fbbf24 !important; font-weight: 800; text-align: center; padding: 4px; font-size: 13pt; height: 8mm; }
 
             .expenses-header { background:#ddd9c3 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 11pt; height: 6mm; }
@@ -1034,26 +1046,23 @@ export default function ExpenseVoucher() {
           </div>
 
           {(expenseVoucherLoading || isFetching) && (
-            <div className="mt-4 space-y-2">
-              <div className="flex items-center justify-between text-sm text-gray-600">
+            <div className="mt-2">
+              <div className="flex items-center justify-between text-sm text-gray-600 mb-1">
                 <span>
                   {isFetching && !expenseVoucherLoading
                     ? "Refreshing data..."
                     : "Fetching voucher data from Notion..."}
                 </span>
-                <span className="font-mono text-orange-600">
-                  {selectedOrder}
-                </span>
+                <span className="font-mono text-orange-600">{selectedOrder}</span>
               </div>
-              <Progress
-                value={searchProgress}
-                className="w-full h-3 bg-gray-200"
-              />
-              <div className="text-xs text-gray-500 text-center">
-                {searchStage || "Initializing search..."}
-              </div>
-              <div className="text-xs text-gray-400 text-center">
-                {searchProgress}% complete
+              <div className="flex items-center justify-center">
+                <TruckLoadingAnimation
+                  label={
+                    isFetching && !expenseVoucherLoading
+                      ? "Refreshing data..."
+                      : "Fetching voucher data..."
+                  }
+                />
               </div>
             </div>
           )}

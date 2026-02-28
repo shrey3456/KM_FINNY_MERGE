@@ -1205,7 +1205,6 @@ console.log(currentUserRole);
               <RefreshCw className="mr-2 h-4 w-4" /> Refresh
           </Button>
 
-<<<<<<< Updated upstream
           {/* Export button - Visible to Read-Only AND Admin/Super */}
           {(isread || isAdminOrSuper || isReadWriteUser) && (
             <Button variant="outline" size="sm" onClick={() => handleExportCSV()}>
@@ -1215,10 +1214,6 @@ console.log(currentUserRole);
 
           {/* Admin/Super/Write Access only buttons */}
           {(isAdminOrSuper || isReadWriteUser) && !isread && (
-=======
-          {/* Admin/Super Admin only */}
-          {(isAdminOrSuper ||  isReadWriteUser) && (
->>>>>>> Stashed changes
             <>
               <Dialog>
                 <DialogTrigger asChild>
@@ -1262,8 +1257,8 @@ console.log(currentUserRole);
                 </DialogContent>
               </Dialog>
 
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 size="sm"
                 onClick={handleRecalculateVolumes}
                 disabled={isRecalculatingVolumes}
@@ -2132,19 +2127,34 @@ console.log(currentUserRole);
                 />
               </div>
               
-              <FormField
-                control={newSlipForm.control}
-                name="notes"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Notes</FormLabel>
-                    <FormControl>
-                      <Textarea {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+              <div className="grid grid-cols-2 gap-4">
+                <FormField
+                  control={newSlipForm.control}
+                  name="createdById"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Created By</FormLabel>
+                      <FormControl>
+                        <Input type="number" {...field} disabled />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={newSlipForm.control}
+                  name="notes"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Notes</FormLabel>
+                      <FormControl>
+                        <Textarea {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
               
               <DialogFooter>
                 <Button type="submit" disabled={createProformaSlipMutation.isPending}>

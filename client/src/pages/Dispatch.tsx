@@ -5,10 +5,10 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { Progress } from '@/components/ui/progress';
 import { Printer, Search, Package, Building, Calendar, Users, FileText, IndianRupee, Phone, Truck, User, Mail, MapPin, Edit3, Check, X, RefreshCw } from 'lucide-react';
 import { apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
+import { TruckLoadingAnimation } from '@/components/TruckLoadingAnimation';
 import * as QRCode from 'qrcode';
 import logoPath from '@assets/logo_og_1756804412382.jpeg';
 
@@ -47,26 +47,16 @@ export default function Dispatch() {
   const { toast } = useToast();
 
   // Fetch dispatch data for selected order
-  const { data: dispatchData, isLoading: dispatchLoading,isFetching, error, refetch } = useQuery<DispatchResponse>({
+  const { data: dispatchData, isLoading: dispatchLoading, isFetching, error, refetch } = useQuery<DispatchResponse>({
     queryKey: ['/api/dispatch', selectedOrder],
     enabled: !!selectedOrder,
     queryFn: async () => {
       if (!selectedOrder) throw new Error('No order selected');
       try {
-        // Progress tracking
-        setSearchProgress(80);
-        setSearchStage('Loading...');
-        
         const response = await apiRequest('POST', '/api/dispatch', { orderNumber: selectedOrder }, false, true);
-        
-        setSearchProgress(100);
-        setSearchStage('Ready!');
-        
-        // Ensure response has the expected structure
         if (response && typeof response === 'object') {
           return response as DispatchResponse;
         }
-        
         throw new Error('Invalid response format');
       } catch (error: any) {
         setSearchProgress(0);
@@ -76,6 +66,27 @@ export default function Dispatch() {
       }
     }
   });
+
+  // Smooth progress animation while loading
+  useEffect(() => {
+    if (dispatchLoading || isFetching) {
+      setSearchProgress(0);
+      const interval = setInterval(() => {
+        setSearchProgress((prev) => {
+          if (prev >= 75) {
+            clearInterval(interval);
+            return 75;
+          }
+          return prev + 1;
+        });
+      }, 80);
+      return () => clearInterval(interval);
+    } else if (searchProgress > 0) {
+      setSearchProgress(100);
+      const timer = setTimeout(() => setSearchProgress(0), 800);
+      return () => clearTimeout(timer);
+    }
+  }, [dispatchLoading, isFetching]);
 
   // NEW: Handle search errors (e.g., Not Found)
   useEffect(() => {
@@ -612,21 +623,16 @@ export default function Dispatch() {
           </div>
 
           {/* Progress indicator during search */}
-          {dispatchLoading && (
-            <div className="mt-4 space-y-2">
-              <div className="flex items-center justify-between text-sm text-gray-600">
-                <span>Fetching dispatch data from Notion...</span>
+          {(dispatchLoading || isFetching) && (
+            <div className="mt-2">
+              <div className="flex items-center justify-between text-sm text-gray-600 mb-1">
+                <span>{isFetching && !dispatchLoading ? 'Refreshing data...' : 'Fetching dispatch data from Notion...'}</span>
                 <span className="font-mono text-blue-600">#{selectedOrder}</span>
               </div>
-              <Progress 
-                value={searchProgress} 
-                className="w-full h-3 bg-gray-200" 
-              />
-              <div className="text-xs text-gray-500 text-center">
-                {searchStage || 'Initializing search...'}
-              </div>
-              <div className="text-xs text-gray-400 text-center">
-                {searchProgress}% complete
+              <div className="flex items-center justify-center">
+                <TruckLoadingAnimation
+                  label={isFetching && !dispatchLoading ? "Refreshing data..." : "Fetching dispatch data..."}
+                />
               </div>
             </div>
           )}
