@@ -77,6 +77,33 @@ export default function Dispatch() {
     }
   });
 
+  // NEW: Handle search errors (e.g., Not Found)
+  useEffect(() => {
+    if (error) {
+      // Check if the error message indicates a 404/Not Found scenario
+      // The backend likely returns a 404 status which queryFn throws as an error
+      const errorMessage = (error as any).message || '';
+      const isNotFound = errorMessage.includes('404') || errorMessage.includes('not found');
+      
+      if (isNotFound) {
+        toast({
+          title: "Order Not Found",
+          description: `Order number #${selectedOrder} could not be found. Please check the number.`,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Search Failed",
+          description: errorMessage || "An error occurred while searching for the order.",
+          variant: "destructive",
+        });
+      }
+      // Reset progress on error
+      setSearchProgress(0);
+      setSearchStage('');
+    }
+  }, [error, selectedOrder, toast]);
+
   // Update editable amount when dispatch data changes
   useEffect(() => {
     if (dispatchData?.data?.orderInfo?.['Amount >']) {

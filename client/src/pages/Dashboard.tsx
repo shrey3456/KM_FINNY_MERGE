@@ -6,6 +6,7 @@ import { isAdminOrSuperAdmin, getCurrentUserPermissions } from '@/lib/permission
 // Import the requested images
 import ganpatiImg from '@assets/ganpati.png';
 import awardImg from '@assets/IMG_20240117_171256.jpg';
+import holiImg from '@assets/download.jpeg';
 
 const Home = () => {
   const [emblaRef, emblaApi] = useEmblaCarousel({ loop: true });
