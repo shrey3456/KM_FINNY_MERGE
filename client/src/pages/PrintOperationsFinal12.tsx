@@ -1018,7 +1018,7 @@ const PrintOperations: React.FC = () => {
                           </div>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1mm' }}>
-                          <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808' }}>#${proformaData.slip.orderNumber}</div>
+                          <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808' }}>#{proformaData.slip.orderNumber}</div>
                           <div style={{ fontSize: '10pt', fontWeight: 'bold', lineHeight: '1.2', textAlign: 'right' }}>{formatDate(proformaData.slip.orderDate)}</div>
                         </div>
                       </div>

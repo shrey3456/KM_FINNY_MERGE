@@ -228,6 +228,10 @@ console.log(currentUserRole);
   
   // Define users who have edit access (Read-Write permissions)
   const isReadWriteUser = ['read/write', 'read-write', 'editor', 'edit', 'rw', 'write'].includes(currentUserRole);
+
+  // NEW: Define isread for read-only users
+  const isread = ['read-only', 'readonly', 'read', 'r'].includes(currentUserRole);
+
   const isITDep= ['IT', 'information technology', 'it'].includes(userDept);
   const ismanagment = ['management', 'manager', 'head', 'director'].includes(userDept);
   // Department: Billing, Designation: Head (Case insensitive check)
@@ -1197,11 +1201,18 @@ console.log(currentUserRole);
             }}
             title="Refresh now"
           >
-            <RefreshCw className="mr-2 h-4 w-4" /> Refresh
+              <RefreshCw className="mr-2 h-4 w-4" /> Refresh
           </Button>
 
-          {/* Admin/Super Admin only */}
-          {isAdminOrSuper && (
+          {/* Export button - Visible to Read-Only AND Admin/Super */}
+          {(isread || isAdminOrSuper || isReadWriteUser) && (
+            <Button variant="outline" size="sm" onClick={() => handleExportCSV()}>
+              <FileDown className="mr-2 h-4 w-4" /> Export All
+            </Button>
+          )}
+
+          {/* Admin/Super/Write Access only buttons */}
+          {(isAdminOrSuper || isReadWriteUser) && !isread && (
             <>
               <Dialog>
                 <DialogTrigger asChild>
@@ -1251,15 +1262,8 @@ console.log(currentUserRole);
                 onClick={handleRecalculateVolumes}
                 disabled={isRecalculatingVolumes}
               >
-                {isRecalculatingVolumes ? (
-                  <>
-                    <span className="animate-spin mr-2">⟳</span> Processing...
-                  </>
-                ) : (
-                  <>
-                    <Calculator className="mr-2 h-4 w-4" /> Recalc Volumes
-                  </>
-                )}
+                <RefreshCw className={`mr-2 h-4 w-4 ${isRecalculatingVolumes ? 'animate-spin' : ''}`} />
+                Recalc Volumes
               </Button>
             </>
           )}
@@ -1270,11 +1274,6 @@ console.log(currentUserRole);
               <Plus className="mr-2 h-4 w-4" /> New Slip
             </Button>
           )}
-
-          {/* Visible to all */}
-          <Button variant="outline" size="sm" onClick={handleExportCSV}>
-            <FileDown className="mr-2 h-4 w-4" /> Export All
-          </Button>
         </div>
       </div>
 
