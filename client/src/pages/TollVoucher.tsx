@@ -11,6 +11,7 @@ import { useToast } from '@/hooks/use-toast';
 import logoPath from '@assets/logo_wo_bg_1757152661130.png';
 import { borderBottomLeftRadius } from 'html2canvas/dist/types/css/property-descriptors/border-radius';
 import { text } from 'stream/consumers';
+import { TruckLoadingAnimation } from '@/components/TruckLoadingAnimation';
 
 interface TollVoucherData {
   orderNumber: string;
@@ -103,7 +104,7 @@ export default function TollVoucher() {
   const { 
     data: tollVoucherData, 
     isLoading: tollVoucherLoading, 
-    isFetching, 
+    isFetching,
     refetch,
     isError,
     error 
@@ -113,14 +114,7 @@ export default function TollVoucher() {
     queryFn: async () => {
       if (!selectedOrder) throw new Error('No order selected');
       try {
-        setSearchProgress(80);
-        setSearchStage('Loading...');
-
         const response = await apiRequest('POST', '/api/toll-voucher', { orderNumber: selectedOrder }, false, true);
-
-        setSearchProgress(100);
-        setSearchStage('Ready!');
-
         return response as TollVoucherResponse;
       } catch (error: any) {
         setSearchProgress(0);
@@ -131,6 +125,27 @@ export default function TollVoucher() {
     },
     retry: false,
   });
+
+  // ✅ Moved AFTER useQuery so tollVoucherLoading & isFetching are defined
+  useEffect(() => {
+    if (tollVoucherLoading || isFetching) {
+      setSearchProgress(0);
+      const interval = setInterval(() => {
+        setSearchProgress((prev) => {
+          if (prev >= 75) {
+            clearInterval(interval);
+            return 75;
+          }
+          return prev + 1;
+        });
+      }, 80);
+      return () => clearInterval(interval);
+    } else if (searchProgress > 0) {
+      setSearchProgress(100);
+      const timer = setTimeout(() => setSearchProgress(0), 800);
+      return () => clearTimeout(timer);
+    }
+  }, [tollVoucherLoading, isFetching]);
 
   const handleSearch = () => {
     if (!voucherNumber.trim()) {
@@ -494,17 +509,17 @@ console.log(length, partyFontPt);
               
               {/* Search Progress */}
               {(tollVoucherLoading || isFetching) && (
-                <div className="mt-4 space-y-2">
-                  <div className="flex items-center justify-between text-sm text-gray-600">
+                <div className="mt-2">
+                  <div className="flex items-center justify-between text-sm text-gray-600 mb-1">
                     <span>{isFetching && !tollVoucherLoading ? 'Refreshing data...' : 'Fetching voucher data from Notion...'}</span>
                     <span className="font-mono text-green-600">{selectedOrder}</span>
                   </div>
-                  <Progress 
-                    value={searchProgress} 
-                    className="w-full h-3 bg-gray-200" 
-                  />
-                  <div className="text-xs text-gray-500 text-center">
-                    {searchStage}
+                  <div className="flex items-center justify-center">
+                    <TruckLoadingAnimation
+                      label={isFetching && !tollVoucherLoading ? "Refreshing data..." : "Fetching voucher data..."}
+                      showProgress={true}
+                      progress={searchProgress}
+                    />
                   </div>
                 </div>
               )}

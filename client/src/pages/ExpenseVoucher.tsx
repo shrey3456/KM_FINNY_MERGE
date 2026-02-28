@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import lottie, { AnimationItem } from "lottie-web";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -12,7 +11,6 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Progress } from "@/components/ui/progress";
 import {
   Printer,
   Search,
@@ -35,6 +33,7 @@ import {
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { TruckLoadingAnimation } from "@/components/TruckLoadingAnimation";
 import * as QRCode from "qrcode";
 import logoPath from "@assets/logo_wo_bg_1757152661130.png";
 
@@ -140,53 +139,6 @@ const getPartyTextFromVoucherInfo = (info?: Record<string, string>) => {
   return entry?.[1] || "";
 };
 
-// ── Truck Animation Data ──────────────────────────────────────────────────────
-const truckAnimationData = {
-  "v": "5.7.4", "fr": 60, "ip": 0, "op": 235, "w": 500, "h": 500,
-  "nm": "truck 3", "ddd": 0, "assets": [],
-  "layers": [
-    { "ddd": 0, "ind": 11, "ty": 4, "nm": "road", "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 0, "k": [267.186, 267.961, 0] }, "a": { "a": 0, "k": [0, 0, 0] }, "s": { "a": 0, "k": [58, 58, 100] } }, "ao": 0, "shapes": [{ "ty": "gr", "it": [{ "ind": 0, "ty": "sh", "ks": { "a": 0, "k": { "i": [[0, 0], [0, 0]], "o": [[0, 0], [0, 0]], "v": [[-175, 115], [184, 115]], "c": false } }, "nm": "Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 2, "lj": 2, "bm": 0, "d": [{ "n": "d", "nm": "dash", "v": { "a": 0, "k": 215 } }, { "n": "g", "nm": "gap", "v": { "a": 0, "k": 128 } }, { "n": "o", "nm": "offset", "v": { "a": 1, "k": [{ "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 0, "s": [0] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 60, "s": [1000] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 120, "s": [2000] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 180, "s": [3000] }, { "t": 234, "s": [3900] }] } }], "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [0, 0] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Shape 1" }], "ip": 0, "op": 235, "st": 0, "bm": 0 },
-    { "ddd": 0, "ind": 6, "ty": 4, "nm": "wheels_rr", "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 0, "k": [242.2, 316.791, 0] }, "a": { "a": 0, "k": [-42.08, 87.189, 0] }, "s": { "a": 0, "k": [58, 58, 100] } }, "ao": 0, "hasMask": true, "masksProperties": [{ "inv": false, "mode": "a", "pt": { "a": 0, "k": { "i": [[0, 0], [0, 0], [0, 0], [0, 0]], "o": [[0, 0], [0, 0], [0, 0], [0, 0]], "v": [[13.412, 69], [-100.5, 69], [-100.5, 126.09], [13.412, 126.09]], "c": true } }, "o": { "a": 0, "k": 100 }, "x": { "a": 0, "k": 0 } }], "shapes": [{ "ty": "gr", "it": [{ "d": 1, "ty": "el", "s": { "a": 0, "k": [50, 50] }, "p": { "a": 0, "k": [0, 0] }, "nm": "Ellipse Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 1, "lj": 1, "ml": 4, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [-42.08, 87.189] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Ellipse 1" }], "ip": 0, "op": 235, "st": 0, "bm": 0 },
-    { "ddd": 0, "ind": 5, "ty": 4, "nm": "wheels_fr", "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 0, "k": [339.64, 316.791, 0] }, "a": { "a": 0, "k": [-42.08, 87.189, 0] }, "s": { "a": 0, "k": [58, 58, 100] } }, "ao": 0, "hasMask": true, "masksProperties": [{ "inv": false, "mode": "a", "pt": { "a": 0, "k": { "i": [[0, 0], [0, 0], [0, 0], [0, 0]], "o": [[0, 0], [0, 0], [0, 0], [0, 0]], "v": [[-2.992, 66], [-101, 66], [-101, 123.623], [-2.992, 123.623]], "c": true } }, "o": { "a": 0, "k": 100 }, "x": { "a": 0, "k": 0 } }], "shapes": [{ "ty": "gr", "it": [{ "d": 1, "ty": "el", "s": { "a": 0, "k": [50, 50] }, "p": { "a": 0, "k": [0, 0] }, "nm": "Ellipse Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 1, "lj": 1, "ml": 4, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [-42.08, 87.189] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Ellipse 1" }], "ip": 0, "op": 235, "st": 0, "bm": 0 },
-    { "ddd": 0, "ind": 10, "ty": 4, "nm": "box", "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 1, "k": [{ "i": { "x": 0.833, "y": 0.833 }, "o": { "x": 0.167, "y": 0.167 }, "t": 0, "s": [267.186, 266.221, 0], "to": [0, -0.06, 0], "ti": [0, 0.124, 0] }, { "i": { "x": 0.833, "y": 0.833 }, "o": { "x": 0.167, "y": 0.167 }, "t": 19, "s": [267.186, 260.421, 0], "to": [0, -0.001, 0], "ti": [0, -0.022, 0] }, { "i": { "x": 0.833, "y": 0.833 }, "o": { "x": 0.167, "y": 0.167 }, "t": 29, "s": [267.186, 262.741, 0], "to": [0, 0.001, 0], "ti": [0, 0.021, 0] }, { "i": { "x": 0.833, "y": 0.833 }, "o": { "x": 0.167, "y": 0.167 }, "t": 38, "s": [267.186, 265.886, 0], "to": [0, 0.117, 0], "ti": [0, 0.004, 0] }, { "t": 39, "s": [267.186, 266.221, 0] }] }, "a": { "a": 0, "k": [0, 0, 0] }, "s": { "a": 0, "k": [58, 58, 100] } }, "ao": 0, "shapes": [{ "ty": "gr", "it": [{ "ind": 0, "ty": "sh", "ks": { "a": 0, "k": { "i": [[0, -6.075], [0, 0], [6.075, 0], [0, 0], [0, 6.075], [0, 0], [-6.075, 0], [0, 0]], "o": [[0, 0], [0, 6.075], [0, 0], [-6.075, 0], [0, 0], [0, -6.075], [0, 0], [6.075, 0]], "v": [[82.788, -57], [82.788, 57.934], [71.788, 68.934], [-67.538, 68.967], [-78.538, 57.967], [-78.538, -56.967], [-67.538, -67.967], [71.788, -68]], "c": true } }, "nm": "Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 2, "lj": 2, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [-43.212, -14.533] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Rectangle 1" }, { "ty": "tm", "s": { "a": 0, "k": 2 }, "e": { "a": 0, "k": 88.8 }, "o": { "a": 0, "k": -117 }, "m": 1, "nm": "Trim Paths 1" }], "ip": 0, "op": 235, "st": 0, "bm": 0 },
-    { "ddd": 0, "ind": 9, "ty": 4, "nm": "head", "parent": 8, "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 0, "k": [0, 0, 0] }, "a": { "a": 0, "k": [0, 0, 0] }, "s": { "a": 0, "k": [100, 100, 100] } }, "ao": 0, "shapes": [{ "ty": "gr", "it": [{ "ind": 0, "ty": "sh", "ks": { "a": 0, "k": { "i": [[0, 0], [0, 0], [4.971, 0], [0, 0], [0, 4.971], [0, 0], [-4.971, 0], [0, 0]], "o": [[0, 0], [0, 4.971], [0, 0], [-4.971, 0], [0, 0], [0, -4.971], [0, 0], [0, 0]], "v": [[55.616, 3.763], [55.616, 53.237], [46.616, 62.237], [-48.116, 62.237], [-57.116, 53.237], [-57.116, -54.487], [-48.116, -63.487], [-4.616, -63.487]], "c": true } }, "nm": "Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 2, "lj": 2, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [120.116, 13.237] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Rectangle 1" }], "ip": 0, "op": 235, "st": 0, "bm": 0 },
-    { "ddd": 0, "ind": 7, "ty": 4, "nm": "glass", "parent": 8, "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 0, "k": [0, 0, 0] }, "a": { "a": 0, "k": [0, 0, 0] }, "s": { "a": 0, "k": [100, 100, 100] } }, "ao": 0, "shapes": [{ "ty": "gr", "it": [{ "ind": 0, "ty": "sh", "ks": { "a": 0, "k": { "i": [[0, 0], [0, 0], [0, 0]], "o": [[0, 0], [0, 0], [0, 0]], "v": [[98, -50], [98, 13], [171.5, 13]], "c": false } }, "nm": "Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 1, "lj": 2, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [0, 0] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Shape 1" }], "ip": 0, "op": 235, "st": 0, "bm": 0 },
-    { "ddd": 0, "ind": 8, "ty": 4, "nm": "chassis", "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 1, "k": [{ "i": { "x": 0.833, "y": 0.835 }, "o": { "x": 0.167, "y": 0.167 }, "t": 0, "s": [267.186, 260.593, 0], "to": [0, -0.053, 0], "ti": [0, 0.105, 0] }, { "i": { "x": 0.833, "y": 0.664 }, "o": { "x": 0.167, "y": 0.158 }, "t": 10, "s": [267.186, 258.449, 0], "to": [0, 0.001, 0], "ti": [0, -0.023, 0] }, { "i": { "x": 0.833, "y": 0.663 }, "o": { "x": 0.167, "y": 0.175 }, "t": 29, "s": [267.186, 262.741, 0], "to": [0, 0.001, 0], "ti": [0, 0.021, 0] }, { "i": { "x": 0.833, "y": 0.833 }, "o": { "x": 0.167, "y": 0.166 }, "t": 38, "s": [267.186, 260.912, 0], "to": [0, -0.105, 0], "ti": [0, 0.106, 0] }, { "t": 39, "s": [267.186, 260.593, 0] }] }, "a": { "a": 0, "k": [0, 0, 0] }, "s": { "a": 0, "k": [58, 58, 100] } }, "ao": 0, "shapes": [{ "ty": "gr", "it": [{ "ind": 0, "ty": "sh", "ks": { "a": 0, "k": { "i": [[0, 0], [0, 0]], "o": [[0, 0], [0, 0]], "v": [[-112.5, 76.75], [92.5, 76.75]], "c": false } }, "nm": "Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 2, "lj": 1, "ml": 4, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [0, 0] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Shape 1" }], "ip": 0, "op": 235, "st": -29, "bm": 0 },
-    { "ddd": 0, "ind": 3, "ty": 4, "nm": "wheels_in_rr", "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 1, "k": [{ "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 0, "s": [166.667] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 60, "s": [1166.667] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 120, "s": [2166.667] }, { "t": 234, "s": [4066.667] }] }, "p": { "a": 0, "k": [242.2, 316.791, 0] }, "a": { "a": 0, "k": [-42.08, 87.189, 0] }, "s": { "a": 0, "k": [58, 58, 100] } }, "ao": 0, "hasMask": true, "masksProperties": [{ "inv": false, "mode": "a", "pt": { "a": 0, "k": { "i": [[0, 0], [0, 0], [0, 0], [0, 0]], "o": [[0, 0], [0, 0], [0, 0], [0, 0]], "v": [[-2.992, 76.5], [-101, 76.5], [-101, 123.623], [-2.992, 123.623]], "c": true } }, "o": { "a": 0, "k": 100 }, "x": { "a": 0, "k": 0 } }], "shapes": [{ "ty": "gr", "it": [{ "d": 1, "ty": "el", "s": { "a": 0, "k": [25, 25] }, "p": { "a": 0, "k": [0, 0] }, "nm": "Ellipse Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 3 }, "lc": 1, "lj": 1, "ml": 4, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [-42.08, 87.189] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Ellipse 1" }, { "ty": "tm", "s": { "a": 0, "k": 0 }, "e": { "a": 0, "k": 25 }, "o": { "a": 0, "k": 0 }, "m": 1, "nm": "Trim Paths 1" }], "ip": -10, "op": 242, "st": -10, "bm": 0 },
-    { "ddd": 0, "ind": 4, "ty": 4, "nm": "wheels_in_fr", "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 1, "k": [{ "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 0, "s": [0] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 60, "s": [1000] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 120, "s": [2000] }, { "t": 234, "s": [3900] }] }, "p": { "a": 0, "k": [339.64, 316.791, 0] }, "a": { "a": 0, "k": [-42.08, 87.189, 0] }, "s": { "a": 0, "k": [58, 58, 100] } }, "ao": 0, "hasMask": true, "masksProperties": [{ "inv": false, "mode": "a", "pt": { "a": 0, "k": { "i": [[0, 0], [0, 0], [0, 0], [0, 0]], "o": [[0, 0], [0, 0], [0, 0], [0, 0]], "v": [[-2.992, 76.5], [-101, 76.5], [-101, 123.623], [-2.992, 123.623]], "c": true } }, "o": { "a": 0, "k": 100 }, "x": { "a": 0, "k": 0 } }], "shapes": [{ "ty": "gr", "it": [{ "d": 1, "ty": "el", "s": { "a": 0, "k": [25, 25] }, "p": { "a": 0, "k": [0, 0] }, "nm": "Ellipse Path 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 3 }, "lc": 1, "lj": 1, "ml": 4, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [-42.08, 87.189] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Ellipse 1" }, { "ty": "tm", "s": { "a": 0, "k": 0 }, "e": { "a": 0, "k": 25 }, "o": { "a": 0, "k": 0 }, "m": 1, "nm": "Trim Paths 1" }], "ip": 0, "op": 235, "st": 0, "bm": 0 },
-    { "ddd": 0, "ind": 1, "ty": 4, "nm": "wind_blow", "parent": 10, "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 0, "k": [-37.735, 25.862, 0] }, "a": { "a": 0, "k": [0, 0, 0] }, "s": { "a": 0, "k": [100, 100, 100] } }, "ao": 0, "shapes": [{ "ty": "gr", "it": [{ "ind": 0, "ty": "sh", "ks": { "a": 0, "k": { "i": [[0, 0], [0, 0]], "o": [[0, 0], [0, 0]], "v": [[-185, -46], [-63, -46]], "c": false } }, "nm": "Path 1" }, { "ty": "tm", "s": { "a": 1, "k": [{ "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 0, "s": [52] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 24, "s": [26] }, { "i": { "x": [0.833], "y": [0.888] }, "o": { "x": [0.167], "y": [0.22] }, "t": 52, "s": [0.169] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0] }, "t": 54, "s": [0] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.167] }, "t": 84, "s": [26] }, { "t": 114, "s": [52] }] }, "e": { "a": 0, "k": 100 }, "o": { "a": 0, "k": 0 }, "m": 1, "nm": "Trim Paths 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 2, "lj": 2, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [0, 0] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Shape 1" }], "ip": 0, "op": 235, "st": -6, "bm": 0 },
-    { "ddd": 0, "ind": 2, "ty": 4, "nm": "Eind_blow2", "parent": 10, "sr": 1, "ks": { "o": { "a": 0, "k": 100 }, "r": { "a": 0, "k": 0 }, "p": { "a": 0, "k": [0, 0, 0] }, "a": { "a": 0, "k": [0, 0, 0] }, "s": { "a": 0, "k": [100, 100, 100] } }, "ao": 0, "shapes": [{ "ty": "gr", "it": [{ "ind": 0, "ty": "sh", "ks": { "a": 0, "k": { "i": [[0, 0], [0, 0]], "o": [[0, 0], [0, 0]], "v": [[-185, -46], [-63, -46]], "c": false } }, "nm": "Path 1" }, { "ty": "tm", "s": { "a": 1, "k": [{ "i": { "x": [0.833], "y": [0.67] }, "o": { "x": [0.167], "y": [0.167] }, "t": 0, "s": [52] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.166] }, "t": 30, "s": [26] }, { "i": { "x": [0.833], "y": [0.888] }, "o": { "x": [0.167], "y": [0.22] }, "t": 58, "s": [0.169] }, { "i": { "x": [0.833], "y": [0.67] }, "o": { "x": [0.167], "y": [0] }, "t": 60, "s": [0] }, { "i": { "x": [0.833], "y": [0.833] }, "o": { "x": [0.167], "y": [0.166] }, "t": 90, "s": [26] }, { "t": 120, "s": [52] }] }, "e": { "a": 0, "k": 100 }, "o": { "a": 0, "k": 0 }, "m": 1, "nm": "Trim Paths 1" }, { "ty": "st", "c": { "a": 0, "k": [0, 0, 0, 1] }, "o": { "a": 0, "k": 100 }, "w": { "a": 0, "k": 15 }, "lc": 2, "lj": 2, "bm": 0, "nm": "Stroke 1" }, { "ty": "tr", "p": { "a": 0, "k": [0, 0] }, "a": { "a": 0, "k": [0, 0] }, "s": { "a": 0, "k": [100, 100] }, "r": { "a": 0, "k": 0 }, "o": { "a": 0, "k": 100 } }], "nm": "Shape 1" }], "ip": 0, "op": 235, "st": 0, "bm": 0 }
-  ],
-  "markers": []
-};
-
-// ── Truck Loading Animation Component ────────────────────────────────────────
-function TruckLoadingAnimation({ label }: { label: string }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const anim = lottie.loadAnimation({
-      container: containerRef.current,
-      renderer: "svg",
-      loop: true,
-      autoplay: true,
-      animationData: truckAnimationData,
-    });
-    anim.setSpeed(0.5);
-    return () => anim.destroy();
-  }, []);
-
-  return (
-    <div className="flex items-center justify-center gap-2 py-1">
-      <div ref={containerRef} style={{ width: 60, height: 60 }} />
-      <p className="text-xs font-medium text-gray-400 animate-pulse">
-        {label}
-      </p>
-    </div>
-  );
-}
-
 export default function ExpenseVoucher() {
   const [selectedPlant, setSelectedPlant] = useState("valsad");
   // const [voucherPrefix, setVoucherPrefix] = useState("KM2526-EV-");
@@ -221,16 +173,13 @@ export default function ExpenseVoucher() {
     isFetching,
     error,
     refetch,
-    isError, // Add this line
+    isError,
   } = useQuery<ExpenseVoucherResponse>({
     queryKey: ["/api/expense-voucher", selectedOrder],
     enabled: !!selectedOrder && hasAccess,
     queryFn: async () => {
       if (!selectedOrder) throw new Error("No order selected");
       try {
-        setSearchProgress(80);
-        setSearchStage("Loading...");
-
         const response = await apiRequest(
           "POST",
           "/api/expense-voucher",
@@ -238,14 +187,9 @@ export default function ExpenseVoucher() {
           false,
           true
         );
-
-        setSearchProgress(100);
-        setSearchStage("Ready!");
-
         if (response && typeof response === "object") {
           return response as ExpenseVoucherResponse;
         }
-
         throw new Error("Invalid response format");
       } catch (error: any) {
         setSearchProgress(0);
@@ -257,6 +201,26 @@ export default function ExpenseVoucher() {
       }
     },
   });
+
+  useEffect(() => {
+    if (expenseVoucherLoading || isFetching) {
+      setSearchProgress(0);
+      const interval = setInterval(() => {
+        setSearchProgress((prev) => {
+          if (prev >= 75) {
+            clearInterval(interval);
+            return 75;
+          }
+          return prev + 1;
+        });
+      }, 80);
+      return () => clearInterval(interval);
+    } else if (searchProgress > 0) {
+      setSearchProgress(100);
+      const timer = setTimeout(() => setSearchProgress(0), 800);
+      return () => clearTimeout(timer);
+    }
+  }, [expenseVoucherLoading, isFetching]);
 
   useEffect(() => {
     if (expenseVoucherData?.data?.voucherInfo) {
@@ -609,7 +573,7 @@ export default function ExpenseVoucher() {
             .route-kms-header, .avg-header { text-align: center; padding: 3px; font-weight: 800; font-size: 9pt; height: 6mm; }
 
             .diesel-bills { background: #fef3c7 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 8pt; height: 7mm; }
-            .route-value, .avg-value { text-align: center; padding: 3px; font-weight: 700; font-size: 11pt; height: 7mm; }
+            .route-value, .avg-value { text-align: center; padding: 3px; font-weight: 700, font-size: 11pt; height: 7mm; }
             .diesel-amount { background: #fbbf24 !important; font-weight: 800; text-align: center; padding: 4px; font-size: 13pt; height: 8mm; }
 
             .expenses-header { background:#ddd9c3 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 11pt; height: 6mm; }
@@ -1091,13 +1055,15 @@ export default function ExpenseVoucher() {
                 </span>
                 <span className="font-mono text-orange-600">{selectedOrder}</span>
               </div>
-              <TruckLoadingAnimation
-                label={
-                  isFetching && !expenseVoucherLoading
-                    ? "Refreshing data..."
-                    : "Fetching voucher data..."
-                }
-              />
+              <div className="flex items-center justify-center">
+                <TruckLoadingAnimation
+                  label={
+                    isFetching && !expenseVoucherLoading
+                      ? "Refreshing data..."
+                      : "Fetching voucher data..."
+                  }
+                />
+              </div>
             </div>
           )}
         </CardContent>
