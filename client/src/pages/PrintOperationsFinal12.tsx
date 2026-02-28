@@ -1335,17 +1335,67 @@ const PrintOperations: React.FC = () => {
                     </div>
                   )}
                 </div>
-                
-                {error && (
-                  <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
-                    Failed to load proforma slip data. Please try again.
-                  </div>
-                )}
               </div>
             </CardContent>
           </Card>
         </div>
       </div>
+
+      {/* Not Found UI - Shows when order is searched but not found */}
+      {activeOrderNumber && !proformaData && !isLoading && error && (
+        <div className="mt-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <Card className="border-red-200 shadow-lg bg-white overflow-hidden">
+            <div className="h-2 bg-gradient-to-r from-red-500 to-orange-500 w-full"></div>
+            <CardContent className="p-12 flex flex-col items-center justify-center text-center">
+              <div className="w-24 h-24 bg-gradient-to-br from-red-50 to-orange-50 rounded-full flex items-center justify-center mb-6 shadow-inner">
+                <Search className="h-12 w-12 text-red-600" />
+              </div>
+              
+              <h3 className="text-2xl font-bold text-gray-900 mb-3">
+                Proforma Slip Not Found
+              </h3>
+              
+              <p className="text-gray-600 max-w-md mb-8 text-lg">
+                We couldn't locate a proforma slip for order <span className="font-mono font-bold text-red-600 bg-red-50 px-3 py-1 rounded-md">{activeOrderNumber}</span>
+              </p>
+              
+              <div className="grid gap-4 w-full max-w-lg">
+                <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 flex items-start gap-3 text-left">
+                  <div className="mt-1 bg-blue-100 p-1.5 rounded">
+                    <PrinterCheck className="h-4 w-4 text-blue-600" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="font-semibold text-blue-900 mb-1">Check Order Number</p>
+                    <p className="text-sm text-blue-700">Ensure the order number is correct and the slip has been created in the system.</p>
+                  </div>
+                </div>
+                
+                <div className="bg-amber-50 p-4 rounded-lg border border-amber-100 flex items-start gap-3 text-left">
+                  <div className="mt-1 bg-amber-100 p-1.5 rounded">
+                    <FileDown className="h-4 w-4 text-amber-600" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="font-semibold text-amber-900 mb-1">Contact Support</p>
+                    <p className="text-sm text-amber-700">If the order exists, please contact your system administrator for assistance.</p>
+                  </div>
+                </div>
+              </div>
+              
+              <Button
+                variant="outline"
+                className="mt-8"
+                onClick={() => {
+                  setInputValue('');
+                  setActiveOrderNumber('');
+                }}
+              >
+                <Search className="h-4 w-4 mr-2" />
+                Search Another Order
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      )}
       
     </div>
   );
