@@ -240,11 +240,12 @@ console.log(currentUserRole);
   // Lock/Unlock permissions: Admin, Super-Admin, IT, Management, Billing Head
   const canLockUnlockSlips = (isAdminOrSuper || isITDep || ismanagment || isBillingHead) && (isReadWriteUser || isAdminOrSuper);
 
+
   // Add new slips: Admin, Super-Admin, and Read-Write users
   const canAddSlips = isAdminOrSuper || isReadWriteUser;
   
   // Only Admin/Super-Admin can edit and delete slips
-  const canEditSlips = isAdminOrSuper;
+  const canEditSlips = isAdminOrSuper || isReadWriteUser;
 
   console.log('DEBUG PROFORMA PERMISSIONS:', { 
     source: remoteUser ? 'remote' : 'local',
@@ -1204,6 +1205,7 @@ console.log(currentUserRole);
               <RefreshCw className="mr-2 h-4 w-4" /> Refresh
           </Button>
 
+<<<<<<< Updated upstream
           {/* Export button - Visible to Read-Only AND Admin/Super */}
           {(isread || isAdminOrSuper || isReadWriteUser) && (
             <Button variant="outline" size="sm" onClick={() => handleExportCSV()}>
@@ -1213,6 +1215,10 @@ console.log(currentUserRole);
 
           {/* Admin/Super/Write Access only buttons */}
           {(isAdminOrSuper || isReadWriteUser) && !isread && (
+=======
+          {/* Admin/Super Admin only */}
+          {(isAdminOrSuper ||  isReadWriteUser) && (
+>>>>>>> Stashed changes
             <>
               <Dialog>
                 <DialogTrigger asChild>
