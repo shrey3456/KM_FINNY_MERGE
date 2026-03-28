@@ -9,6 +9,112 @@ const searchCache = new Map<string, { data: any, timestamp: number }>();
 const partyCache = new Map<string, { data: any, timestamp: number }>();
 const CACHE_DURATION = (60 * 1000)/2; // 1 hour cache for maximum speed
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableNotionError(error: any): boolean {
+  const status = error?.status;
+  const code = error?.code;
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    code === 'notionhq_client_request_timeout'
+  );
+}
+
+async function queryNotionWithRetry(
+  notion: Client,
+  queryParams: Record<string, any>,
+  maxAttempts = 3
+): Promise<any> {
+  let lastError: any;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await notion.databases.query(queryParams as any);
+    } catch (error: any) {
+      lastError = error;
+      if (!isRetryableNotionError(error) || attempt === maxAttempts) {
+        throw error;
+      }
+
+      const backoffMs = attempt * 1000;
+      console.warn(
+        `Notion query retry ${attempt}/${maxAttempts} after error status ${error?.status || 'unknown'}`
+      );
+      await sleep(backoffMs);
+    }
+  }
+
+  throw lastError;
+}
+
+function normalizeVoucherValue(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+function extractVoucherNoFromPage(page: any): string {
+  const prop = page?.properties?.['Voucher No. :'];
+  if (!prop) return '';
+  if (prop.rich_text && Array.isArray(prop.rich_text)) {
+    return prop.rich_text.map((t: any) => t.plain_text || '').join('');
+  }
+  if (prop.title && Array.isArray(prop.title)) {
+    return prop.title.map((t: any) => t.plain_text || '').join('');
+  }
+  if (prop.formula?.string) {
+    return prop.formula.string;
+  }
+  if (typeof prop.number === 'number') {
+    return String(prop.number);
+  }
+  return '';
+}
+
+async function queryByVoucherNumber(
+  notion: Client,
+  databaseId: string,
+  voucherNumber: string
+): Promise<any[]> {
+  const searchValues = Array.from(new Set([voucherNumber.trim(), normalizeVoucherValue(voucherNumber)]));
+
+  for (const value of searchValues) {
+    const filters = [
+      { property: 'Voucher No. :', rich_text: { equals: value } },
+      { property: 'Voucher No. :', rich_text: { contains: value } },
+      { property: 'Voucher No. :', title: { equals: value } },
+      { property: 'Voucher No. :', title: { contains: value } },
+      { property: 'Voucher No. :', formula: { string: { equals: value } } },
+      { property: 'Voucher No. :', formula: { string: { contains: value } } }
+    ];
+
+    for (const filter of filters) {
+      try {
+        const response = await queryNotionWithRetry(notion, {
+          database_id: databaseId,
+          page_size: 25,
+          filter
+        });
+
+        if (response.results?.length) {
+          return response.results;
+        }
+      } catch (error: any) {
+        if (error?.code === 'validation_error') {
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  return [];
+}
+
 // Expense voucher API - Protected
 router.post('/expense-voucher', async (req, res) => {
   try {
@@ -29,8 +135,10 @@ router.post('/expense-voucher', async (req, res) => {
       return res.json(cached.data);
     }
     
+    // Increase Notion client timeout to 60 seconds to reduce timeout errors
     const notion = new Client({
       auth: process.env.NOTION_INTEGRATION_SECRET,
+      timeoutMs: 120000 // 60 seconds
     });
     
     // Extract database ID from the provided URL: https://www.notion.so/kmfinny/173604c4adf080f7853dc9a41a8a69a9?v=173604c4adf08158ba8a000c964da041&source=copy_link
@@ -55,20 +163,39 @@ router.post('/expense-voucher', async (req, res) => {
       console.log(`🔍 Searching for voucher: ${orderNumber}`);
       let allResults: any[] = [];
       let matchingResults: any[] = [];
+      const normalizedOrderNumber = normalizeVoucherValue(String(orderNumber));
       
       try {
+        console.log(`Trying direct Notion filter for voucher: ${normalizedOrderNumber}`);
+        const directMatches = await queryByVoucherNumber(
+          notion,
+          EXPENSE_VOUCHER_DATABASE_ID,
+          String(orderNumber)
+        );
+        if (directMatches.length > 0) {
+          matchingResults = directMatches;
+          console.log(`Direct filter matched ${directMatches.length} record(s).`);
+          console.log(
+            'Direct filter Voucher No. samples:',
+            directMatches.slice(0, 5).map((page: any) => {
+              const raw = extractVoucherNoFromPage(page);
+              return { raw, normalized: normalizeVoucherValue(raw) };
+            })
+          );
+        }
+
+        if (matchingResults.length === 0) {
+        // TODO: Optimize this query by using Notion API filters if possible to avoid fetching all records and reduce timeouts.
         // Fetch in small batches and check after each batch (early exit when found)
         console.log(`📅 Fetching recent records (newest first)...`);
-        
         let hasMore = true;
         let cursor: string | undefined = undefined;
         let batchCount = 0;
-        const MAX_BATCHES = 2; // Only fetch 200 records max (2 batches of 100)
-        
+        const MAX_BATCHES = 10; // Fallback scan up to 500 recent records
         while (hasMore && batchCount < MAX_BATCHES && matchingResults.length === 0) {
-          const response = await notion.databases.query({
+          const response = await queryNotionWithRetry(notion, {
             database_id: EXPENSE_VOUCHER_DATABASE_ID,
-            page_size: 100,
+            page_size: 50,
             start_cursor: cursor,
             sorts: [
               {
@@ -77,23 +204,30 @@ router.post('/expense-voucher', async (req, res) => {
               }
             ]
           });
-          
           batchCount++;
           const batchResults = response.results;
           allResults = allResults.concat(batchResults);
-          
+          console.log(
+            `Batch ${batchCount} Voucher No. samples:`,
+            batchResults.slice(0, 5).map((page: any) => {
+              const raw = extractVoucherNoFromPage(page);
+              return { raw, normalized: normalizeVoucherValue(raw) };
+            })
+          );
           console.log(`📄 Batch ${batchCount}: Fetched ${batchResults.length} records, total: ${allResults.length}`);
-          
+          // Log property keys from the first record in the first batch for debugging
+          if (batchCount === 1 && batchResults.length > 0) {
+            const firstProps = batchResults[0].properties;
+            console.log('🔑 Property keys in first record:', Object.keys(firstProps));
+          }
           // Search THIS batch immediately for early exit
           const batchMatches = batchResults.filter((page: any) => {
             if (!('properties' in page)) return false;
             const properties = page.properties;
-            
             // Check ALL fields for the voucher number
             for (const [key, value] of Object.entries(properties)) {
               const prop = value as any;
               let fieldValue = '';
-              
               // FIX: Join ALL text parts. Notion splits text if formatting changes
               if (prop.rich_text && Array.isArray(prop.rich_text)) {
                 fieldValue = prop.rich_text.map((t: any) => t.plain_text).join('');
@@ -108,31 +242,32 @@ router.post('/expense-voucher', async (req, res) => {
               } else if (prop.select?.name) {
                 fieldValue = prop.select.name;
               }
-              
               // Check for exact match ONLY
               // If searching for "6417", we do NOT want "6417A"
-              if (fieldValue && fieldValue === orderNumber) {
+              if (fieldValue && normalizeVoucherValue(fieldValue) === normalizedOrderNumber) {
                 return true;
               }
             }
-            
             return false;
           });
-          
           if (batchMatches.length > 0) {
             console.log(`✅ FOUND in batch ${batchCount}! Stopping search.`);
             matchingResults = batchMatches;
             break; // Early exit - found it!
           }
-          
           hasMore = response.has_more;
           cursor = response.next_cursor || undefined;
         }
-        
+        }
         console.log(`✅ Search complete: ${allResults.length} records checked, ${matchingResults.length} matches found`);
-        
-      } catch (error) {
+      } catch (error: any) {
         console.error('📋 Error fetching expense voucher data:', error);
+        if ([502, 503, 504].includes(error?.status)) {
+          return res.status(503).json({
+            success: false,
+            message: 'Notion service is temporarily unavailable. Please retry in a few seconds.'
+          });
+        }
         return res.status(500).json({
           success: false,
           message: 'Failed to fetch expense voucher data'
@@ -141,6 +276,14 @@ router.post('/expense-voucher', async (req, res) => {
       
       // Check if we found any matches
       if (matchingResults.length === 0) {
+        console.log(`No voucher match for input raw="${orderNumber}", normalized="${normalizedOrderNumber}"`);
+        console.log(
+          'Scanned Voucher No. sample (first 20):',
+          allResults.slice(0, 20).map((page: any) => {
+            const raw = extractVoucherNoFromPage(page);
+            return { raw, normalized: normalizeVoucherValue(raw) };
+          })
+        );
         return res.status(404).json({
           success: false,
           message: `Voucher ${orderNumber} not found in expense voucher database`
@@ -218,7 +361,7 @@ router.post('/expense-voucher', async (req, res) => {
       if (dieselBillNo) {
         try {
           // Search diesel bill database efficiently
-          let dieselResponse = await notion.databases.query({
+          let dieselResponse = await queryNotionWithRetry(notion, {
             database_id: DIESEL_BILL_DATABASE_ID,
             page_size: 50
           });
@@ -318,7 +461,7 @@ router.post('/expense-voucher', async (req, res) => {
             let orderBatchCount = 0;
             
             do {
-              let orderBatchResponse = await notion.databases.query({
+              let orderBatchResponse = await queryNotionWithRetry(notion, {
                 database_id: ORDER_DETAILS_DATABASE_ID,
                 page_size: 100,
                 start_cursor: orderCursor
@@ -456,7 +599,7 @@ router.post('/expense-voucher', async (req, res) => {
             let driverBatchCount = 0;
             
             do {
-              let driverBatchResponse = await notion.databases.query({
+              let driverBatchResponse = await queryNotionWithRetry(notion, {
                 database_id: DRIVER_DATABASE_ID,
                 page_size: 100,
                 start_cursor: driverCursor

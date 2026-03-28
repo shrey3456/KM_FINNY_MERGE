@@ -85,22 +85,36 @@ router.post('/proforma-slips/import-api', async (req, res) => {
       let hasMore = true;
       let nextCursor = undefined;
       
+      // Add date filter to Notion query
       while (hasMore) {
         const response = await notion.databases.query({
           database_id: databaseId,
           page_size: 100,
-          start_cursor: nextCursor
+          start_cursor: nextCursor,
+          filter: {
+            and: [
+              {
+                property: 'Ord Date :',
+                date: {
+                  on_or_after: startDate
+                }
+              },
+              {
+                property: 'Ord Date :',
+                date: {
+                  on_or_before: endDate
+                }
+              }
+            ]
+          }
         });
-        
         allResults.push(...response.results);
         hasMore = response.has_more;
         nextCursor = response.next_cursor;
-        
         console.log(`Retrieved batch of ${response.results.length} records (total: ${allResults.length})`);
       }
-      
       notionResponse = { results: allResults };
-      console.log(`Retrieved ${allResults.length} total records from Notion`);
+      console.log(`Retrieved ${allResults.length} total records from Notion (filtered by date)`);
 
       // Also fetch from the order database to get plant information
       const ORDER_DATABASE_ID = '296851d9af9e4a14966376e58f8475e5';
