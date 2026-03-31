@@ -8,6 +8,112 @@ const router = Router();
 const searchCache = new Map<string, { data: any, timestamp: number }>();
 const CACHE_DURATION = 60 * 60 * 1000; // 1 hour cache
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableNotionError(error: any): boolean {
+  const status = error?.status;
+  const code = error?.code;
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    code === 'notionhq_client_request_timeout'
+  );
+}
+
+async function queryNotionWithRetry(
+  notion: Client,
+  queryParams: Record<string, any>,
+  maxAttempts = 3
+): Promise<any> {
+  let lastError: any;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await notion.databases.query(queryParams as any);
+    } catch (error: any) {
+      lastError = error;
+      if (!isRetryableNotionError(error) || attempt === maxAttempts) {
+        throw error;
+      }
+
+      const backoffMs = attempt * 1000;
+      console.warn(
+        `[TOLL] Notion query retry ${attempt}/${maxAttempts} after error status ${error?.status || 'unknown'}`
+      );
+      await sleep(backoffMs);
+    }
+  }
+
+  throw lastError;
+}
+
+function normalizeVoucherValue(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+function extractVoucherNoFromPage(page: any): string {
+  const prop = page?.properties?.['Voucher No. :'];
+  if (!prop) return '';
+  if (prop.rich_text && Array.isArray(prop.rich_text)) {
+    return prop.rich_text.map((t: any) => t.plain_text || '').join('');
+  }
+  if (prop.title && Array.isArray(prop.title)) {
+    return prop.title.map((t: any) => t.plain_text || '').join('');
+  }
+  if (prop.formula?.string) {
+    return prop.formula.string;
+  }
+  if (typeof prop.number === 'number') {
+    return String(prop.number);
+  }
+  return '';
+}
+
+async function queryByVoucherNumber(
+  notion: Client,
+  databaseId: string,
+  voucherNumber: string
+): Promise<any[]> {
+  const searchValues = Array.from(new Set([voucherNumber.trim(), normalizeVoucherValue(voucherNumber)]));
+
+  for (const value of searchValues) {
+    const filters = [
+      { property: 'Voucher No. :', rich_text: { equals: value } },
+      { property: 'Voucher No. :', rich_text: { contains: value } },
+      { property: 'Voucher No. :', title: { equals: value } },
+      { property: 'Voucher No. :', title: { contains: value } },
+      { property: 'Voucher No. :', formula: { string: { equals: value } } },
+      { property: 'Voucher No. :', formula: { string: { contains: value } } }
+    ];
+
+    for (const filter of filters) {
+      try {
+        const response = await queryNotionWithRetry(notion, {
+          database_id: databaseId,
+          page_size: 25,
+          filter
+        });
+
+        if (response.results?.length) {
+          return response.results;
+        }
+      } catch (error: any) {
+        if (error?.code === 'validation_error') {
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  return [];
+}
+
 // Toll voucher API - Protected
 router.post('/toll-voucher', async (req, res) => {
   try {
@@ -29,94 +135,104 @@ router.post('/toll-voucher', async (req, res) => {
     
     const notion = new Client({
       auth: process.env.NOTION_INTEGRATION_SECRET,
+      timeoutMs: 120000,
     });
     
     // Use same expense voucher database
     const EXPENSE_VOUCHER_DATABASE_ID = '173604c4adf080f7853dc9a41a8a69a9';
     
-    let allResults: any[] = [];
-    let matchingResults: any[] = [];
+  let allResults: any[] = [];
+  let matchingResults: any[] = [];
+  const normalizedOrderNumber = normalizeVoucherValue(String(orderNumber));
     
     try {
       console.log(`🔍 [TOLL] Searching for voucher: ${orderNumber}`);
       
-      let hasMore = true;
-      let cursor: string | undefined = undefined;
-      let batchCount = 0;
-      const MAX_BATCHES = 2;
-      
-      while (hasMore && batchCount < MAX_BATCHES && matchingResults.length === 0) {
-        const response = await notion.databases.query({
-          database_id: EXPENSE_VOUCHER_DATABASE_ID,
-          page_size: 100,
-          start_cursor: cursor,
-          sorts: [
-            {
-              timestamp: 'created_time',
-              direction: 'descending'
-            }
-          ]
-        });
-        
-        batchCount++;
-        const batchResults = response.results;
-        allResults = allResults.concat(batchResults);
-        
-        console.log(`📄 [TOLL] Batch ${batchCount}: Fetched ${batchResults.length} records`);
-        
-        // Search batch for voucher
-        const batchMatches = batchResults.filter((page: any) => {
-          if (!('properties' in page)) return false;
-          const properties = page.properties;
-          
-          for (const [key, value] of Object.entries(properties)) {
-            const prop = value as any;
-            let fieldValue = '';
-            
-            // FIX: Join ALL text parts. Notion splits text if formatting changes (e.g. 6617 is bold, A is normal)
-            if (prop.rich_text && Array.isArray(prop.rich_text)) {
-              fieldValue = prop.rich_text.map((t: any) => t.plain_text).join('');
-            } else if (prop.title && Array.isArray(prop.title)) {
-              fieldValue = prop.title.map((t: any) => t.plain_text).join('');
-            } else if (prop.formula?.string) {
-              fieldValue = prop.formula.string;
-            } else if (prop.formula?.number) {
-              fieldValue = prop.formula.number.toString();
-            } else if (prop.number) {
-              fieldValue = prop.number.toString();
-            } else if (prop.select?.name) {
-              fieldValue = prop.select.name;
-            }
-            
-            // Check for exact match or contains
-            if (fieldValue) {
-              // STRICT EXACT MATCH ONLY
-              // We only accept if the FULL value matches exactly.
-              // No partial matches allowed.
-              if (fieldValue === orderNumber) {
+      const directMatches = await queryByVoucherNumber(
+        notion,
+        EXPENSE_VOUCHER_DATABASE_ID,
+        String(orderNumber)
+      );
+
+      if (directMatches.length > 0) {
+        matchingResults = directMatches;
+        console.log(`[TOLL] Direct filter matched ${directMatches.length} record(s).`);
+      }
+
+      if (matchingResults.length === 0) {
+        let hasMore = true;
+        let cursor: string | undefined = undefined;
+        let batchCount = 0;
+        const MAX_BATCHES = 10;
+
+        while (hasMore && batchCount < MAX_BATCHES && matchingResults.length === 0) {
+          const response = await queryNotionWithRetry(notion, {
+            database_id: EXPENSE_VOUCHER_DATABASE_ID,
+            page_size: 50,
+            start_cursor: cursor,
+            sorts: [
+              {
+                timestamp: 'created_time',
+                direction: 'descending'
+              }
+            ]
+          });
+
+          batchCount++;
+          const batchResults = response.results;
+          allResults = allResults.concat(batchResults);
+
+          console.log(`📄 [TOLL] Batch ${batchCount}: Fetched ${batchResults.length} records, total: ${allResults.length}`);
+
+          const batchMatches = batchResults.filter((page: any) => {
+            if (!('properties' in page)) return false;
+            const properties = page.properties;
+
+            for (const [, value] of Object.entries(properties)) {
+              const prop = value as any;
+              let fieldValue = '';
+
+              if (prop.rich_text && Array.isArray(prop.rich_text)) {
+                fieldValue = prop.rich_text.map((t: any) => t.plain_text).join('');
+              } else if (prop.title && Array.isArray(prop.title)) {
+                fieldValue = prop.title.map((t: any) => t.plain_text).join('');
+              } else if (prop.formula?.string) {
+                fieldValue = prop.formula.string;
+              } else if (prop.formula?.number) {
+                fieldValue = prop.formula.number.toString();
+              } else if (prop.number) {
+                fieldValue = prop.number.toString();
+              } else if (prop.select?.name) {
+                fieldValue = prop.select.name;
+              }
+
+              if (fieldValue && normalizeVoucherValue(fieldValue) === normalizedOrderNumber) {
                 return true;
               }
-              
-              // If the field value is "6417A" and we search "6417", this is NOT a match.
-              // If the field value is "6417" and we search "6417", this IS a match.
             }
+
+            return false;
+          });
+
+          if (batchMatches.length > 0) {
+            console.log(`✅ [TOLL] FOUND in batch ${batchCount}!`);
+            matchingResults = batchMatches;
+            break;
           }
-          
-          return false;
-        });
-        
-        if (batchMatches.length > 0) {
-          console.log(`✅ [TOLL] FOUND in batch ${batchCount}!`);
-          matchingResults = batchMatches;
-          break;
+
+          hasMore = response.has_more;
+          cursor = response.next_cursor || undefined;
         }
-        
-        hasMore = response.has_more;
-        cursor = response.next_cursor || undefined;
       }
       
     } catch (error) {
       console.error('📋 [TOLL] Error fetching data:', error);
+      if ([502, 503, 504].includes((error as any)?.status)) {
+        return res.status(503).json({
+          success: false,
+          message: 'Notion service is temporarily unavailable. Please retry in a few seconds.'
+        });
+      }
       return res.status(500).json({
         success: false,
         message: 'Failed to fetch toll voucher data'
@@ -134,15 +250,6 @@ router.post('/toll-voucher', async (req, res) => {
     const firstMatch = matchingResults[0] as any;
     const properties = firstMatch.properties || {};
 
-// DEBUG: dump property keys and a short sample so we can see exact name/type
-    console.log('[TOLL] page id=', firstMatch.id, 'property keys=', Object.keys(properties).join(', '));
-    for (const [k, v] of Object.entries(properties)) {
-      // show type and a small sample
-      try { console.log(`[TOLL] prop: "${k}" type:${v?.type} sample:`, JSON.stringify(v).slice(0,200)); }
-      catch (e) { console.log('[TOLL] prop sample error', e); }
-    }
-
-// --- existing date-extraction logic (keep or add) ---
     let parsedOrderDate = '';
     try {
       // try preferred keys first (add more names if your Notion shows different keys)
@@ -167,17 +274,15 @@ router.post('/toll-voucher', async (req, res) => {
           parsedOrderDate = `${String(maybe.getDate()).padStart(2,'0')}/${String(maybe.getMonth()+1).padStart(2,'0')}/${maybe.getFullYear()}`;
         } else parsedOrderDate = String(dateFound);
       }
-      console.log('[TOLL] dateFound raw=', dateFound, 'parsedOrderDate=', parsedOrderDate);
     } catch(err) {
       console.warn('[TOLL] date parse failed', err);
     }
 
-// ensure orderDate is attached to response object
     const tollVoucherData: any = {
       orderNumber: orderNumber,
       plant: properties['Plant']?.select?.name || properties['Stk Plant :']?.select?.name || 'INDORE',
       voucherInfo: {} as any,
-      orderDate: parsedOrderDate // <- ensure this is present
+      orderDate: parsedOrderDate
     };
     
     // Extract all property data from expense voucher record (same as expense voucher)
@@ -251,13 +356,13 @@ router.post('/toll-voucher', async (req, res) => {
     // Convert toll tax to words (Indian number system)
     tollVoucherData.tollTaxInWords = numberToWords(tollVoucherData.tollTax);
     
-    // BEFORE sending response: log final payload for verification
     const payload = {
       success: true,
       message: 'OK',
       data: tollVoucherData
     };
-    console.log('[TOLL] Sending payload sample:', JSON.stringify(payload, null, 2).slice(0,2000));
+
+    searchCache.set(cacheKey, { data: payload, timestamp: Date.now() });
     return res.json(payload);
     
   } catch (error: any) {
