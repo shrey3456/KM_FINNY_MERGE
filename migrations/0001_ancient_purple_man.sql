@@ -6,5 +6,4 @@ CREATE TABLE "plants" (
 	"border_color" text NOT NULL,
 	"created_at" timestamp DEFAULT now()
 );
---> statement-breakpoint
 ALTER TABLE "orders" ALTER COLUMN "order_date" SET DEFAULT '2026-02-04';

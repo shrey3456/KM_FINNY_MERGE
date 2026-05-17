@@ -28,7 +28,7 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from 'react-hook-form';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Smartphone, Radio, QrCode, Zap, Shield, Database } from 'lucide-react';
 import { apiRequest } from '@/lib/queryClient';
 import { useQueryClient } from '@tanstack/react-query';
@@ -51,6 +51,37 @@ const Settings = () => {
   const [isClearing, setIsClearing] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [showClearDialog, setShowClearDialog] = useState(false);
+
+  // Voucher prefixes state
+  const [prefixes, setPrefixes] = useState<{ expense?: string; toll?: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [isAdminUser, setIsAdminUser] = useState(false);
+  const [originalPrefixes, setOriginalPrefixes] = useState<{ expense?: string; toll?: string } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiRequest('GET', '/api/voucher-prefixes', undefined, false, true);
+        if (res && res.data) {
+          setPrefixes(res.data as any);
+          setOriginalPrefixes(res.data as any);
+        }
+      } catch (e) {
+        // ignore
+      }
+    })();
+
+    try {
+      const userString = localStorage.getItem('currentUser');
+      if (userString) {
+        const user = JSON.parse(userString);
+        const role = (user?.role || '').toString().toLowerCase();
+        setIsAdminUser(['admin', 'super-admin', 'superadmin', 'super_admin'].includes(role));
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
 
   // NEW: dialog UI state
   const [confirmText, setConfirmText] = useState('');
@@ -320,6 +351,96 @@ const Settings = () => {
                   
                   <div className="flex justify-end">
                     <Button>Save Settings</Button>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Voucher Prefixes - centrally managed by admin */}
+              <Card className="mt-6">
+                <CardHeader>
+                  <CardTitle>Voucher Prefixes</CardTitle>
+                  <CardDescription>Set canonical prefixes for Expense and Toll vouchers (admin only)</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <Label>Expense Prefix</Label>
+                      <Input
+                        value={prefixes?.expense || ''}
+                        onChange={(e) => setPrefixes((p: any) => ({ ...(p||{}), expense: e.target.value }))}
+                        disabled={!isAdminUser}
+                        placeholder="e.g. KM2526-EV-"
+                      />
+                    </div>
+                    <div>
+                      <Label>Toll Prefix</Label>
+                      <Input
+                        value={prefixes?.toll || ''}
+                        onChange={(e) => setPrefixes((p: any) => ({ ...(p||{}), toll: e.target.value }))}
+                        disabled={!isAdminUser}
+                        placeholder="e.g. KM2526-TV-"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex gap-2 justify-end">
+                    <Button
+                      type="button"
+                      onClick={async (e) => {
+                        e.preventDefault();
+                        setSaving(true);
+                        try {
+                          const toSave: string[] = [];
+                          const types: Array<'expense' | 'toll'> = ['expense', 'toll'];
+                          for (const t of types) {
+                            const current = (prefixes as any)?.[t];
+                            const original = (originalPrefixes as any)?.[t];
+                            // If original is null (never loaded), treat non-empty as changed
+                            if (original === undefined || original === null) {
+                              if (current) toSave.push(t);
+                            } else if (String(current || '') !== String(original || '')) {
+                              toSave.push(t);
+                            }
+                          }
+
+                          if (toSave.length === 0) {
+                            toast({ title: 'No changes', description: 'Nothing to save' });
+                            setSaving(false);
+                            return;
+                          }
+
+                          let finalData: any = originalPrefixes ? { ...(originalPrefixes as any) } : {};
+                          for (const t of toSave) {
+                            try {
+                              const res = await apiRequest('PUT', `/api/voucher-prefixes/${t}`, { prefix: (prefixes as any)?.[t] || '' }, false, true);
+                              if (res && res.data) {
+                                // server returns full set; merge
+                                finalData = { ...(finalData || {}), ...(res.data || {}) };
+                              }
+                            } catch (err) {
+                              console.error(`Failed to save prefix ${t}:`, err);
+                              // continue with others
+                            }
+                          }
+
+                          if (finalData) {
+                            setPrefixes(finalData);
+                            setOriginalPrefixes(finalData);
+                          }
+
+                          try { localStorage.setItem('voucher_prefixes_updated', String(Date.now())); } catch (e) {}
+                          toast({ title: 'Saved', description: 'Voucher prefixes updated' });
+                        } catch (e: any) {
+                          console.error('Failed to save voucher prefixes', e);
+                          toast({ title: 'Error', description: 'Failed to save prefixes', variant: 'destructive' });
+                        } finally {
+                          setSaving(false);
+                        }
+                      }}
+                      disabled={!isAdminUser || saving}
+                    >
+                      {saving ? 'Saving...' : 'Save Prefixes'}
+                    </Button>
                   </div>
                 </CardContent>
               </Card>

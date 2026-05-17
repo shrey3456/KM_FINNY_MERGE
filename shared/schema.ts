@@ -533,6 +533,25 @@ export const proformaSlipItemsBackup = pgTable("proforma_slip_items_backup", {
 export type BackupSettings = typeof backupSettings.$inferSelect;
 export type InsertBackupSettings = z.infer<typeof insertBackupSettingsSchema>;
 
+// Voucher prefix table to store prefixes for different voucher types
+export const voucherPrefixes = pgTable("voucher_prefixes", {
+  id: serial("id").primaryKey(),
+  type: text("type").notNull(), // e.g. 'expense' or 'toll'
+  prefix: text("prefix").notNull(),
+  updatedBy: text("updated_by"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertVoucherPrefixSchema = createInsertSchema(voucherPrefixes).pick({
+  type: true,
+  prefix: true,
+  updatedBy: true,
+});
+
+export type VoucherPrefix = typeof voucherPrefixes.$inferSelect;
+export type InsertVoucherPrefix = z.infer<typeof insertVoucherPrefixSchema>;
+
 // Loading Operations Items backup schema
 export const loadingOpItemsBackup = pgTable("load_operations_items_backup", {
   id: serial("id").primaryKey(),
