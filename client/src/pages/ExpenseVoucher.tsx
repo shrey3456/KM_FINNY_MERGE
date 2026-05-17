@@ -158,14 +158,67 @@ export default function ExpenseVoucher() {
     useState(false);
   const { toast } = useToast();
   const { hasAccess, isLoading: accessLoading } = useAccessControl();
-   const [voucherPrefix, setVoucherPrefix] = useState(() => {
-    const saved = localStorage.getItem("expenseVoucherPrefix");
-    return saved || "KM2526-EV-";
-  });
+  const [voucherPrefix, setVoucherPrefix] = useState<string>("KM2526-EV-");
+  const [isAdminUser, setIsAdminUser] = useState(false);
 
+  // Fetch global prefixes from server
   useEffect(() => {
-    localStorage.setItem("expenseVoucherPrefix", voucherPrefix);
-  }, [voucherPrefix]);
+    (async () => {
+      try {
+        const res = await apiRequest("GET", "/api/voucher-prefixes", undefined, false, true);
+        if (res && res.data && res.data.expense) {
+          setVoucherPrefix(res.data.expense);
+        }
+      } catch (e) {
+        // keep default
+        console.error("Failed to fetch voucher prefixes:", e);
+      }
+    })();
+
+    // determine admin role from localStorage user cache
+    try {
+      const userString = localStorage.getItem("currentUser");
+      if (userString) {
+        const user = JSON.parse(userString);
+        const role = (user?.role || "").toString().toLowerCase();
+        setIsAdminUser(["admin", "super-admin", "superadmin", "super_admin"].includes(role));
+      }
+    } catch (e) {
+      // ignore
+    }
+    // Listen for prefix updates from other tabs/windows
+    const storageHandler = async (e: StorageEvent) => {
+      if (e.key === 'voucher_prefixes_updated') {
+        try {
+          const res = await apiRequest("GET", "/api/voucher-prefixes", undefined, false, true);
+          if (res && res.data && res.data.expense) {
+            setVoucherPrefix(res.data.expense);
+          }
+        } catch (err) {
+          // ignore
+        }
+      }
+    };
+
+    window.addEventListener('storage', storageHandler);
+
+    // Poll every 30 seconds for changes from other devices/browsers
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await apiRequest("GET", "/api/voucher-prefixes", undefined, false, true);
+        if (res && res.data && res.data.expense) {
+          setVoucherPrefix(res.data.expense);
+        }
+      } catch (e) {
+        // ignore
+      }
+    }, 30000);
+
+    return () => {
+      window.removeEventListener('storage', storageHandler);
+      clearInterval(pollInterval);
+    };
+  }, []);
 
   const {
     data: expenseVoucherData,
@@ -1009,6 +1062,8 @@ export default function ExpenseVoucher() {
                   onKeyDown={(e) => e.key === "Enter" && handleSearch()}
                   className="rounded-r-none text-sm font-mono bg-gray-50 w-32 border-r-0 focus-visible:ring-2 focus-visible:ring-blue-500"
                   placeholder="Prefix"
+                  // Prefixs are managed centrally in Settings — make this read-only
+                  disabled={true}
                 />
                 <Input
                   type="text"

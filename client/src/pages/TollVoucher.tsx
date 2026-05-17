@@ -92,13 +92,67 @@ export default function TollVoucher() {
   const [searchStage, setSearchStage] = useState('');
   const { toast } = useToast();
   const { hasAccess, isLoading: accessLoading } = useAccessControl();
-  const [voucherPrefix, setVoucherPrefix] = useState(() => {
-    return localStorage.getItem('tollVoucherPrefix') || 'KM2526-EV-';
-  });
+  const [voucherPrefix, setVoucherPrefix] = useState<string>('KM2526-EV-');
+  const [isAdminUser, setIsAdminUser] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem('tollVoucherPrefix', voucherPrefix);
-  }, [voucherPrefix]);
+    (async () => {
+      try {
+        const res = await apiRequest('GET', '/api/voucher-prefixes', undefined, false, true);
+        if (res && res.data && res.data.toll) {
+          setVoucherPrefix(res.data.toll);
+        }
+      } catch (e) {
+        console.error('Failed to fetch voucher prefixes:', e);
+      }
+    })();
+
+    try {
+      const userString = localStorage.getItem('currentUser');
+      if (userString) {
+        const user = JSON.parse(userString);
+        const role = (user?.role || '').toString().toLowerCase();
+        setIsAdminUser(['admin', 'super-admin', 'superadmin', 'super_admin'].includes(role));
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // Listen for updates from other tabs in the same browser
+    const storageHandler = (e: StorageEvent) => {
+      if (e.key === 'voucher_prefixes_updated') {
+        (async () => {
+          try {
+            const res = await apiRequest('GET', '/api/voucher-prefixes', undefined, false, true);
+            if (res && res.data && res.data.toll) {
+              setVoucherPrefix(res.data.toll);
+            }
+          } catch (err) {
+            // ignore
+          }
+        })();
+      }
+    };
+
+    window.addEventListener('storage', storageHandler);
+
+    // Poll every 30 seconds for changes from other devices/browsers
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await apiRequest('GET', '/api/voucher-prefixes', undefined, false, true);
+        if (res && res.data && res.data.toll) {
+          setVoucherPrefix(res.data.toll);
+        }
+      } catch (e) {
+        // ignore
+      }
+    }, 30000);
+
+    return () => {
+      window.removeEventListener('storage', storageHandler);
+      clearInterval(pollInterval);
+    };
+  }, []);
 
   // Fetch toll voucher data
   const { 
@@ -476,6 +530,8 @@ console.log(length, partyFontPt);
                       className="rounded-r-none text-sm font-mono bg-gray-50 w-32 border-r-0 focus-visible:ring-2 focus-visible:ring-green-500"
                       placeholder="Prefix"
                       data-testid="input-voucher-prefix"
+                      // Prefixs are managed centrally in Settings — make this read-only
+                      disabled={true}
                     />
                     <Input
                       type="text"
@@ -517,8 +573,6 @@ console.log(length, partyFontPt);
                   <div className="flex items-center justify-center">
                     <TruckLoadingAnimation
                       label={isFetching && !tollVoucherLoading ? "Refreshing data..." : "Fetching voucher data..."}
-                      showProgress={true}
-                      progress={searchProgress}
                     />
                   </div>
                 </div>

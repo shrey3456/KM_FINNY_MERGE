@@ -103,6 +103,7 @@ import dispatchRoutes from "./routes/dispatch-simple";
 import dispatchOrdersRoutes from "./routes/dispatch-orders";
 import expenseVoucherRoutes from "./routes/expense-voucher";
 import tollVoucherRoutes from "./routes/toll-voucher";
+import voucherPrefixRoutes from "./routes/voucher-prefix";
 import checkinoutRoutes from "./routes/checkinout";
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -8626,6 +8627,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount dispatch orders routes
   apiRouter.use(dispatchOrdersRoutes);
+
+  // Mount voucher prefix routes
+  apiRouter.use(voucherPrefixRoutes);
 
   // Mount expense voucher routes
   apiRouter.use(expenseVoucherRoutes);
