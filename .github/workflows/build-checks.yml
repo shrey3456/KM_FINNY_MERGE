@@ -1,0 +1,28 @@
+name: Build Check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "[Build] Checkout Repository"
+        uses: actions/checkout@v4
+
+      - name: "[Build] Setup Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: "[Build] Install Dependencies"
+        run: npm install
+
+      - name: "[Build] Running TypeScript Build"
+        run: npm run build
+
+      - name: "[Build] Build Successful"
+        if: success()
+        run: echo "[Build] Application compiled successfully."
