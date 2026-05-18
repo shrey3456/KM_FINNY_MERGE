@@ -55,7 +55,6 @@ async function comparePasswords(supplied: string, stored: string) {
 export function setupAuth(app: Express) {
   // Detect deployment environment more reliably
   const isProduction = process.env.NODE_ENV === 'production' || 
-                      process.env.REPLIT_DEPLOYMENT === '1' ||
                       process.env.REPL_DEPLOYMENT === '1' ||
                       process.env.REPL_SLUG !== undefined || // Replit deployment indicator
                       process.env.REPLIT_DB_URL !== undefined; // Another deployment indicator
@@ -78,17 +77,17 @@ export function setupAuth(app: Express) {
     saveUninitialized: false,
     store: storage.sessionStore,
     cookie: {
-      maxAge: 24 * 60 * 60 * 1000, // 1 day
+      maxAge: 24 *60 * 60 * 1000, // 1 day
       secure: useSecureCookies, // Only use secure cookies when appropriate
       httpOnly: true,
       // Fix Windows compatibility - use 'lax' for better cross-platform support
-      sameSite: 'lax', // Use 'lax' for Windows compatibility instead of 'none'
+      sameSite: 'lax' , // Use 'lax' for Windows compatibility instead of 'none'
       // Don't set domain - let it default to the current domain
     },
     // Add better error handling
     name: 'km-tribe-session',
     // Rolling sessions to keep users logged in
-    rolling: true
+    rolling: false, // Don't reset maxAge on every response - adjust as needed
   };
 
   // Add debug logging for session issues in deployment
