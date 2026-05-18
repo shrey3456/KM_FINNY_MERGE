@@ -8,6 +8,10 @@ on:
       - synchronize
       - reopened
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   pr-title-check:
     runs-on: ubuntu-latest
@@ -21,8 +25,14 @@ jobs:
           types: |
             feat
             fix
+            docs
+            style
             refactor
             test
+            chore
+            ci
+            build
+            perf
             revert
 
           requireScope: true
