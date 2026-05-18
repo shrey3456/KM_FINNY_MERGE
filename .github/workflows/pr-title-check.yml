@@ -1,0 +1,42 @@
+name: PR Title Validation
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+jobs:
+  pr-title-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "[PR Check] Validating Pull Request Title"
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            refactor
+            test
+            revert
+
+          requireScope: true
+
+      - name: "[PR Check] Pull Request Title Validation Passed"
+        if: success()
+        run: echo "[PR Check] Pull request title follows naming conventions."
+
+      - name: "[PR Check] Pull Request Title Validation Failed"
+        if: failure()
+        run: |
+          echo "[PR Check] Invalid pull request title!"
+          echo "[PR Check] Use format like:"
+          echo "feat(scanning): add vehicle scan validation"
+          echo "fix(auth): resolve login issue"
+          echo "refactor(report): optimize report query"
+          exit 1
