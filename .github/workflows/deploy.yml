@@ -1,0 +1,14 @@
+name: Deploy Application
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Deploy Application
+        run: D:\KM-finny\KM-FINNY-Github\KM_FINNY_MERGE\deploy.bat
