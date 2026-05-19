@@ -14,7 +14,14 @@ router.get('/dispatch-orders', async (req, res) => {
     });
     
     // Use order database to get orders with correct status
-    const ORDER_DATABASE_ID = '296851d9af9e4a14966376e58f8475e5';
+    const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+    
+    if (!ORDER_DATABASE_ID) {
+      return res.status(500).json({
+        success: false,
+        message: 'ORDER_DATABASE_ID environment variable is not set'
+      });
+    }
     
     // Query for orders with dispatched or ready for dispatch status (only 10 recent orders)
     const response = await notion.databases.query({

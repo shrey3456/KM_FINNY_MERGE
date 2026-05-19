@@ -25,7 +25,11 @@ router.post('/dispatch', async (req, res) => {
     });
     
     // Use ONLY the dispatch database as specified
-    const DATABASE_ID = '296851d9af9e4a14966376e58f8475e5';
+    const DATABASE_ID = process.env.DISPATCH_DATABASE_ID;
+    
+    if(!DATABASE_ID) {
+      return res.status(500).json({ success: false, message: 'DISPATCH_DATABASE_ID environment variable is not set' });
+    }
     
     try {
       console.log(`📋 Searching for order ${orderNumber} in dispatch database: ${DATABASE_ID}`);

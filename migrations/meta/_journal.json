@@ -29,6 +29,13 @@
       "when": 1770548927961,
       "tag": "0003_lean_rictor",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1779210325949,
+      "tag": "0004_shiny_franklin_richards",
+      "breakpoints": true
     }
   ]
 }

@@ -117,8 +117,12 @@ router.post('/proforma-slips/import-api', async (req, res) => {
       console.log(`Retrieved ${allResults.length} total records from Notion (filtered by date)`);
 
       // Also fetch from the order database to get plant information
-      const ORDER_DATABASE_ID = '296851d9af9e4a14966376e58f8475e5';
-      console.log(`Fetching order data from Notion database: ${ORDER_DATABASE_ID}`);
+      const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+      if(!ORDER_DATABASE_ID) {
+        return res.status(500).json({ success: false, message: 'ORDER_DATABASE_ID environment variable is not set' });
+      }
+      
+      //console.log(`Fetching order data from Notion database: ${ORDER_DATABASE_ID}`);
       
       const allOrderResults = [];
       let orderHasMore = true;

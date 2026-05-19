@@ -8416,6 +8416,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Create a new plant
   app.post("/api/plants", async (req, res) => {
     try {
+      const role = String((req as any)?.user?.role ?? "").toLowerCase();
+      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
+      if (!allowedRoles.includes(role)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
       const data = insertPlantSchema.parse(req.body);
       const newPlant = await storage.createPlant(data); // Ensure this method exists in storage.ts
       res.status(201).json(newPlant);
@@ -8427,6 +8433,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Update a plant
   app.put("/api/plants/:id", async (req, res) => {
     try {
+      const role = String((req as any)?.user?.role ?? "").toLowerCase();
+      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
+      if (!allowedRoles.includes(role)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
       const id = parseInt(req.params.id);
       const data = insertPlantSchema.parse(req.body);
       const updatedPlant = await storage.updatePlant(id, data); // Ensure this method exists
@@ -8439,11 +8451,105 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Delete a plant
   app.delete("/api/plants/:id", async (req, res) => {
     try {
+      const role = String((req as any)?.user?.role ?? "").toLowerCase();
+      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
+      if (!allowedRoles.includes(role)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
       const id = parseInt(req.params.id);
       await storage.deletePlant(id); // Ensure this method exists
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ message: "Failed to delete plant" });
+    }
+  });
+
+  app.get("/api/plants/:id/stvs", async (req, res) => {
+    try {
+      const plantId = parseInt(req.params.id);
+      if (Number.isNaN(plantId)) {
+        return res.status(400).json({ message: "Invalid plant id" });
+      }
+      const stvs = await storage.listPlantStvs(plantId);
+      res.json(stvs);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch STVs" });
+    }
+  });
+
+  app.post("/api/plants/:id/stvs", async (req, res) => {
+    try {
+      const role = String((req as any)?.user?.role ?? "").toLowerCase();
+      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
+      if (!allowedRoles.includes(role)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const plantId = parseInt(req.params.id);
+      if (Number.isNaN(plantId)) {
+        return res.status(400).json({ message: "Invalid plant id" });
+      }
+
+      const payloadSchema = z.object({
+        stv: z.string().min(1, "STV is required"),
+      });
+
+      const payload = payloadSchema.parse(req.body);
+      const newStv = await storage.createPlantStv({
+        plantId,
+        stv: payload.stv.trim(),
+      });
+
+      res.status(201).json(newStv);
+    } catch (error) {
+      res.status(400).json({ message: "Invalid STV data" });
+    }
+  });
+
+  app.put("/api/plant-stvs/:id", async (req, res) => {
+    try {
+      const role = String((req as any)?.user?.role ?? "").toLowerCase();
+      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
+      if (!allowedRoles.includes(role)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const id = parseInt(req.params.id);
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ message: "Invalid STV id" });
+      }
+
+      const payloadSchema = z.object({
+        stv: z.string().min(1, "STV is required"),
+      });
+
+      const payload = payloadSchema.parse(req.body);
+      const updated = await storage.updatePlantStv(id, { stv: payload.stv.trim() });
+
+      res.json(updated);
+    } catch (error) {
+      res.status(400).json({ message: "Failed to update STV" });
+    }
+  });
+
+  app.delete("/api/plant-stvs/:id", async (req, res) => {
+    try {
+      const role = String((req as any)?.user?.role ?? "").toLowerCase();
+      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
+      if (!allowedRoles.includes(role)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const id = parseInt(req.params.id);
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ message: "Invalid STV id" });
+      }
+
+      await storage.deletePlantStv(id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to delete STV" });
     }
   });
 

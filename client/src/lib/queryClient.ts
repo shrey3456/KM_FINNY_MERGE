@@ -1,6 +1,22 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
+const authStorageKeys = ["currentUser", "km-user", "userCode", "userId"];
+
+export function handleUnauthorized() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  authStorageKeys.forEach((key) => localStorage.removeItem(key));
+  queryClient.setQueryData(["/api/user"], null);
+  window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+}
+
 async function throwIfResNotOk(res: Response) {
+  if (res.status === 401 || res.status === 403) {
+    handleUnauthorized();
+  }
+
   if (!res.ok) {
     const text = (await res.text()) || res.statusText;
     throw new Error(`${res.status}: ${text}`);
@@ -33,6 +49,10 @@ export async function apiRequest(
     body,
     credentials: "include",
   });
+
+  if (res.status === 401 || res.status === 403) {
+    handleUnauthorized();
+  }
 
   await throwIfResNotOk(res);
   
@@ -76,6 +96,10 @@ export const getQueryFn: <T>(options: {
       credentials: "include",
       headers: {} as Record<string, string>
     });
+
+    if (res.status === 401 || res.status === 403) {
+      handleUnauthorized();
+    }
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;
