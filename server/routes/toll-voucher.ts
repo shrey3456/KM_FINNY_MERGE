@@ -139,8 +139,14 @@ router.post('/toll-voucher', async (req, res) => {
     });
     
     // Use same expense voucher database
-    const EXPENSE_VOUCHER_DATABASE_ID = '173604c4adf080f7853dc9a41a8a69a9';
+    const EXPENSE_VOUCHER_DATABASE_ID = process.env.EXPENSE_VOUCHER_DATABASE_ID;
     
+    if (!EXPENSE_VOUCHER_DATABASE_ID) {
+      return res.status(500).json({
+        success: false, 
+        message: 'EXPENSE_VOUCHER_DATABASE_ID environment variable is not set'
+      });
+    }
   let allResults: any[] = [];
   let matchingResults: any[] = [];
   const normalizedOrderNumber = normalizeVoucherValue(String(orderNumber));

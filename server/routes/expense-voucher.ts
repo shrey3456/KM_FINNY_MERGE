@@ -142,19 +142,49 @@ router.post('/expense-voucher', async (req, res) => {
     });
     
     // Extract database ID from the provided URL: https://www.notion.so/kmfinny/173604c4adf080f7853dc9a41a8a69a9?v=173604c4adf08158ba8a000c964da041&source=copy_link
-    const EXPENSE_VOUCHER_DATABASE_ID = '173604c4adf080f7853dc9a41a8a69a9';
+    const EXPENSE_VOUCHER_DATABASE_ID = process.env.EXPENSE_VOUCHER_DATABASE_ID;
     
     // Diesel bill database ID from: https://www.notion.so/kmfinny/dfba335ed74d4cd991b5b1a597c90605?v=a1866200419647f898d21f0fb6983a47&source=copy_link
-    const DIESEL_BILL_DATABASE_ID = 'dfba335ed74d4cd991b5b1a597c90605';
+    const DIESEL_BILL_DATABASE_ID = process.env.DIESEL_BILL_DATABASE_ID;
     
     // Order details database ID from: https://www.notion.so/kmfinny/296851d9af9e4a14966376e58f8475e5?v=71fd049ebcc042dba43cc985ac6520a0&source=copy_link
-    const ORDER_DETAILS_DATABASE_ID = '296851d9af9e4a14966376e58f8475e5';
+    const ORDER_DETAILS_DATABASE_ID = process.env.ORDER_DATABASE_ID;
     
     // Driver database ID from: https://www.notion.so/kmfinny/7ac590de16e645cb96478236d5c47618?v=af0c988b17994ba7b7bdcce02f0a0cc2&source=copy_link
-    const DRIVER_DATABASE_ID = '7ac590de16e645cb96478236d5c47618';
+    const DRIVER_DATABASE_ID = process.env.DRIVER_DATABASE_ID;
     
-    const PARTY_DATABASE_ID = '0da8aefd54554a75971f3726eaabcd42';
+    const PARTY_DATABASE_ID = process.env.PARTY_DATABASE_ID;
     
+    if (!EXPENSE_VOUCHER_DATABASE_ID) {
+      return res.status(500).json({
+        success: false,
+        message: 'EXPENSE_VOUCHER_DATABASE_ID environment variable is not set'
+      });
+    }
+    if (!DIESEL_BILL_DATABASE_ID) {
+      return res.status(500).json({
+        success: false,
+        message: 'DIESEL_BILL_DATABASE_ID environment variable is not set'
+      });
+    }
+    if (!ORDER_DETAILS_DATABASE_ID) {
+      return res.status(500).json({
+        success: false,
+        message: 'ORDER_DETAILS_DATABASE_ID environment variable is not set'
+      });
+    }
+    if (!DRIVER_DATABASE_ID) {
+      return res.status(500).json({
+        success: false,
+        message: 'DRIVER_DATABASE_ID environment variable is not set'
+      });
+    }
+    if (!PARTY_DATABASE_ID) {
+      return res.status(500).json({
+        success: false,
+        message: 'PARTY_DATABASE_ID environment variable is not set'
+      });
+    }
     try {
       // Simple query without any filters
       // Fetching records

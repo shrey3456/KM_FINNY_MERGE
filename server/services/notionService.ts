@@ -2,8 +2,8 @@ import { Client } from '@notionhq/client';
 import { LoadingOperation, ProformaSlip, ProformaSlipItem } from '../../shared/schema';
 
 // Initialize Notion client
-const NOTION_API_KEY = process.env.NOTION_API_KEY || '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';
-const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID || '1c8604c4adf080aca05cdf9336cf904e';
+const NOTION_API_KEY = process.env.NOTION_API_KEY;
+const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID ;
 
 const notion = new Client({ auth: NOTION_API_KEY });
 
