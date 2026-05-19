@@ -36,8 +36,17 @@ router.post('/dispatch', async (req, res) => {
       auth: process.env.NOTION_INTEGRATION_SECRET,
     });
     
-    const DISPATCH_DATABASE_ID = '296851d9af9e4a14966376e58f8475e5';
-    const PARTY_DATABASE_ID = '0da8aefd54554a75971f3726eaabcd42';
+    const DISPATCH_DATABASE_ID = process.env.DISPATCH_DATABASE_ID;
+    const PARTY_DATABASE_ID = process.env.PARTY_DATABASE_ID;
+
+    // Ensure required environment variables are present and are strings
+    if (!DISPATCH_DATABASE_ID) {
+      return res.status(500).json({ success: false, message: 'DISPATCH_DATABASE_ID is not configured' });
+    }
+    if (!PARTY_DATABASE_ID) {
+      // PARTY_DATABASE_ID is optional for this route; warn but continue if absent
+      console.warn('PARTY_DATABASE_ID is not configured');
+    }
     
     try {
       // Simple query without any filters
