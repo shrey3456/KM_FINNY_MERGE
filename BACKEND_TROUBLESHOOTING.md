@@ -23,10 +23,10 @@ echo $DATABASE_URL
 #### Fix .env Configuration
 ```env
 # Use the correct Replit database URL
-DATABASE_URL=postgresql://neondb_owner:npg_WfN9rFaIo4OzXJIqBGJjlh8vHKvIJNYQ@ep-twilight-fire-a5o6hqjz.us-east-2.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL=postgresql://<user>:<password>@<host>/<database>?sslmode=require
 
 # Add session secret
-SESSION_SECRET=km-finny-super-secure-session-secret-key-2025-production-change-this
+SESSION_SECRET=<generate-a-long-random-session-secret>
 
 # Development settings
 NODE_ENV=development
