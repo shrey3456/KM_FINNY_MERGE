@@ -221,6 +221,16 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
           path: "/users",
         },
         {
+          label: "Plant Management",
+          icon: (
+            <Factory
+              className="h-5 w-5 mr-3 text-[#001d6e]"
+              style={{ fill: "#4d7eff" }}
+            />
+          ),
+          path: "/plant-settings",
+        },
+        {
           label: "Activities",
           icon: <Activity className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/activities",
