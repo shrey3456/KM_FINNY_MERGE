@@ -35,11 +35,15 @@ export interface IStorage {
   // Session store for authentication
   sessionStore: session.Store;
   
-   getAllPlants(): Promise<Plant[]>;
+  getAllPlants(): Promise<Plant[]>;
   getPlantByName(name: string): Promise<Plant | undefined>;
   createPlant(plant: InsertPlant): Promise<Plant>;
   updatePlant(id: number, plant: Partial<InsertPlant>): Promise<Plant | undefined>;
   deletePlant(id: number): Promise<boolean>;
+  listPlantStvs(plantId: number): Promise<PlantStv[]>;
+  createPlantStv(stv: InsertPlantStv): Promise<PlantStv>;
+  updatePlantStv(id: number, stv: Partial<InsertPlantStv>): Promise<PlantStv | undefined>;
+  deletePlantStv(id: number): Promise<boolean>;
 
   // User operations
   getUser(userCode: string): Promise<User | undefined>;
