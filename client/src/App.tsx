@@ -1,5 +1,5 @@
 import { Switch, Route, useLocation } from "wouter";
-import { queryClient } from "./lib/queryClient";
+import { queryClient, handleUnauthorized } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
@@ -177,6 +177,28 @@ function Router() {
     };
   }, [handleLogout]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handleUnauthorizedEvent = () => {
+      setIsAuthenticated(false);
+      toast({
+        title: "Session expired",
+        description: "Please enter your PIN to continue.",
+        variant: "destructive",
+      });
+      navigate("/");
+    };
+
+    window.addEventListener("auth:unauthorized", handleUnauthorizedEvent);
+
+    return () => {
+      window.removeEventListener("auth:unauthorized", handleUnauthorizedEvent);
+    };
+  }, [navigate, toast]);
+
   // Show splash screen
   if (showSplash) {
     return <SplashScreen />;
@@ -341,6 +363,26 @@ function App() {
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const originalFetch = window.fetch;
+
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized();
+      }
+      return response;
+    };
+
+    return () => {
+      window.fetch = originalFetch;
     };
   }, []);
 

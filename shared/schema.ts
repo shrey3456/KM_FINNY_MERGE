@@ -723,7 +723,7 @@ export const insertPlantStvSchema = createInsertSchema(plantStvs).pick({
 });
 
 export type PlantStv = typeof plantStvs.$inferSelect;
-export type InsertPlantStv = typeof plantStvs.$inferInsert;
+export type InsertPlantStv = z.infer<typeof insertPlantStvSchema>;
 
 export type OrderItem = typeof orderItems.$inferSelect;
 export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;

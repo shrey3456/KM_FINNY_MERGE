@@ -46,7 +46,10 @@ router.post('/fast-notion-import', async (req, res) => {
 
     try {
       // STEP 1: Fetch order database for plant values (FAST - limited batches)
-      const ORDER_DATABASE_ID = '296851d9af9e4a14966376e58f8475e5';
+      const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+      if(!ORDER_DATABASE_ID) {
+        return res.status(500).json({ success: false, message: 'ORDER_DATABASE_ID environment variable is not set' });
+      }
       console.log(`⚡ Loading plant data...`);
       
       const orderPlantMap = new Map();
@@ -134,7 +137,8 @@ router.post('/fast-notion-import', async (req, res) => {
           const orderNo = row['For Order No. :'] || row['Order No. :'] || row['Order No.'] || '';
           if (!orderNo) continue;
           
-          const rawOrderDate = row['For Ord Date :'] || row['Ord Date :'] || startDate;
+          // Ensure rawOrderDate is a string (convert null/undefined to startDate)
+          const rawOrderDate = (row['For Ord Date :'] ?? row['Ord Date :'] ?? startDate) as string;
           const ordDate = formatDateToDDMMYYYY(rawOrderDate);
           const partyName = row['For Party Name '] || row['For Party Name'] || 'Unknown Party';
           const plant = orderPlantMap.get(orderNo) || 'VALSAD';

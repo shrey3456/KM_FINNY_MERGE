@@ -14,9 +14,15 @@ router.get('/inspect-notion-schema', async (req, res) => {
     });
     
     // Use the specific order database ID
-    const ORDER_DATABASE_ID = '296851d9af9e4a14966376e58f8475e5';
+    const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
     
-    console.log(`🔍 Database ID: ${ORDER_DATABASE_ID}`);
+    if (!ORDER_DATABASE_ID) {
+      return res.status(500).json({
+        success: false, 
+        message: 'ORDER_DATABASE_ID environment variable is not set'
+      });
+    }
+    //console.log(`🔍 Database ID: ${ORDER_DATABASE_ID}`);
     
     // Get database schema
     const database = await notion.databases.retrieve({

@@ -52,6 +52,7 @@ export default function PlantSettings() {
   const queryClient = useQueryClient();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingPlant, setEditingPlant] = useState<any>(null);
+  const [selectedPlant, setSelectedPlant] = useState<any>(null);
   const [expandedPlantId, setExpandedPlantId] = useState<number | null>(null);
   const [newStv, setNewStv] = useState("");
   const [editingStvId, setEditingStvId] = useState<number | null>(null);
@@ -78,16 +79,14 @@ export default function PlantSettings() {
     queryKey: ["/api/plants"],
   });
 
-  const selectedPlant = plants?.find((plant) => plant.id === expandedPlantId) ?? null;
-
   const { data: stvs, isLoading: isStvsLoading } = useQuery<any[]>({
-    queryKey: ["/api/plants", expandedPlantId, "stvs"],
+    queryKey: ["/api/plants", selectedPlant?.id, "stvs"],
     queryFn: async () => {
-      if (!expandedPlantId) return [];
-      const res = await apiRequest("GET", `/api/plants/${expandedPlantId}/stvs`);
+      if (!selectedPlant?.id) return [];
+      const res = await apiRequest("GET", `/api/plants/${selectedPlant.id}/stvs`);
       return res.json();
     },
-    enabled: !!expandedPlantId,
+    enabled: !!selectedPlant?.id,
   });
 
   // Create Mutation
@@ -152,18 +151,9 @@ export default function PlantSettings() {
       });
       return res.json();
     },
-    onSuccess: (createdStv) => {
-      if (expandedPlantId) {
-        queryClient.setQueryData(
-          ["/api/plants", expandedPlantId, "stvs"],
-          (oldStvs: any[] | undefined) => {
-            if (!oldStvs) return createdStv ? [createdStv] : [];
-            if (!createdStv) return oldStvs;
-            const exists = oldStvs.some((stv) => stv.id === createdStv.id);
-            return exists ? oldStvs : [...oldStvs, createdStv];
-          },
-        );
-        queryClient.invalidateQueries({ queryKey: ["/api/plants", expandedPlantId, "stvs"] });
+    onSuccess: () => {
+      if (selectedPlant?.id) {
+        queryClient.invalidateQueries({ queryKey: ["/api/plants", selectedPlant.id, "stvs"] });
       }
       setNewStv("");
       toast({ title: "Success", description: "STV added" });
@@ -180,16 +170,9 @@ export default function PlantSettings() {
       });
       return res.json();
     },
-    onSuccess: (updatedStv) => {
-      if (expandedPlantId) {
-        queryClient.setQueryData(
-          ["/api/plants", expandedPlantId, "stvs"],
-          (oldStvs: any[] | undefined) => {
-            if (!oldStvs || !updatedStv) return oldStvs ?? [];
-            return oldStvs.map((stv) => (stv.id === updatedStv.id ? updatedStv : stv));
-          },
-        );
-        queryClient.invalidateQueries({ queryKey: ["/api/plants", expandedPlantId, "stvs"] });
+    onSuccess: () => {
+      if (selectedPlant?.id) {
+        queryClient.invalidateQueries({ queryKey: ["/api/plants", selectedPlant.id, "stvs"] });
       }
       setEditingStvId(null);
       setEditingStvValue("");
@@ -204,16 +187,9 @@ export default function PlantSettings() {
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/plant-stvs/${id}`);
     },
-    onSuccess: (_, deletedId) => {
-      if (expandedPlantId) {
-        queryClient.setQueryData(
-          ["/api/plants", expandedPlantId, "stvs"],
-          (oldStvs: any[] | undefined) => {
-            if (!oldStvs) return [];
-            return oldStvs.filter((stv) => stv.id !== deletedId);
-          },
-        );
-        queryClient.invalidateQueries({ queryKey: ["/api/plants", expandedPlantId, "stvs"] });
+    onSuccess: () => {
+      if (selectedPlant?.id) {
+        queryClient.invalidateQueries({ queryKey: ["/api/plants", selectedPlant.id, "stvs"] });
       }
       toast({ title: "Deleted", description: "STV removed" });
     },
@@ -279,8 +255,10 @@ export default function PlantSettings() {
   const handleToggleStvPanel = (plant: any) => {
     if (expandedPlantId === plant.id) {
       setExpandedPlantId(null);
+      setSelectedPlant(null);
     } else {
       setExpandedPlantId(plant.id);
+      setSelectedPlant(plant);
     }
     setEditingStvId(null);
     setEditingStvValue("");
@@ -288,9 +266,9 @@ export default function PlantSettings() {
   };
 
   const handleAddStv = () => {
-    if (!expandedPlantId || !newStv.trim()) return;
+    if (!selectedPlant?.id || !newStv.trim()) return;
     createStvMutation.mutate({
-      plantId: expandedPlantId,
+      plantId: selectedPlant.id,
       stv: newStv.trim(),
     });
   };
@@ -493,7 +471,10 @@ export default function PlantSettings() {
                 <TableRow><TableCell colSpan={9} className="text-center">Loading...</TableCell></TableRow>
               ) : plants?.map((plant: any) => (
                 <React.Fragment key={plant.id}>
-                <TableRow className="cursor-pointer" onClick={() => handleToggleStvPanel(plant)}>
+                <TableRow
+                  className="cursor-pointer"
+                  onClick={() => handleToggleStvPanel(plant)}
+                >
                   <TableCell className="font-medium">{plant.name}</TableCell>
                   {/* ADD THIS: Locking Status Column */}
                   <TableCell>
@@ -587,124 +568,108 @@ export default function PlantSettings() {
                 {expandedPlantId === plant.id ? (
                   <TableRow>
                     <TableCell colSpan={9}>
-                      <div className="rounded-xl border bg-white p-0 shadow-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/40 px-5 py-3">
-                          <div className="flex items-center gap-3">
-                            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white shadow-sm">
-                              <Tag className="h-4 w-4 text-muted-foreground" />
-                            </div>
-                            <div className="space-y-0.5">
-                              <div className="text-sm font-semibold">STV Directory</div>
-                              <div className="text-xs text-muted-foreground">{plant.name}</div>
-                            </div>
+                      <div className="rounded-lg border bg-muted/30 p-4 space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="text-sm font-semibold">
+                            STV List - {plant.name}
                           </div>
-                          <div className="rounded-full border bg-white px-3 py-1 text-xs font-medium text-muted-foreground">
-                            {stvs?.length ?? 0} STVs
+                          <div className="flex w-full max-w-md gap-2">
+                            <Input
+                              placeholder="Add STV"
+                              value={newStv}
+                              onChange={(event) => setNewStv(event.target.value)}
+                              onClick={(event) => event.stopPropagation()}
+                            />
+                            <Button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleAddStv();
+                              }}
+                              disabled={createStvMutation.isPending || !newStv.trim()}
+                            >
+                              Add
+                            </Button>
                           </div>
                         </div>
 
-                        <div className="px-5 py-4">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="flex w-full max-w-md gap-2">
-                              <Input
-                                placeholder="Add STV"
-                                value={newStv}
-                                onChange={(event) => setNewStv(event.target.value)}
-                                onClick={(event) => event.stopPropagation()}
-                              />
-                              <Button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleAddStv();
-                                }}
-                                disabled={createStvMutation.isPending || !newStv.trim()}
-                              >
-                                Add
-                              </Button>
-                            </div>
-                          </div>
-
-                          {isStvsLoading ? (
-                            <div className="mt-4 text-sm text-muted-foreground">Loading STVs...</div>
-                          ) : stvs && stvs.length > 0 ? (
-                            <div className="mt-4 space-y-2">
-                              {stvs.map((stv: any, index: number) => (
-                                <div key={stv.id} className="flex items-center gap-3 rounded-lg border bg-muted/30 px-3 py-2">
-                                  <div className="flex h-7 w-7 items-center justify-center rounded-full border bg-white text-xs font-semibold text-muted-foreground">
-                                    {String(index + 1).padStart(2, "0")}
-                                  </div>
-                                  {editingStvId === stv.id ? (
-                                    <div className="flex flex-1 flex-wrap items-center gap-2">
-                                      <Input
-                                        value={editingStvValue}
-                                        onChange={(event) => setEditingStvValue(event.target.value)}
-                                        onClick={(event) => event.stopPropagation()}
-                                      />
-                                      <Button
-                                        type="button"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          updateStvMutation.mutate({
-                                            id: stv.id,
-                                            stv: editingStvValue.trim(),
-                                          });
-                                        }}
-                                        disabled={updateStvMutation.isPending || !editingStvValue.trim()}
-                                      >
-                                        Save
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        variant="outline"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          setEditingStvId(null);
-                                          setEditingStvValue("");
-                                        }}
-                                      >
-                                        Cancel
-                                      </Button>
+                        {isStvsLoading ? (
+                          <div className="text-sm text-muted-foreground">Loading STVs...</div>
+                        ) : stvs && stvs.length > 0 ? (
+                          <div className="space-y-2">
+                            {stvs.map((stv: any) => (
+                              <div key={stv.id} className="flex items-center gap-2">
+                                <Tag className="h-4 w-4 text-muted-foreground" />
+                                {editingStvId === stv.id ? (
+                                  <>
+                                    <Input
+                                      value={editingStvValue}
+                                      onChange={(event) => setEditingStvValue(event.target.value)}
+                                      onClick={(event) => event.stopPropagation()}
+                                    />
+                                    <Button
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        updateStvMutation.mutate({
+                                          id: stv.id,
+                                          stv: editingStvValue.trim(),
+                                        });
+                                      }}
+                                      disabled={updateStvMutation.isPending || !editingStvValue.trim()}
+                                    >
+                                      Save
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setEditingStvId(null);
+                                        setEditingStvValue("");
+                                      }}
+                                    >
+                                      Cancel
+                                    </Button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <div className="flex-1 text-sm font-medium">
+                                      {stv.stv}
                                     </div>
-                                  ) : (
-                                    <>
-                                      <div className="flex-1 text-sm font-semibold text-gray-900">
-                                        {stv.stv}
-                                      </div>
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          setEditingStvId(stv.id);
-                                          setEditingStvValue(stv.stv || "");
-                                        }}
-                                      >
-                                        <Edit className="h-4 w-4" />
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        className="text-destructive"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          deleteStvMutation.mutate(stv.id);
-                                        }}
-                                        disabled={deleteStvMutation.isPending}
-                                      >
-                                        <Trash2 className="h-4 w-4" />
-                                      </Button>
-                                    </>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="mt-4 text-sm text-muted-foreground">No STVs added yet.</div>
-                          )}
-                        </div>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setEditingStvId(stv.id);
+                                        setEditingStvValue(stv.stv || "");
+                                      }}
+                                    >
+                                      <Edit className="h-4 w-4" />
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      className="text-destructive"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        deleteStvMutation.mutate(stv.id);
+                                      }}
+                                      disabled={deleteStvMutation.isPending}
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </Button>
+                                  </>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-muted-foreground">No STVs added yet.</div>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
