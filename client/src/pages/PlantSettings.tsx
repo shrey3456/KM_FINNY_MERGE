@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -47,6 +47,33 @@ const plantFormSchema = z.object({
 
 type PlantFormValues = z.infer<typeof plantFormSchema>;
 
+type PlantRecord = PlantFormValues & {
+  id: number;
+  createdAt?: string | Date | null;
+};
+
+const PLANTS_QUERY_KEY = ["/api/plants"] as const;
+
+const normalizePlantResponse = (
+  response: PlantRecord | { plant?: PlantRecord } | null | undefined,
+): PlantRecord | null => {
+  if (!response) return null;
+  if ("plant" in response) return response.plant ?? null;
+  return response;
+};
+
+const updatePlantsCache = (
+  queryClient: QueryClient,
+  updater: (plants: PlantRecord[]) => PlantRecord[],
+) => {
+  queryClient.setQueriesData({ queryKey: PLANTS_QUERY_KEY }, (oldData: unknown) => {
+    if (!Array.isArray(oldData)) return oldData;
+    return updater(oldData as PlantRecord[]);
+  });
+};
+
+const getStvsQueryKey = (plantId: number) => ["/api/plants", plantId, "stvs"] as const;
+
 export default function PlantSettings() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -74,8 +101,14 @@ export default function PlantSettings() {
   console.log('🔍 Current form values:', formValues);
 
   // Fetch plants
-  const { data: plants, isLoading } = useQuery<any[]>({
-    queryKey: ["/api/plants"],
+  const { data: plants, isLoading } = useQuery<PlantRecord[]>({
+    queryKey: PLANTS_QUERY_KEY,
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/plants?_t=${Date.now()}`);
+      return res.json();
+    },
+    refetchOnWindowFocus: true,
+    staleTime: 0,
   });
 
   const selectedPlant = plants?.find((plant) => plant.id === expandedPlantId) ?? null;
@@ -84,7 +117,7 @@ export default function PlantSettings() {
     queryKey: ["/api/plants", expandedPlantId, "stvs"],
     queryFn: async () => {
       if (!expandedPlantId) return [];
-      const res = await apiRequest("GET", `/api/plants/${expandedPlantId}/stvs`);
+      const res = await apiRequest("GET", `/api/plants/${expandedPlantId}/stvs?_t=${Date.now()}`);
       return res.json();
     },
     enabled: !!expandedPlantId,
@@ -99,8 +132,25 @@ export default function PlantSettings() {
       console.log('📥 Create response:', result); // DEBUG
       return result;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/plants"] });
+    onSuccess: (response, variables) => {
+      const createdPlant = normalizePlantResponse(response);
+      if (createdPlant) {
+        updatePlantsCache(queryClient, (oldPlants) => {
+          const existingIndex = oldPlants.findIndex((plant) => plant.id === createdPlant.id);
+          if (existingIndex >= 0) {
+            return oldPlants.map((plant) => (plant.id === createdPlant.id ? createdPlant : plant));
+          }
+          return [...oldPlants, createdPlant];
+        });
+      } else {
+        const optimisticPlant: PlantRecord = {
+          id: Date.now(),
+          ...variables,
+          name: variables.name.toUpperCase(),
+        };
+        updatePlantsCache(queryClient, (oldPlants) => [...oldPlants, optimisticPlant]);
+      }
+      queryClient.invalidateQueries({ queryKey: PLANTS_QUERY_KEY, refetchType: "inactive" });
       toast({ title: "Success", description: "Plant added successfully" });
       setIsDialogOpen(false);
       setEditingPlant(null);
@@ -120,15 +170,33 @@ export default function PlantSettings() {
       console.log('📥 Update response:', result); // DEBUG
       return result;
     },
-    onSuccess: async () => {
-      // Wait for query to refetch before closing dialog
-      await queryClient.invalidateQueries({ queryKey: ["/api/plants"] });
-      await queryClient.refetchQueries({ queryKey: ["/api/plants"] });
+    onMutate: async ({ id, data }) => {
+      await queryClient.cancelQueries({ queryKey: PLANTS_QUERY_KEY });
+      const previousPlants = queryClient.getQueryData<PlantRecord[]>(PLANTS_QUERY_KEY);
+
+      updatePlantsCache(queryClient, (oldPlants) =>
+        oldPlants.map((plant) => (plant.id === id ? { ...plant, ...data } : plant)),
+      );
+
+      return { previousPlants };
+    },
+    onSuccess: (response, variables) => {
+      const updatedPlant = normalizePlantResponse(response) ?? {
+        id: variables.id,
+        ...variables.data,
+      };
+      updatePlantsCache(queryClient, (oldPlants) =>
+        oldPlants.map((plant) => (plant.id === variables.id ? { ...plant, ...updatedPlant } : plant)),
+      );
+      queryClient.invalidateQueries({ queryKey: PLANTS_QUERY_KEY, refetchType: "inactive" });
       toast({ title: "Success", description: "Plant updated successfully" });
       setIsDialogOpen(false);
       setEditingPlant(null);
     },
-     onError: (err: any) => {
+     onError: (err: any, _variables, context) => {
+      if (context?.previousPlants) {
+        queryClient.setQueryData(PLANTS_QUERY_KEY, context.previousPlants);
+      }
       console.error('❌ Update error:', err);
       toast({ title: "Error", description: err.message, variant: "destructive" });
     }
@@ -139,9 +207,34 @@ export default function PlantSettings() {
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/plants/${id}`);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/plants"] });
+    onMutate: async (deletedId) => {
+      await queryClient.cancelQueries({ queryKey: PLANTS_QUERY_KEY });
+      const previousPlants = queryClient.getQueryData<PlantRecord[]>(PLANTS_QUERY_KEY);
+
+      updatePlantsCache(queryClient, (oldPlants) =>
+        oldPlants.filter((plant) => plant.id !== deletedId),
+      );
+
+      if (expandedPlantId === deletedId) {
+        setExpandedPlantId(null);
+      }
+
+      return { previousPlants };
+    },
+    onSuccess: (_response, deletedId) => {
+      updatePlantsCache(queryClient, (oldPlants) =>
+        oldPlants.filter((plant) => plant.id !== deletedId),
+      );
       toast({ title: "Deleted", description: "Plant removed successfully" });
+    },
+    onError: (err: any, _variables, context) => {
+      if (context?.previousPlants) {
+        queryClient.setQueryData(PLANTS_QUERY_KEY, context.previousPlants);
+      }
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: PLANTS_QUERY_KEY, refetchType: "inactive" });
     },
   });
 
@@ -152,10 +245,10 @@ export default function PlantSettings() {
       });
       return res.json();
     },
-    onSuccess: (createdStv) => {
+    onSuccess: (createdStv, variables) => {
       if (expandedPlantId) {
         queryClient.setQueryData(
-          ["/api/plants", expandedPlantId, "stvs"],
+          getStvsQueryKey(expandedPlantId),
           (oldStvs: any[] | undefined) => {
             if (!oldStvs) return createdStv ? [createdStv] : [];
             if (!createdStv) return oldStvs;
@@ -163,7 +256,16 @@ export default function PlantSettings() {
             return exists ? oldStvs : [...oldStvs, createdStv];
           },
         );
-        queryClient.invalidateQueries({ queryKey: ["/api/plants", expandedPlantId, "stvs"] });
+
+        queryClient.invalidateQueries({
+          queryKey: getStvsQueryKey(expandedPlantId),
+          refetchType: "inactive",
+        });
+      } else {
+        queryClient.invalidateQueries({
+          queryKey: getStvsQueryKey(variables.plantId),
+          refetchType: "inactive",
+        });
       }
       setNewStv("");
       toast({ title: "Success", description: "STV added" });
@@ -180,46 +282,103 @@ export default function PlantSettings() {
       });
       return res.json();
     },
+    onMutate: async (variables) => {
+      if (!expandedPlantId) return {};
+      const stvsQueryKey = getStvsQueryKey(expandedPlantId);
+      await queryClient.cancelQueries({ queryKey: stvsQueryKey });
+      const previousStvs = queryClient.getQueryData<any[]>(stvsQueryKey);
+
+      queryClient.setQueryData(
+        stvsQueryKey,
+        (oldStvs: any[] | undefined) => {
+          if (!oldStvs) return oldStvs;
+          return oldStvs.map((stv) =>
+            stv.id === variables.id ? { ...stv, stv: variables.stv } : stv,
+          );
+        },
+      );
+
+      return { previousStvs };
+    },
     onSuccess: (updatedStv) => {
       if (expandedPlantId) {
         queryClient.setQueryData(
-          ["/api/plants", expandedPlantId, "stvs"],
+          getStvsQueryKey(expandedPlantId),
           (oldStvs: any[] | undefined) => {
             if (!oldStvs || !updatedStv) return oldStvs ?? [];
             return oldStvs.map((stv) => (stv.id === updatedStv.id ? updatedStv : stv));
           },
         );
-        queryClient.invalidateQueries({ queryKey: ["/api/plants", expandedPlantId, "stvs"] });
       }
       setEditingStvId(null);
       setEditingStvValue("");
       toast({ title: "Success", description: "STV updated" });
     },
-    onError: (err: any) => {
+    onError: (err: any, _variables, context) => {
+      if (context?.previousStvs && expandedPlantId) {
+        queryClient.setQueryData(
+          getStvsQueryKey(expandedPlantId),
+          context.previousStvs,
+        );
+      }
       toast({ title: "Error", description: err.message, variant: "destructive" });
-    }
+    },
+    onSettled: () => {
+      if (expandedPlantId) {
+        queryClient.invalidateQueries({
+          queryKey: getStvsQueryKey(expandedPlantId),
+          refetchType: "inactive",
+        });
+      }
+    },
   });
 
   const deleteStvMutation = useMutation({
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/plant-stvs/${id}`);
     },
-    onSuccess: (_, deletedId) => {
+    onMutate: async (deletedId) => {
+      if (!expandedPlantId) return {};
+      const stvsQueryKey = getStvsQueryKey(expandedPlantId);
+      await queryClient.cancelQueries({ queryKey: stvsQueryKey });
+      const previousStvs = queryClient.getQueryData<any[]>(stvsQueryKey);
+
+      queryClient.setQueryData(
+        stvsQueryKey,
+        (oldStvs: any[] | undefined) => {
+          if (!oldStvs) return [];
+          return oldStvs.filter((stv) => stv.id !== deletedId);
+        },
+      );
+
+      return { previousStvs };
+    },
+    onSuccess: () => {
       if (expandedPlantId) {
-        queryClient.setQueryData(
-          ["/api/plants", expandedPlantId, "stvs"],
-          (oldStvs: any[] | undefined) => {
-            if (!oldStvs) return [];
-            return oldStvs.filter((stv) => stv.id !== deletedId);
-          },
-        );
-        queryClient.invalidateQueries({ queryKey: ["/api/plants", expandedPlantId, "stvs"] });
+        queryClient.invalidateQueries({
+          queryKey: getStvsQueryKey(expandedPlantId),
+          refetchType: "inactive",
+        });
       }
       toast({ title: "Deleted", description: "STV removed" });
     },
-    onError: (err: any) => {
+    onError: (err: any, _variables, context) => {
+      if (context?.previousStvs && expandedPlantId) {
+        queryClient.setQueryData(
+          getStvsQueryKey(expandedPlantId),
+          context.previousStvs,
+        );
+      }
       toast({ title: "Error", description: err.message, variant: "destructive" });
-    }
+    },
+    onSettled: () => {
+      if (expandedPlantId) {
+        queryClient.invalidateQueries({
+          queryKey: getStvsQueryKey(expandedPlantId),
+          refetchType: "inactive",
+        });
+      }
+    },
   });
 
   const onSubmit = (data: PlantFormValues) => {
