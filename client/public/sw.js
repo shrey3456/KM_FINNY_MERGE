@@ -1,7 +1,7 @@
 // Service Worker for KM Finny - Enhanced for Android Compatibility
-const CACHE_NAME = 'km-finny-v5'; // Update cache version with every significant change
-const DATA_CACHE_NAME = 'km-finny-data-v5'; // Separate cache for API data
-const APP_SHELL_CACHE_NAME = 'km-finny-shell-v5'; // Cache for application shell
+const CACHE_NAME = 'km-finny-v6'; // Update cache version with every significant change
+const DATA_CACHE_NAME = 'km-finny-data-v6'; // Separate cache for API data
+const APP_SHELL_CACHE_NAME = 'km-finny-shell-v6'; // Cache for application shell
 
 // Core application shell files to cache for offline functionality
 const APP_SHELL_FILES = [
@@ -45,6 +45,7 @@ const SPA_ROUTES = [
   '/messages',
   '/inout',
   '/checkinout-admin',
+  '/order-management',
 ];
 
 // Check if a request should be cached based on type
@@ -111,6 +112,13 @@ self.addEventListener('fetch', event => {
   if (url.origin !== self.location.origin) {
     return;
   }
+
+  // Cache Storage only supports GET requests. Let POST/PUT/PATCH/DELETE pass
+  // straight through so uploads and mutations are never cached accidentally.
+  if (request.method !== 'GET') {
+    event.respondWith(fetch(request));
+    return;
+  }
   
   // Handle API requests with a network-first approach
   if (url.pathname.startsWith('/api/')) {
@@ -121,7 +129,7 @@ self.addEventListener('fetch', event => {
             return response;
           }
           
-          // Cache a copy of the API response for offline use
+          // Cache a copy of successful GET API responses for offline use
           const responseToCache = response.clone();
           caches.open(DATA_CACHE_NAME)
             .then(cache => {

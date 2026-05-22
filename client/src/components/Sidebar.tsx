@@ -16,7 +16,6 @@ import {
   Package,
   PieChart,
   UserRound,
-  History,
   Activity,
   Receipt,
   IndianRupee,
@@ -26,6 +25,7 @@ import {
   PrinterCheck,
   FileBarChart,
   Clock,
+  ScanLine,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -186,9 +186,9 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
           permission: "canAccessExpenseVoucher",
         },
         {
-          label: "Scan History",
-          icon: <History className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/scan-history",
+          label: "Scan Order",
+          icon: <ScanLine className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/scan",
         },
         {
           label: "Reports",
@@ -229,6 +229,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
             />
           ),
           path: "/plant-settings",
+        },
+        {
+          label: "Order Management",
+          icon: <ClipboardList className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-management",
         },
         {
           label: "Activities",

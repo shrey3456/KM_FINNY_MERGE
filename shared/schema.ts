@@ -708,22 +708,5 @@ export const insertPlantSchema = createInsertSchema(plants).pick({
 export type Plant = typeof plants.$inferSelect;
 export type InsertPlant = typeof plants.$inferInsert;
 
-export const plantStvs = pgTable("plant_stvs", {
-  id: serial("id").primaryKey(),
-  plantId: integer("plant_id").references(() => plants.id, {
-    onDelete: "cascade",
-  }),
-  stv: text("stv").notNull(),
-  createdAt: timestamp("created_at").defaultNow(),
-});
-
-export const insertPlantStvSchema = createInsertSchema(plantStvs).pick({
-  plantId: true,
-  stv: true,
-});
-
-export type PlantStv = typeof plantStvs.$inferSelect;
-export type InsertPlantStv = z.infer<typeof insertPlantStvSchema>;
-
 export type OrderItem = typeof orderItems.$inferSelect;
 export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;

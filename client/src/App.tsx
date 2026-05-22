@@ -4,7 +4,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
 import Home from "@/pages/Dashboard";
-import Scanner from "@/pages/Scanner";
+import ScanOrder from "@/pages/Scanning/Scan";
 import Inventory from "@/pages/Inventory";
 import Reports from "@/pages/Reports";
 import Users from "@/pages/Users";
@@ -21,6 +21,7 @@ import Dispatch from "./pages/Dispatch";
 import ExpenseVoucher from "./pages/ExpenseVoucher";
 import TollVoucher from "./pages/TollVoucher";
 import StockSheets from "./pages/StockSheets";
+import OrderManagement from "./pages/OrderManagement";
 // BackupPage removed as requested
 import MessagesPage from "./pages/MessagesPage";
 import CheckInOutPage from "./pages/CheckInOutPage";
@@ -236,7 +237,7 @@ function Router() {
     <Layout onLogout={handleLogout}>
       <Switch>
         <Route path="/" component={Home} />
-        <Route path="/scan" component={Scanner} />
+        <Route path="/scan" component={ScanOrder} />
         <ProtectedRoute path="/inventory" component={Inventory} requireInventoryAccess={true} />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} />
         <Route path="/load-operations" component={LoadOperations} /> {/* Updated route */}
@@ -251,6 +252,7 @@ function Router() {
         <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} />
         <ProtectedRoute path="/settings" component={Settings} requireAdmin={true} />
         <ProtectedRoute path="/plant-settings" component={PlantSettings} requireAdmin={true} />
+        <ProtectedRoute path="/order-management" component={OrderManagement} requireAdmin={true} />
         <Route path="/scan-history" component={ScanHistoryPage} />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />

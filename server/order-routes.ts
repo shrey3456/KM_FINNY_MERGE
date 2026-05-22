@@ -7,14 +7,15 @@ import {
   insertOrderSchema, 
   insertOrderItemSchema,
   proformaSlips,
-  proformaSlipItems,
-  loadingOperations
+  proformaSlipItems
 } from '@shared/schema';
-import { asc, eq, desc } from 'drizzle-orm';
+import { asc, eq, desc, ilike, inArray, or } from 'drizzle-orm';
 import { z } from 'zod';
 import multer from 'multer';
 
-const upload = multer({ storage: multer.memoryStorage() });
+// Keep uploads in memory for small CSVs, but enforce a conservative file size limit
+// so production instances don't OOM when someone accidentally uploads a very large file.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB
 
 type CsvRow = string[];
 
@@ -93,6 +94,39 @@ function normalizeHeader(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function mergeWrappedHeaderRows(rows: CsvRow[]) {
+  const merged: CsvRow[] = [];
+
+  rows.forEach((row) => {
+    if (merged.length === 0) {
+      merged.push([...row]);
+      return;
+    }
+
+    const previous = merged[merged.length - 1];
+    const previousHasHeader = previous.some((cell) => {
+      const normalized = normalizeHeader(cell || '');
+      return normalized.includes('customer') ||
+        normalized.includes('productcode') ||
+        normalized.includes('productname') ||
+        normalized === 'state';
+    });
+
+    const startsWithEmpty = !row[0] || normalizeHeader(row[0]) === '';
+    if (previousHasHeader && startsWithEmpty) {
+      const toAppend = row.slice(1);
+      if (toAppend.some((cell) => cell !== '')) {
+        previous.push(...toAppend);
+        return;
+      }
+    }
+
+    merged.push([...row]);
+  });
+
+  return merged;
+}
+
 function parseProductDescriptor(descriptor: string) {
   const clean = descriptor.trim();
   const match = clean.match(/^(\d+)\s*-\s*(.+)$/);
@@ -147,111 +181,132 @@ function parseArrivingOrdersCsv(
   productRows: Array<typeof products.$inferSelect>,
   options: { plant?: string; orderDate?: string },
 ): ParsedOrder[] {
+  const normalizedRows = mergeWrappedHeaderRows(rows);
   const lookup = buildProductLookup(productRows);
   const plant = options.plant?.trim() || 'Valsad';
   const orderDate = options.orderDate || new Date().toISOString().split('T')[0];
 
-  if (rows.length < 2) return [];
+  if (normalizedRows.length < 2) return [];
 
-  const firstRow = rows[0].map((cell) => cell.trim());
-  const secondRow = rows[1]?.map((cell) => cell.trim()) || [];
-  const firstCell = normalizeHeader(firstRow[0] || '');
-  const secondCell = normalizeHeader(secondRow[0] || '');
-
-  if (firstCell.includes('customer') && secondCell.includes('productcode')) {
-    const dealerColumns = firstRow
-      .map((dealer, index) => ({ dealer, index }))
-      .filter(({ dealer, index }) => index > 0 && dealer && normalizeHeader(dealer) !== 'total');
-
-    const ordersByDealer = new Map<string, ParsedOrder>();
-
-    dealerColumns.forEach(({ dealer }, orderIndex) => {
-      ordersByDealer.set(dealer, {
-        dealer,
-        orderNumber: buildOrderNumber('ARR', orderDate, orderIndex),
-        plant,
-        vehicleNumber: '',
-        orderDate,
-        items: [],
-      });
-    });
-
-    rows.slice(2).forEach((row) => {
-      const descriptor = row[0];
-      if (!descriptor || normalizeHeader(descriptor).includes('grandtotal') || normalizeHeader(descriptor) === 'total') return;
-
-      const parsedProduct = parseProductDescriptor(descriptor);
-
-      dealerColumns.forEach(({ dealer, index }) => {
-        const quantity = toQuantity(row[index]);
-        if (!quantity) return;
-
-        const product = matchProduct(parsedProduct, lookup);
-        ordersByDealer.get(dealer)?.items.push({
-          productId: product?.id,
-          srNo: product?.srNo || '',
-          name: product?.name || parsedProduct.name,
-          barcode: product?.barcode || '',
-          quantity,
-          sapCode: parsedProduct.sapCode,
-        });
-      });
-    });
-
-    return Array.from(ordersByDealer.values()).filter((order) => order.items.length > 0);
-  }
-
-  const productHeaderRowIndex = rows.findIndex((row) =>
+  const productHeaderRowIndex = normalizedRows.findIndex((row) =>
     row.some((cell) => normalizeHeader(cell).includes('productcode')),
   );
-  const customerHeaderRowIndex = rows.findIndex((row) =>
-    row.some((cell) => normalizeHeader(cell) === 'customer'),
+  const customerHeaderRowIndex = normalizedRows.findIndex((row) =>
+    row.some((cell) => normalizeHeader(cell).includes('customer') || normalizeHeader(cell) === 'customer'),
   );
 
-  if (productHeaderRowIndex >= 0 && customerHeaderRowIndex >= 0 && productHeaderRowIndex < customerHeaderRowIndex) {
-    const productHeaderRow = rows[productHeaderRowIndex];
-    const customerHeaderRow = rows[customerHeaderRowIndex];
-    const productStartIndex = productHeaderRow.findIndex((cell) => normalizeHeader(cell).includes('productcode')) + 1;
-    const customerColumnIndex = customerHeaderRow.findIndex((cell) => normalizeHeader(cell) === 'customer');
-    const productColumns = productHeaderRow
-      .map((descriptor, index) => ({ ...parseProductDescriptor(descriptor), index }))
-      .filter(({ name, index }) => index >= productStartIndex && name && !normalizeHeader(name).includes('total'));
+  if (productHeaderRowIndex >= 0 && customerHeaderRowIndex >= 0) {
+    if (customerHeaderRowIndex < productHeaderRowIndex) {
+      // Columns are customers, rows are products
+      const customerRow = normalizedRows[customerHeaderRowIndex].map((cell) => cell.trim());
+      const productHeaderRow = normalizedRows[productHeaderRowIndex].map((cell) => cell.trim());
 
-    return rows.slice(customerHeaderRowIndex + 1).map((row, orderIndex) => {
-      const dealer = row[customerColumnIndex]?.trim();
-      if (!dealer || normalizeHeader(dealer).includes('total')) return null;
+      const customerLabelIndex = customerRow.findIndex(
+        (cell) => normalizeHeader(cell) === 'customer',
+      );
+      const productNameIndex = productHeaderRow.findIndex((cell) => {
+        const normalized = normalizeHeader(cell);
+        return normalized.includes('productcode') || normalized.includes('productname');
+      });
 
-      const order: ParsedOrder = {
-        dealer,
-        orderNumber: buildOrderNumber('ARR', orderDate, orderIndex),
-        plant,
-        vehicleNumber: '',
-        orderDate,
-        items: [],
-      };
+      const dealerStartIndex = (customerLabelIndex >= 0 ? customerLabelIndex : productNameIndex) + 1;
 
-      productColumns.forEach((productColumn) => {
-        const quantity = toQuantity(row[productColumn.index]);
-        if (!quantity) return;
+      const dealerColumns = customerRow
+        .map((dealer, index) => ({ dealer, index }))
+        .filter(({ dealer, index }) => {
+          const normalized = normalizeHeader(dealer);
+          return index >= dealerStartIndex &&
+            dealer &&
+            !normalized.includes('total') &&
+            normalized !== 'state';
+        });
 
-        const product = matchProduct(productColumn, lookup);
-        order.items.push({
-          productId: product?.id,
-          srNo: product?.srNo || '',
-          name: product?.name || productColumn.name,
-          barcode: product?.barcode || '',
-          quantity,
-          sapCode: productColumn.sapCode,
+      const ordersByDealer = new Map<string, ParsedOrder>();
+
+      dealerColumns.forEach(({ dealer }, orderIndex) => {
+        ordersByDealer.set(dealer, {
+          dealer,
+          orderNumber: buildOrderNumber('ARR', orderDate, orderIndex),
+          plant,
+          vehicleNumber: '',
+          orderDate,
+          items: [],
         });
       });
 
-      return order.items.length > 0 ? order : null;
-    }).filter((order): order is ParsedOrder => Boolean(order));
+      // Products start after productHeaderRowIndex
+      normalizedRows.slice(productHeaderRowIndex + 1).forEach((row) => {
+        const descriptor = row[productNameIndex >= 0 ? productNameIndex : 0];
+        if (!descriptor || normalizeHeader(descriptor).includes('grandtotal') || normalizeHeader(descriptor) === 'total') return;
+
+        const parsedProduct = parseProductDescriptor(descriptor);
+
+        dealerColumns.forEach(({ dealer, index }) => {
+          const quantity = toQuantity(row[index]);
+          if (!quantity) return;
+
+          const product = matchProduct(parsedProduct, lookup);
+          ordersByDealer.get(dealer)?.items.push({
+            productId: product?.id,
+            srNo: product?.srNo || '',
+            name: product?.name || parsedProduct.name,
+            barcode: product?.barcode || '',
+            quantity,
+            sapCode: parsedProduct.sapCode,
+          });
+        });
+      });
+
+      const parsedOrders = Array.from(ordersByDealer.values()).filter((order) => order.items.length > 0);
+      if (parsedOrders.length > 0) return parsedOrders;
+    } else {
+      // Columns are products, rows are customers
+      const productHeaderRow = normalizedRows[productHeaderRowIndex];
+      const customerHeaderRow = normalizedRows[customerHeaderRowIndex];
+      const productStartIndex = productHeaderRow.findIndex((cell) => normalizeHeader(cell).includes('productcode')) + 1;
+      const customerColumnIndex = customerHeaderRow.findIndex((cell) => normalizeHeader(cell) === 'customer');
+      const productColumns = productHeaderRow
+        .map((descriptor, index) => ({ ...parseProductDescriptor(descriptor), index }))
+        .filter(({ name, index }) => index >= productStartIndex && name && !normalizeHeader(name).includes('total'));
+
+      const parsedOrders = normalizedRows.slice(customerHeaderRowIndex + 1).map((row, orderIndex) => {
+        const dealer = row[customerColumnIndex]?.trim();
+        if (!dealer || normalizeHeader(dealer).includes('total')) return null;
+
+        const order: ParsedOrder = {
+          dealer,
+          orderNumber: buildOrderNumber('ARR', orderDate, orderIndex),
+          plant,
+          vehicleNumber: '',
+          orderDate,
+          items: [],
+        };
+
+        productColumns.forEach((productColumn) => {
+          const quantity = toQuantity(row[productColumn.index]);
+          if (!quantity) return;
+
+          const product = matchProduct(productColumn, lookup);
+          order.items.push({
+            productId: product?.id,
+            srNo: product?.srNo || '',
+            name: product?.name || productColumn.name,
+            barcode: product?.barcode || '',
+            quantity,
+            sapCode: productColumn.sapCode,
+          });
+        });
+
+        return order.items.length > 0 ? order : null;
+      }).filter((order): order is ParsedOrder => Boolean(order));
+      
+      if (parsedOrders.length > 0) return parsedOrders;
+    }
   }
 
-  const headerRowIndex = rows.findIndex((row) => row.some((cell) => normalizeHeader(cell).includes('ordernumber')));
+  const headerRowIndex = normalizedRows.findIndex((row) => row.some((cell) => normalizeHeader(cell).includes('ordernumber')));
   if (headerRowIndex >= 0) {
-    const headers = rows[headerRowIndex].map(normalizeHeader);
+    const headers = normalizedRows[headerRowIndex].map(normalizeHeader);
     const getCell = (row: CsvRow, names: string[]) => {
       const index = headers.findIndex((header) => names.includes(header));
       return index >= 0 ? row[index]?.trim() : '';
@@ -259,7 +314,7 @@ function parseArrivingOrdersCsv(
 
     const groupedOrders = new Map<string, ParsedOrder>();
 
-    rows.slice(headerRowIndex + 1).forEach((row, rowIndex) => {
+    normalizedRows.slice(headerRowIndex + 1).forEach((row, rowIndex) => {
       const dealer = getCell(row, ['dealer', 'partyname', 'customer', 'customername']) || 'Imported Dealer';
       const orderNumber = getCell(row, ['ordernumber', 'order']) || buildOrderNumber('ARR', orderDate, rowIndex);
       const productName = getCell(row, ['productname', 'itemname', 'name']);
@@ -297,7 +352,44 @@ function parseArrivingOrdersCsv(
     return Array.from(groupedOrders.values()).filter((order) => order.items.length > 0);
   }
 
-  return [];
+  // Fallback: accept very simple CSVs where each row is [product, quantity, dealer?]
+  // Many users will upload a minimal file with two columns: product name/code and qty.
+  // We'll treat each non-empty row as one order per dealer (or a single dealer if provided in the 3rd column).
+  const fallbackParsed: ParsedOrder[] = [];
+  normalizedRows.forEach((row, rowIndex) => {
+    const prod = (row[0] || '').trim();
+    const qty = toQuantity(row[1]);
+    if (!prod || !qty) return;
+
+    const dealer = (row[2] || 'Imported Dealer').trim() || 'Imported Dealer';
+    const orderKey = `${dealer}-${rowIndex}`;
+
+    let order = fallbackParsed.find((o) => o.orderNumber === orderKey);
+    if (!order) {
+      order = {
+        dealer,
+        orderNumber: buildOrderNumber('ARR', orderDate, fallbackParsed.length),
+        plant,
+        vehicleNumber: '',
+        orderDate,
+        items: [],
+      };
+      fallbackParsed.push(order);
+    }
+
+    const parsedProduct = parseProductDescriptor(prod);
+    const product = matchProduct(parsedProduct, lookup);
+    order.items.push({
+      productId: product?.id,
+      srNo: product?.srNo || '',
+      name: product?.name || parsedProduct.name,
+      barcode: product?.barcode || '',
+      quantity: qty,
+      sapCode: parsedProduct.sapCode,
+    });
+  });
+
+  return fallbackParsed.filter((o) => o.items.length > 0);
 }
 
 // Define a complete order schema that combines the header and items
@@ -315,11 +407,153 @@ export function registerOrderRoutes(apiRouter: Router) {
   // Get all orders
   apiRouter.get('/orders', async (_req: Request, res: Response) => {
     try {
-      const result = await db.select().from(orders).orderBy(desc(orders.createdAt));
-      return res.json(result);
+      // Simple pagination to avoid returning massive result sets in production.
+      const limitParam = typeof _req.query.limit === 'string' ? parseInt(_req.query.limit, 10) : NaN;
+      const pageParam = typeof _req.query.page === 'string' ? parseInt(_req.query.page, 10) : NaN;
+      const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 1000) : 100;
+      const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+      const offset = (page - 1) * limit;
+
+      const result = await db.select().from(orders).orderBy(desc(orders.createdAt)).limit(limit).offset(offset);
+      return res.json({ page, limit, results: result });
     } catch (error) {
       console.error('Error fetching orders:', error);
       return res.status(500).json({ error: 'Failed to fetch orders' });
+    }
+  });
+
+  // List imported arriving order CSVs
+  apiRouter.get('/orders/imports', async (_req: Request, res: Response) => {
+    try {
+      // Pagination + safe cap to avoid scanning the entire orders table in production.
+      const limitParam = typeof _req.query.limit === 'string' ? parseInt(_req.query.limit, 10) : NaN;
+      const pageParam = typeof _req.query.page === 'string' ? parseInt(_req.query.page, 10) : NaN;
+      const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 500) : 100;
+      const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+      const offset = (page - 1) * limit;
+
+      const importedOrders = await db
+        .select({ id: orders.id, notes: orders.notes, createdAt: orders.createdAt })
+        .from(orders)
+        .where(
+          or(
+            ilike(orders.notes, '%Imported from%'),
+            ilike(orders.notes, '%imported from%'),
+          ),
+        )
+        .orderBy(desc(orders.createdAt))
+        .limit(limit)
+        .offset(offset);
+
+      const importsMap = new Map<string, { filename: string; orderCount: number; itemCount: number; lastImportedAt: string }>();
+
+      importedOrders.forEach((order) => {
+  const note = order.notes || '';
+  const excelMatch = note.match(/Imported from Excel file:\s*(.+)$/i);
+  const filename = excelMatch?.[1]?.trim() || note.replace(/^Imported from\s*/i, '').trim();
+        if (!filename) return;
+
+        const existing = importsMap.get(filename);
+        if (existing) {
+          existing.orderCount += 1;
+          return;
+        }
+
+        importsMap.set(filename, {
+          filename,
+          orderCount: 1,
+          itemCount: 0,
+          lastImportedAt: order.createdAt ? new Date(order.createdAt).toISOString() : new Date().toISOString(),
+        });
+      });
+
+      const importList = Array.from(importsMap.values()).sort((a, b) =>
+        b.lastImportedAt.localeCompare(a.lastImportedAt),
+      );
+
+      return res.json({ page, limit, results: importList });
+    } catch (error) {
+      console.error('Error fetching import list:', error);
+      return res.status(500).json({ error: 'Failed to fetch import list' });
+    }
+  });
+
+  // Fetch aggregated items for a specific imported CSV
+  apiRouter.get('/orders/imports/items', async (req: Request, res: Response) => {
+    try {
+      const filename = typeof req.query.filename === 'string' ? req.query.filename.trim() : '';
+      if (!filename) {
+        return res.status(400).json({ error: 'filename is required' });
+      }
+
+      const matchingOrders = await db
+        .select({ id: orders.id })
+        .from(orders)
+        .where(ilike(orders.notes, `%${filename}%`));
+
+      const orderIds = matchingOrders.map((order) => order.id);
+      if (!orderIds.length) {
+        return res.json({ filename, items: [] });
+      }
+
+      const items = await db
+        .select({
+          orderId: orderItems.orderId,
+          productId: orderItems.productId,
+          name: orderItems.name,
+          barcode: orderItems.barcode,
+          quantity: orderItems.quantity,
+        })
+        .from(orderItems)
+        .where(inArray(orderItems.orderId, orderIds));
+
+      const productIds = Array.from(new Set(items.map((item) => item.productId).filter((id): id is number => typeof id === 'number')));
+      const productsList = productIds.length
+        ? await db.select().from(products).where(inArray(products.id, productIds))
+        : [];
+      const productMap = new Map<number, typeof products.$inferSelect>();
+      productsList.forEach((product) => productMap.set(product.id, product));
+
+      const aggregate = new Map<string, {
+        id: string;
+        sku: string;
+        itemName: string;
+        expectedQty: number;
+        scannedQty: number;
+        productId?: number;
+        barcode?: string;
+        itemNo?: string | null;
+        sapCode?: string | null;
+      }>();
+
+      items.forEach((item) => {
+        const product = item.productId ? productMap.get(item.productId) : undefined;
+        const key = item.productId ? `product-${item.productId}` : `name-${item.name.toLowerCase()}`;
+        const sku = product?.itemNo || product?.sapCode || product?.srNo || item.name;
+
+        const existing = aggregate.get(key);
+        if (existing) {
+          existing.expectedQty += item.quantity || 0;
+          return;
+        }
+
+        aggregate.set(key, {
+          id: key,
+          sku,
+          itemName: product?.name || item.name,
+          expectedQty: item.quantity || 0,
+          scannedQty: 0,
+          productId: product?.id,
+          barcode: product?.barcode || item.barcode || undefined,
+          itemNo: product?.itemNo ?? undefined,
+          sapCode: product?.sapCode ?? undefined,
+        });
+      });
+
+      return res.json({ filename, items: Array.from(aggregate.values()) });
+    } catch (error) {
+      console.error('Error fetching import items:', error);
+      return res.status(500).json({ error: 'Failed to fetch import items' });
     }
   });
 
@@ -479,6 +713,34 @@ export function registerOrderRoutes(apiRouter: Router) {
     }
   });
 
+  // Bulk delete orders by CSV filename
+  apiRouter.post('/orders/batch-delete-by-filename', async (req: Request, res: Response) => {
+    try {
+      let { filename } = req.body;
+      
+      if (!filename || typeof filename !== 'string') {
+        return res.status(400).json({ error: 'Filename is required' });
+      }
+
+      // Trim any trailing/leading whitespace and spaces
+      filename = filename.trim();
+
+      const deletedOrders = await db
+        .delete(orders)
+        .where(ilike(orders.notes, `%${filename}%`))
+        .returning();
+
+      return res.json({ 
+        success: true, 
+        deletedCount: deletedOrders.length,
+        message: `Successfully deleted ${deletedOrders.length} orders imported from ${filename}`
+      });
+    } catch (error) {
+      console.error('Error deleting batch orders:', error);
+      return res.status(500).json({ error: 'Failed to delete orders matching filename' });
+    }
+  });
+
   // Convert an order to a proforma slip
   apiRouter.post('/orders/:id/to-proforma', async (req: Request, res: Response) => {
     const orderId = parseInt(req.params.id);
@@ -513,16 +775,14 @@ export function registerOrderRoutes(apiRouter: Router) {
       // Create proforma slip with proper field names based on proformaSlips schema
       let orderDateString = orderData.orderDate || new Date().toISOString().split('T')[0];
       
-      const [newProformaSlip] = await db.insert(proformaSlips).values({
-        orderNumber: orderData.orderNumber,
-        partyName: orderData.dealer,
-        vehicleNumber: orderData.vehicleNumber,
-        plant: orderData.plant,
-        orderDate: orderDateString,
-        createdById: req.user?.id || orderData.createdById
-      }).returning();
-
-      if (!newProformaSlip) {
+        const [newProformaSlip] = await db.insert(proformaSlips).values({
+          orderNumber: orderData.orderNumber,
+          partyName: orderData.dealer,
+          vehicleNumber: orderData.vehicleNumber,
+          plant: orderData.plant,
+          orderDate: orderDateString,
+          createdByCode: (req.user as any)?.userCode || orderData.createdByCode
+        }).returning();      if (!newProformaSlip) {
         return res.status(500).json({ error: 'Failed to create proforma slip' });
       }
 
@@ -569,6 +829,16 @@ export function registerOrderRoutes(apiRouter: Router) {
 
       const csvText = req.file.buffer.toString('utf-8');
       const rows = parseCsvRows(csvText);
+      const normalizedRowsForDebug = mergeWrappedHeaderRows(rows);
+      const debugHeaderRowIndex = normalizedRowsForDebug.findIndex((row) =>
+        row.some((cell) => normalizeHeader(cell).includes('ordernumber')),
+      );
+      const debugProductHeaderIndex = normalizedRowsForDebug.findIndex((row) =>
+        row.some((cell) => normalizeHeader(cell).includes('productcode')),
+      );
+      const debugCustomerHeaderIndex = normalizedRowsForDebug.findIndex((row) =>
+        row.some((cell) => normalizeHeader(cell).includes('customer') || normalizeHeader(cell) === 'customer'),
+      );
       const productRows = await db.select().from(products);
       const parsedOrders = parseArrivingOrdersCsv(rows, productRows, {
         plant: typeof req.body.plant === 'string' ? req.body.plant : undefined,
@@ -578,6 +848,14 @@ export function registerOrderRoutes(apiRouter: Router) {
       if (parsedOrders.length === 0) {
         return res.status(400).json({
           message: 'No arriving orders were found in the CSV. Please check the file format.',
+          debug: {
+            rowCount: rows.length,
+            normalizedRowCount: normalizedRowsForDebug.length,
+            headerRowIndex: debugHeaderRowIndex,
+            productHeaderRowIndex: debugProductHeaderIndex,
+            customerHeaderRowIndex: debugCustomerHeaderIndex,
+            firstRows: normalizedRowsForDebug.slice(0, 5),
+          },
         });
       }
 
