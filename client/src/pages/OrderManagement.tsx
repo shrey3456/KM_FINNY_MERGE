@@ -42,7 +42,11 @@ export default function OrderManagement() {
       if (!response.ok) {
         throw new Error('Failed to load orders');
       }
-      return response.json();
+      const data = await response.json();
+      // Support both array responses and paginated envelope { page, limit, results }
+      if (Array.isArray(data)) return data;
+      if (data && Array.isArray(data.results)) return data.results;
+      return [] as Order[];
     },
   });
 
