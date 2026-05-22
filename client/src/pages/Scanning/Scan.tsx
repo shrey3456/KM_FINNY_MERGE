@@ -211,20 +211,25 @@ export default function ScanOrderPage() {
   const [isScanning, setIsScanning] = useState(false);
   const [isPostingScan, setIsPostingScan] = useState(false);
 
-  const { data: products = [] } = useQuery<Product[]>({
+  const { data: productsRaw = [] } = useQuery<any>({
     queryKey: ["/api/products", { all: "true" }],
   });
+  const products: Product[] = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.results ?? []);
 
-  const importsQuery = useQuery<ImportSummary[]>({
+  const importsQuery = useQuery<any>({
     queryKey: ["/api/orders/imports"],
     queryFn: async () => {
       const response = await apiRequest("GET", "/api/orders/imports", undefined, false, true);
-      return (response as ImportSummary[]) || [];
+      // Support both array and envelope { page, limit, results }
+      if (Array.isArray(response)) return response;
+      if (response && Array.isArray(response.results)) return response.results;
+      return [];
     },
     retry: false,
   });
 
-  const { data: importSummaries = [], isLoading: importsLoading, refetch: refetchImports, error: importsError } = importsQuery;
+  const { data: importSummariesRaw = [], isLoading: importsLoading, refetch: refetchImports, error: importsError } = importsQuery as any;
+  const importSummaries: ImportSummary[] = Array.isArray(importSummariesRaw) ? importSummariesRaw : [];
 
   useEffect(() => {
     if (importsError) {
