@@ -55,9 +55,49 @@ export class BarcodeScanner {
    */
   async initialize(): Promise<MediaDeviceInfo[]> {
     try {
-      const devices = await this.reader.listVideoInputDevices();
+      // Try to detect explicit permission state when available
+      let permState: PermissionState | null = null;
+      try {
+        // Some browsers support querying the camera permission directly
+        const permissions = (navigator as any).permissions;
+        if (permissions && typeof permissions.query === 'function') {
+          const status = await permissions.query({ name: 'camera' } as any);
+          permState = status.state as PermissionState;
+        }
+      } catch (permErr) {
+        // Ignore permission query errors - not all browsers support it
+      }
+
+      // List devices first; if none found and permission isn't explicitly denied,
+      // try to prompt the user by calling getUserMedia once and re-enumerate.
+      let devices = await this.reader.listVideoInputDevices();
       this.hasCamera = devices.length > 0;
-      
+
+      if (!this.hasCamera && permState !== 'denied' && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+        try {
+          // Trigger a permission prompt (if the browser allows) so devices become available
+          const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+          // Immediately stop tracks - we only wanted to prompt
+          tempStream.getTracks().forEach(t => t.stop());
+          // Re-list devices after prompting
+          devices = await this.reader.listVideoInputDevices();
+          this.hasCamera = devices.length > 0;
+        } catch (mediaErr: any) {
+          // If user denied permission or no devices exist, record that state
+          if (mediaErr && mediaErr.name === 'NotAllowedError') {
+            this.hasCamera = false;
+            this.onError(new Error('Camera permission denied. Please enable camera access for this site in your browser settings.'));
+            return [];
+          }
+          if (mediaErr && (mediaErr.name === 'NotFoundError' || mediaErr.name === 'OverconstrainedError')) {
+            this.hasCamera = false;
+            this.onError(new Error('No camera devices found on this system.'));
+            return [];
+          }
+          // Non-fatal: continue and return whatever devices we have (likely none)
+        }
+      }
+
       if (this.hasCamera && !this.selectedDeviceId) {
         console.log("Available cameras:", devices.map(d => `${d.label} (${d.deviceId})`));
         
@@ -94,7 +134,15 @@ export class BarcodeScanner {
     } catch (error) {
       console.error('Failed to initialize scanner:', error);
       this.hasCamera = false;
-      this.onError(new Error('Camera access denied or not available'));
+      // Provide a clearer error depending on the error type
+      const e: any = error;
+      if (e && e.name === 'NotAllowedError') {
+        this.onError(new Error('Camera permission denied. Please enable camera access for this site in your browser settings.'));
+      } else if (e && (e.name === 'NotFoundError' || e.name === 'OverconstrainedError')) {
+        this.onError(new Error('No camera devices found on this system.'));
+      } else {
+        this.onError(new Error('Camera access denied or not available'));
+      }
       return [];
     }
   }
