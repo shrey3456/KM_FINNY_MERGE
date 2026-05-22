@@ -70,8 +70,17 @@ export class BarcodeScanner {
 
       // List devices first; if none found and permission isn't explicitly denied,
       // try to prompt the user by calling getUserMedia once and re-enumerate.
-      let devices = await this.reader.listVideoInputDevices();
-      this.hasCamera = devices.length > 0;
+      // Try to list devices, but some browsers/environments don't support enumeration
+      // (e.g., older Safari versions, cross-origin frames, or restricted contexts).
+      let devices: MediaDeviceInfo[] = [];
+      try {
+        devices = await this.reader.listVideoInputDevices();
+        this.hasCamera = devices.length > 0;
+      } catch (listErr: any) {
+        console.warn('Device enumeration not supported or failed:', listErr?.message || listErr);
+        // We'll try to prompt for camera access directly as a fallback below.
+        this.hasCamera = false;
+      }
 
       if (!this.hasCamera && permState !== 'denied' && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
         try {
@@ -80,8 +89,15 @@ export class BarcodeScanner {
           // Immediately stop tracks - we only wanted to prompt
           tempStream.getTracks().forEach(t => t.stop());
           // Re-list devices after prompting
-          devices = await this.reader.listVideoInputDevices();
-          this.hasCamera = devices.length > 0;
+          try {
+            devices = await this.reader.listVideoInputDevices();
+            this.hasCamera = devices.length > 0;
+          } catch (relistErr: any) {
+            // enumerate still not available but getUserMedia succeeded -> treat as available
+            console.warn('Re-enumeration failed after prompt:', relistErr?.message || relistErr);
+            this.hasCamera = true;
+            // leave devices as empty array; start() will fall back to browser default
+          }
         } catch (mediaErr: any) {
           // If user denied permission or no devices exist, record that state
           if (mediaErr && mediaErr.name === 'NotAllowedError') {
@@ -98,7 +114,7 @@ export class BarcodeScanner {
         }
       }
 
-      if (this.hasCamera && !this.selectedDeviceId) {
+  if (this.hasCamera && !this.selectedDeviceId) {
         console.log("Available cameras:", devices.map(d => `${d.label} (${d.deviceId})`));
         
         // Define keywords that might indicate a rear camera
@@ -168,9 +184,12 @@ export class BarcodeScanner {
     try {
       if (!this.selectedDeviceId) {
         const devices = await this.initialize();
-        if (devices.length === 0) {
+        // initialize() sets this.hasCamera based on enumeration or successful getUserMedia prompt.
+        if (!this.hasCamera) {
           throw new Error('No camera available');
         }
+        // If enumeration is unsupported, devices may be empty but hasCamera===true; we allow start and
+        // rely on decodeFromVideoDevice(null, ...) to pick browser default device.
       }
 
       // Create a callback function for barcode detection
@@ -378,21 +397,25 @@ export class BarcodeScanner {
     if (!this.hasCamera || !this.videoElement) {
       return;
     }
+    try {
+      const devices = await this.reader.listVideoInputDevices();
+      if (devices.length <= 1) {
+        return; // No other cameras to switch to
+      }
 
-    const devices = await this.reader.listVideoInputDevices();
-    if (devices.length <= 1) {
-      return; // No other cameras to switch to
+      // Find the index of the current device
+      const currentIndex = devices.findIndex(device => device.deviceId === this.selectedDeviceId);
+      // Select the next device in the list, or the first if we're at the end
+      const nextIndex = (currentIndex + 1) % devices.length;
+      this.selectedDeviceId = devices[nextIndex].deviceId;
+
+      // Restart with the new device
+      await this.stop();
+      await this.start(this.videoElement, this.selectedDeviceId);
+    } catch (err) {
+      console.warn('Unable to enumerate devices to switch camera:', err);
+      // If enumeration isn't supported, there's nothing to switch — silently ignore.
     }
-
-    // Find the index of the current device
-    const currentIndex = devices.findIndex(device => device.deviceId === this.selectedDeviceId);
-    // Select the next device in the list, or the first if we're at the end
-    const nextIndex = (currentIndex + 1) % devices.length;
-    this.selectedDeviceId = devices[nextIndex].deviceId;
-
-    // Restart with the new device
-    await this.stop();
-    await this.start(this.videoElement, this.selectedDeviceId);
   }
 
   /**

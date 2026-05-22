@@ -191,70 +191,9 @@ const ScannerView = ({ onScanComplete, onOrderScanned }: ScannerProps) => {
       constraints: videoConstraints
     });
 
-    const initializeScanner = async () => {
-      try {
-        // Configure video element for iOS
-        if (videoRef.current && isIOSDevice) {
-          console.log("Configuring video element for iOS");
-
-          // Required attributes for iOS video
-          videoRef.current.setAttribute('autoplay', 'true');
-          videoRef.current.setAttribute('muted', 'true');
-          videoRef.current.setAttribute('playsinline', 'true');
-
-          // Critical for iOS PWA mode
-          videoRef.current.setAttribute('controls', 'false');
-          videoRef.current.setAttribute('webkit-playsinline', 'true');
-
-          // Style adjustments for iOS
-          videoRef.current.style.width = '100%';
-          videoRef.current.style.height = '100%';
-          videoRef.current.style.objectFit = 'cover';
-          videoRef.current.style.zIndex = '1'; 
-
-          // For iPad specifically
-          if (/iPad/.test(navigator.userAgent) || 
-              (/Macintosh/.test(navigator.userAgent) && 'ontouchend' in document)) {
-            console.log("iPad detected, applying iPad-specific video settings");
-            // These settings help with iPad camera orientation issues
-            videoRef.current.style.transform = 'scaleX(-1)';
-            videoRef.current.style.position = 'absolute';
-          }
-        }
-
-        const devices = await scanner.initialize();
-        if (devices.length === 0) {
-          toast({
-            title: "Camera not found",
-            description: "No camera devices were detected. Please ensure you've granted camera permissions.",
-            variant: "destructive"
-          });
-
-          // Despite no devices found, still set the scanner ref
-          // This allows the user to attempt manual scanning later
-          scannerRef.current = scanner;
-          return;
-        }
-
-        console.log("Available cameras:", devices.map(d => d.label || "Unnamed camera"));
-
-        // If we have exactly two devices, we'll assume they're front and back cameras
-        // On mobile devices, typically device[0] is the rear camera
-        if (devices.length === 2) {
-          console.log("Detected two cameras - likely front and rear configuration");
-        }
-      } catch (error) {
-        console.error("Error initializing scanner:", error);
-        toast({
-          title: "Scanner initialization error",
-          description: "There was a problem setting up the scanner. Please check camera permissions.",
-          variant: "destructive"
-        });
-      }
-    };
-
-    initializeScanner();
-
+    // Do not auto-initialize devices on mount; initialization (and any getUserMedia prompts)
+    // must happen during a user gesture (Start Scanning). Just create the scanner and
+    // assign it to the ref; startScanning will call start() which will initialize as needed.
     scannerRef.current = scanner;
 
     // Cleanup
