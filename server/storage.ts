@@ -21,7 +21,6 @@ import {
   messages, type Message, type InsertMessage,
   activities, type Activity, type InsertActivity,
   plants, type Plant, type InsertPlant,
-  plantStvs, type PlantStv, type InsertPlantStv,
   vehicleInfo, type VehicleInfo, type InsertVehicleInfo
 } from "@shared/schema";
 import { and, gte, lte, lt, eq, asc, desc, sql, like, or, isNull, isNotNull, inArray, not } from "drizzle-orm";
@@ -40,10 +39,6 @@ export interface IStorage {
   createPlant(plant: InsertPlant): Promise<Plant>;
   updatePlant(id: number, plant: Partial<InsertPlant>): Promise<Plant | undefined>;
   deletePlant(id: number): Promise<boolean>;
-  listPlantStvs(plantId: number): Promise<PlantStv[]>;
-  createPlantStv(stv: InsertPlantStv): Promise<PlantStv>;
-  updatePlantStv(id: number, stv: Partial<InsertPlantStv>): Promise<PlantStv | undefined>;
-  deletePlantStv(id: number): Promise<boolean>;
 
   // User operations
   getUser(userCode: string): Promise<User | undefined>;
@@ -4925,36 +4920,6 @@ eq(loadingOperations.status, status),
     return !!deletedPlant;
   }
 
-  async listPlantStvs(plantId: number): Promise<PlantStv[]> {
-    return await db
-      .select()
-      .from(plantStvs)
-      .where(eq(plantStvs.plantId, plantId))
-      .orderBy(asc(plantStvs.id));
-  }
-
-  async createPlantStv(stv: InsertPlantStv): Promise<PlantStv> {
-    const [newStv] = await db.insert(plantStvs).values(stv).returning();
-    return newStv;
-  }
-
-  async updatePlantStv(id: number, stv: Partial<InsertPlantStv>): Promise<PlantStv | undefined> {
-    const [updatedStv] = await db
-      .update(plantStvs)
-      .set(stv)
-      .where(eq(plantStvs.id, id))
-      .returning();
-    return updatedStv;
-  }
-
-  async deletePlantStv(id: number): Promise<boolean> {
-    const [deletedStv] = await db
-      .delete(plantStvs)
-      .where(eq(plantStvs.id, id))
-      .returning();
-    return !!deletedStv;
-  }
-  
   async recalculateDealerPurchaseOrderTotals(purchaseOrderId: number): Promise<void> {
     try {
       // Calculate total items and unique dealers for the purchase order

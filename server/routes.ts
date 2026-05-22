@@ -501,30 +501,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  apiRouter.get("/products/:id", async (req: Request, res: Response) => {
-    const product = await storage.getProduct(parseInt(req.params.id));
-    if (!product) {
-      return res.status(404).json({ message: "Product not found" });
-    }
-    res.json(product);
-  });
-
   apiRouter.get(
     "/products/barcode/:barcode",
     async (req: Request, res: Response) => {
       const barcode = req.params.barcode;
       let product = await storage.getProductByBarcode(barcode);
 
-      // If not found by barcode, try to find by SKU (itemNo)
+      // If not found by barcode, try to find by SKU (itemNo).
       if (!product) {
-        // Fallback: search by itemNo (SKU)
-        // Since we don't have a direct method exposed here, we fetch all products and find matching itemNo
-        // This ensures we can scan either barcode OR SKU
         const allProducts = await storage.getAllProducts();
         product =
           allProducts.find(
             (p) => p.itemNo === barcode || p.itemNo === barcode.trim(),
-          ) || null;
+          ) || undefined;
       }
 
       if (!product) {
@@ -533,6 +522,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(product);
     },
   );
+
+  apiRouter.get("/products/:id", async (req: Request, res: Response) => {
+    const product = await storage.getProduct(parseInt(req.params.id));
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    res.json(product);
+  });
 
   apiRouter.post("/products", async (req: Request, res: Response) => {
     try {
@@ -873,8 +870,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           product = await storage.getProduct(scan.productId);
         }
 
-        if (scan.scannedById) {
-          user = await storage.getUser(scan.scannedById);
+        if (scan.scannedByCode) {
+          user = await storage.getUser(scan.scannedByCode);
         }
 
         return {
@@ -1032,31 +1029,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ? await storage.getProduct(scanData.productId)
         : await storage.getProductByBarcode(scanData.barcode);
 
+      // We'll interpret the incoming scan 'quantity' as number of boxes/units scanned.
+      // If the product has an itemsPerPallet defined (e.g., 30, 60), multiply to get units.
+  const computeUnitsAsync = async (qty: number, prod?: any) => {
+        // Primary source: explicit itemsPerPallet column
+        const perBoxRaw = prod && prod.itemsPerPallet != null ? Number(prod.itemsPerPallet) : NaN;
+        let perBox = Number.isFinite(perBoxRaw) && perBoxRaw > 0 ? Math.round(perBoxRaw) : 0;
+
+        // Fallback: try to extract a reasonable integer from common product fields
+        if (!perBox && prod) {
+          const candidates = [prod.itemsPerPallet, prod.itemNo, prod.srNo, prod.sapCode, prod.name, prod.description];
+          for (const c of candidates) {
+            if (!c) continue;
+            const s = String(c);
+            // Look for standalone numbers like 30, 60, 24 etc.
+            const m = s.match(/\b(\d{1,4})\b/);
+            if (m) {
+              const n = Number(m[1]);
+              if (Number.isFinite(n) && n > 1) {
+                perBox = Math.round(n);
+                break;
+              }
+            }
+          }
+        }
+
+        // Default to 1 if nothing useful found
+        if (!perBox || perBox < 1) perBox = 1;
+
+        return Math.round(qty * perBox);
+      };
+      
+      // Helper to call the async compute in existing sync code paths
+      const computeUnits = (qty: number, prod?: any) => computeUnitsAsync(qty, prod);
+
       // Create product if it doesn't exist and a name is provided
       if (!product && scanData.name) {
+        // Use itemsPerPallet if provided in request body, else default to 1
+  const itemsPerPallet = typeof (scanData as any).itemsPerPallet === 'number' ? (scanData as any).itemsPerPallet : undefined;
+  const initialUnits = await computeUnitsAsync(scanData.quantity, { itemsPerPallet });
+
         product = await storage.createProduct({
           barcode: scanData.barcode,
           name: scanData.name,
           description: scanData.description || "",
-          inStock: scanData.action === "add" ? scanData.quantity : 0,
+          inStock: scanData.action === "add" ? initialUnits : 0,
           category: scanData.category || "Uncategorized",
-          createdById: 1, // Default admin user
+          itemsPerPallet: itemsPerPallet,
+          createdByCode: scanData.scannedByCode,
         });
       } else if (product) {
         // Update product quantity based on action
         let newInStock = product.inStock || 0;
 
+  const units = await computeUnitsAsync(scanData.quantity, product);
+
         if (scanData.action === "add") {
-          newInStock += scanData.quantity;
+          newInStock += units;
         } else if (scanData.action === "remove") {
-          newInStock = Math.max(0, newInStock - scanData.quantity);
+          newInStock = Math.max(0, newInStock - units);
         } else if (scanData.action === "update") {
-          newInStock = scanData.quantity;
+          // For update we set absolute units (not boxes)
+          newInStock = units;
         }
 
-        await storage.updateProduct(product.id, {
+        // Persist update and reassign the product variable so later logic sees the updated inStock
+        const updatedProduct = await storage.updateProduct(product.id, {
           inStock: newInStock,
         });
+
+        // Debug log to confirm itemsPerPallet and units computation
+        try {
+          console.log(`[SCAN] barcode=${scanData.barcode} productId=${product.id} itemsPerPallet=${product.itemsPerPallet} boxes=${scanData.quantity} units=${units} oldInStock=${product.inStock} newInStock=${updatedProduct?.inStock}`);
+        } catch (logErr) {
+          // ignore logging errors
+        }
+
+        if (updatedProduct) {
+          product = updatedProduct;
+        }
       } else {
         return res
           .status(400)
@@ -1067,21 +1118,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // Create scan history entry
+      // Record units in scan history (units = boxes * itemsPerPallet)
+      const historyUnits = await computeUnitsAsync(scanData.quantity, product);
+
       const scanHistoryEntry = await storage.createScanHistory({
         barcode: scanData.barcode,
         productId: product.id,
-        scannedById: scanData.scannedById || 1, // Use provided ID or default
+        scannedByCode: scanData.scannedByCode,
         action: scanData.action,
-        quantity: scanData.quantity,
+        quantity: historyUnits,
         notes: scanData.notes || "",
-        productSku: product.barcode || scanData.productSku || scanData.barcode, // Use barcode as primary SKU source
+        productSku: scanData.productSku || product.itemNo || product.sapCode || product.barcode || scanData.barcode,
         scannerName: scanData.scannerName || "Unknown User", // User's display name
         scannerDepartment: scanData.scannerDepartment || "N/A", // User's department
+        productName: scanData.productName || product.name,
+        orderNumber: scanData.orderNumber,
       });
+
+      // Include the recorded units in the response to help client-side UI updates
+      const addedUnits = scanData.action === 'add' ? historyUnits : (scanData.action === 'remove' ? -historyUnits : historyUnits);
 
       res.status(201).json({
         scan: scanHistoryEntry,
         product,
+        addedUnits,
+        action: scanData.action,
       });
     } catch (error) {
       if (error instanceof ZodError) {
@@ -3563,9 +3624,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   const inStock = row.InStock
                     ? parseInt(row.InStock, 10) || 0
                     : 0;
-                  const itemsPerPallet = row.ItemsPerPallet
-                    ? parseInt(row.ItemsPerPallet, 10) || 0
-                    : 0;
+                  // Try multiple header variants for items-per-pallet and coerce to a positive integer
+                  const rawItemsPerPallet = row.ItemsPerPallet ?? row.ItemsPer_Pallet ?? row['Items Per Pallet'] ?? row.itemsperpallet ?? row.items_per_pallet ?? row['items per pallet'];
+                  let itemsPerPallet = 0;
+                  if (rawItemsPerPallet != null && String(rawItemsPerPallet).trim() !== '') {
+                    const cleaned = String(rawItemsPerPallet).replace(/[^0-9.-]/g, '');
+                    const parsed = Number(cleaned);
+                    itemsPerPallet = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
+                  }
                   const pallets = row.Pallets
                     ? parseInt(row.Pallets, 10) || 0
                     : 0;
@@ -3645,6 +3711,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     },
   );
+
+  // Admin endpoint: attempt to fix itemsPerPallet for existing products by parsing numbers
+  // Call with ?confirm=true to perform updates; otherwise it returns a dry-run report.
+  apiRouter.post('/products/fix-items-per-pallet', async (req: Request, res: Response) => {
+    try {
+      const confirm = req.query.confirm === 'true';
+      const allProducts = await storage.listProducts(100000, 0);
+      const updates: Array<{ id: number; old: number | null | undefined; found: number }> = [];
+
+      for (const p of allProducts) {
+        const current = p.itemsPerPallet || 0;
+        if (current && current > 1) continue; // already set
+
+        const candidates = [p.itemsPerPallet, p.itemNo, p.srNo, p.sapCode, p.name, p.description];
+        let found: number | null = null;
+        for (const c of candidates) {
+          if (!c) continue;
+          const s = String(c);
+          const m = s.match(/\b(\d{1,4})\b/);
+          if (m) {
+            const n = Number(m[1]);
+            if (Number.isFinite(n) && n > 1) {
+              found = Math.round(n);
+              break;
+            }
+          }
+        }
+
+        if (found) {
+          updates.push({ id: p.id as number, old: p.itemsPerPallet, found });
+          if (confirm) {
+            await storage.updateProduct(p.id as number, { itemsPerPallet: found });
+          }
+        }
+      }
+
+      return res.json({ success: true, confirm, updated: updates.length, details: updates.slice(0, 200) });
+    } catch (err) {
+      console.error('Failed to fix itemsPerPallet:', err);
+      return res.status(500).json({ error: 'Failed to fix itemsPerPallet' });
+    }
+  });
 
   // Proforma Slip endpoints
   apiRouter.get("/proforma-slips", async (req: Request, res: Response) => {

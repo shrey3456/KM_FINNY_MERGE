@@ -1,6 +1,6 @@
 // KM Finny Service Worker
 
-const CACHE_NAME = 'km-finny-cache-v1';
+const CACHE_NAME = 'km-finny-cache-v2';
 const urlsToCache = [
   '/',
   '/index.html',
@@ -19,6 +19,11 @@ self.addEventListener('install', event => {
 });
 
 self.addEventListener('fetch', event => {
+  if (event.request.method !== 'GET') {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request)
       .then(response => {
