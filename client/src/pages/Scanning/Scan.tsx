@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
+import CameraPermissionBanner from "@/components/CameraPermissionBanner";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -924,6 +925,17 @@ export default function ScanOrderPage() {
   return (
     <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
       <div className="mx-auto max-w-7xl space-y-5">
+        {/* Camera Permission Helper Banner */}
+        <CameraPermissionBanner 
+          onPermissionGranted={() => {
+            toast({
+              title: "Camera Permission Granted",
+              description: "You can now start scanning. Click 'Add New Order' to begin.",
+              variant: "default"
+            });
+          }}
+        />
+
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold text-gray-950">Scan Order</h1>

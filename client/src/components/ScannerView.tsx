@@ -7,6 +7,7 @@ import BarcodeScanner from '@/lib/barcodeScanner';
 import { Result } from '@zxing/library';
 import NewManualEntryModal from './modals/NewManualEntryModal';
 import BarcodeResultModal from './modals/BarcodeResultModal';
+import CameraPermissionBanner from './CameraPermissionBanner';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { Card, CardContent } from '@/components/ui/card';
@@ -634,6 +635,17 @@ const ScannerView = ({ onScanComplete, onOrderScanned }: ScannerProps) => {
   return (
     <>
       <div className="mx-auto">
+        {/* Camera Permission Helper Banner */}
+        <CameraPermissionBanner 
+          onPermissionGranted={() => {
+            toast({
+              title: "Camera Permission Granted",
+              description: "You can now start scanning. Click 'Start Scanning' to begin.",
+              variant: "default"
+            });
+          }}
+        />
+
         {/* Scanner Header */}
         <div className="mb-4 flex items-center">
           <ScanLine className="h-7 w-7 text-[#001d6e] mr-2" />
