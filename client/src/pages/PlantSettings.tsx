@@ -652,7 +652,7 @@ export default function PlantSettings() {
                 <TableRow><TableCell colSpan={9} className="text-center">Loading...</TableCell></TableRow>
               ) : plants?.map((plant: any) => (
                 <React.Fragment key={plant.id}>
-                <TableRow className="cursor-pointer" onClick={() => handleToggleStvPanel(plant)}>
+                <TableRow>
                   <TableCell className="font-medium">{plant.name}</TableCell>
                   {/* ADD THIS: Locking Status Column */}
                   <TableCell>
@@ -679,14 +679,24 @@ export default function PlantSettings() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      {expandedPlantId === plant.id ? (
-                        <ChevronDown className="h-4 w-4" />
-                      ) : (
-                        <ChevronRight className="h-4 w-4" />
-                      )}
-                      <span>View STVs</span>
-                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-auto px-2 py-1 text-sm text-muted-foreground"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleToggleStvPanel(plant);
+                      }}
+                    >
+                      <div className="flex items-center gap-2">
+                        {expandedPlantId === plant.id ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                        <span>View STVs</span>
+                      </div>
+                    </Button>
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
@@ -877,3 +887,5 @@ export default function PlantSettings() {
     </div>
   );
 }
+
+

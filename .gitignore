@@ -10,3 +10,6 @@ vite.config.ts.*
 *.bak
 *.tmp
 *.swp   
+deploy.bat
+migrations/
+web.config

@@ -36,6 +36,20 @@
       "when": 1779210325949,
       "tag": "0004_shiny_franklin_richards",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1779304696245,
+      "tag": "0005_chubby_ender_wiggin",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1779637722588,
+      "tag": "0006_mean_mongu",
+      "breakpoints": true
     }
   ]
 }
