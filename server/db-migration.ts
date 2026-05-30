@@ -1,6 +1,7 @@
 import { db } from './db';
 import { sql } from 'drizzle-orm';
 import { removeProformaColumns } from './migrations/remove-proforma-columns';
+import { addScanSessionPalletScans } from './migrations/add-scan-session-pallet-scans';
 
 /**
  * This script runs the necessary database migrations:
@@ -33,6 +34,10 @@ async function runDbMigration() {
     // Step 2: Remove unnecessary columns from proforma_slip_items
     console.log('Step 2: Removing unnecessary columns from proforma_slip_items...');
     await removeProformaColumns();
+
+    // Step 3: Create scan_session_pallet_scans table
+    console.log('Step 3: Creating scan_session_pallet_scans table...');
+    await addScanSessionPalletScans();
 
     console.log('Database schema migration completed successfully');
     return { success: true };

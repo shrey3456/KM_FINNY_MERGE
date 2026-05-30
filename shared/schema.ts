@@ -1,258 +1,111 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, date, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-// Activities schema to track all user actions in the app
-export const activities = pgTable("activities", {
-  id: serial("id").primaryKey(),
-  pageName: text("page_name").notNull(), // Which page generated this activity
-  action: text("action").notNull(), // The action performed (e.g., "create", "update", "delete")
-  entityType: text("entity_type").notNull(), // Type of entity affected (e.g., "product", "slip", "sale")
-  entityId: text("entity_id"), // ID or reference of the affected entity
-  details: text("details"), // Additional details about the activity in JSON format
-  userCode: text("user_code").references(() => users.userCode), // Who performed the action
-  userName: text("user_name"), // Cache the user name for quick display
-  createdAt: timestamp("created_at").defaultNow(), // When the action occurred
-});
+// ============================================================================
+// USERS
+// Purpose : Employee accounts. Each user has a unique userCode (employee ID)
+//           and authenticates with a numeric PIN.
+// Used by : Login page, all pages that record who performed an action.
+// ============================================================================
 
-export const insertActivitySchema = createInsertSchema(activities).pick({
-  pageName: true,
-  action: true,
-  entityType: true,
-  entityId: true,
-  details: true,
-  userCode: true,
-  userName: true,
-});
-
-// Load Operations schema
-export const loadingOperations = pgTable("load_operations", {
-  id: serial("id").primaryKey(),
-  status: text("status").default("in progress"),
-  referenceNumber: text("reference_number"),
-  partyName: text("party_name"), // Party name (dealer) field, imported from proforma slip - moved up after referenceNumber
-  plant: text("plant"), // Plant field for location information - moved up after partyName
-  vehicleNumber: text("vehicle_number"), // Added vehicle number field to match proforma slips
-  driverName: text("driver_name"), // Added driver name field for complete independence from proforma slips
-  createdByCode: text("created_by_code").references(() => users.userCode),
-  createdAt: timestamp("created_at").defaultNow(),
-  completedAt: timestamp("completed_at"),
-  notes: text("notes"),
-  orderDate: timestamp("order_date"), // Added order date field to match proforma slips
-  isBackedUp: boolean("is_backed_up").default(false), // Flag to indicate if this record has been backed up
-});
-
-export const insertLoadingOperationSchema = createInsertSchema(loadingOperations, {
-  // Override the orderDate field to accept both Date and string
-  orderDate: z.union([z.date(), z.string()]).optional(),
-  // Add plant field validation
-  plant: z.string().optional(),
-  // Add party name validation
-  partyName: z.string().optional(),
-  // Add driver name validation
-  driverName: z.string().optional()
-}).pick({
-  status: true,
-  referenceNumber: true,
-  vehicleNumber: true,
-  driverName: true,
-  createdByCode: true,
-  notes: true,
-  orderDate: true,
-  isBackedUp: true,
-  plant: true,
-  partyName: true,
-});
-
-// GJ Operations Items schema (previously Loading Operation Items)
-export const loadingOpItems = pgTable("load_operations_items", { //Renamed table
-  id: serial("id").primaryKey(),
-  loadOperationsId: integer("load_operations_id").references(() => loadingOperations.id), // Consistent field name
-  productId: integer("product_id").references(() => products.id),
-  quantity: integer("quantity").default(0), // Total quantity (proforma + extra)
-  originalQuantity: integer("original_quantity"), // Track the original proforma quantity
-  extraQuantity: integer("extra_quantity").default(0), // Track extra quantity beyond proforma
-  loadedQuantity: integer("loaded_quantity").default(0), // Track how many items were actually loaded
-  loaded: boolean("loaded").default(false), // Track whether the item has been loaded (checkbox state) - moved after loaded_quantity
-  createdAt: timestamp("created_at").defaultNow(),
-  srNo: text("sr_no"), // Serial number for the item
-  barcode: text("barcode"), // Barcode for the item
-  itemName: text("item_name"), // Name of the item
-  srNoDisplay: text("sr_no_display"), // Display field for Sr.No. column in UI
-});
-
-// Create the insert schema
-export const insertLoadingOpItemSchema = createInsertSchema(loadingOpItems).pick({
-  loadOperationsId: true,
-  productId: true,
-  quantity: true,
-  originalQuantity: true,
-  extraQuantity: true, // Added extra quantity field
-  loadedQuantity: true,
-  loaded: true,
-  srNo: true,
-  barcode: true,
-  itemName: true,
-  srNoDisplay: true,
-});
-
-// Create type aliases for MP Operations for backward compatibility 
-// with existing code that uses the MP prefix
-export type MpOperation = typeof loadingOperations.$inferSelect;
-export type MpOperationItem = typeof loadingOpItems.$inferSelect;
-export type InsertMpOperation = InsertLoadingOperation;
-export type InsertMpOperationItem = InsertLoadingOpItem;
-
-// Purchase schema
-export const purchases = pgTable("purchases", {
-  id: serial("id").primaryKey(),
-  date: date("date").defaultNow(),
-  item: text("item").notNull(),
-  quantity: integer("quantity").default(0),
-  priceDetails: text("price_details"),
-  notes: text("notes"),
-  userCode: text("user_code").references(() => users.userCode),
-  createdAt: timestamp("created_at").defaultNow(),
-});
-
-export const insertPurchaseSchema = createInsertSchema(purchases, {
-  // Override the date field to accept both Date and string for DD-MM-YYYY format
-  date: z.union([z.date(), z.string()])
-}).pick({
-  date: true,
-  item: true,
-  quantity: true,
-  priceDetails: true,
-  notes: true,
-  userCode: true,
-});
-
-
-// User schema
 export const users = pgTable("users", {
-  userCode: text("user_code").primaryKey().notNull(), // User ID number for employee identification - primary key
+  userCode: text("user_code").primaryKey().notNull(), // unique employee ID, used as FK across all tables
   username: text("username").notNull().unique(),
-  pin: text("pin").notNull(), // Changed from password to pin
+  pin: text("pin").notNull(),
   name: text("name"),
   designation: text("designation"),
   department: text("department"),
-  role: text("role").default("user"),
-  profileImage: text("profile_image"), // Base64 encoded profile image
+  role: text("role").default("user"), // "user" | "admin"
+  profileImage: text("profile_image"), // Base64-encoded JPEG
 });
 
-// Recreate the insert schema with the new pin field
 export const insertUserSchema = createInsertSchema(users);
 
-// Product schema
+export type User = typeof users.$inferSelect;
+export type InsertUser = z.infer<typeof insertUserSchema>;
+
+// ============================================================================
+// PRODUCTS (Inventory Master)
+// Purpose : Master catalogue of every product / SKU in the warehouse.
+//           inStock / purchased / sold are live running totals updated on every
+//           scan or purchase entry.
+// Used by : Inventory page, Scan Order, Load Operations, Proforma Slips,
+//           Pallet Stock Report.
+// ============================================================================
+
 export const products = pgTable("products", {
   id: serial("id").primaryKey(),
-  srNo: text("sr_no"), // Sr. No. from CSV
-  itemNo: text("item_no"), // SKU or internal item number
+  srNo: text("sr_no"),             // serial number from the original CSV import
+  itemNo: text("item_no"),         // internal SKU / item code
   barcode: text("barcode").notNull().unique(),
   name: text("name").notNull(),
   category: text("category"),
-  volumeInCuFt: text("volume_in_cu_ft"), // Cu. ft. volume
-  hsnCode: text("hsn_code"),
-  sapCode: text("sap_code"),
-  purchased: integer("purchased").default(0),
-  sold: integer("sold").default(0),
-  inStock: integer("in_stock").default(0),
-  itemsPerPallet: integer("items_per_pallet").default(0),
-  pallets: integer("pallets").default(0),
+  volumeInCuFt: text("volume_in_cu_ft"),
+  hsnCode: text("hsn_code"),       // GST harmonised system code
+  sapCode: text("sap_code"),       // SAP ERP code
+  purchased: integer("purchased").default(0),  // cumulative units purchased
+  sold: integer("sold").default(0),            // cumulative units sold/dispatched
+  inStock: integer("in_stock").default(0),     // current live stock level
+  itemsPerPallet: integer("items_per_pallet").default(0), // units packed per pallet
+  pallets: integer("pallets").default(0),      // current number of pallets in stock
   purchasePrice: text("purchase_price"),
   sellingPrice: text("selling_price"),
   lastUpdated: timestamp("last_updated"),
   description: text("description"),
-  status: text("status").default("in stock"),
+  status: text("status").default("in stock"),  // "in stock" | "out of stock"
   createdByCode: text("created_by_code").references(() => users.userCode),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 export const insertProductSchema = createInsertSchema(products, {
-  // Override the lastUpdated field to accept both Date and string
   lastUpdated: z.union([z.date(), z.string()]).optional(),
 }).pick({
-  srNo: true,
-  itemNo: true,
-  barcode: true,
-  name: true,
-  category: true,
-  volumeInCuFt: true,
-  hsnCode: true,
-  sapCode: true,
-  purchased: true,
-  sold: true,
-  inStock: true,
-  itemsPerPallet: true,
-  pallets: true,
-  purchasePrice: true,
-  sellingPrice: true,
-  lastUpdated: true,
-  description: true,
-  status: true,
+  srNo: true, itemNo: true, barcode: true, name: true, category: true,
+  volumeInCuFt: true, hsnCode: true, sapCode: true, purchased: true, sold: true,
+  inStock: true, itemsPerPallet: true, pallets: true, purchasePrice: true,
+  sellingPrice: true, lastUpdated: true, description: true, status: true,
   createdByCode: true,
 });
 
-// Scan history schema
+export type Product = typeof products.$inferSelect;
+export type InsertProduct = z.infer<typeof insertProductSchema>;
+
+// ============================================================================
+// SCAN HISTORY
+// Purpose : Permanent audit log of every barcode scan that touches stock.
+//           Each row records one scan event (add / remove / update) and the
+//           quantity change. This is used for the Scan History page and for
+//           tracing stock movement over time.
+// Used by : Scan Order page (adds rows on each confirmed scan),
+//           Scan History page, Reports page.
+// ============================================================================
+
 export const scanHistory = pgTable("scan_history", {
   id: serial("id").primaryKey(),
   barcode: text("barcode").notNull(),
   productId: integer("product_id").references(() => products.id),
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
   scannedAt: timestamp("scanned_at").defaultNow(),
-  action: text("action").notNull(), // e.g., "add", "remove", "update"
+  action: text("action").notNull(),          // "add" | "remove" | "update"
   quantity: integer("quantity").default(1),
   notes: text("notes"),
-  productSku: text("product_sku"), // Added to support SKU in scan history
-  scannerName: text("scanner_name"), // User's display name who scanned the barcode
-  scannerDepartment: text("scanner_department"), // User's department
-  productName: text("product_name"), // Store the product name for better historical records
-  isBackedUp: boolean("is_backed_up").default(false), // Flag to indicate if this record has been backed up
-  orderNumber: text("order_number"), // Reference to associated order number
+  productSku: text("product_sku"),
+  scannerName: text("scanner_name"),
+  scannerDepartment: text("scanner_department"),
+  productName: text("product_name"),
+  isBackedUp: boolean("is_backed_up").default(false),
+  orderNumber: text("order_number"),         // links this scan to a scan session order
 });
 
 export const insertScanHistorySchema = createInsertSchema(scanHistory).pick({
-  barcode: true,
-  productId: true,
-  scannedByCode: true,
-  action: true,
-  quantity: true,
-  notes: true,
-  productSku: true,
-  scannerName: true,
-  scannerDepartment: true,
-  productName: true,
-  isBackedUp: true,
-  orderNumber: true,
+  barcode: true, productId: true, scannedByCode: true, action: true,
+  quantity: true, notes: true, productSku: true, scannerName: true,
+  scannerDepartment: true, productName: true, isBackedUp: true, orderNumber: true,
 });
 
-// Types for frontend and backend use
-export type User = typeof users.$inferSelect;
-export type InsertUser = z.infer<typeof insertUserSchema>;
-
-export type Product = typeof products.$inferSelect;
-export type InsertProduct = z.infer<typeof insertProductSchema>;
-
-export type ScanHistory = typeof scanHistory.$inferSelect;
-export type InsertScanHistory = z.infer<typeof insertScanHistorySchema>;
-
-export type Purchase = typeof purchases.$inferSelect;
-export type InsertPurchase = z.infer<typeof insertPurchaseSchema>;
-
-
-export type LoadingOperation = typeof loadingOperations.$inferSelect & {
-  creatorName?: string;
-  creatorUsername?: string;
-  creatorRole?: string;
-};
-export type InsertLoadingOperation = z.infer<typeof insertLoadingOperationSchema>;
-
-export type LoadingOpItem = typeof loadingOpItems.$inferSelect;
-export type InsertLoadingOpItem = z.infer<typeof insertLoadingOpItemSchema>;
-
-
-// Extended schemas for validation
+// Zod schema used for validating the POST /api/scans request body
 export const scanEntrySchema = z.object({
   barcode: z.string().min(1, "Barcode is required"),
   quantity: z.number().int().positive().default(1),
@@ -261,24 +114,140 @@ export const scanEntrySchema = z.object({
   category: z.string().optional(),
   action: z.enum(["add", "remove", "update"]).default("add"),
   notes: z.string().optional(),
-  productId: z.number().optional(), // Added to support direct product reference
-  productSku: z.string().optional(), // Added to support SKU display in scan history
-  scannerName: z.string().optional(), // User's display name who scanned the barcode
-  scannerDepartment: z.string().optional(), // User's department
-  scannedByCode: z.string().optional(), // The user code of who performed the scan
-  productName: z.string().optional(), // Store the product name for better historical records
-  isBackedUp: z.boolean().optional(), // Flag to indicate if this record has been backed up
-  orderNumber: z.string().optional(), // Reference to the order number for matching with load operations
+  productId: z.number().optional(),
+  productSku: z.string().optional(),
+  scannerName: z.string().optional(),
+  scannerDepartment: z.string().optional(),
+  scannedByCode: z.string().optional(),
+  productName: z.string().optional(),
+  isBackedUp: z.boolean().optional(),
+  orderNumber: z.string().optional(),
 });
 
+export type ScanHistory = typeof scanHistory.$inferSelect;
+export type InsertScanHistory = z.infer<typeof insertScanHistorySchema>;
 export type ScanEntry = z.infer<typeof scanEntrySchema>;
 
-// Proforma Slip schema
+// ============================================================================
+// SCAN ORDER SESSIONS  (Pallet Stock Report / Arrival Scanning)
+// Purpose : Tracks a stock-arrival scanning job created from a CSV import.
+//           The user uploads an order CSV, creates a session, then scans each
+//           arriving box. The system compares scanned qty vs expected qty from
+//           the CSV and surfaces extras or shortfalls.
+//
+// Table relationships:
+//   scanSessions         — one session per CSV order (the "job header")
+//   scanSessionItems     — one row per product in the CSV (expected qty tracked here)
+//   scanSessionExtras    — boxes scanned that were NOT listed in the CSV order
+//   scanSessionPalletScans — one row per individual pallet scan event (audit trail)
+//
+// Used by : Scan Order page (/scan), Pallet Stock Report (/scan-stock-report).
+// ============================================================================
+
+// Header — one session = one CSV order import
+export const scanSessions = pgTable("scan_sessions", {
+  id: serial("id").primaryKey(),
+  orderName: text("order_name").notNull(),   // label chosen by the user (e.g. dealer name)
+  csvName: text("csv_name").notNull(),        // original filename of the uploaded CSV
+  mappedColumn: text("mapped_column").notNull(), // which CSV column was selected as the order
+  status: text("status").default("scanning"), // "scanning" | "completed"
+  createdByCode: text("created_by_code").references(() => users.userCode),
+  createdByName: text("created_by_name"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Expected items from the CSV — scannedQty increments on each confirmed scan
+export const scanSessionItems = pgTable("scan_session_items", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => scanSessions.id, { onDelete: "cascade" }).notNull(),
+  sku: text("sku").notNull(),
+  itemName: text("item_name").notNull(),
+  barcode: text("barcode"),
+  itemNo: text("item_no"),
+  sapCode: text("sap_code"),
+  productId: integer("product_id").references(() => products.id),
+  expectedQty: integer("expected_qty").default(0),  // qty from the CSV
+  scannedQty: integer("scanned_qty").default(0),    // actual qty scanned so far
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Items scanned that did not match any row in the CSV order
+export const scanSessionExtras = pgTable("scan_session_extras", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => scanSessions.id, { onDelete: "cascade" }).notNull(),
+  code: text("code").notNull(),           // the barcode or code that was scanned
+  itemName: text("item_name").notNull(),
+  sku: text("sku"),
+  productId: integer("product_id").references(() => products.id),
+  quantity: integer("quantity").default(0),
+  reason: text("reason").notNull(),       // "not_in_order" | "unknown_product"
+  scannedByCode: text("scanned_by_code"),
+  scannedByName: text("scanned_by_name"),
+  scannedAt: timestamp("scanned_at").defaultNow(),
+});
+
+// Individual pallet-level scan events — one row per confirmed scan click.
+// palletNumber is auto-incremented per item within the session.
+export const scanSessionPalletScans = pgTable("scan_session_pallet_scans", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => scanSessions.id, { onDelete: "cascade" }).notNull(),
+  sessionItemId: integer("session_item_id").references(() => scanSessionItems.id, { onDelete: "set null" }),
+  barcode: text("barcode").notNull(),
+  sku: text("sku"),
+  itemName: text("item_name").notNull(),
+  productId: integer("product_id").references(() => products.id),
+  palletNumber: integer("pallet_number").notNull(), // sequential per item in this session
+  quantity: integer("quantity").notNull().default(1),
+  numPallets: real("num_pallets"),                  // calculated: quantity ÷ itemsPerPallet (e.g. 1.03)
+  isExtra: boolean("is_extra").default(false),      // true = not matched to the order
+  scannedByCode: text("scanned_by_code").references(() => users.userCode),
+  scannedByName: text("scanned_by_name"),
+  scannedAt: timestamp("scanned_at").defaultNow(),
+});
+
+export const insertScanSessionSchema = createInsertSchema(scanSessions).pick({
+  orderName: true, csvName: true, mappedColumn: true, status: true,
+  createdByCode: true, createdByName: true,
+});
+
+export const insertScanSessionItemSchema = createInsertSchema(scanSessionItems).pick({
+  sessionId: true, sku: true, itemName: true, barcode: true, itemNo: true,
+  sapCode: true, productId: true, expectedQty: true, scannedQty: true,
+});
+
+export const insertScanSessionExtraSchema = createInsertSchema(scanSessionExtras).pick({
+  sessionId: true, code: true, itemName: true, sku: true, productId: true,
+  quantity: true, reason: true, scannedByCode: true, scannedByName: true,
+});
+
+export const insertScanSessionPalletScanSchema = createInsertSchema(scanSessionPalletScans).pick({
+  sessionId: true, sessionItemId: true, barcode: true, sku: true, itemName: true,
+  productId: true, palletNumber: true, quantity: true, numPallets: true, isExtra: true,
+  scannedByCode: true, scannedByName: true,
+});
+
+export type ScanSession = typeof scanSessions.$inferSelect;
+export type ScanSessionItem = typeof scanSessionItems.$inferSelect;
+export type ScanSessionExtra = typeof scanSessionExtras.$inferSelect;
+export type ScanSessionPalletScan = typeof scanSessionPalletScans.$inferSelect;
+export type InsertScanSessionPalletScan = z.infer<typeof insertScanSessionPalletScanSchema>;
+
+// ============================================================================
+// PROFORMA SLIPS  (Dispatch / Delivery Orders)
+// Purpose : Proforma invoices raised before goods are dispatched to a dealer.
+//           Each slip has a list of line items imported from a CSV.  Line item
+//           data is stored as an IMMUTABLE SNAPSHOT so historical prints are
+//           never affected by later inventory changes.
+// Used by : Proforma Slips page, Print Operations page, Load Operations page.
+// ============================================================================
+
 export const proformaSlips = pgTable("proforma_slips", {
   id: serial("id").primaryKey(),
   orderDate: date("order_date").defaultNow(),
   orderNumber: text("order_number").notNull(),
-  partyName: text("party_name").notNull(),
+  partyName: text("party_name").notNull(),  // dealer / customer name
   plant: text("plant"),
   totalQuantity: integer("total_quantity").default(0),
   totalVolume: text("total_volume"),
@@ -288,8 +257,7 @@ export const proformaSlips = pgTable("proforma_slips", {
   createdAt: timestamp("created_at").defaultNow(),
   notes: text("notes"),
   isBackedUp: boolean("is_backed_up").default(false),
-   // Flag to indicate if this record has been backed up
-   isPrintLocked: boolean("is_print_locked").default(false),
+  isPrintLocked: boolean("is_print_locked").default(false), // prevents edits after first print
   printedByCode: text("printed_by_code"),
   printedByName: text("printed_by_name"),
   printedAt: timestamp("printed_at"),
@@ -297,343 +265,128 @@ export const proformaSlips = pgTable("proforma_slips", {
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
-  // Override the orderDate field to accept both Date and string for DD-MM-YYYY format
   orderDate: z.union([z.date(), z.string()])
 }).pick({
-  orderDate: true,
-  orderNumber: true,
-  partyName: true,
-  plant: true,
-  totalQuantity: true,
-  totalVolume: true,
-  vehicleNumber: true,
-  driverName: true,
-  createdByCode: true,
-  notes: true,
-  isBackedUp: true,
-  isPrintLocked: true,
-  printedByCode: true,
-  printedByName: true,
-  printedAt: true,
-  printCount: true,
+  orderDate: true, orderNumber: true, partyName: true, plant: true,
+  totalQuantity: true, totalVolume: true, vehicleNumber: true, driverName: true,
+  createdByCode: true, notes: true, isBackedUp: true, isPrintLocked: true,
+  printedByCode: true, printedByName: true, printedAt: true, printCount: true,
 });
 
-// Proforma Slip Items schema
-// IMPORTANT: This table stores IMMUTABLE SNAPSHOTS of product data at import time
-// These fields should NEVER be updated after import, even if inventory changes
+// IMPORTANT: All fields below are IMMUTABLE SNAPSHOTS of product data at import
+// time. They must NEVER be updated after the slip is created, even if the live
+// product record changes later.
 export const proformaSlipItems = pgTable("proforma_slip_items", {
   id: serial("id").primaryKey(),
   proformaSlipId: integer("proforma_slip_id").references(() => proformaSlips.id),
-  productId: integer("product_id"), // Optional reference - NOT used for display, data comes from CSV snapshots
+  productId: integer("product_id"), // soft reference only — display always uses snapshot fields below
   quantity: integer("quantity").default(0),
   createdAt: timestamp("created_at").defaultNow(),
-  // Snapshot fields: Store complete product data at import time to ensure immutability
-  // ALL DATA comes from CSV - NO inventory lookup
-  srNo: text("sr_no"), // Serial number for the item
-  itemNo: text("item_no"), // SKU or internal item number (snapshot)
-  barcode: text("barcode"), // Barcode for the item (snapshot)
-  itemName: text("item_name"), // Name of the item (snapshot)
-  category: text("category"), // Product category (snapshot)
-  volumeInCuFt: text("volume_in_cu_ft"), // Cu. ft. volume (snapshot)
-  hsnCode: text("hsn_code"), // HSN code (snapshot)
-  sapCode: text("sap_code"), // SAP code (snapshot)
-  description: text("description"), // Product description (snapshot)
-  purchasePrice: text("purchase_price"), // Purchase price at import time (snapshot)
-  sellingPrice: text("selling_price"), // Selling price at import time (snapshot)
+  srNo: text("sr_no"),
+  itemNo: text("item_no"),
+  barcode: text("barcode"),
+  itemName: text("item_name"),
+  category: text("category"),
+  volumeInCuFt: text("volume_in_cu_ft"),
+  hsnCode: text("hsn_code"),
+  sapCode: text("sap_code"),
+  description: text("description"),
+  purchasePrice: text("purchase_price"),
+  sellingPrice: text("selling_price"),
 });
 
 export const insertProformaSlipItemSchema = createInsertSchema(proformaSlipItems).pick({
-  proformaSlipId: true,
-  productId: true,
-  quantity: true,
-  srNo: true,
-  itemNo: true,
-  barcode: true,
-  itemName: true,
-  category: true,
-  volumeInCuFt: true,
-  hsnCode: true,
-  sapCode: true,
-  description: true,
-  purchasePrice: true,
-  sellingPrice: true,
+  proformaSlipId: true, productId: true, quantity: true, srNo: true, itemNo: true,
+  barcode: true, itemName: true, category: true, volumeInCuFt: true, hsnCode: true,
+  sapCode: true, description: true, purchasePrice: true, sellingPrice: true,
 });
 
 export type ProformaSlip = typeof proformaSlips.$inferSelect;
 export type InsertProformaSlip = z.infer<typeof insertProformaSlipSchema>;
-
 export type ProformaSlipItem = typeof proformaSlipItems.$inferSelect;
 export type InsertProformaSlipItem = z.infer<typeof insertProformaSlipItemSchema>;
 
-// Vehicle Info schema
-export const vehicleInfo = pgTable("vehicle_info", {
+// ============================================================================
+// LOAD OPERATIONS  (GJ / Truck Loading Jobs)
+// Purpose : Tracks a physical truck-loading job — which products are loaded
+//           onto a vehicle against a proforma or standalone order.
+//           Each operation has a header (vehicle, driver, party) and a list of
+//           line items with loaded vs expected quantities.
+// Used by : Load Operations page, GJ Operations.
+// ============================================================================
+
+export const loadingOperations = pgTable("load_operations", {
   id: serial("id").primaryKey(),
-  srNo: integer("sr_no").notNull(),
-  rtoNumber: text("rto_number").notNull(),
-  vehicleNumber: text("vehicle_number").notNull().unique(),
-  lastEditedByCode: text("last_edited_by_code").references(() => users.userCode),
-  lastEditedAt: timestamp("last_edited_at").defaultNow(),
-  createdByCode: text("created_by_code").references(() => users.userCode),
-  createdAt: timestamp("created_at").defaultNow(),
-});
-
-export const insertVehicleInfoSchema = createInsertSchema(vehicleInfo).pick({
-  srNo: true,
-  rtoNumber: true, 
-  vehicleNumber: true,
-  lastEditedByCode: true,
-  createdByCode: true,
-});
-
-export type VehicleInfo = typeof vehicleInfo.$inferSelect;
-export type InsertVehicleInfo = z.infer<typeof insertVehicleInfoSchema>;
-
-// Purchase Orders schema (for Excel-based consolidated dealer orders)
-export const purchaseOrders = pgTable("purchase_orders", {
-  id: serial("id").primaryKey(),
-  orderDate: date("order_date").notNull(), // The order date from Excel (e.g., 18/09/2025)
-  deliveryDate: date("delivery_date"), // Delivery date if different from order date
-  status: text("status").default("pending"), // pending, confirmed, processed, completed, cancelled
-  totalItems: integer("total_items").default(0), // Total number of items across all dealers
-  totalDealers: integer("total_dealers").default(0), // Number of dealers participating
-  notes: text("notes"),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-  createdByCode: text("created_by_code").references(() => users.userCode),
-});
-
-export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders, {
-  orderDate: z.union([z.date(), z.string()]),
-  deliveryDate: z.union([z.date(), z.string()]).optional(),
-}).pick({
-  orderDate: true,
-  deliveryDate: true,
-  status: true,
-  totalItems: true,
-  totalDealers: true,
-  notes: true,
-  createdByCode: true,
-});
-
-
-// Purchase Order Items schema (product-dealer-quantity matrix)
-export const purchaseOrderItems = pgTable("purchase_order_items", {
-  id: serial("id").primaryKey(),
-  purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id),
-  dealerName: text("dealer_name").notNull(), // Dealer/customer name from Excel
-  vehicleNumber: text("vehicle_number"), // Assigned vehicle number
-  driverName: text("driver_name"), // Driver name if available
-  productId: integer("product_id").references(() => products.id),
-  productCode: text("product_code"), // Product code from Excel (e.g., "100215")
-  productName: text("product_name"), // Product name for reference
-  barcode: text("barcode"), // Product barcode for reference
-  quantity: integer("quantity").default(0), // Quantity this dealer ordered for this product
-  unitPrice: text("unit_price"), // Unit price if available
-  totalPrice: text("total_price"), // Total price for this dealer-product combination
-  notes: text("notes"),
-  createdAt: timestamp("created_at").defaultNow(),
-});
-
-export const insertPurchaseOrderItemSchema = createInsertSchema(purchaseOrderItems).pick({
-  purchaseOrderId: true,
-  dealerName: true,
-  vehicleNumber: true,
-  driverName: true,
-  productId: true,
-  productCode: true,
-  productName: true,
-  barcode: true,
-  quantity: true,
-  unitPrice: true,
-  totalPrice: true,
-  notes: true,
-});
-
-export type PurchaseOrder = typeof purchaseOrders.$inferSelect;
-export type InsertPurchaseOrder = z.infer<typeof insertPurchaseOrderSchema>;
-
-export type PurchaseOrderItem = typeof purchaseOrderItems.$inferSelect;
-export type InsertPurchaseOrderItem = z.infer<typeof insertPurchaseOrderItemSchema>;
-
-// Aliases for dealer purchase orders (used by frontend)
-export type DealerPurchaseOrder = PurchaseOrder;
-export type InsertDealerPurchaseOrder = InsertPurchaseOrder;
-export type DealerPurchaseOrderItem = PurchaseOrderItem;
-export type InsertDealerPurchaseOrderItem = InsertPurchaseOrderItem;
-
-// Data Backup schema
-export const backupSettings = pgTable("backup_settings", {
-  id: serial("id").primaryKey(),
-  lastBackupDate: timestamp("last_backup_date").defaultNow(),
-  autoBackupEnabled: boolean("auto_backup_enabled").default(true),
-  backupFrequencyHours: integer("backup_frequency_hours").default(24), // Default to daily backups
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-});
-
-export const insertBackupSettingsSchema = createInsertSchema(backupSettings).pick({
-  lastBackupDate: true,
-  autoBackupEnabled: true,
-  backupFrequencyHours: true,
-});
-
-// Backup tables for historical data
-export const scanHistoryBackup = pgTable("scan_history_backup", {
-  id: serial("id").primaryKey(),
-  originalId: integer("original_id"), // Reference to the original record ID
-  barcode: text("barcode").notNull(),
-  productId: integer("product_id"),
-  productName: text("product_name"),
-  productSku: text("product_sku"),
-  scannedByCode: text("scanned_by_code"),
-  scannerName: text("scanner_name"),
-  scannerDepartment: text("scanner_department"),
-  scannedAt: timestamp("scanned_at"),
-  action: text("action"),
-  quantity: integer("quantity"),
-  notes: text("notes"),
-  backupDate: timestamp("backup_date").defaultNow(), // When the record was backed up
-});
-
-
-
-// Proforma Slip backup schema
-export const proformaSlipsBackup = pgTable("proforma_slips_backup", {
-  id: serial("id").primaryKey(),
-  originalId: integer("original_id"), // Reference to the original record ID
-  orderDate: date("order_date"),
-  orderNumber: text("order_number"),
-  partyName: text("party_name"),
-  plant: text("plant"),
-  totalQuantity: integer("total_quantity"),
-  totalVolume: text("total_volume"),
-  vehicleNumber: text("vehicle_number"),
-  driverName: text("driver_name"),
-  createdById: integer("created_by_id"),
-  createdAt: timestamp("created_at"),
-  notes: text("notes"),
-  backupDate: timestamp("backup_date").defaultNow(), // When the record was backed up
-});
-
-// Proforma Slip Items backup schema
-export const proformaSlipItemsBackup = pgTable("proforma_slip_items_backup", {
-  id: serial("id").primaryKey(),
-  originalId: integer("original_id"), // Reference to the original record ID
-  proformaSlipId: integer("proforma_slip_id"), // Reference to the original proforma slip ID
-  proformaSlipBackupId: integer("proforma_slip_backup_id"), // Reference to the backup proforma slip ID
-  productId: integer("product_id"),
-  quantity: integer("quantity"),
-  srNo: text("sr_no"),
-  barcode: text("barcode"),
-  itemName: text("item_name"),
-  createdAt: timestamp("created_at"),
-  backupDate: timestamp("backup_date").defaultNow(), // When the record was backed up
-});
-
-export type BackupSettings = typeof backupSettings.$inferSelect;
-export type InsertBackupSettings = z.infer<typeof insertBackupSettingsSchema>;
-
-// Voucher prefix table to store prefixes for different voucher types
-export const voucherPrefixes = pgTable("voucher_prefixes", {
-  id: serial("id").primaryKey(),
-  type: text("type").notNull(), // e.g. 'expense' or 'toll'
-  prefix: text("prefix").notNull(),
-  updatedBy: text("updated_by"),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-});
-
-export const insertVoucherPrefixSchema = createInsertSchema(voucherPrefixes).pick({
-  type: true,
-  prefix: true,
-  updatedBy: true,
-});
-
-export type VoucherPrefix = typeof voucherPrefixes.$inferSelect;
-export type InsertVoucherPrefix = z.infer<typeof insertVoucherPrefixSchema>;
-
-// Loading Operations Items backup schema
-export const loadingOpItemsBackup = pgTable("load_operations_items_backup", {
-  id: serial("id").primaryKey(),
-  originalId: integer("original_id"), // Reference to the original record ID
-  loadOperationsId: integer("load_operations_id"), // Reference to the original operation ID
-  productId: integer("product_id"),
-  quantity: integer("quantity").default(0),
-  originalQuantity: integer("original_quantity"),
-  extraQuantity: integer("extra_quantity").default(0),
-  loadedQuantity: integer("loaded_quantity").default(0),
-  loaded: boolean("loaded").default(false),
-  srNo: text("sr_no"),
-  barcode: text("barcode"),
-  itemName: text("item_name"),
-  createdAt: timestamp("created_at"),
-  backupDate: timestamp("backup_date").defaultNow(), // When the record was backed up
-});
-
-// Loading Operations backup schema
-export const loadingOperationsBackup = pgTable("load_operations_backup", {
-  id: serial("id").primaryKey(),
-  originalId: integer("original_id"), // Reference to the original record ID
-  status: text("status"),
+  status: text("status").default("in progress"), // "in progress" | "completed"
   referenceNumber: text("reference_number"),
-  partyName: text("party_name"),
+  partyName: text("party_name"),       // dealer / recipient
   plant: text("plant"),
   vehicleNumber: text("vehicle_number"),
   driverName: text("driver_name"),
-  createdById: integer("created_by_id"),
-  createdAt: timestamp("created_at"),
+  createdByCode: text("created_by_code").references(() => users.userCode),
+  createdAt: timestamp("created_at").defaultNow(),
   completedAt: timestamp("completed_at"),
   notes: text("notes"),
   orderDate: timestamp("order_date"),
-  backupDate: timestamp("backup_date").defaultNow(), // When the record was backed up
+  isBackedUp: boolean("is_backed_up").default(false),
 });
 
-export type ScanHistoryBackup = typeof scanHistoryBackup.$inferSelect;
-export type LoadingOpItemBackup = typeof loadingOpItemsBackup.$inferSelect;
-export type LoadingOperationBackup = typeof loadingOperationsBackup.$inferSelect;
+export const insertLoadingOperationSchema = createInsertSchema(loadingOperations, {
+  orderDate: z.union([z.date(), z.string()]).optional(),
+  plant: z.string().optional(),
+  partyName: z.string().optional(),
+  driverName: z.string().optional(),
+}).pick({
+  status: true, referenceNumber: true, vehicleNumber: true, driverName: true,
+  createdByCode: true, notes: true, orderDate: true, isBackedUp: true,
+  plant: true, partyName: true,
+});
 
-export type ProformaSlipBackup = typeof proformaSlipsBackup.$inferSelect;
-export type ProformaSlipItemBackup = typeof proformaSlipItemsBackup.$inferSelect;
-
-// Messages schema
-export const messages = pgTable("messages", {
+// Line items for a load operation — tracks original qty, extra qty and how many were physically loaded
+export const loadingOpItems = pgTable("load_operations_items", {
   id: serial("id").primaryKey(),
-  senderCode: text("sender_code").notNull(), // Uses userCode instead of user ID
-  recipientCode: text("recipient_code"), // Optional for broadcast messages, uses userCode
-  content: text("content").notNull(),
-  isRead: boolean("is_read").default(false),
+  loadOperationsId: integer("load_operations_id").references(() => loadingOperations.id),
+  productId: integer("product_id").references(() => products.id),
+  quantity: integer("quantity").default(0),             // total qty (proforma + extra)
+  originalQuantity: integer("original_quantity"),       // qty from the original proforma
+  extraQuantity: integer("extra_quantity").default(0),  // additional qty beyond the proforma
+  loadedQuantity: integer("loaded_quantity").default(0),// qty physically confirmed loaded
+  loaded: boolean("loaded").default(false),             // checkbox: fully loaded?
   createdAt: timestamp("created_at").defaultNow(),
-  broadcastToAll: boolean("broadcast_to_all").default(false),
-  broadcastToDesignation: text("broadcast_to_designation"), // For sending to specific designations
-  broadcastToDepartment: text("broadcast_to_department"), // For sending to specific departments
+  srNo: text("sr_no"),
+  barcode: text("barcode"),
+  itemName: text("item_name"),
+  srNoDisplay: text("sr_no_display"), // formatted Sr.No. shown in the UI table
 });
 
-export const insertMessageSchema = createInsertSchema(messages).pick({
-  senderCode: true,
-  recipientCode: true,
-  content: true,
-  isRead: true,
-  broadcastToAll: true,
-  broadcastToDesignation: true,
-  broadcastToDepartment: true,
+export const insertLoadingOpItemSchema = createInsertSchema(loadingOpItems).pick({
+  loadOperationsId: true, productId: true, quantity: true, originalQuantity: true,
+  extraQuantity: true, loadedQuantity: true, loaded: true, srNo: true,
+  barcode: true, itemName: true, srNoDisplay: true,
 });
 
-export type Message = typeof messages.$inferSelect;
-export type InsertMessage = z.infer<typeof insertMessageSchema>;
+// Backward-compatibility aliases (older code uses the "Mp" prefix)
+export type MpOperation = typeof loadingOperations.$inferSelect;
+export type MpOperationItem = typeof loadingOpItems.$inferSelect;
+export type LoadingOperation = typeof loadingOperations.$inferSelect & {
+  creatorName?: string;
+  creatorUsername?: string;
+  creatorRole?: string;
+};
+export type InsertLoadingOperation = z.infer<typeof insertLoadingOperationSchema>;
+export type LoadingOpItem = typeof loadingOpItems.$inferSelect;
+export type InsertLoadingOpItem = z.infer<typeof insertLoadingOpItemSchema>;
+export type InsertMpOperation = InsertLoadingOperation;
+export type InsertMpOperationItem = InsertLoadingOpItem;
 
-// Session table for express-session PostgreSQL store
-export const session = pgTable("session", {
-  sid: text("sid").primaryKey(),
-  sess: text("sess").notNull(), // JSON session data
-  expire: timestamp("expire").notNull(),
-});
+// ============================================================================
+// ORDERS  (Dealer Order Management)
+// Purpose : Dealer orders created manually in the Order Management module.
+//           An order can be converted into a Proforma Slip (sentToProforma flag).
+//           Each order has a list of line items with quantities and prices.
+// Used by : Order Management page (/order-management).
+// ============================================================================
 
-export type Activity = typeof activities.$inferSelect;
-export type InsertActivity = z.infer<typeof insertActivitySchema>;
-
-
-
-// Orders schema
 export const orders = pgTable("orders", {
   id: serial("id").primaryKey(),
   orderNumber: text("order_number").notNull(),
@@ -641,27 +394,19 @@ export const orders = pgTable("orders", {
   plant: text("plant"),
   vehicleNumber: text("vehicle_number"),
   orderDate: text("order_date").default(new Date().toISOString().split('T')[0]),
-  status: text("status").default("DRAFT"),
+  status: text("status").default("DRAFT"), // "DRAFT" | "CONFIRMED" | "DISPATCHED"
   createdByCode: text("created_by_code").references(() => users.userCode),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
   notes: text("notes"),
   sentToProforma: boolean("sent_to_proforma").default(false),
-  proformaId: integer("proforma_id"),
+  proformaId: integer("proforma_id"), // FK to proformaSlips once converted
 });
 
 export const insertOrderSchema = createInsertSchema(orders).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
-  sentToProforma: true,
-  proformaId: true
+  id: true, createdAt: true, updatedAt: true, sentToProforma: true, proformaId: true,
 });
 
-export type Order = typeof orders.$inferSelect;
-export type InsertOrder = z.infer<typeof insertOrderSchema>;
-
-// Order Items schema
 export const orderItems = pgTable("order_items", {
   id: serial("id").primaryKey(),
   orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
@@ -675,55 +420,388 @@ export const orderItems = pgTable("order_items", {
   category: text("category"),
   hsn: text("hsn"),
   createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow()
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 export const insertOrderItemSchema = createInsertSchema(orderItems).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true
+  id: true, createdAt: true, updatedAt: true,
 });
 
-// In schema.ts
+export type Order = typeof orders.$inferSelect;
+export type InsertOrder = z.infer<typeof insertOrderSchema>;
+export type OrderItem = typeof orderItems.$inferSelect;
+export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;
+
+// ============================================================================
+// PURCHASE ORDERS  (Excel-based Consolidated Dealer Orders)
+// Purpose : Bulk dealer orders imported from Excel files. A single purchase
+//           order covers multiple dealers and multiple products (a matrix).
+//           Each cell in the matrix becomes one purchaseOrderItem row.
+// Used by : Order Management / Purchases import flow.
+// ============================================================================
+
+export const purchaseOrders = pgTable("purchase_orders", {
+  id: serial("id").primaryKey(),
+  orderDate: date("order_date").notNull(),
+  deliveryDate: date("delivery_date"),
+  status: text("status").default("pending"), // "pending" | "confirmed" | "processed" | "completed" | "cancelled"
+  totalItems: integer("total_items").default(0),
+  totalDealers: integer("total_dealers").default(0),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+  createdByCode: text("created_by_code").references(() => users.userCode),
+});
+
+export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders, {
+  orderDate: z.union([z.date(), z.string()]),
+  deliveryDate: z.union([z.date(), z.string()]).optional(),
+}).pick({
+  orderDate: true, deliveryDate: true, status: true, totalItems: true,
+  totalDealers: true, notes: true, createdByCode: true,
+});
+
+// One row per (dealer × product) combination in the Excel matrix
+export const purchaseOrderItems = pgTable("purchase_order_items", {
+  id: serial("id").primaryKey(),
+  purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id),
+  dealerName: text("dealer_name").notNull(),
+  vehicleNumber: text("vehicle_number"),
+  driverName: text("driver_name"),
+  productId: integer("product_id").references(() => products.id),
+  productCode: text("product_code"),
+  productName: text("product_name"),
+  barcode: text("barcode"),
+  quantity: integer("quantity").default(0),
+  unitPrice: text("unit_price"),
+  totalPrice: text("total_price"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertPurchaseOrderItemSchema = createInsertSchema(purchaseOrderItems).pick({
+  purchaseOrderId: true, dealerName: true, vehicleNumber: true, driverName: true,
+  productId: true, productCode: true, productName: true, barcode: true,
+  quantity: true, unitPrice: true, totalPrice: true, notes: true,
+});
+
+export type PurchaseOrder = typeof purchaseOrders.$inferSelect;
+export type InsertPurchaseOrder = z.infer<typeof insertPurchaseOrderSchema>;
+export type PurchaseOrderItem = typeof purchaseOrderItems.$inferSelect;
+export type InsertPurchaseOrderItem = z.infer<typeof insertPurchaseOrderItemSchema>;
+
+// Aliases used by the frontend (historical naming convention)
+export type DealerPurchaseOrder = PurchaseOrder;
+export type InsertDealerPurchaseOrder = InsertPurchaseOrder;
+export type DealerPurchaseOrderItem = PurchaseOrderItem;
+export type InsertDealerPurchaseOrderItem = InsertPurchaseOrderItem;
+
+// ============================================================================
+// PURCHASES  (Manual Stock Purchase Log)
+// Purpose : Simple log of stock purchases entered manually by a user.
+//           Not to be confused with purchaseOrders (Excel import).
+//           These entries are used to increase inStock on the product.
+// Used by : Purchases page (/purchases).
+// ============================================================================
+
+export const purchases = pgTable("purchases", {
+  id: serial("id").primaryKey(),
+  date: date("date").defaultNow(),
+  item: text("item").notNull(),
+  quantity: integer("quantity").default(0),
+  priceDetails: text("price_details"),
+  notes: text("notes"),
+  userCode: text("user_code").references(() => users.userCode),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertPurchaseSchema = createInsertSchema(purchases, {
+  date: z.union([z.date(), z.string()])
+}).pick({
+  date: true, item: true, quantity: true, priceDetails: true,
+  notes: true, userCode: true,
+});
+
+export type Purchase = typeof purchases.$inferSelect;
+export type InsertPurchase = z.infer<typeof insertPurchaseSchema>;
+
+// ============================================================================
+// PLANTS  (Warehouse / Location Settings)
+// Purpose : Configurable plant/warehouse locations. Each plant has display
+//           colours for UI branding and feature flags (print-lock, split pages).
+//           STVs (sub-transfer voucher codes) are linked to a plant via plantStvs.
+// Used by : Plant Settings page (/plant-settings), Proforma Slips, Load Operations.
+// ============================================================================
+
 export const plants = pgTable("plants", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   bgColor: text("bg_color").notNull(),
   textColor: text("text_color").notNull(),
   borderColor: text("border_color").notNull(),
-  isLockingEnabled: boolean("is_locking_enabled").default(true),
-  isSplitPagesEnabled: boolean("is_split_pages_enabled").default(false),
+  isLockingEnabled: boolean("is_locking_enabled").default(true),      // lock proforma after first print
+  isSplitPagesEnabled: boolean("is_split_pages_enabled").default(false), // split print across pages
   createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const insertPlantSchema = createInsertSchema(plants).pick({
-  name: true,
-  bgColor: true,
-  textColor: true,
-  borderColor: true,
-  isLockingEnabled: true,
-  isSplitPagesEnabled: true,
+  name: true, bgColor: true, textColor: true, borderColor: true,
+  isLockingEnabled: true, isSplitPagesEnabled: true,
 });
 
-export type Plant = typeof plants.$inferSelect;
-export type InsertPlant = typeof plants.$inferInsert;
-
+// STV codes associated with a plant (e.g. for truck/dispatch routing)
 export const plantStvs = pgTable("plant_stvs", {
   id: serial("id").primaryKey(),
-  plantId: integer("plant_id").references(() => plants.id, {
-    onDelete: "cascade",
-  }),
+  plantId: integer("plant_id").references(() => plants.id, { onDelete: "cascade" }),
   stv: text("stv").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const insertPlantStvSchema = createInsertSchema(plantStvs).pick({
-  plantId: true,
-  stv: true,
+  plantId: true, stv: true,
 });
 
+export type Plant = typeof plants.$inferSelect;
+export type InsertPlant = typeof plants.$inferInsert;
 export type PlantStv = typeof plantStvs.$inferSelect;
 export type InsertPlantStv = z.infer<typeof insertPlantStvSchema>;
 
-export type OrderItem = typeof orderItems.$inferSelect;
-export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;
+// ============================================================================
+// VEHICLE INFO
+// Purpose : Registry of company vehicles with their RTO numbers.
+//           Provides an autocomplete source for the vehicle number field
+//           in Proforma Slips and Load Operations.
+// Used by : Proforma Slips page, Load Operations page, Settings.
+// ============================================================================
+
+export const vehicleInfo = pgTable("vehicle_info", {
+  id: serial("id").primaryKey(),
+  srNo: integer("sr_no").notNull(),
+  rtoNumber: text("rto_number").notNull(),
+  vehicleNumber: text("vehicle_number").notNull().unique(),
+  lastEditedByCode: text("last_edited_by_code").references(() => users.userCode),
+  lastEditedAt: timestamp("last_edited_at").defaultNow(),
+  createdByCode: text("created_by_code").references(() => users.userCode),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertVehicleInfoSchema = createInsertSchema(vehicleInfo).pick({
+  srNo: true, rtoNumber: true, vehicleNumber: true,
+  lastEditedByCode: true, createdByCode: true,
+});
+
+export type VehicleInfo = typeof vehicleInfo.$inferSelect;
+export type InsertVehicleInfo = z.infer<typeof insertVehicleInfoSchema>;
+
+// ============================================================================
+// MESSAGES  (Internal Messaging / Broadcasts)
+// Purpose : In-app messaging between employees. Supports direct messages
+//           and broadcasts to all users, a specific designation, or a
+//           specific department.
+// Used by : Messages page (/messages).
+// ============================================================================
+
+export const messages = pgTable("messages", {
+  id: serial("id").primaryKey(),
+  senderCode: text("sender_code").notNull(),       // userCode of the sender
+  recipientCode: text("recipient_code"),            // userCode of the recipient (null for broadcasts)
+  content: text("content").notNull(),
+  isRead: boolean("is_read").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+  broadcastToAll: boolean("broadcast_to_all").default(false),
+  broadcastToDesignation: text("broadcast_to_designation"), // target a specific job title
+  broadcastToDepartment: text("broadcast_to_department"),   // target a specific department
+});
+
+export const insertMessageSchema = createInsertSchema(messages).pick({
+  senderCode: true, recipientCode: true, content: true, isRead: true,
+  broadcastToAll: true, broadcastToDesignation: true, broadcastToDepartment: true,
+});
+
+export type Message = typeof messages.$inferSelect;
+export type InsertMessage = z.infer<typeof insertMessageSchema>;
+
+// ============================================================================
+// VOUCHER PREFIXES
+// Purpose : Configurable number prefixes for expense and toll vouchers.
+//           e.g. prefix "EXP-" → voucher numbers become "EXP-001", "EXP-002".
+// Used by : Expense Voucher page, Toll Voucher page, Settings.
+// ============================================================================
+
+export const voucherPrefixes = pgTable("voucher_prefixes", {
+  id: serial("id").primaryKey(),
+  type: text("type").notNull(),    // "expense" | "toll"
+  prefix: text("prefix").notNull(),
+  updatedBy: text("updated_by"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertVoucherPrefixSchema = createInsertSchema(voucherPrefixes).pick({
+  type: true, prefix: true, updatedBy: true,
+});
+
+export type VoucherPrefix = typeof voucherPrefixes.$inferSelect;
+export type InsertVoucherPrefix = z.infer<typeof insertVoucherPrefixSchema>;
+
+// ============================================================================
+// ACTIVITIES  (Global Audit Log)
+// Purpose : Records every significant user action across all pages — creates,
+//           updates, deletes, prints, etc. Used for the Activities admin page
+//           and compliance auditing.
+// Used by : Activities page (/activities, admin only). Written from almost
+//           every route handler via a shared helper.
+// ============================================================================
+
+export const activities = pgTable("activities", {
+  id: serial("id").primaryKey(),
+  pageName: text("page_name").notNull(),    // which page triggered this event
+  action: text("action").notNull(),          // "create" | "update" | "delete" | "print" | etc.
+  entityType: text("entity_type").notNull(), // "product" | "slip" | "order" | etc.
+  entityId: text("entity_id"),               // ID of the affected record
+  details: text("details"),                  // extra JSON metadata about the change
+  userCode: text("user_code").references(() => users.userCode),
+  userName: text("user_name"),               // cached for fast display without a join
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertActivitySchema = createInsertSchema(activities).pick({
+  pageName: true, action: true, entityType: true, entityId: true,
+  details: true, userCode: true, userName: true,
+});
+
+export type Activity = typeof activities.$inferSelect;
+export type InsertActivity = z.infer<typeof insertActivitySchema>;
+
+// ============================================================================
+// AUTH SESSION  (Express-session Store)
+// Purpose : Stores server-side HTTP sessions for express-session using the
+//           connect-pg-simple PostgreSQL store. Each row is one active login
+//           session. Rows expire automatically via the `expire` timestamp.
+// Managed by : connect-pg-simple (do NOT write to this table manually).
+// ============================================================================
+
+export const session = pgTable("session", {
+  sid: text("sid").primaryKey(),
+  sess: text("sess").notNull(), // serialised JSON session data
+  expire: timestamp("expire").notNull(),
+});
+
+// ============================================================================
+// BACKUP TABLES  (Historical / Archived Data)
+// Purpose : When a backup job runs, completed records are copied from the live
+//           tables into these backup tables and the live rows are marked
+//           isBackedUp = true.  This keeps the live tables lean while
+//           preserving full history.
+//
+// backup_settings        — configures how often auto-backup runs
+// scan_history_backup    — archived rows from scan_history
+// proforma_slips_backup  — archived rows from proforma_slips
+// proforma_slip_items_backup — archived rows from proforma_slip_items
+// load_operations_backup     — archived rows from load_operations
+// load_operations_items_backup — archived rows from load_operations_items
+// ============================================================================
+
+export const backupSettings = pgTable("backup_settings", {
+  id: serial("id").primaryKey(),
+  lastBackupDate: timestamp("last_backup_date").defaultNow(),
+  autoBackupEnabled: boolean("auto_backup_enabled").default(true),
+  backupFrequencyHours: integer("backup_frequency_hours").default(24),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertBackupSettingsSchema = createInsertSchema(backupSettings).pick({
+  lastBackupDate: true, autoBackupEnabled: true, backupFrequencyHours: true,
+});
+
+export type BackupSettings = typeof backupSettings.$inferSelect;
+export type InsertBackupSettings = z.infer<typeof insertBackupSettingsSchema>;
+
+export const scanHistoryBackup = pgTable("scan_history_backup", {
+  id: serial("id").primaryKey(),
+  originalId: integer("original_id"),
+  barcode: text("barcode").notNull(),
+  productId: integer("product_id"),
+  productName: text("product_name"),
+  productSku: text("product_sku"),
+  scannedByCode: text("scanned_by_code"),
+  scannerName: text("scanner_name"),
+  scannerDepartment: text("scanner_department"),
+  scannedAt: timestamp("scanned_at"),
+  action: text("action"),
+  quantity: integer("quantity"),
+  notes: text("notes"),
+  backupDate: timestamp("backup_date").defaultNow(),
+});
+
+export const proformaSlipsBackup = pgTable("proforma_slips_backup", {
+  id: serial("id").primaryKey(),
+  originalId: integer("original_id"),
+  orderDate: date("order_date"),
+  orderNumber: text("order_number"),
+  partyName: text("party_name"),
+  plant: text("plant"),
+  totalQuantity: integer("total_quantity"),
+  totalVolume: text("total_volume"),
+  vehicleNumber: text("vehicle_number"),
+  driverName: text("driver_name"),
+  createdById: integer("created_by_id"),
+  createdAt: timestamp("created_at"),
+  notes: text("notes"),
+  backupDate: timestamp("backup_date").defaultNow(),
+});
+
+export const proformaSlipItemsBackup = pgTable("proforma_slip_items_backup", {
+  id: serial("id").primaryKey(),
+  originalId: integer("original_id"),
+  proformaSlipId: integer("proforma_slip_id"),
+  proformaSlipBackupId: integer("proforma_slip_backup_id"),
+  productId: integer("product_id"),
+  quantity: integer("quantity"),
+  srNo: text("sr_no"),
+  barcode: text("barcode"),
+  itemName: text("item_name"),
+  createdAt: timestamp("created_at"),
+  backupDate: timestamp("backup_date").defaultNow(),
+});
+
+export const loadingOpItemsBackup = pgTable("load_operations_items_backup", {
+  id: serial("id").primaryKey(),
+  originalId: integer("original_id"),
+  loadOperationsId: integer("load_operations_id"),
+  productId: integer("product_id"),
+  quantity: integer("quantity").default(0),
+  originalQuantity: integer("original_quantity"),
+  extraQuantity: integer("extra_quantity").default(0),
+  loadedQuantity: integer("loaded_quantity").default(0),
+  loaded: boolean("loaded").default(false),
+  srNo: text("sr_no"),
+  barcode: text("barcode"),
+  itemName: text("item_name"),
+  createdAt: timestamp("created_at"),
+  backupDate: timestamp("backup_date").defaultNow(),
+});
+
+export const loadingOperationsBackup = pgTable("load_operations_backup", {
+  id: serial("id").primaryKey(),
+  originalId: integer("original_id"),
+  status: text("status"),
+  referenceNumber: text("reference_number"),
+  partyName: text("party_name"),
+  plant: text("plant"),
+  vehicleNumber: text("vehicle_number"),
+  driverName: text("driver_name"),
+  createdById: integer("created_by_id"),
+  createdAt: timestamp("created_at"),
+  completedAt: timestamp("completed_at"),
+  notes: text("notes"),
+  orderDate: timestamp("order_date"),
+  backupDate: timestamp("backup_date").defaultNow(),
+});
+
+export type ScanHistoryBackup = typeof scanHistoryBackup.$inferSelect;
+export type LoadingOpItemBackup = typeof loadingOpItemsBackup.$inferSelect;
+export type LoadingOperationBackup = typeof loadingOperationsBackup.$inferSelect;
+export type ProformaSlipBackup = typeof proformaSlipsBackup.$inferSelect;
+export type ProformaSlipItemBackup = typeof proformaSlipItemsBackup.$inferSelect;

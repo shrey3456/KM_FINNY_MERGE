@@ -105,6 +105,7 @@ import expenseVoucherRoutes from "./routes/expense-voucher";
 import tollVoucherRoutes from "./routes/toll-voucher";
 import voucherPrefixRoutes from "./routes/voucher-prefix";
 import checkinoutRoutes from "./routes/checkinout";
+import scanSessionRoutes from "./routes/scan-sessions";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -8853,6 +8854,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount check-in/out routes
   apiRouter.use(checkinoutRoutes);
+
+  // Mount scan session routes
+  apiRouter.use('/scan-sessions', scanSessionRoutes);
 
   // Mount the API router
   app.use("/api", apiRouter);

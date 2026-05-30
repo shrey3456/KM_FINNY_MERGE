@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
 import Home from "@/pages/Dashboard";
 import ScanOrder from "@/pages/Scanning/Scan";
+import StockReport from "@/pages/Scanning/StockReport";
 import Inventory from "@/pages/Inventory";
 import Reports from "@/pages/Reports";
 import Users from "@/pages/Users";
@@ -238,6 +239,7 @@ function Router() {
       <Switch>
         <Route path="/" component={Home} />
         <Route path="/scan" component={ScanOrder} />
+        <Route path="/scan-stock-report" component={StockReport} />
         <ProtectedRoute path="/inventory" component={Inventory} requireInventoryAccess={true} />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} />
         <Route path="/load-operations" component={LoadOperations} /> {/* Updated route */}
