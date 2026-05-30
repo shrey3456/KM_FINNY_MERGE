@@ -191,6 +191,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
           path: "/scan",
         },
         {
+          label: "Pallet Stock Report",
+          icon: <FileBarChart className="h-5 w-5 mr-3 text-[#001d6e]" style={{ fill: "#a78bfa" }} />,
+          path: "/scan-stock-report",
+        },
+        {
           label: "Reports",
           icon: <PieChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/reports",

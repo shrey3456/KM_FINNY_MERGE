@@ -152,23 +152,29 @@ function toQuantity(value: string | undefined) {
 function buildProductLookup(productRows: Array<typeof products.$inferSelect>) {
   const bySap = new Map<string, typeof products.$inferSelect>();
   const byName = new Map<string, typeof products.$inferSelect>();
+  const byBarcode = new Map<string, typeof products.$inferSelect>();
 
   productRows.forEach((product) => {
     if (product.sapCode) bySap.set(product.sapCode.trim(), product);
     byName.set(product.name.trim().toLowerCase(), product);
+    if (product.barcode) byBarcode.set(product.barcode.trim().toLowerCase(), product);
   });
 
-  return { bySap, byName };
+  return { bySap, byName, byBarcode };
 }
 
 function matchProduct(
-  item: { sapCode?: string; name: string },
+  item: { sapCode?: string; name: string; barcode?: string },
   lookup: ReturnType<typeof buildProductLookup>,
 ) {
+  // Try barcode first (most precise match)
+  if (item.barcode) {
+    const byBarcode = lookup.byBarcode.get(item.barcode.trim().toLowerCase());
+    if (byBarcode) return byBarcode;
+  }
   if (item.sapCode && lookup.bySap.has(item.sapCode)) {
     return lookup.bySap.get(item.sapCode);
   }
-
   return lookup.byName.get(item.name.trim().toLowerCase());
 }
 
@@ -333,17 +339,21 @@ function parseArrivingOrdersCsv(
         });
       }
 
+      // Read barcode from 'productBarcode' or 'barcode' column — normalised to lowercase without spaces
+      const barcodeFromCsv = getCell(row, ['productbarcode', 'barcode']);
       const parsedProduct = {
         sapCode: getCell(row, ['sapcode', 'productcode']),
         name: productName,
+        barcode: barcodeFromCsv,
       };
       const product = matchProduct(parsedProduct, lookup);
 
       groupedOrders.get(orderNumber)?.items.push({
         productId: product?.id,
-        srNo: getCell(row, ['srno', 'serialnumber']) || product?.srNo || '',
+        srNo: getCell(row, ['productsrno', 'srno', 'serialnumber']) || product?.srNo || '',
         name: product?.name || productName,
-        barcode: getCell(row, ['barcode']) || product?.barcode || '',
+        // Always prefer the barcode from the CSV column over the inventory fallback
+        barcode: barcodeFromCsv || product?.barcode || '',
         quantity,
         sapCode: parsedProduct.sapCode,
       });
@@ -498,21 +508,13 @@ export function registerOrderRoutes(apiRouter: Router) {
 
       const items = await db
         .select({
-          orderId: orderItems.orderId,
-          productId: orderItems.productId,
           name: orderItems.name,
           barcode: orderItems.barcode,
+          srNo: orderItems.srNo,
           quantity: orderItems.quantity,
         })
         .from(orderItems)
         .where(inArray(orderItems.orderId, orderIds));
-
-      const productIds = Array.from(new Set(items.map((item) => item.productId).filter((id): id is number => typeof id === 'number')));
-      const productsList = productIds.length
-        ? await db.select().from(products).where(inArray(products.id, productIds))
-        : [];
-      const productMap = new Map<number, typeof products.$inferSelect>();
-      productsList.forEach((product) => productMap.set(product.id, product));
 
       const aggregate = new Map<string, {
         id: string;
@@ -526,10 +528,9 @@ export function registerOrderRoutes(apiRouter: Router) {
         sapCode?: string | null;
       }>();
 
-      items.forEach((item) => {
-        const product = item.productId ? productMap.get(item.productId) : undefined;
-        const key = item.productId ? `product-${item.productId}` : `name-${item.name.toLowerCase()}`;
-        const sku = product?.itemNo || product?.sapCode || product?.srNo || item.name;
+      items.forEach((item, index) => {
+        const sku = item.barcode || item.srNo || item.name || `item-${index}`;
+        const key = `${sku.toLowerCase()}-${index}`;
 
         const existing = aggregate.get(key);
         if (existing) {
@@ -540,13 +541,13 @@ export function registerOrderRoutes(apiRouter: Router) {
         aggregate.set(key, {
           id: key,
           sku,
-          itemName: product?.name || item.name,
+          itemName: item.name,
           expectedQty: item.quantity || 0,
           scannedQty: 0,
-          productId: product?.id,
-          barcode: product?.barcode || item.barcode || undefined,
-          itemNo: product?.itemNo ?? undefined,
-          sapCode: product?.sapCode ?? undefined,
+          productId: undefined,
+          barcode: item.barcode || undefined,
+          itemNo: item.srNo || undefined,
+          sapCode: undefined,
         });
       });
 

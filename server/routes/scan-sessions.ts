@@ -1,0 +1,802 @@
+import { Router, Request, Response } from 'express';
+import { db, pool } from '../db';
+import {
+  scanSessions,
+  scanSessionItems,
+  scanSessionExtras,
+  scanSessionPalletScans,
+  products,
+  insertScanSessionSchema,
+  insertScanSessionItemSchema,
+  insertScanSessionExtraSchema,
+  insertScanSessionPalletScanSchema,
+} from '@shared/schema';
+import { eq, desc, inArray, count, asc } from 'drizzle-orm';
+import { z } from 'zod';
+
+const router = Router();
+
+// ── List all sessions ──────────────────────────────────────────────────────
+router.get('/', async (_req: Request, res: Response) => {
+  try {
+    const sessions = await db
+      .select()
+      .from(scanSessions)
+      .orderBy(desc(scanSessions.createdAt));
+
+    // Attach item/extra counts
+    const sessionIds = sessions.map((s) => s.id);
+    if (!sessionIds.length) return res.json([]);
+
+    const items = await db
+      .select()
+      .from(scanSessionItems)
+      .where(inArray(scanSessionItems.sessionId, sessionIds));
+
+    const extras = await db
+      .select()
+      .from(scanSessionExtras)
+      .where(inArray(scanSessionExtras.sessionId, sessionIds));
+
+    const result = sessions.map((session) => {
+      const sessionItems = items.filter((i) => i.sessionId === session.id);
+      const sessionExtras = extras.filter((e) => e.sessionId === session.id);
+      return {
+        ...session,
+        totalExpected: sessionItems.reduce((s, i) => s + (i.expectedQty ?? 0), 0),
+        totalScanned: sessionItems.reduce((s, i) => s + (i.scannedQty ?? 0), 0),
+        totalExtras: sessionExtras.reduce((s, e) => s + (e.quantity ?? 0), 0),
+        itemCount: sessionItems.length,
+      };
+    });
+
+    return res.json(result);
+  } catch (error) {
+    console.error('Error listing scan sessions:', error);
+    return res.status(500).json({ error: 'Failed to list scan sessions' });
+  }
+});
+
+// ── Get single session with full items + extras ────────────────────────────
+router.get('/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid session ID' });
+
+  try {
+    const [session] = await db.select().from(scanSessions).where(eq(scanSessions.id, id));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const items = await db
+      .select()
+      .from(scanSessionItems)
+      .where(eq(scanSessionItems.sessionId, id));
+
+    const extras = await db
+      .select()
+      .from(scanSessionExtras)
+      .where(eq(scanSessionExtras.sessionId, id))
+      .orderBy(desc(scanSessionExtras.scannedAt));
+
+    return res.json({ ...session, items, extras });
+  } catch (error) {
+    console.error('Error fetching scan session:', error);
+    return res.status(500).json({ error: 'Failed to fetch scan session' });
+  }
+});
+
+// ── Create session + bulk insert items ────────────────────────────────────
+router.post('/', async (req: Request, res: Response) => {
+  try {
+    const { session: sessionData, items: itemsData } = req.body as {
+      session: z.infer<typeof insertScanSessionSchema>;
+      items: Array<Omit<z.infer<typeof insertScanSessionItemSchema>, 'sessionId'>>;
+    };
+
+    const validSession = insertScanSessionSchema.parse({
+      ...sessionData,
+      createdByCode: (req.user as any)?.userCode ?? sessionData.createdByCode,
+      createdByName: (req.user as any)?.name ?? sessionData.createdByName,
+    });
+
+    const [newSession] = await db.insert(scanSessions).values(validSession).returning();
+
+    const insertedItems =
+      itemsData?.length
+        ? await db
+            .insert(scanSessionItems)
+            .values(itemsData.map((item) => ({ ...item, sessionId: newSession.id })))
+            .returning()
+        : [];
+
+    return res.status(201).json({ ...newSession, items: insertedItems, extras: [] });
+  } catch (error) {
+    console.error('Error creating scan session:', error);
+    if (error instanceof z.ZodError) return res.status(400).json({ error: error.errors });
+    return res.status(500).json({ error: 'Failed to create scan session' });
+  }
+});
+
+// ── Update session status ──────────────────────────────────────────────────
+router.patch('/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid session ID' });
+
+  try {
+    const { status } = req.body as { status?: string };
+    const [updated] = await db
+      .update(scanSessions)
+      .set({ status, updatedAt: new Date() })
+      .where(eq(scanSessions.id, id))
+      .returning();
+
+    if (!updated) return res.status(404).json({ error: 'Session not found' });
+    return res.json(updated);
+  } catch (error) {
+    console.error('Error updating scan session:', error);
+    return res.status(500).json({ error: 'Failed to update scan session' });
+  }
+});
+
+// ── Increment scannedQty for an item ──────────────────────────────────────
+// Accepts { increment: number } — uses a SQL-side add so concurrent scans
+// never overwrite each other (avoids stale-closure race conditions on the client).
+router.patch('/:id/items/:itemId', async (req: Request, res: Response) => {
+  const sessionId = parseInt(req.params.id);
+  const itemId = parseInt(req.params.itemId);
+  if (isNaN(sessionId) || isNaN(itemId)) return res.status(400).json({ error: 'Invalid ID' });
+
+  try {
+    const { increment, productId } = req.body as { increment: number; productId?: number | null };
+    const inc = Number(increment);
+    if (!Number.isFinite(inc) || inc <= 0) {
+      return res.status(400).json({ error: 'increment must be a positive number' });
+    }
+
+    // Increment scannedQty and — if productId is provided and the row currently has no
+    // product linked — store it so the report JOIN to products works going forward.
+    await pool.query(
+      `UPDATE scan_session_items
+       SET scanned_qty = COALESCE(scanned_qty, 0) + $1,
+           updated_at  = NOW(),
+           product_id  = CASE WHEN product_id IS NULL THEN $3 ELSE product_id END
+       WHERE id = $2`,
+      [inc, itemId, productId ?? null],
+    );
+
+    const result = await pool.query('SELECT * FROM scan_session_items WHERE id = $1', [itemId]);
+    const updated = result.rows[0];
+
+    if (!updated) return res.status(404).json({ error: 'Item not found' });
+
+    await db
+      .update(scanSessions)
+      .set({ updatedAt: new Date() })
+      .where(eq(scanSessions.id, sessionId));
+
+    return res.json(updated);
+  } catch (error) {
+    console.error('Error updating scan session item:', error);
+    return res.status(500).json({ error: 'Failed to update item' });
+  }
+});
+
+// ── Upsert an extra scan ───────────────────────────────────────────────────
+router.post('/:id/extras', async (req: Request, res: Response) => {
+  const sessionId = parseInt(req.params.id);
+  if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
+
+  try {
+    const payload = insertScanSessionExtraSchema.parse({
+      ...req.body,
+      sessionId,
+      scannedByCode: (req.user as any)?.userCode ?? req.body.scannedByCode,
+      scannedByName: (req.user as any)?.name ?? req.body.scannedByName,
+    });
+
+    // If an extra for this code already exists in the session, increment qty
+    const existingForCode = (
+      await db.select().from(scanSessionExtras).where(eq(scanSessionExtras.sessionId, sessionId))
+    ).find((e) => e.code === payload.code);
+
+    let result;
+    if (existingForCode) {
+      [result] = await db
+        .update(scanSessionExtras)
+        .set({ quantity: (existingForCode.quantity ?? 0) + (payload.quantity ?? 1), scannedAt: new Date() })
+        .where(eq(scanSessionExtras.id, existingForCode.id))
+        .returning();
+    } else {
+      [result] = await db.insert(scanSessionExtras).values(payload).returning();
+    }
+
+    await db.update(scanSessions).set({ updatedAt: new Date() }).where(eq(scanSessions.id, sessionId));
+
+    return res.status(201).json(result);
+  } catch (error) {
+    console.error('Error adding extra scan:', error);
+    if (error instanceof z.ZodError) return res.status(400).json({ error: error.errors });
+    return res.status(500).json({ error: 'Failed to add extra scan' });
+  }
+});
+
+// ── Bulk-sync all item scannedQty values for a session ───────────────────
+// Called when the user navigates away from the scan view to guarantee
+// every item's quantity is persisted, even if individual PATCHes were missed.
+router.put('/:id/sync-items', async (req: Request, res: Response) => {
+  const sessionId = parseInt(req.params.id);
+  if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
+
+  try {
+    const { items } = req.body as { items: Array<{ id: number; scannedQty: number }> };
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.json({ updated: 0 });
+    }
+
+    // Update each item using the absolute scannedQty the client reports
+    await Promise.all(
+      items.map(({ id, scannedQty }) =>
+        pool.query(
+          'UPDATE scan_session_items SET scanned_qty = $1, updated_at = NOW() WHERE id = $2 AND session_id = $3',
+          [Math.max(0, scannedQty), id, sessionId],
+        ),
+      ),
+    );
+
+    await pool.query(
+      'UPDATE scan_sessions SET updated_at = NOW() WHERE id = $1',
+      [sessionId],
+    );
+
+    return res.json({ updated: items.length });
+  } catch (error) {
+    console.error('Error syncing session items:', error);
+    return res.status(500).json({ error: 'Failed to sync session items' });
+  }
+});
+
+// ── Record a pallet scan ──────────────────────────────────────────────────
+// One row per confirmed scan event. palletNumber is auto-assigned as
+// (total prior pallet scans for this item in this session) + 1.
+router.post('/:id/pallet-scans', async (req: Request, res: Response) => {
+  const sessionId = parseInt(req.params.id);
+  if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
+
+  try {
+    const body = req.body as {
+      sessionItemId?: number;
+      barcode: string;
+      sku?: string;
+      itemName: string;
+      productId?: number;
+      quantity?: number;
+      numPallets?: number;   // calculated: quantity ÷ itemsPerPallet (e.g. 1.03)
+      isExtra?: boolean;
+      scannedByCode?: string;
+      scannedByName?: string;
+    };
+
+    // Count existing pallet scans for this item (or for the barcode if extra)
+    // to derive the next sequential pallet number.
+    const [{ value: existing }] = await db
+      .select({ value: count() })
+      .from(scanSessionPalletScans)
+      .where(
+        body.sessionItemId
+          ? eq(scanSessionPalletScans.sessionItemId, body.sessionItemId)
+          : eq(scanSessionPalletScans.sessionId, sessionId),
+      );
+
+    const palletNumber = (existing ?? 0) + 1;
+
+    const payload = insertScanSessionPalletScanSchema.parse({
+      sessionId,
+      sessionItemId: body.sessionItemId ?? null,
+      barcode: body.barcode,
+      sku: body.sku ?? null,
+      itemName: body.itemName,
+      productId: body.productId ?? null,
+      palletNumber,
+      quantity: body.quantity ?? 1,
+      numPallets: body.numPallets ?? null,
+      isExtra: body.isExtra ?? false,
+      scannedByCode: (req.user as any)?.userCode ?? body.scannedByCode ?? null,
+      scannedByName: (req.user as any)?.name ?? body.scannedByName ?? null,
+    });
+
+    const [result] = await db.insert(scanSessionPalletScans).values(payload).returning();
+    return res.status(201).json(result);
+  } catch (error) {
+    console.error('Error recording pallet scan:', error);
+    if (error instanceof z.ZodError) return res.status(400).json({ error: error.errors });
+    return res.status(500).json({ error: 'Failed to record pallet scan' });
+  }
+});
+
+// ── Per-session stock report (specs + stock levels + pallet breakdown) ───
+router.get('/:id/stock-report', async (req: Request, res: Response) => {
+  const sessionId = parseInt(req.params.id);
+  if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
+
+  try {
+    const [session] = await db.select().from(scanSessions).where(eq(scanSessions.id, sessionId));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    // Session items joined with product specs + current stock
+    const items = await db
+      .select({
+        id: scanSessionItems.id,
+        sku: scanSessionItems.sku,
+        barcode: scanSessionItems.barcode,
+        itemName: scanSessionItems.itemName,
+        itemNo: scanSessionItems.itemNo,
+        sapCode: scanSessionItems.sapCode,
+        productId: scanSessionItems.productId,
+        expectedQty: scanSessionItems.expectedQty,
+        scannedQty: scanSessionItems.scannedQty,
+        inStock: products.inStock,
+        hsnCode: products.hsnCode,
+        category: products.category,
+        itemsPerPallet: products.itemsPerPallet,
+        volumeInCuFt: products.volumeInCuFt,
+        productSapCode: products.sapCode,
+        productItemNo: products.itemNo,
+      })
+      .from(scanSessionItems)
+      .leftJoin(products, eq(scanSessionItems.productId, products.id))
+      .where(eq(scanSessionItems.sessionId, sessionId))
+      .orderBy(asc(scanSessionItems.itemName));
+
+    // Pallet scans for this session (order items only — extras handled separately)
+    const palletScans = await db
+      .select()
+      .from(scanSessionPalletScans)
+      .where(eq(scanSessionPalletScans.sessionId, sessionId))
+      .orderBy(asc(scanSessionPalletScans.palletNumber));
+
+    const itemsWithPallets = items.map((item) => {
+      const pallets = palletScans
+        .filter((p) => p.sessionItemId === item.id)
+        .map((p) => ({
+          id: p.id,
+          palletNumber: p.palletNumber,
+          quantity: p.quantity,
+          scannedByName: p.scannedByName,
+          scannedAt: p.scannedAt,
+          isExtra: p.isExtra,
+        }));
+      return {
+        sessionItemId: item.id,
+        sku: item.sku,
+        barcode: item.barcode ?? null,
+        itemName: item.itemName,
+        itemNo: item.itemNo ?? item.productItemNo ?? null,
+        sapCode: item.sapCode ?? item.productSapCode ?? null,
+        productId: item.productId ?? null,
+        expectedQty: item.expectedQty ?? 0,
+        scannedQty: item.scannedQty ?? 0,
+        inStock: item.inStock ?? null,
+        hsnCode: item.hsnCode ?? null,
+        category: item.category ?? null,
+        itemsPerPallet: item.itemsPerPallet ?? null,
+        volumeInCuFt: item.volumeInCuFt ?? null,
+        pallets,
+      };
+    });
+
+    // Extras joined with product specs
+    const extras = await db
+      .select({
+        id: scanSessionExtras.id,
+        code: scanSessionExtras.code,
+        itemName: scanSessionExtras.itemName,
+        sku: scanSessionExtras.sku,
+        productId: scanSessionExtras.productId,
+        quantity: scanSessionExtras.quantity,
+        reason: scanSessionExtras.reason,
+        scannedByName: scanSessionExtras.scannedByName,
+        scannedAt: scanSessionExtras.scannedAt,
+        inStock: products.inStock,
+        hsnCode: products.hsnCode,
+        category: products.category,
+        itemsPerPallet: products.itemsPerPallet,
+      })
+      .from(scanSessionExtras)
+      .leftJoin(products, eq(scanSessionExtras.productId, products.id))
+      .where(eq(scanSessionExtras.sessionId, sessionId))
+      .orderBy(desc(scanSessionExtras.scannedAt));
+
+    return res.json({ session, items: itemsWithPallets, extras });
+  } catch (error) {
+    console.error('Error generating session stock report:', error);
+    return res.status(500).json({ error: 'Failed to generate stock report' });
+  }
+});
+
+// ── Get all pallet scans for a session ────────────────────────────────────
+router.get('/:id/pallet-scans', async (req: Request, res: Response) => {
+  const sessionId = parseInt(req.params.id);
+  if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
+
+  try {
+    const rows = await db
+      .select()
+      .from(scanSessionPalletScans)
+      .where(eq(scanSessionPalletScans.sessionId, sessionId))
+      .orderBy(scanSessionPalletScans.scannedAt);
+    return res.json(rows);
+  } catch (error) {
+    console.error('Error fetching pallet scans:', error);
+    return res.status(500).json({ error: 'Failed to fetch pallet scans' });
+  }
+});
+
+// ─── Reports ───────────────────────────────────────────────────────────────
+
+// Pallet stock sheet: one row per unique item, with individual pallet scan events
+router.get('/reports/pallet-stock-sheet', async (_req: Request, res: Response) => {
+  try {
+    // Fetch all pallet scans joined with product data for category
+    const rows = await db
+      .select({
+        id: scanSessionPalletScans.id,
+        sessionId: scanSessionPalletScans.sessionId,
+        sessionItemId: scanSessionPalletScans.sessionItemId,
+        barcode: scanSessionPalletScans.barcode,
+        sku: scanSessionPalletScans.sku,
+        itemName: scanSessionPalletScans.itemName,
+        productId: scanSessionPalletScans.productId,
+        palletNumber: scanSessionPalletScans.palletNumber,
+        quantity: scanSessionPalletScans.quantity,
+        isExtra: scanSessionPalletScans.isExtra,
+        scannedByName: scanSessionPalletScans.scannedByName,
+        scannedAt: scanSessionPalletScans.scannedAt,
+        category: products.category,
+        productName: products.name,
+        itemsPerPallet: products.itemsPerPallet,
+        orderName: scanSessions.orderName,
+      })
+      .from(scanSessionPalletScans)
+      .leftJoin(products, eq(scanSessionPalletScans.productId, products.id))
+      .leftJoin(scanSessions, eq(scanSessionPalletScans.sessionId, scanSessions.id))
+      .orderBy(asc(scanSessionPalletScans.itemName), asc(scanSessionPalletScans.scannedAt));
+
+    // Group by barcode so the frontend gets one entry per item with all pallets listed
+    const itemMap = new Map<string, {
+      barcode: string;
+      sku: string | null;
+      itemName: string;
+      productId: number | null;
+      category: string | null;
+      itemsPerPallet: number | null;
+      totalQuantity: number;
+      palletCount: number;
+      pallets: Array<{
+        id: number;
+        sessionId: number;
+        orderName: string | null;
+        palletNumber: number;
+        quantity: number;
+        isExtra: boolean | null;
+        scannedByName: string | null;
+        scannedAt: Date | null;
+      }>;
+    }>();
+
+    for (const row of rows) {
+      const key = row.barcode;
+      if (!itemMap.has(key)) {
+        itemMap.set(key, {
+          barcode: row.barcode,
+          sku: row.sku,
+          itemName: row.productName ?? row.itemName,
+          productId: row.productId,
+          category: row.category ?? null,
+          itemsPerPallet: row.itemsPerPallet ?? null,
+          totalQuantity: 0,
+          palletCount: 0,
+          pallets: [],
+        });
+      }
+      const entry = itemMap.get(key)!;
+      entry.totalQuantity += row.quantity ?? 0;
+      entry.palletCount += 1;
+      entry.pallets.push({
+        id: row.id,
+        sessionId: row.sessionId,
+        orderName: row.orderName ?? null,
+        palletNumber: row.palletNumber,
+        quantity: row.quantity ?? 0,
+        isExtra: row.isExtra,
+        scannedByName: row.scannedByName,
+        scannedAt: row.scannedAt,
+      });
+    }
+
+    return res.json(Array.from(itemMap.values()));
+  } catch (error) {
+    console.error('Error generating pallet stock sheet:', error);
+    return res.status(500).json({ error: 'Failed to generate pallet stock sheet' });
+  }
+});
+
+// Stock sheet: all sessions with item-level detail
+router.get('/reports/stock-sheet', async (_req: Request, res: Response) => {
+  try {
+    const sessions = await db.select().from(scanSessions).orderBy(desc(scanSessions.createdAt));
+    const sessionIds = sessions.map((s) => s.id);
+    if (!sessionIds.length) return res.json([]);
+
+    const items = await db
+      .select()
+      .from(scanSessionItems)
+      .where(inArray(scanSessionItems.sessionId, sessionIds));
+
+    const extras = await db
+      .select()
+      .from(scanSessionExtras)
+      .where(inArray(scanSessionExtras.sessionId, sessionIds));
+
+    const report = sessions.map((session) => ({
+      ...session,
+      items: items.filter((i) => i.sessionId === session.id),
+      extras: extras.filter((e) => e.sessionId === session.id),
+    }));
+
+    return res.json(report);
+  } catch (error) {
+    console.error('Error generating stock sheet:', error);
+    return res.status(500).json({ error: 'Failed to generate stock sheet' });
+  }
+});
+
+// Extra orders report: all extras across all sessions
+router.get('/reports/extras', async (_req: Request, res: Response) => {
+  try {
+    const extras = await db
+      .select({
+        id: scanSessionExtras.id,
+        sessionId: scanSessionExtras.sessionId,
+        orderName: scanSessions.orderName,
+        csvName: scanSessions.csvName,
+        code: scanSessionExtras.code,
+        itemName: scanSessionExtras.itemName,
+        sku: scanSessionExtras.sku,
+        quantity: scanSessionExtras.quantity,
+        reason: scanSessionExtras.reason,
+        scannedByName: scanSessionExtras.scannedByName,
+        scannedAt: scanSessionExtras.scannedAt,
+      })
+      .from(scanSessionExtras)
+      .innerJoin(scanSessions, eq(scanSessionExtras.sessionId, scanSessions.id))
+      .orderBy(desc(scanSessionExtras.scannedAt));
+
+    return res.json(extras);
+  } catch (error) {
+    console.error('Error generating extras report:', error);
+    return res.status(500).json({ error: 'Failed to generate extras report' });
+  }
+});
+
+// ── Overall stock report: all orders aggregated by SKU ────────────────────
+// Groups every scan_session_item by barcode/SKU, sums expected + scanned across
+// all sessions, and enriches each row with live product specs from the inventory.
+router.get('/reports/overall-stock', async (_req: Request, res: Response) => {
+  try {
+    const rows = await db
+      .select({
+        sku: scanSessionItems.sku,
+        barcode: scanSessionItems.barcode,
+        itemName: scanSessionItems.itemName,
+        itemNo: scanSessionItems.itemNo,
+        sapCode: scanSessionItems.sapCode,
+        productId: scanSessionItems.productId,
+        expectedQty: scanSessionItems.expectedQty,
+        scannedQty: scanSessionItems.scannedQty,
+        sessionId: scanSessionItems.sessionId,
+        sessionOrderName: scanSessions.orderName,
+        sessionStatus: scanSessions.status,
+        sessionCreatedAt: scanSessions.createdAt,
+        // Live product specs & stock
+        inStock: products.inStock,
+        hsnCode: products.hsnCode,
+        category: products.category,
+        itemsPerPallet: products.itemsPerPallet,
+        volumeInCuFt: products.volumeInCuFt,
+        productSapCode: products.sapCode,
+        productItemNo: products.itemNo,
+        productName: products.name,
+      })
+      .from(scanSessionItems)
+      .innerJoin(scanSessions, eq(scanSessionItems.sessionId, scanSessions.id))
+      .leftJoin(products, eq(scanSessionItems.productId, products.id))
+      .orderBy(asc(scanSessionItems.itemName));
+
+    // Aggregate by barcode (fall back to sku when barcode is null)
+    const skuMap = new Map<string, {
+      sku: string;
+      barcode: string | null;
+      itemName: string;
+      itemNo: string | null;
+      sapCode: string | null;
+      productId: number | null;
+      inStock: number | null;
+      hsnCode: string | null;
+      category: string | null;
+      itemsPerPallet: number | null;
+      volumeInCuFt: string | null;
+      totalExpected: number;
+      totalScanned: number;
+      sessions: Array<{
+        sessionId: number;
+        orderName: string;
+        status: string;
+        expectedQty: number;
+        scannedQty: number;
+      }>;
+    }>();
+
+    for (const row of rows) {
+      const key = row.barcode ?? row.sku;
+      if (!skuMap.has(key)) {
+        skuMap.set(key, {
+          sku: row.sku,
+          barcode: row.barcode ?? null,
+          itemName: row.productName ?? row.itemName,
+          itemNo: row.itemNo ?? row.productItemNo ?? null,
+          sapCode: row.sapCode ?? row.productSapCode ?? null,
+          productId: row.productId ?? null,
+          inStock: row.inStock ?? null,
+          hsnCode: row.hsnCode ?? null,
+          category: row.category ?? null,
+          itemsPerPallet: row.itemsPerPallet ?? null,
+          volumeInCuFt: row.volumeInCuFt ?? null,
+          totalExpected: 0,
+          totalScanned: 0,
+          sessions: [],
+        });
+      }
+      const entry = skuMap.get(key)!;
+      entry.totalExpected += row.expectedQty ?? 0;
+      entry.totalScanned += row.scannedQty ?? 0;
+      entry.sessions.push({
+        sessionId: row.sessionId,
+        orderName: row.sessionOrderName,
+        status: row.sessionStatus ?? 'scanning',
+        expectedQty: row.expectedQty ?? 0,
+        scannedQty: row.scannedQty ?? 0,
+      });
+    }
+
+    return res.json(Array.from(skuMap.values()));
+  } catch (error) {
+    console.error('Error generating overall stock report:', error);
+    return res.status(500).json({ error: 'Failed to generate overall stock report' });
+  }
+});
+
+// ── Completed-sessions stock sheet ───────────────────────────────────────
+// Returns every scanned item (scannedQty > 0) from ALL sessions,
+// grouped by barcode/SKU with full product specs and which orders it appeared in.
+// Includes active (scanning) sessions so the report updates live as boxes are scanned.
+router.get('/reports/completed-stock', async (req: Request, res: Response) => {
+  try {
+    // Optional date filter: ?date=YYYY-MM-DD — filters by the session's arrival date
+    const dateParam = typeof req.query.date === 'string' && req.query.date.trim()
+      ? req.query.date.trim()
+      : null;
+
+    // CTE pre-aggregates pallet scan data once — avoids N correlated subqueries per row.
+    // The WHERE sci.scanned_qty > 0 filter at SQL level keeps the result set small.
+    const queryParams: string[] = [];
+    const dateFilter = dateParam
+      ? `AND DATE(ss.created_at) = $${queryParams.push(dateParam)}`
+      : '';
+
+    const rawRows = await pool.query(`
+      WITH item_pallets AS (
+        SELECT
+          session_item_id,
+          MAX(product_id) FILTER (WHERE product_id IS NOT NULL)    AS pallet_product_id,
+          ROUND(CAST(SUM(num_pallets) AS NUMERIC), 2)              AS total_pallets
+        FROM  scan_session_pallet_scans
+        WHERE session_item_id IS NOT NULL
+        GROUP BY session_item_id
+      )
+      SELECT
+        sci.sku,
+        sci.barcode,
+        sci.item_name                                             AS "itemName",
+        sci.item_no                                               AS "itemNo",
+        sci.sap_code                                              AS "sapCode",
+        sci.scanned_qty                                           AS "scannedQty",
+        sci.session_id                                            AS "sessionId",
+        ss.order_name                                             AS "sessionOrderName",
+        ss.status                                                 AS "sessionStatus",
+        ss.created_at                                             AS "sessionCreatedAt",
+        COALESCE(sci.product_id, ip.pallet_product_id)           AS "productId",
+        p.in_stock                                                AS "inStock",
+        p.hsn_code                                                AS "hsnCode",
+        p.category,
+        COALESCE(NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0)) AS "itemsPerPallet",
+        p.volume_in_cu_ft                                         AS "volumeInCuFt",
+        p.sap_code                                                AS "productSapCode",
+        p.item_no                                                 AS "productItemNo",
+        p.name                                                    AS "productName",
+        ip.total_pallets                                          AS "storedNumPallets"
+      FROM  scan_session_items sci
+      JOIN  scan_sessions ss  ON ss.id  = sci.session_id
+      LEFT  JOIN item_pallets ip ON ip.session_item_id = sci.id
+      LEFT  JOIN products p  ON p.id   = COALESCE(sci.product_id, ip.pallet_product_id)
+      WHERE sci.scanned_qty > 0
+        ${dateFilter}
+      ORDER BY sci.item_name ASC
+    `, queryParams);
+    const rows: Array<{
+      sku: string; barcode: string | null; itemName: string; itemNo: string | null;
+      sapCode: string | null; scannedQty: number; sessionId: number;
+      sessionOrderName: string; sessionStatus: string | null; sessionCreatedAt: Date | null;
+      productId: number | null; inStock: number | null; hsnCode: string | null;
+      category: string | null; itemsPerPallet: number | null; volumeInCuFt: string | null;
+      productSapCode: string | null; productItemNo: string | null; productName: string | null;
+      storedNumPallets: number | null;
+    }> = rawRows.rows;
+
+    // Group by barcode (fall back to sku), sum scannedQty and storedNumPallets across all sessions
+    const skuMap = new Map<string, {
+      srNo: number;
+      sku: string;
+      barcode: string | null;
+      itemName: string;
+      itemNo: string | null;
+      sapCode: string | null;
+      hsnCode: string | null;
+      category: string | null;
+      itemsPerPallet: number | null;
+      volumeInCuFt: string | null;
+      inStock: number | null;
+      totalScanned: number;
+      totalPallets: number | null; // sum of stored numPallets
+      orders: Array<{ name: string; status: string }>;
+    }>();
+
+    let srNo = 1;
+    for (const row of rows) {
+      const key = row.barcode ?? row.sku;
+      if (!skuMap.has(key)) {
+        skuMap.set(key, {
+          srNo: srNo++,
+          sku:            row.sku,
+          barcode:        row.barcode ?? null,
+          itemName:       row.productName ?? row.itemName,
+          itemNo:         row.itemNo ?? row.productItemNo ?? null,
+          sapCode:        row.sapCode ?? row.productSapCode ?? null,
+          hsnCode:        row.hsnCode ?? null,
+          category:       row.category ?? null,
+          itemsPerPallet: row.itemsPerPallet != null ? Number(row.itemsPerPallet) : null,
+          volumeInCuFt:   row.volumeInCuFt ?? null,
+          inStock:        row.inStock != null ? Number(row.inStock) : null,
+          totalScanned:   0,
+          totalPallets:   null,
+          orders:         [],
+        });
+      }
+      const entry = skuMap.get(key)!;
+      entry.totalScanned += Number(row.scannedQty ?? 0);
+      // storedNumPallets comes back as a string from PostgreSQL NUMERIC type — parse it
+      const storedNum = row.storedNumPallets != null ? parseFloat(String(row.storedNumPallets)) : null;
+      if (storedNum != null && !isNaN(storedNum)) {
+        entry.totalPallets = parseFloat(((entry.totalPallets ?? 0) + storedNum).toFixed(2));
+      }
+      if (row.sessionOrderName && !entry.orders.find((o) => o.name === row.sessionOrderName)) {
+        entry.orders.push({ name: row.sessionOrderName, status: row.sessionStatus ?? 'scanning' });
+      }
+    }
+
+    return res.json(Array.from(skuMap.values()));
+  } catch (error) {
+    console.error('Error generating completed stock sheet:', error);
+    return res.status(500).json({ error: 'Failed to generate completed stock sheet' });
+  }
+});
+
+export default router;

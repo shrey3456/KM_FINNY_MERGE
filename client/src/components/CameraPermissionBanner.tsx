@@ -13,10 +13,11 @@ type CameraPermissionBannerProps = {
 const CameraPermissionBanner = ({ onPermissionGranted, onDismiss }: CameraPermissionBannerProps) => {
   const [permissionState, setPermissionState] = useState<PermissionState>('unknown');
   const [isAttemptingPrompt, setIsAttemptingPrompt] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
+  const [dismissed, setDismissed] = useState(true); // Changed to true to hide banner by default
 
   useEffect(() => {
-    checkCameraPermission();
+    // Banner is hidden by default - no need to check permission on load
+    // checkCameraPermission();
   }, []);
 
   const checkCameraPermission = async () => {
