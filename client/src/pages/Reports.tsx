@@ -36,13 +36,15 @@ import {
   Search, X, RefreshCw, Download, Layers, UserCircle, Trash2, ScanLine,
 } from 'lucide-react';
 import { format } from 'date-fns';
-import { useState, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 const actionStyles: Record<string, string> = {
   add:    'bg-emerald-100 text-emerald-800 hover:bg-emerald-100',
   remove: 'bg-red-100 text-red-800 hover:bg-red-100',
   update: 'bg-blue-100 text-blue-800 hover:bg-blue-100',
 };
+
+const PAGE_SIZE = 10;
 
 // Mirrors computeUnitsAsync fallback: extract pallet size from product name when
 // the itemsPerPallet column is 0 (e.g. "24GM*240" → 240).
@@ -79,16 +81,25 @@ const Reports = () => {
   const [actionFilter, setActionFilter] = useState('all');
   const [scannerFilter, setScannerFilter] = useState('all');
   const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [scanPage, setScanPage] = useState(1);
 
+  useEffect(() => {
+    setScanPage(1);
+  }, [search, actionFilter, scannerFilter]);
+
+  const scanOffset = (scanPage - 1) * PAGE_SIZE;
   const { data: scansRaw, isLoading: isLoadingScans, refetch: refetchScans } = useQuery<any[]>({
-    queryKey: ['/api/scans', { limit: 300, offset: 0 }],
+    queryKey: ['/api/scans', { limit: PAGE_SIZE + 1, offset: scanOffset }],
     staleTime: 0,
   });
 
-  const scans = useMemo(
-    () => [...(scansRaw ?? [])].sort((a, b) => new Date(b.scannedAt || 0).getTime() - new Date(a.scannedAt || 0).getTime()),
-    [scansRaw],
-  );
+  const hasMoreScans = (scansRaw ?? []).length > PAGE_SIZE;
+  const scans = useMemo(() => {
+    const sorted = [...(scansRaw ?? [])].sort(
+      (a, b) => new Date(b.scannedAt || 0).getTime() - new Date(a.scannedAt || 0).getTime(),
+    );
+    return sorted.slice(0, PAGE_SIZE);
+  }, [scansRaw]);
 
   const scannerOptions = useMemo(() => {
     const names = new Set<string>();
@@ -351,6 +362,29 @@ const Reports = () => {
                       </TableBody>
                     </Table>
                   </ScrollArea>
+                )}
+                {!isLoadingScans && scans.length > 0 && (
+                  <div className="flex items-center justify-between border-t px-5 py-3 text-xs text-gray-500">
+                    <span>Page {scanPage}</span>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={scanPage <= 1}
+                        onClick={() => setScanPage((p) => Math.max(1, p - 1))}
+                      >
+                        Prev
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!hasMoreScans}
+                        onClick={() => setScanPage((p) => p + 1)}
+                      >
+                        Next
+                      </Button>
+                    </div>
+                  </div>
                 )}
               </CardContent>
             </Card>

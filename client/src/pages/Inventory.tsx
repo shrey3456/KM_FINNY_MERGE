@@ -60,9 +60,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { 
+import {
   Search, Plus, Package, Pencil, Trash, Upload, FileUp, Loader2, Database, RefreshCw,
-  ChevronLeft, ChevronRight, ChevronFirst, ChevronLast 
+  ChevronLeft, ChevronRight, ChevronFirst, ChevronLast, CloudDownload
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { apiRequest } from '@/lib/queryClient';
@@ -220,6 +220,31 @@ const Inventory = () => {
     console.log('Manual refresh of product data requested');
     refetchProducts();
   };
+
+  // Notion sync report dialog state
+  const [syncReport, setSyncReport] = useState<any | null>(null);
+  const [isSyncReportOpen, setIsSyncReportOpen] = useState(false);
+
+  // Notion inventory sync mutation
+  const notionSyncMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest('POST', '/api/notion-inventory-sync/trigger');
+      return res.json();
+    },
+    onSuccess: async (data) => {
+      setSyncReport(data);
+      setIsSyncReportOpen(true);
+      await queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      refetchProducts();
+    },
+    onError: (error: any) => {
+      toast({
+        title: 'Notion Sync Failed',
+        description: error.message || 'An error occurred during Notion sync.',
+        variant: 'destructive',
+      });
+    },
+  });
 
   // Import CSV mutation
   const importMutation = useMutation({
@@ -572,14 +597,36 @@ const Inventory = () => {
                       onChange={(e) => setSearchTerm(e.target.value)}
                     />
                   </div>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     size="icon"
                     onClick={handleRefresh}
                     title="Refresh inventory"
                   >
                     <RefreshCw className="h-4 w-4" />
                   </Button>
+                  <Button
+                    variant="outline"
+                    className="flex items-center gap-1"
+                    onClick={() => notionSyncMutation.mutate()}
+                    disabled={notionSyncMutation.isPending}
+                    title="Sync catalog data from Notion (name, category, HSN, SAP, volume, price)"
+                  >
+                    {notionSyncMutation.isPending
+                      ? <Loader2 className="h-4 w-4 animate-spin" />
+                      : <CloudDownload className="h-4 w-4" />}
+                    <span>{notionSyncMutation.isPending ? 'Syncing...' : 'Sync from Notion'}</span>
+                  </Button>
+                  {syncReport && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-muted-foreground"
+                      onClick={() => setIsSyncReportOpen(true)}
+                    >
+                      Last Report
+                    </Button>
+                  )}
                   <Dialog open={isImportDialogOpen} onOpenChange={setIsImportDialogOpen}>
                     <DialogTrigger asChild>
                       <Button variant="outline" className="flex items-center gap-1">
@@ -1229,8 +1276,8 @@ const Inventory = () => {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction 
-              onClick={confirmDeleteProduct} 
+            <AlertDialogAction
+              onClick={confirmDeleteProduct}
               className="bg-[#001d6e] hover:bg-red-700"
               disabled={deleteProductMutation.isPending}
             >
@@ -1244,6 +1291,129 @@ const Inventory = () => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Notion Sync Report Dialog */}
+      <Dialog open={isSyncReportOpen} onOpenChange={setIsSyncReportOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CloudDownload className="h-5 w-5 text-blue-600" />
+              Notion Sync Report
+            </DialogTitle>
+            <DialogDescription>
+              {syncReport?.syncTime
+                ? `Synced on ${new Date(syncReport.syncTime).toLocaleString()}`
+                : 'Last sync details'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {syncReport && (
+            <div className="flex flex-col gap-4 overflow-hidden">
+              {/* Summary badges */}
+              <div className="flex flex-wrap gap-3">
+                <div className="flex flex-col items-center px-4 py-2 bg-green-50 border border-green-200 rounded-lg">
+                  <span className="text-2xl font-bold text-green-700">{syncReport.updated}</span>
+                  <span className="text-xs text-green-600">Updated</span>
+                </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <span className="text-2xl font-bold text-gray-600">{syncReport.skipped}</span>
+                  <span className="text-xs text-gray-500">No Change</span>
+                </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <span className="text-2xl font-bold text-yellow-700">{syncReport.notFound}</span>
+                  <span className="text-xs text-yellow-600">Unmatched</span>
+                </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+                  <span className="text-2xl font-bold text-blue-700">{syncReport.total}</span>
+                  <span className="text-xs text-blue-600">Total Pages</span>
+                </div>
+                {syncReport.errors?.length > 0 && (
+                  <div className="flex flex-col items-center px-4 py-2 bg-red-50 border border-red-200 rounded-lg">
+                    <span className="text-2xl font-bold text-red-700">{syncReport.errors.length}</span>
+                    <span className="text-xs text-red-600">Errors</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Changed products table */}
+              {syncReport.changedProducts?.length > 0 ? (
+                <div className="overflow-y-auto flex-1 border rounded-md">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/50">
+                        <TableHead className="w-[180px]">Product</TableHead>
+                        <TableHead className="w-[100px]">SKU</TableHead>
+                        <TableHead>Changes</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {syncReport.changedProducts.map((pc: any) => (
+                        <TableRow key={pc.productId}>
+                          <TableCell className="font-medium text-sm align-top py-3">
+                            {pc.productName}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground align-top py-3">
+                            {pc.barcode || pc.srNo || '—'}
+                          </TableCell>
+                          <TableCell className="align-top py-3">
+                            <div className="flex flex-col gap-1">
+                              {pc.changes.map((ch: any, i: number) => (
+                                <div key={i} className="flex items-start gap-1 text-xs">
+                                  <span className="font-medium text-muted-foreground min-w-[110px]">
+                                    {ch.label}:
+                                  </span>
+                                  <span className="line-through text-red-500 max-w-[120px] truncate" title={String(ch.oldValue ?? '—')}>
+                                    {ch.oldValue != null && ch.oldValue !== '' ? String(ch.oldValue) : '—'}
+                                  </span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span className="text-green-700 font-medium max-w-[120px] truncate" title={String(ch.newValue)}>
+                                    {String(ch.newValue)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+                  <CloudDownload className="h-10 w-10 mb-2 opacity-30" />
+                  <p className="text-sm">No products were changed in this sync.</p>
+                  <p className="text-xs mt-1">All inventory data already matches Notion.</p>
+                </div>
+              )}
+
+              {/* Errors section */}
+              {syncReport.errors?.length > 0 && (
+                <div className="bg-red-50 border border-red-200 rounded-md p-3">
+                  <p className="text-xs font-semibold text-red-700 mb-1">Errors ({syncReport.errors.length})</p>
+                  {syncReport.errors.slice(0, 5).map((err: string, i: number) => (
+                    <p key={i} className="text-xs text-red-600">{err}</p>
+                  ))}
+                  {syncReport.errors.length > 5 && (
+                    <p className="text-xs text-red-400 mt-1">...and {syncReport.errors.length - 5} more</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsSyncReportOpen(false)}>Close</Button>
+            <Button
+              onClick={() => { setIsSyncReportOpen(false); notionSyncMutation.mutate(); }}
+              disabled={notionSyncMutation.isPending}
+              className="flex items-center gap-1"
+            >
+              <CloudDownload className="h-4 w-4" />
+              Sync Again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 };
