@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { format } from 'date-fns';
-import { useState, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Download,
   History,
@@ -36,7 +36,7 @@ import {
 } from '@/components/ui/dialog';
 import PageHeader from '../components/PageHeader';
 
-const FETCH_LIMIT = 300;
+const PAGE_SIZE = 10;
 
 const actionStyles: Record<string, string> = {
   add: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-100',
@@ -56,16 +56,25 @@ export default function ScanHistoryPage() {
   const [actionFilter, setActionFilter] = useState('all');
   const [scannerFilter, setScannerFilter] = useState('all');
   const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [scanPage, setScanPage] = useState(1);
 
+  useEffect(() => {
+    setScanPage(1);
+  }, [search, actionFilter, scannerFilter]);
+
+  const scanOffset = (scanPage - 1) * PAGE_SIZE;
   const { data: rawScans = [], isLoading, refetch } = useQuery<any[]>({
-    queryKey: ['/api/scans', { limit: FETCH_LIMIT, offset: 0 }],
+    queryKey: ['/api/scans', { limit: PAGE_SIZE + 1, offset: scanOffset }],
     staleTime: 0,
   });
 
-  const scans = useMemo(
-    () => [...rawScans].sort((a, b) => new Date(b.scannedAt || 0).getTime() - new Date(a.scannedAt || 0).getTime()),
-    [rawScans],
-  );
+  const hasMoreScans = rawScans.length > PAGE_SIZE;
+  const scans = useMemo(() => {
+    const sorted = [...rawScans].sort(
+      (a, b) => new Date(b.scannedAt || 0).getTime() - new Date(a.scannedAt || 0).getTime(),
+    );
+    return sorted.slice(0, PAGE_SIZE);
+  }, [rawScans]);
 
   // Unique scanner names for filter dropdown
   const scannerOptions = useMemo(() => {
@@ -296,6 +305,29 @@ export default function ScanHistoryPage() {
                       ))}
                     </TableBody>
                   </Table>
+                </div>
+              )}
+              {!isLoading && scans.length > 0 && (
+                <div className="flex items-center justify-between border-t px-5 py-3 text-xs text-gray-500">
+                  <span>Page {scanPage}</span>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={scanPage <= 1}
+                      onClick={() => setScanPage((p) => Math.max(1, p - 1))}
+                    >
+                      Prev
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!hasMoreScans}
+                      onClick={() => setScanPage((p) => p + 1)}
+                    >
+                      Next
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>

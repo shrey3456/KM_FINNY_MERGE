@@ -106,6 +106,8 @@ import tollVoucherRoutes from "./routes/toll-voucher";
 import voucherPrefixRoutes from "./routes/voucher-prefix";
 import checkinoutRoutes from "./routes/checkinout";
 import scanSessionRoutes from "./routes/scan-sessions";
+import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
+import { syncInventoryFromNotion } from "./services/notionInventorySync";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -8858,8 +8860,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount scan session routes
   apiRouter.use('/scan-sessions', scanSessionRoutes);
 
+  // Mount Notion inventory sync routes
+  apiRouter.use(notionInventorySyncRoutes);
+
   // Mount the API router
   app.use("/api", apiRouter);
+
+  // Start 24-hour Notion inventory sync if the database ID is configured
+  if (process.env.NOTION_INVENTORY_DATABASE_ID) {
+    const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    setInterval(async () => {
+      try {
+        console.log('[Notion Inventory Sync] Running scheduled 24-hour sync...');
+        await syncInventoryFromNotion();
+      } catch (err) {
+        console.error('[Notion Inventory Sync] Scheduled sync failed:', err);
+      }
+    }, SYNC_INTERVAL_MS);
+    console.log('[Notion Inventory Sync] 24-hour auto-sync scheduler registered');
+  }
 
   // Return the HTTP server with WebSocket support
   return httpServer;

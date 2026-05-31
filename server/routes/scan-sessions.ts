@@ -552,25 +552,58 @@ router.get('/reports/stock-sheet', async (_req: Request, res: Response) => {
 // Extra orders report: all extras across all sessions
 router.get('/reports/extras', async (_req: Request, res: Response) => {
   try {
-    const extras = await db
-      .select({
-        id: scanSessionExtras.id,
-        sessionId: scanSessionExtras.sessionId,
-        orderName: scanSessions.orderName,
-        csvName: scanSessions.csvName,
-        code: scanSessionExtras.code,
-        itemName: scanSessionExtras.itemName,
-        sku: scanSessionExtras.sku,
-        quantity: scanSessionExtras.quantity,
-        reason: scanSessionExtras.reason,
-        scannedByName: scanSessionExtras.scannedByName,
-        scannedAt: scanSessionExtras.scannedAt,
-      })
-      .from(scanSessionExtras)
-      .innerJoin(scanSessions, eq(scanSessionExtras.sessionId, scanSessions.id))
-      .orderBy(desc(scanSessionExtras.scannedAt));
+    const req = _req;
+    const limit = Math.max(1, Math.min(100, parseInt(String(req.query.limit ?? '10'), 10) || 10));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+    const dateParam = typeof req.query.date === 'string' && req.query.date.trim()
+      ? req.query.date.trim()
+      : null;
 
-    return res.json(extras);
+    const params: Array<string | number> = [];
+    const whereSql = dateParam
+      ? `WHERE DATE(se.scanned_at) = $${params.push(dateParam)}`
+      : '';
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              COALESCE(SUM(se.quantity), 0)::int AS total_quantity
+       FROM scan_session_extras se
+       ${whereSql}`,
+      params,
+    );
+
+    const total = countResult.rows[0]?.total ?? 0;
+    const totalQuantity = countResult.rows[0]?.total_quantity ?? 0;
+
+    const pageParams = [...params, limit, offset];
+    const rows = await pool.query(
+      `SELECT
+         se.id,
+         se.session_id AS "sessionId",
+         ss.order_name AS "orderName",
+         ss.csv_name AS "csvName",
+         se.code,
+         se.item_name AS "itemName",
+         se.sku,
+         se.quantity,
+         se.reason,
+         se.scanned_by_name AS "scannedByName",
+         se.scanned_at AS "scannedAt"
+       FROM scan_session_extras se
+       INNER JOIN scan_sessions ss ON se.session_id = ss.id
+       ${whereSql}
+       ORDER BY se.scanned_at DESC
+       LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+      pageParams,
+    );
+
+    return res.json({
+      items: rows.rows,
+      total,
+      totalQuantity,
+      limit,
+      offset,
+    });
   } catch (error) {
     console.error('Error generating extras report:', error);
     return res.status(500).json({ error: 'Failed to generate extras report' });
@@ -685,6 +718,9 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
       ? req.query.date.trim()
       : null;
 
+    const limit = Math.max(1, Math.min(200, parseInt(String(req.query.limit ?? '10'), 10) || 10));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+
     // CTE pre-aggregates pallet scan data once — avoids N correlated subqueries per row.
     // The WHERE sci.scanned_qty > 0 filter at SQL level keeps the result set small.
     const queryParams: string[] = [];
@@ -792,7 +828,16 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
       }
     }
 
-    return res.json(Array.from(skuMap.values()));
+    const items = Array.from(skuMap.values());
+    const total = items.length;
+    const pagedItems = items.slice(offset, offset + limit);
+
+    return res.json({
+      items: pagedItems,
+      total,
+      limit,
+      offset,
+    });
   } catch (error) {
     console.error('Error generating completed stock sheet:', error);
     return res.status(500).json({ error: 'Failed to generate completed stock sheet' });
