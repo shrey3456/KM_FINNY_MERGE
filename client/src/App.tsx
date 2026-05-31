@@ -15,7 +15,6 @@ import LoadOperations from "./pages/LoadOperations"; // Renamed component
 import PrintOperations from "./pages/PrintOperationsFinal12";
 import Login from "./pages/Login";
 import SplashScreen from "./pages/SplashScreen";
-import ScanHistoryPage from "./pages/ScanHistoryPage";
 import ProformaSlips from "./pages/ProformaSlips";
 import Activities from "./pages/Activities";
 import Dispatch from "./pages/Dispatch";
@@ -255,7 +254,6 @@ function Router() {
         <ProtectedRoute path="/settings" component={Settings} requireAdmin={true} />
         <ProtectedRoute path="/plant-settings" component={PlantSettings} requireAdmin={true} />
         <ProtectedRoute path="/order-management" component={OrderManagement} requireAdmin={true} />
-        <Route path="/scan-history" component={ScanHistoryPage} />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />
         <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />

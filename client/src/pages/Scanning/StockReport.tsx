@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Search, Package, Layers, Tag, RefreshCw, CalendarDays, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Download, Search, Package, Layers, Tag, RefreshCw, CalendarDays, X, UserCircle } from "lucide-react";
 import { Link } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { Badge } from "@/components/ui/badge";
@@ -15,8 +15,23 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { format } from "date-fns";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+type ExtraItem = {
+  id: number;
+  sessionId: number;
+  orderName: string;
+  csvName: string;
+  code: string;
+  itemName: string;
+  sku: string | null;
+  quantity: number;
+  reason: "not_in_order" | "unknown_product";
+  scannedByName: string | null;
+  scannedAt: string | null;
+};
 
 type StockItem = {
   srNo: number;
@@ -44,6 +59,25 @@ export default function StockReport() {
   const apiUrl = selectedDate
     ? `/api/scan-sessions/reports/completed-stock?date=${selectedDate}`
     : "/api/scan-sessions/reports/completed-stock";
+
+  const { data: rawExtras = [] } = useQuery<ExtraItem[]>({
+    queryKey: ["/api/scan-sessions/reports/extras"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/scan-sessions/reports/extras", undefined, false, true);
+      return Array.isArray(r) ? r : [];
+    },
+    refetchInterval: 5000,
+  });
+
+  // Apply date filter to extras client-side (same date as stock filter)
+  const extras = selectedDate
+    ? rawExtras.filter((e) => {
+        if (!e.scannedAt) return false;
+        return e.scannedAt.startsWith(selectedDate);
+      })
+    : rawExtras;
+
+  const totalExtraQty = extras.reduce((s, e) => s + (e.quantity ?? 0), 0);
 
   const { data: rawItems = [], isLoading, isFetching } = useQuery<StockItem[]>({
     queryKey: ["/api/scan-sessions/reports/completed-stock", selectedDate],
@@ -281,6 +315,117 @@ export default function StockReport() {
               )}
             </TableBody>
           </Table>
+        </div>
+
+        {/* Extra Items Report */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              <h2 className="text-lg font-semibold text-gray-900">Extra Items Report</h2>
+            </div>
+            <div className="flex items-center gap-3">
+              <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700 text-sm px-3 py-1">
+                {extras.length} item{extras.length !== 1 ? "s" : ""}
+              </Badge>
+              <Badge variant="outline" className="border-[#001d6e] bg-blue-50 text-[#001d6e] text-sm px-3 py-1">
+                {totalExtraQty.toLocaleString()} total qty
+              </Badge>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={extras.length === 0}
+                onClick={() => {
+                  const csv = [
+                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Reason", "Scanned By", "Time"].join(","),
+                    ...extras.map((e, idx) => [
+                      idx + 1,
+                      `"${e.orderName}"`,
+                      `"${e.csvName}"`,
+                      `"${e.itemName}"`,
+                      e.code || e.sku || "",
+                      e.quantity ?? 0,
+                      e.reason === "not_in_order" ? "Not in order" : "Unknown product",
+                      `"${e.scannedByName || ""}"`,
+                      e.scannedAt ? format(new Date(e.scannedAt.replace(/Z$/, "")), "yyyy-MM-dd h:mm a") : "",
+                    ].join(",")),
+                  ].join("\n");
+                  const a = document.createElement("a");
+                  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+                  a.download = `extra-items${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}.csv`;
+                  a.click();
+                }}
+              >
+                <Download className="h-4 w-4 mr-1.5" />Get Sheet
+              </Button>
+            </div>
+          </div>
+
+          <div className="rounded-md border bg-white overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-amber-600 hover:bg-amber-600">
+                  <TableHead className="text-white font-semibold">#</TableHead>
+                  <TableHead className="text-white font-semibold">ORDER</TableHead>
+                  <TableHead className="text-white font-semibold">ITEM NAME</TableHead>
+                  <TableHead className="text-white font-semibold">BARCODE / SKU</TableHead>
+                  <TableHead className="text-white font-semibold text-right">QTY</TableHead>
+                  <TableHead className="text-white font-semibold">REASON</TableHead>
+                  <TableHead className="text-white font-semibold">
+                    <span className="flex items-center gap-1"><UserCircle className="h-3.5 w-3.5" />SCANNED BY</span>
+                  </TableHead>
+                  <TableHead className="text-white font-semibold">TIME</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {extras.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={8} className="py-12 text-center text-sm text-gray-400">
+                      No extra items recorded{selectedDate ? " for this date" : ""}.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  extras.map((extra, idx) => (
+                    <TableRow key={extra.id} className={idx % 2 === 0 ? "bg-white" : "bg-amber-50/40"}>
+                      <TableCell className="text-gray-400 text-sm">{idx + 1}</TableCell>
+                      <TableCell>
+                        <p className="font-medium text-gray-800 text-sm">{extra.orderName}</p>
+                        <p className="text-xs text-gray-400">{extra.csvName}</p>
+                      </TableCell>
+                      <TableCell className="font-medium text-gray-900 max-w-[200px]">
+                        {extra.itemName}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-gray-600">
+                        {extra.code || extra.sku || <span className="text-gray-300">—</span>}
+                      </TableCell>
+                      <TableCell className="text-right font-bold text-amber-700">
+                        {(extra.quantity ?? 0).toLocaleString()}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          className={
+                            extra.reason === "not_in_order"
+                              ? "bg-orange-100 text-orange-800 hover:bg-orange-100 text-xs"
+                              : "bg-red-100 text-red-800 hover:bg-red-100 text-xs"
+                          }
+                        >
+                          {extra.reason === "not_in_order" ? "Not in order" : "Unknown product"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-sm text-gray-700">
+                        {extra.scannedByName || <span className="text-gray-300">—</span>}
+                      </TableCell>
+                      <TableCell className="text-xs text-gray-500 whitespace-nowrap">
+                        {extra.scannedAt
+                          ? format(new Date(extra.scannedAt.replace(/Z$/, "")), "MMM d, h:mm a")
+                          : "—"}
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
         </div>
 
       </div>
