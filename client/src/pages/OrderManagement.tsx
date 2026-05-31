@@ -1,5 +1,5 @@
   import React, { useState, useMemo } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { AlertCircle, CheckCircle, ClipboardList, Loader2, RefreshCw, Upload, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -28,6 +28,7 @@ type ImportResult = {
 };
 
 export default function OrderManagement() {
+  const queryClient = useQueryClient();
   const [file, setFile] = useState<File | null>(null);
   const [plant, setPlant] = useState('Valsad');
   const [orderDate, setOrderDate] = useState(format(new Date(), 'yyyy-MM-dd'));
@@ -98,15 +99,20 @@ export default function OrderManagement() {
       if (response && response.error) {
         throw new Error(response.error);
       }
+      if (response?.deletedCount === 0) {
+        throw new Error(`No orders found matching "${filename}". Nothing was deleted.`);
+      }
       return response;
     },
     onSuccess: (data: any, filename: string) => {
       toast({
         title: 'CSV Removed',
-        description: `Successfully deleted ${data.deletedCount !== undefined ? data.deletedCount : 'all'} orders imported from ${filename}.`,
+        description: `Deleted ${data.deletedCount} order${data.deletedCount !== 1 ? 's' : ''} imported from ${filename}.`,
       });
       setFileToDelete(null);
-      refetch();
+      // Invalidate all related caches so every query re-fetches fresh data
+      queryClient.invalidateQueries({ queryKey: ['/api/orders'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/orders/imports'] });
     },
     onError: (error: Error) => {
       toast({
