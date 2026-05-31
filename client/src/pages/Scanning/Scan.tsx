@@ -16,15 +16,18 @@ import {
   RotateCcw,
   ScanLine,
   Square,
+  User,
 } from "lucide-react";
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { useUser } from "@/hooks/use-user";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
 import {
   Dialog,
   DialogContent,
@@ -123,6 +126,8 @@ type SessionSummary = {
   itemCount: number;
   createdAt: string;
   updatedAt: string;
+  createdByName?: string | null;
+  createdByCode?: string | null;
 };
 
 
@@ -200,6 +205,7 @@ const extractPalletSize = (product: { itemsPerPallet?: number | null; name?: str
 
 export default function ScanOrderPage() {
   const { toast } = useToast();
+  const { user: currentUser } = useUser();
   const queryClient = useQueryClient();
   const videoRef = useRef<HTMLVideoElement>(null);
   const scannerRef = useRef<BarcodeScanner | null>(null);
@@ -244,9 +250,10 @@ export default function ScanOrderPage() {
   const products: Product[] = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.results ?? []);
 
   const { data: sessionsRaw = [], refetch: refetchSessions } = useQuery<SessionSummary[]>({
-    queryKey: ["/api/scan-sessions"],
+    queryKey: ["/api/scan-sessions", currentUser?.userCode],
     queryFn: async () => {
-      const r = await apiRequest("GET", "/api/scan-sessions", undefined, false, true);
+      const params = currentUser?.userCode ? `?userCode=${encodeURIComponent(currentUser.userCode)}` : "";
+      const r = await apiRequest("GET", `/api/scan-sessions${params}`, undefined, false, true);
       return Array.isArray(r) ? r : [];
     },
   });
@@ -261,6 +268,7 @@ export default function ScanOrderPage() {
       return [];
     },
     retry: false,
+    staleTime: 0,
   });
   const { data: importSummariesRaw = [], error: importsError } = importsQuery as any;
   const importSummaries: { filename: string; orderCount: number; itemCount: number; lastImportedAt: string }[] =
@@ -523,10 +531,6 @@ export default function ScanOrderPage() {
     const qty = Math.max(1, parseInt(pendingQty, 10) || 1);
     const userRaw = localStorage.getItem("currentUser");
     const user = userRaw ? JSON.parse(userRaw) : null;
-    // Calculate and store the decimal pallet count: qty ÷ itemsPerPallet (e.g. 31/30 = 1.03)
-    const numPallets = pendingScan.itemsPerPallet > 0
-      ? parseFloat((qty / pendingScan.itemsPerPallet).toFixed(2))
-      : null;
     setIsPostingScan(true);
     try {
       if (product) {
@@ -536,55 +540,7 @@ export default function ScanOrderPage() {
       }
       const scannedAt = new Date().toISOString();
 
-      if (matchedItem) {
-        // Float this item to the top of the CSV Order Items table on mobile
-        setRecentItemIds((prev) => [matchedItem!.id, ...prev.filter((id) => id !== matchedItem!.id)]);
-
-        // 1. Optimistic UI update immediately (functional form reads latest state, not stale closure)
-        setActiveSession((s) => s ? {
-          ...s,
-          updatedAt: scannedAt,
-          items: s.items.map((i) => i.id === matchedItem!.id ? { ...i, scannedQty: i.scannedQty + qty } : i),
-        } : s);
-
-        // 2. Persist scannedQty to DB with retry (up to 3 attempts)
-        let saved = false;
-        for (let attempt = 0; attempt < 3 && !saved; attempt++) {
-          try {
-            await apiRequest("PATCH", `/api/scan-sessions/${activeSession.id}/items/${matchedItem.id}`, { increment: qty, productId: product?.id ?? null }, false, true);
-            saved = true;
-          } catch {
-            if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-          }
-        }
-        if (!saved) {
-          // Revert optimistic update and surface the error
-          setActiveSession((s) => s ? {
-            ...s,
-            items: s.items.map((i) => i.id === matchedItem!.id ? { ...i, scannedQty: i.scannedQty - qty } : i),
-          } : s);
-          throw new Error("Failed to save scan after 3 attempts. Please try again.");
-        }
-
-        // 3. Pallet scan record — saved with retry (best-effort, won't revert scannedQty if it fails)
-        postPalletScan(activeSession.id, {
-          sessionItemId: matchedItem.id,
-          barcode: product?.barcode || code,
-          sku: product?.itemNo || product?.sapCode || product?.barcode || code,
-          itemName: matchedItem.itemName,
-          productId: product?.id,
-          quantity: qty,
-          numPallets,
-          isExtra: false,
-          scannedByCode: user?.userCode,
-          scannedByName: user?.name || user?.username,
-        });
-
-        setScanActivities((prev) => [{ id: `act-${Date.now()}`, code, itemName: matchedItem.itemName, quantity: qty, scannedAt, type: "order" as const }, ...prev].slice(0, 50));
-      } else {
-        const extraName = product?.name ?? "Unknown product";
-
-        // Persist extra scan with retry
+      const saveExtra = async (extraQty: number, extraName: string) => {
         let saved = false;
         for (let attempt = 0; attempt < 3 && !saved; attempt++) {
           try {
@@ -593,7 +549,7 @@ export default function ScanOrderPage() {
               itemName: extraName,
               sku: product?.itemNo || product?.sapCode || product?.barcode,
               productId: product?.id,
-              quantity: qty,
+              quantity: extraQty,
               reason: product ? "not_in_order" : "unknown_product",
               scannedByCode: user?.userCode,
               scannedByName: user?.name || user?.username,
@@ -605,20 +561,21 @@ export default function ScanOrderPage() {
         }
         if (!saved) throw new Error("Failed to save extra scan after 3 attempts. Please try again.");
 
-        // Pallet scan record for extras — saved with retry (best-effort)
+        const extraNumPallets = pendingScan.itemsPerPallet > 0
+          ? parseFloat((extraQty / pendingScan.itemsPerPallet).toFixed(2))
+          : null;
         postPalletScan(activeSession.id, {
           barcode: product?.barcode || code,
           sku: product?.itemNo || product?.sapCode || product?.barcode || code,
           itemName: extraName,
           productId: product?.id,
-          quantity: qty,
-          numPallets,
+          quantity: extraQty,
+          numPallets: extraNumPallets,
           isExtra: true,
           scannedByCode: user?.userCode,
           scannedByName: user?.name || user?.username,
         });
 
-        // Update local extras
         const existing = (activeSession.extras ?? []).find((e) => e.code === code);
         setActiveSession((s) => {
           if (!s) return s;
@@ -626,19 +583,89 @@ export default function ScanOrderPage() {
             ...s,
             updatedAt: scannedAt,
             extras: existing
-              ? s.extras.map((e) => e.code === code ? { ...e, quantity: e.quantity + qty, scannedAt } : e)
-              : [{ id: Date.now(), code, itemName: extraName, sku: product?.itemNo || product?.sapCode || product?.barcode, quantity: qty, scannedAt, productId: product?.id, reason: product ? "not_in_order" as const : "unknown_product" as const }, ...s.extras],
+              ? s.extras.map((e) => e.code === code ? { ...e, quantity: e.quantity + extraQty, scannedAt } : e)
+              : [{ id: Date.now(), code, itemName: extraName, sku: product?.itemNo || product?.sapCode || product?.barcode, quantity: extraQty, scannedAt, productId: product?.id, reason: product ? "not_in_order" as const : "unknown_product" as const }, ...s.extras],
           };
         });
-        setScanActivities((prev) => [{ id: `act-${Date.now()}`, code, itemName: extraName, quantity: qty, scannedAt, type: "extra" as const }, ...prev].slice(0, 50));
+        setScanActivities((prev) => [{ id: `act-${Date.now()}-x`, code, itemName: extraName, quantity: extraQty, scannedAt, type: "extra" as const }, ...prev].slice(0, 50));
+      };
+
+      if (matchedItem) {
+        // Split: qty that fills the remaining expected goes to order; overflow goes to extras
+        const remaining = Math.max(0, matchedItem.expectedQty - matchedItem.scannedQty);
+        const orderQty = Math.min(qty, remaining);
+        const extraQty = qty - orderQty;
+
+        setRecentItemIds((prev) => [matchedItem!.id, ...prev.filter((id) => id !== matchedItem!.id)]);
+
+        if (orderQty > 0) {
+          const orderNumPallets = pendingScan.itemsPerPallet > 0
+            ? parseFloat((orderQty / pendingScan.itemsPerPallet).toFixed(2))
+            : null;
+
+          // Optimistic UI update
+          setActiveSession((s) => s ? {
+            ...s,
+            updatedAt: scannedAt,
+            items: s.items.map((i) => i.id === matchedItem!.id ? { ...i, scannedQty: i.scannedQty + orderQty } : i),
+          } : s);
+
+          // Persist to DB with retry
+          let saved = false;
+          for (let attempt = 0; attempt < 3 && !saved; attempt++) {
+            try {
+              await apiRequest("PATCH", `/api/scan-sessions/${activeSession.id}/items/${matchedItem.id}`, { increment: orderQty, productId: product?.id ?? null }, false, true);
+              saved = true;
+            } catch {
+              if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+            }
+          }
+          if (!saved) {
+            setActiveSession((s) => s ? {
+              ...s,
+              items: s.items.map((i) => i.id === matchedItem!.id ? { ...i, scannedQty: i.scannedQty - orderQty } : i),
+            } : s);
+            throw new Error("Failed to save scan after 3 attempts. Please try again.");
+          }
+
+          postPalletScan(activeSession.id, {
+            sessionItemId: matchedItem.id,
+            barcode: product?.barcode || code,
+            sku: product?.itemNo || product?.sapCode || product?.barcode || code,
+            itemName: matchedItem.itemName,
+            productId: product?.id,
+            quantity: orderQty,
+            numPallets: orderNumPallets,
+            isExtra: false,
+            scannedByCode: user?.userCode,
+            scannedByName: user?.name || user?.username,
+          });
+
+          setScanActivities((prev) => [{ id: `act-${Date.now()}`, code, itemName: matchedItem.itemName, quantity: orderQty, scannedAt, type: "order" as const }, ...prev].slice(0, 50));
+        }
+
+        // Any overflow beyond expected goes straight to extras
+        if (extraQty > 0) {
+          await saveExtra(extraQty, matchedItem.itemName);
+        }
+
+        toast({
+          title: orderQty > 0 ? "Stock updated" : "Extra box recorded",
+          description: extraQty > 0
+            ? `${matchedItem.itemName} — ${orderQty} to order, ${extraQty} extra (over expected).`
+            : `${matchedItem.itemName} — ${orderQty} unit${orderQty !== 1 ? "s" : ""} added.`,
+        });
+      } else {
+        const extraName = product?.name ?? "Unknown product";
+        await saveExtra(qty, extraName);
+        toast({
+          title: "Extra box recorded",
+          description: product ? `${product.name} — ${qty} unit${qty !== 1 ? "s" : ""} not in order.` : `${code} kept in the extra report (not in inventory).`,
+          variant: "destructive",
+        });
       }
 
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions"] });
-      toast({
-        title: matchedItem ? "Stock updated" : "Extra box recorded",
-        description: product ? `${product.name} — ${qty} unit${qty !== 1 ? "s" : ""} added to stock.` : `${code} kept in the extra report (not in inventory).`,
-        variant: matchedItem ? "default" : "destructive",
-      });
     } catch (error) {
       toast({ title: "Scan failed", description: error instanceof Error ? error.message : "Could not process this scan.", variant: "destructive" });
     } finally {
@@ -1049,74 +1076,178 @@ export default function ScanOrderPage() {
 
   // ── Dashboard ─────────────────────────────────────────────────────────────
 
+  const activeSessions = sessions.filter((s) => s.status === "scanning");
+  const completedSessions = sessions.filter((s) => s.status === "completed");
+  const totalScanned = sessions.reduce((sum, s) => sum + (s.totalScanned ?? 0), 0);
+  const totalExtras = sessions.reduce((sum, s) => sum + (s.totalExtras ?? 0), 0);
+
   return (
     <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
-      <div className="mx-auto max-w-7xl space-y-5">
-        <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'Add New Order' to begin." })} />
+      <div className="mx-auto max-w-5xl space-y-5">
+        <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
 
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        {/* Header */}
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold text-gray-950">Scan Order</h1>
-            <p className="text-sm text-gray-600">Create an arrival order from CSV, scan box QR codes, and track stock arrivals.</p>
+            <div className="flex items-center gap-2 mb-0.5">
+              <User className="h-4 w-4 text-gray-400" />
+              <span className="text-sm text-gray-500">{currentUser?.name || currentUser?.username || "Your"}'s orders</span>
+            </div>
+            <h1 className="text-2xl font-semibold text-gray-950">Scan Order Dashboard</h1>
+            <p className="text-sm text-gray-500 mt-0.5">Your stock arrival scan orders and history.</p>
           </div>
-          <Button onClick={() => { resetDraft(); setView("map"); }} className="bg-[#001d6e] hover:bg-[#00154b]">
-            <Plus className="mr-2 h-4 w-4" />Add New Order
+          <Button onClick={() => { resetDraft(); importsQuery.refetch(); setView("map"); }} className="bg-[#001d6e] hover:bg-[#00154b]">
+            <Plus className="mr-2 h-4 w-4" />New Scan Order
           </Button>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-3">
-          <Card className="rounded-md"><CardContent className="flex items-center gap-3 p-5"><PackageCheck className="h-9 w-9 text-emerald-600" /><div><p className="text-xs text-gray-500">Active Orders</p><p className="text-2xl font-semibold">{sessions.filter((s) => s.status === "scanning").length}</p></div></CardContent></Card>
-          <Card className="rounded-md"><CardContent className="flex items-center gap-3 p-5"><ScanLine className="h-9 w-9 text-[#001d6e]" /><div><p className="text-xs text-gray-500">Boxes Scanned</p><p className="text-2xl font-semibold">{sessions.reduce((sum, s) => sum + (s.totalScanned ?? 0), 0)}</p></div></CardContent></Card>
-          <Card className="rounded-md"><CardContent className="flex items-center gap-3 p-5"><AlertTriangle className="h-9 w-9 text-amber-600" /><div><p className="text-xs text-gray-500">Extra Boxes</p><p className="text-2xl font-semibold">{sessions.reduce((sum, s) => sum + (s.totalExtras ?? 0), 0)}</p></div></CardContent></Card>
+        {/* Stats */}
+        <div className="grid gap-3 sm:grid-cols-4">
+          <Card className="rounded-xl border-0 shadow-sm">
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Active</p>
+                <div className="h-7 w-7 rounded-full bg-blue-50 flex items-center justify-center">
+                  <ScanLine className="h-3.5 w-3.5 text-[#001d6e]" />
+                </div>
+              </div>
+              <p className="text-3xl font-bold text-gray-900">{activeSessions.length}</p>
+              <p className="text-xs text-gray-400 mt-0.5">in progress</p>
+            </CardContent>
+          </Card>
+          <Card className="rounded-xl border-0 shadow-sm">
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Completed</p>
+                <div className="h-7 w-7 rounded-full bg-emerald-50 flex items-center justify-center">
+                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                </div>
+              </div>
+              <p className="text-3xl font-bold text-gray-900">{completedSessions.length}</p>
+              <p className="text-xs text-gray-400 mt-0.5">orders done</p>
+            </CardContent>
+          </Card>
+          <Card className="rounded-xl border-0 shadow-sm">
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Boxes Scanned</p>
+                <div className="h-7 w-7 rounded-full bg-indigo-50 flex items-center justify-center">
+                  <PackageCheck className="h-3.5 w-3.5 text-indigo-600" />
+                </div>
+              </div>
+              <p className="text-3xl font-bold text-gray-900">{totalScanned}</p>
+              <p className="text-xs text-gray-400 mt-0.5">total units</p>
+            </CardContent>
+          </Card>
+          <Card className="rounded-xl border-0 shadow-sm">
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Extras</p>
+                <div className="h-7 w-7 rounded-full bg-amber-50 flex items-center justify-center">
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                </div>
+              </div>
+              <p className="text-3xl font-bold text-gray-900">{totalExtras}</p>
+              <p className="text-xs text-gray-400 mt-0.5">not in orders</p>
+            </CardContent>
+          </Card>
         </div>
 
-        <Card className="rounded-md">
-          <CardHeader><CardTitle className="flex items-center text-lg"><History className="mr-2 h-5 w-5 text-[#001d6e]" />All Scan Orders</CardTitle></CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Order</TableHead>
-                  <TableHead>CSV</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Progress</TableHead>
-                  <TableHead className="text-right">Extras</TableHead>
-                  <TableHead>Updated</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sessions.map((session) => (
-                  <TableRow key={session.id}>
-                    <TableCell className="font-medium">{session.orderName}</TableCell>
-                    <TableCell className="text-gray-500 text-sm">{session.csvName}</TableCell>
-                    <TableCell>
-                      <Badge className={session.status === "completed" ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-100" : "bg-blue-100 text-blue-800 hover:bg-blue-100"}>
-                        {session.status === "completed" ? "Completed" : "Scanning"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right font-medium">
-                      <span className={(session.totalScanned ?? 0) > 0 ? "text-emerald-700" : ""}>{session.totalScanned ?? 0}</span>
-                      <span className="text-gray-400">/{session.totalExpected ?? 0}</span>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {(session.totalExtras ?? 0) > 0 ? <span className="text-amber-600 font-medium">{session.totalExtras}</span> : <span className="text-gray-400">—</span>}
-                    </TableCell>
-                    <TableCell className="text-sm text-gray-500">{new Date(session.updatedAt).toLocaleString()}</TableCell>
-                    <TableCell className="text-right">
-                      <Button size="sm" variant="outline" onClick={() => loadFullSession(session.id)}>
-                        {session.status === "completed" ? "View" : "Resume"}
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {!sessions.length && (
-                  <TableRow><TableCell colSpan={7} className="py-12 text-center text-gray-500">No scan orders yet. Add a new order to begin.</TableCell></TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+        {/* Active orders */}
+        {activeSessions.length > 0 && (
+          <div className="space-y-2">
+            <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-blue-500 inline-block" />
+              In Progress
+            </h2>
+            <div className="space-y-3">
+              {activeSessions.map((session) => {
+                const pct = session.totalExpected > 0 ? Math.round((session.totalScanned / session.totalExpected) * 100) : 0;
+                return (
+                  <Card key={session.id} className="rounded-xl border-0 shadow-sm hover:shadow-md transition-shadow cursor-pointer" onClick={() => loadFullSession(session.id)}>
+                    <CardContent className="p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100 text-xs px-2 py-0">Scanning</Badge>
+                            {(session.totalExtras ?? 0) > 0 && (
+                              <Badge variant="outline" className="border-amber-300 text-amber-700 text-xs px-2 py-0">{session.totalExtras} extra</Badge>
+                            )}
+                          </div>
+                          <p className="font-semibold text-gray-900 truncate">{session.orderName}</p>
+                          <p className="text-xs text-gray-400 truncate">{session.csvName}</p>
+                        </div>
+                        <Button size="sm" className="bg-[#001d6e] hover:bg-[#00154b] shrink-0" onClick={(e) => { e.stopPropagation(); loadFullSession(session.id); }}>
+                          Resume
+                        </Button>
+                      </div>
+                      <div className="mt-3 space-y-1">
+                        <div className="flex justify-between text-xs text-gray-500">
+                          <span>{session.totalScanned ?? 0} scanned</span>
+                          <span>{pct}% of {session.totalExpected ?? 0}</span>
+                        </div>
+                        <Progress value={pct} className="h-1.5" />
+                      </div>
+                      <p className="text-xs text-gray-400 mt-2">Updated {new Date(session.updatedAt).toLocaleString()}</p>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Completed orders */}
+        <div className="space-y-2">
+          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide flex items-center gap-2">
+            <History className="h-3.5 w-3.5 text-gray-400" />
+            History
+          </h2>
+          {completedSessions.length === 0 && activeSessions.length === 0 ? (
+            <Card className="rounded-xl border-0 shadow-sm">
+              <CardContent className="py-16 text-center">
+                <ScanLine className="h-10 w-10 text-gray-200 mx-auto mb-3" />
+                <p className="text-gray-500 font-medium">No scan orders yet</p>
+                <p className="text-sm text-gray-400 mt-1">Click "New Scan Order" to get started.</p>
+              </CardContent>
+            </Card>
+          ) : completedSessions.length === 0 ? (
+            <Card className="rounded-xl border-0 shadow-sm">
+              <CardContent className="py-10 text-center">
+                <p className="text-sm text-gray-400">Completed orders will appear here.</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-2">
+              {completedSessions.map((session) => {
+                const pct = session.totalExpected > 0 ? Math.round((session.totalScanned / session.totalExpected) * 100) : 100;
+                return (
+                  <Card key={session.id} className="rounded-xl border-0 shadow-sm hover:shadow-md transition-shadow cursor-pointer" onClick={() => loadFullSession(session.id)}>
+                    <CardContent className="p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100 text-xs px-2 py-0">Completed</Badge>
+                            {(session.totalExtras ?? 0) > 0 && (
+                              <Badge variant="outline" className="border-amber-300 text-amber-700 text-xs px-2 py-0">{session.totalExtras} extra</Badge>
+                            )}
+                          </div>
+                          <p className="font-medium text-gray-800 truncate">{session.orderName}</p>
+                          <p className="text-xs text-gray-400 truncate">{session.csvName}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-sm font-semibold text-emerald-700">{session.totalScanned ?? 0}<span className="text-gray-400 font-normal">/{session.totalExpected ?? 0}</span></p>
+                          <p className="text-xs text-gray-400">{new Date(session.updatedAt).toLocaleDateString()}</p>
+                        </div>
+                      </div>
+                      <Progress value={pct} className="h-1 mt-3" />
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

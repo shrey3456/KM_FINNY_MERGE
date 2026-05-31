@@ -1,445 +1,329 @@
-import { useLocation, Link } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getCurrentUserPermissions } from '../lib/permissions';
-import { 
-  Card, 
-  CardContent, 
-  CardHeader, 
-  CardTitle,
-  CardDescription, 
-  CardFooter 
-} from '@/components/ui/card';
-import PageHeader from '../components/PageHeader';
-
-import finnyLogo from '@assets/finny-logo.png';
-import { format } from 'date-fns';
-import { 
-  ScanLine, 
-  Search, 
-  SlidersHorizontal, 
-  Download,
-  ArrowUpDown,
-  Calendar,
-  UserCircle,
-  Package,
-  RefreshCw,
-  History
-} from 'lucide-react';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { format } from 'date-fns';
 import { useState, useMemo } from 'react';
-import { Separator } from '@/components/ui/separator';
+import {
+  Download,
+  History,
+  Layers,
+  RefreshCw,
+  Search,
+  ScanLine,
+  Trash2,
+  UserCircle,
+  X,
+} from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import PageHeader from '../components/PageHeader';
 
-// Minimal scan item component
-const ScanHistoryItem = ({ scan, onDelete }: { scan: any, onDelete: (id: number) => void }) => {
-  // Fetch product details to get itemsPerPallet
-  const { data: productData } = useQuery({
-    queryKey: ['/api/products', scan.productId],
-    enabled: !!scan.productId,
-    queryFn: async () => {
-      const response = await fetch(`/api/products/${scan.productId}`);
-      if (!response.ok) return null;
-      return response.json();
-    }
+const FETCH_LIMIT = 300;
+
+const actionStyles: Record<string, string> = {
+  add: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-100',
+  remove: 'bg-red-100 text-red-800 hover:bg-red-100',
+  update: 'bg-blue-100 text-blue-800 hover:bg-blue-100',
+};
+
+function formatPallets(quantity: number, itemsPerPallet: number): string {
+  if (!itemsPerPallet || itemsPerPallet <= 0) return '—';
+  const p = quantity / itemsPerPallet;
+  return p % 1 === 0 ? String(p) : p.toFixed(2);
+}
+
+export default function ScanHistoryPage() {
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState('');
+  const [actionFilter, setActionFilter] = useState('all');
+  const [scannerFilter, setScannerFilter] = useState('all');
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+
+  const { data: rawScans = [], isLoading, refetch } = useQuery<any[]>({
+    queryKey: ['/api/scans', { limit: FETCH_LIMIT, offset: 0 }],
+    staleTime: 0,
   });
-  
-  // Format the timestamp
-  const formattedTime = scan.scannedAt ? 
-    format(new Date(scan.scannedAt), 'h:mm a') : 
-    'Unknown time';
-  
-  const formattedDate = scan.scannedAt ?
-    format(new Date(scan.scannedAt), 'dd/MM/yyyy h:mm a') :
-    'Unknown date';
-    
-  // Determine status badge based on action
-  let badgeVariant = 'secondary';
-  let statusText = 'Scanned';
-  
-  if (scan.action === 'add') {
-    statusText = 'Added';
-    badgeVariant = 'default'; // Green
-  } else if (scan.action === 'remove') {
-    statusText = 'Removed';
-    badgeVariant = 'destructive'; // Red
-  } else if (scan.action === 'update') {
-    statusText = 'Updated';
-    badgeVariant = 'outline'; // Blue
-  }
-  
-  // Use the itemsPerPallet from the product data if available
-  const itemsPerPallet = productData?.itemsPerPallet || 0;
-  
-  // Get user permissions from our utility
+
+  const scans = useMemo(
+    () => [...rawScans].sort((a, b) => new Date(b.scannedAt || 0).getTime() - new Date(a.scannedAt || 0).getTime()),
+    [rawScans],
+  );
+
+  // Unique scanner names for filter dropdown
+  const scannerOptions = useMemo(() => {
+    const names = new Set<string>();
+    scans.forEach((s) => { if (s.scannerName) names.add(s.scannerName); });
+    return Array.from(names).sort();
+  }, [scans]);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    return scans.filter((s) => {
+      const matchSearch =
+        !q ||
+        s.productName?.toLowerCase().includes(q) ||
+        s.barcode?.toLowerCase().includes(q) ||
+        s.productSku?.toLowerCase().includes(q);
+      const matchAction = actionFilter === 'all' || s.action === actionFilter;
+      const matchScanner = scannerFilter === 'all' || s.scannerName === scannerFilter;
+      return matchSearch && matchAction && matchScanner;
+    });
+  }, [scans, search, actionFilter, scannerFilter]);
+
   const userPermissions = getCurrentUserPermissions();
   const canDelete = userPermissions.canDeleteOperationalItems;
-  
-  return (
-    <div className="p-3 mb-2 bg-white border border-gray-200 rounded-md hover:shadow-sm transition-shadow">
-      <div className="flex justify-between items-center">
-        <div className="flex items-center space-x-2">
-          <ScanLine className="h-4 w-4 text-[#001d6e]" />
-          <span className="text-sm text-gray-500">ID: {scan.id}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge variant={badgeVariant as any} className="text-xs">{statusText}</Badge>
-          {canDelete && (
-            <Button 
-              variant="ghost" 
-              size="icon" 
-              className="h-6 w-6 text-gray-400 hover:text-red-500"
-              onClick={() => onDelete(scan.id)}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-trash-2">
-                <path d="M3 6h18"></path>
-                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
-                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
-                <line x1="10" y1="11" x2="10" y2="17"></line>
-                <line x1="14" y1="11" x2="14" y2="17"></line>
-              </svg>
-            </Button>
-          )}
-        </div>
-      </div>
-      
-      <div className="mt-2 grid grid-cols-1 sm:grid-cols-12 gap-2">
-        {/* Product info - 7 columns */}
-        <div className="sm:col-span-7">
-          <p className="font-medium text-[#001d6e] truncate">{scan.productName || 'Unknown product'}</p>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 mt-1">
-            <span>SKU: {scan.productSku || 'N/A'}</span>
-            <span className="flex items-center gap-1">
-              <UserCircle className="h-3 w-3" />
-              <span className="font-semibold text-purple-700">{scan.scannerName || 'Unknown'}</span>
-            </span>
-            <span className="flex items-center gap-1">
-              <Calendar className="h-3 w-3" />
-              {formattedDate}
-            </span>
-          </div>
-        </div>
-        
-        {/* Quantity info - 5 columns */}
-        <div className="sm:col-span-5 flex items-center justify-end">
-          <div className="text-right">
-            <div className="text-xs text-gray-500">
-              Qty: <span className="font-medium">{scan.quantity || 0} boxes</span>
-            </div>
-            <div className="text-xs text-gray-500">
-              {scan.quantity && itemsPerPallet && itemsPerPallet > 0 ? (
-                <>
-                  {Math.floor(scan.quantity / itemsPerPallet)} pallet{Math.floor(scan.quantity / itemsPerPallet) !== 1 ? 's' : ''}
-                  {(scan.quantity % itemsPerPallet) > 0 && 
-                    ` + ${scan.quantity % itemsPerPallet} box${(scan.quantity % itemsPerPallet) !== 1 ? 'es' : ''}`
-                  }
-                </>
-              ) : (
-                scan.pallets ? `${scan.pallets} pallet${scan.pallets !== 1 ? 's' : ''}` : '0 pallets'
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
 
-// Empty state component
-const EmptyState = () => {
-  const [_, navigate] = useLocation();
-  
-  return (
-    <div className="p-8 text-center border rounded-lg bg-white">
-      <ScanLine className="mx-auto h-12 w-12 text-gray-400" />
-      <h3 className="mt-2 text-lg font-medium text-gray-900">No scan history found</h3>
-      <p className="mt-1 text-gray-500">Try adjusting your filters or start scanning new items.</p>
-      <div className="mt-6">
-        <Button variant="default" onClick={() => navigate('/scan')}>
-          Go to Scanner
-        </Button>
-      </div>
-    </div>
-  );
-};
-
-const ScanHistoryPage = () => {
-  const [location] = useLocation();
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterAction, setFilterAction] = useState('all');
-  const queryClient = useQueryClient();
-  
-  // For delete confirmation
-  const [isDeleting, setIsDeleting] = useState(false);
-  const [scanToDelete, setScanToDelete] = useState<number | null>(null);
-  
-  // Fetch scan history
-  const { data: scanHistory = [], isLoading, error, refetch } = useQuery({
-    queryKey: ['/api/scans'],
-    staleTime: 5000 // 5 seconds
-  });
-  
-  // Track the productId of the scan being deleted
-  const [deletingProductId, setDeletingProductId] = useState<number | null>(null);
-  
-  // Delete mutation
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => {
-      // First fetch the scan record to get its details
-      const scanResponse = await fetch(`/api/scans/${id}`);
-      if (!scanResponse.ok) {
-        throw new Error('Failed to fetch scan record details');
-      }
-      
-      // Try to parse as array first (for /api/scans endpoint)
-      let scanData;
-      const responseText = await scanResponse.text();
-      try {
-        const parsedData = JSON.parse(responseText);
-        // If it's an array, we're getting all scans, so find by ID
-        if (Array.isArray(parsedData)) {
-          scanData = parsedData.find(scan => scan.id === id);
-        } else {
-          // Otherwise it's just the single scan
-          scanData = parsedData;
-        }
-      } catch (e) {
-        console.error('Error parsing scan data:', e);
-        throw new Error('Failed to parse scan data');
-      }
-      
-      // Store the productId for later use
-      if (scanData && scanData.productId) {
-        console.log(`Found scan with productId: ${scanData.productId}`);
-        setDeletingProductId(scanData.productId);
-      }
-      
-      // Now delete the scan
-      const deleteResponse = await fetch(`/api/scans/${id}`, {
-        method: 'DELETE',
-      });
-      
-      if (!deleteResponse.ok) {
-        throw new Error('Failed to delete scan record');
-      }
-      
-      return { id, productId: scanData?.productId };
+      const res = await fetch(`/api/scans/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete scan record');
     },
-    onSuccess: (data) => {
-      console.log('Scan deletion successful, refreshing data...', data);
-      // Refresh scan history and invalidate products to update stock values
-      refetch();
-
-      // Invalidate product data and force immediate refetches
-      console.log('Invalidating and refetching product queries');
+    onSuccess: () => {
+      setDeleteId(null);
+      queryClient.invalidateQueries({ queryKey: ['/api/scans'] });
       queryClient.invalidateQueries({ queryKey: ['/api/products'] });
-      
-      // Wait a brief moment to allow the invalidation to take effect
-      setTimeout(() => {
-        console.log('Force refetching product queries after delay');
-        // Force a refetch of all products queries
-        queryClient.refetchQueries({ 
-          queryKey: ['/api/products'],
-          exact: false,
-          type: 'all'
-        });
-        
-        // Also explicitly refetch the specific products endpoint used by Inventory
-        queryClient.refetchQueries({
-          queryKey: ['/api/products?limit=1000&offset=0'],
-          exact: true
-        });
-        
-        // And fetch the specific product that was affected
-        const productId = data.productId || deletingProductId;
-        if (productId) {
-          console.log(`Refetching specific product: ${productId}`);
-          queryClient.refetchQueries({
-            queryKey: ['/api/products', productId],
-            exact: true
-          });
-        } else {
-          console.warn('No productId found for refetching specific product');
-        }
-      }, 300); // Longer delay to ensure database operations complete
-      
-      setIsDeleting(false);
-      setScanToDelete(null);
-      // Reset the productId
-      setDeletingProductId(null);
     },
-    onError: (error: Error) => {
-      console.error('Error deleting scan record:', error);
-      setIsDeleting(false);
-      setScanToDelete(null);
-    }
   });
-  
-  // Handle delete action
-  const handleDelete = (id: number) => {
-    setScanToDelete(id);
-    setIsDeleting(true);
-    
-    // Fetch the scan first to ensure we capture productId before deletion
-    fetch(`/api/scans`)
-      .then(response => response.json())
-      .then(data => {
-        const scanToDelete = Array.isArray(data) 
-          ? data.find(scan => scan.id === id)
-          : null;
-          
-        if (scanToDelete && scanToDelete.productId) {
-          setDeletingProductId(scanToDelete.productId);
-        }
-        
-        // Now proceed with deletion
-        deleteMutation.mutate(id);
-      })
-      .catch(error => {
-        console.error("Error fetching scan before deletion:", error);
-        // Still try to delete even if the pre-fetch fails
-        deleteMutation.mutate(id);
-      });
+
+  const clearFilters = () => {
+    setSearch('');
+    setActionFilter('all');
+    setScannerFilter('all');
   };
-  
-  // Cast to array for type safety and sorting
-  const scans = (scanHistory as any[]).slice().sort((a, b) => {
-    // Sort by most recent first
-    return new Date(b.scannedAt || 0).getTime() - new Date(a.scannedAt || 0).getTime();
-  });
-  
-  // Apply filters
-  const filteredScans = useMemo(() => {
-    return scans.filter(scan => {
-      const matchesSearch = searchQuery === '' || 
-        (scan.productName && scan.productName.toLowerCase().includes(searchQuery.toLowerCase())) || 
-        (scan.barcode && scan.barcode.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (scan.productSku && scan.productSku.toLowerCase().includes(searchQuery.toLowerCase()));
-        
-      const matchesAction = filterAction === 'all' || scan.action === filterAction;
-      
-      return matchesSearch && matchesAction;
-    });
-  }, [scans, searchQuery, filterAction]);
-  
+
+  const hasFilters = search || actionFilter !== 'all' || scannerFilter !== 'all';
+
   return (
     <>
-      {/* Mobile Header removed as requested */}
-      
-      <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-        <div className="max-w-6xl mx-auto">
+      <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
+        <div className="max-w-6xl mx-auto space-y-5">
           <PageHeader
             icon={History}
-            title="Scan History" 
-            description="View all barcode scan history"
+            title="Scan History"
+            description="A full record of who scanned what and when."
           />
-          
-          {/* Filter Controls */}
-          <Card className="mb-6">
+
+          {/* Filters */}
+          <Card className="rounded-xl border-0 shadow-sm">
             <CardContent className="p-4">
-              <div className="flex flex-col md:flex-row gap-4 items-end">
-                <div className="flex-1">
-                  <label className="text-sm font-medium mb-1.5 block">Search</label>
+              <div className="flex flex-wrap gap-3 items-end">
+                <div className="flex-1 min-w-[200px]">
+                  <label className="text-xs font-medium text-gray-500 mb-1.5 block uppercase tracking-wide">Search</label>
                   <div className="relative">
                     <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-gray-400" />
-                    <Input 
-                      type="text" 
-                      placeholder="Search by product name, SKU or barcode" 
+                    <Input
+                      placeholder="Product, SKU or barcode…"
                       className="pl-9"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
                     />
                   </div>
                 </div>
-                
-                <div className="w-full md:w-48">
-                  <label className="text-sm font-medium mb-1.5 block">Filter by Action</label>
-                  <Select 
-                    value={filterAction} 
-                    onValueChange={setFilterAction}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select action" />
-                    </SelectTrigger>
+
+                <div className="w-44">
+                  <label className="text-xs font-medium text-gray-500 mb-1.5 block uppercase tracking-wide">Action</label>
+                  <Select value={actionFilter} onValueChange={setActionFilter}>
+                    <SelectTrigger><SelectValue placeholder="All actions" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All Actions</SelectItem>
-                      <SelectItem value="add">Added to Inventory</SelectItem>
-                      <SelectItem value="remove">Removed from Inventory</SelectItem>
-                      <SelectItem value="update">Updated Quantity</SelectItem>
+                      <SelectItem value="add">Add</SelectItem>
+                      <SelectItem value="remove">Remove</SelectItem>
+                      <SelectItem value="update">Update</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                
-                <Button variant="outline" className="md:ml-2 w-full md:w-auto"  onClick={() => {
-                  setSearchQuery('');
-                  setFilterAction('all');
-                }}>
-                  <SlidersHorizontal className="h-4 w-4 mr-2" />
-                  Reset Filters
-                </Button>
-                
-                <Button variant="outline" className="w-full md:w-auto">
-                  <Download className="h-4 w-4 mr-2" />
-                  Export CSV
-                </Button>
+
+                <div className="w-48">
+                  <label className="text-xs font-medium text-gray-500 mb-1.5 block uppercase tracking-wide">Scanned By</label>
+                  <Select value={scannerFilter} onValueChange={setScannerFilter}>
+                    <SelectTrigger><SelectValue placeholder="All users" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Users</SelectItem>
+                      {scannerOptions.map((name) => (
+                        <SelectItem key={name} value={name}>{name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="flex gap-2">
+                  {hasFilters && (
+                    <Button variant="ghost" size="icon" onClick={clearFilters} title="Clear filters">
+                      <X className="h-4 w-4" />
+                    </Button>
+                  )}
+                  <Button variant="outline" size="icon" onClick={() => refetch()} title="Refresh">
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => {
+                    const csv = [
+                      ['Timestamp', 'Product', 'Barcode', 'SKU', 'Action', 'Pallets', 'Scanned By', 'Department'].join(','),
+                      ...filtered.map((s) => [
+                        format(new Date(s.scannedAt), 'yyyy-MM-dd HH:mm'),
+                        `"${s.productName || ''}"`,
+                        s.barcode || '',
+                        s.productSku || '',
+                        s.action || '',
+                        formatPallets(s.quantity, s.itemsPerPallet),
+                        `"${s.scannerName || ''}"`,
+                        `"${s.scannerDepartment || ''}"`,
+                      ].join(',')),
+                    ].join('\n');
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+                    a.download = `scan-history-${format(new Date(), 'yyyy-MM-dd')}.csv`;
+                    a.click();
+                  }}>
+                    <Download className="h-4 w-4 mr-1.5" />Export
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>
-          
-          {/* Scan History */}
-          <div className="mb-6">
-            {isLoading ? (
-              <Card>
-                <CardContent className="p-8 text-center">
-                  <p className="text-gray-500">Loading scan history...</p>
-                </CardContent>
-              </Card>
-            ) : error ? (
-              <Card>
-                <CardContent className="p-8 text-center">
-                  <p className="text-red-500">Error loading scan history</p>
-                </CardContent>
-              </Card>
-            ) : filteredScans.length > 0 ? (
-              <>
-                <div className="mb-2 flex justify-between">
-                  <p className="text-sm text-gray-500">{filteredScans.length} scan{filteredScans.length !== 1 ? 's' : ''} found</p>
-                  <div className="flex items-center gap-2">
-                    <Button 
-                      variant="outline" 
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => queryClient.invalidateQueries({ queryKey: ['/api/scans'] })}
-                      title="Refresh scan history"
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button variant="ghost" size="sm" className="h-7 px-2 text-gray-500">
-                      <ArrowUpDown className="h-3.5 w-3.5 mr-1.5" />
-                      <span className="text-xs">Sort by date</span>
-                    </Button>
-                  </div>
+
+          {/* Table */}
+          <Card className="rounded-xl border-0 shadow-sm">
+            <CardHeader className="pb-3 flex flex-row items-center justify-between">
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <History className="h-4 w-4 text-[#001d6e]" />
+                Scan Records
+              </CardTitle>
+              <span className="text-sm text-gray-400">
+                {isLoading ? 'Loading…' : `${filtered.length} record${filtered.length !== 1 ? 's' : ''}`}
+              </span>
+            </CardHeader>
+            <CardContent className="p-0">
+              {isLoading ? (
+                <div className="py-20 text-center text-gray-400 text-sm">Loading scan history…</div>
+              ) : filtered.length === 0 ? (
+                <div className="py-20 text-center">
+                  <ScanLine className="h-10 w-10 text-gray-200 mx-auto mb-3" />
+                  <p className="text-gray-500 font-medium">No records found</p>
+                  {hasFilters && <p className="text-sm text-gray-400 mt-1">Try clearing the filters.</p>}
                 </div>
-              
-                {filteredScans.map((scan: any) => (
-                  <ScanHistoryItem key={scan.id} scan={scan} onDelete={handleDelete} />
-                ))}
-              </>
-            ) : (
-              <EmptyState />
-            )}
-          </div>
-          
-          {filteredScans.length > 10 && (
-            <div className="flex justify-center">
-              <Button variant="outline">Load More Scans</Button>
-            </div>
-          )}
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-gray-50 hover:bg-gray-50">
+                        <TableHead className="pl-5 text-xs font-semibold uppercase tracking-wide text-gray-500">Timestamp</TableHead>
+                        <TableHead className="text-xs font-semibold uppercase tracking-wide text-gray-500">Product</TableHead>
+                        <TableHead className="text-xs font-semibold uppercase tracking-wide text-gray-500">Barcode</TableHead>
+                        <TableHead className="text-xs font-semibold uppercase tracking-wide text-gray-500">Action</TableHead>
+                        <TableHead className="text-xs font-semibold uppercase tracking-wide text-gray-500 text-right">
+                          <span className="flex items-center justify-end gap-1">
+                            <Layers className="h-3 w-3" />Pallets
+                          </span>
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                          <span className="flex items-center gap-1">
+                            <UserCircle className="h-3 w-3" />Scanned By
+                          </span>
+                        </TableHead>
+                        {canDelete && <TableHead className="w-10" />}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filtered.map((scan) => (
+                        <TableRow key={scan.id} className="group hover:bg-blue-50/30">
+                          <TableCell className="pl-5">
+                            <p className="text-sm text-gray-800 whitespace-nowrap">
+                              {scan.scannedAt ? format(new Date(scan.scannedAt), 'MMM d, yyyy') : '—'}
+                            </p>
+                            <p className="text-xs text-gray-400 whitespace-nowrap">
+                              {scan.scannedAt ? format(new Date(scan.scannedAt), 'HH:mm') : ''}
+                            </p>
+                          </TableCell>
+                          <TableCell>
+                            <p className="font-medium text-gray-900 max-w-[240px] truncate text-sm">
+                              {scan.productName || '—'}
+                            </p>
+                            <p className="text-xs text-gray-400">{scan.productSku || ''}</p>
+                          </TableCell>
+                          <TableCell>
+                            <span className="font-mono text-xs text-gray-600">{scan.barcode || '—'}</span>
+                          </TableCell>
+                          <TableCell>
+                            <Badge className={`text-xs capitalize ${actionStyles[scan.action] ?? 'bg-gray-100 text-gray-700'}`}>
+                              {scan.action || '—'}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span className="font-semibold text-[#001d6e]">
+                              {formatPallets(scan.quantity, scan.itemsPerPallet)}
+                            </span>
+                            {scan.itemsPerPallet > 0 && (
+                              <p className="text-xs text-gray-400">{scan.quantity}/{scan.itemsPerPallet}</p>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <p className="text-sm text-gray-800">{scan.scannerName || '—'}</p>
+                            {scan.scannerDepartment && scan.scannerDepartment !== 'N/A' && (
+                              <p className="text-xs text-gray-400">{scan.scannerDepartment}</p>
+                            )}
+                          </TableCell>
+                          {canDelete && (
+                            <TableCell>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500"
+                                onClick={() => setDeleteId(scan.id)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
       </div>
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={deleteId !== null} onOpenChange={(open) => { if (!open) setDeleteId(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Scan Record</DialogTitle>
+            <DialogDescription>
+              This will permanently remove the scan record and reverse the inventory change. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteId(null)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              disabled={deleteMutation.isPending}
+              onClick={() => deleteId !== null && deleteMutation.mutate(deleteId)}
+            >
+              {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
-};
-
-export default ScanHistoryPage;
+}

@@ -17,12 +17,12 @@ import { z } from 'zod';
 const router = Router();
 
 // ── List all sessions ──────────────────────────────────────────────────────
-router.get('/', async (_req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
-    const sessions = await db
-      .select()
-      .from(scanSessions)
-      .orderBy(desc(scanSessions.createdAt));
+    const { userCode } = req.query;
+    const sessions = userCode
+      ? await db.select().from(scanSessions).where(eq(scanSessions.createdByCode, String(userCode))).orderBy(desc(scanSessions.createdAt))
+      : await db.select().from(scanSessions).orderBy(desc(scanSessions.createdAt));
 
     // Attach item/extra counts
     const sessionIds = sessions.map((s) => s.id);

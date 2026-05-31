@@ -77,6 +77,7 @@ export default function OrderManagement() {
       if (input) input.value = '';
 
       queryClient.invalidateQueries({ queryKey: ['/api/orders'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/orders/imports'] });
       toast({
         title: 'Orders imported',
         description: `${data.ordersCreated} orders and ${data.itemsCreated} items were imported.`,
