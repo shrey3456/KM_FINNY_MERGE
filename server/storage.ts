@@ -24,12 +24,24 @@ import {
   plantStvs, type PlantStv, type InsertPlantStv,
   vehicleInfo, type VehicleInfo, type InsertVehicleInfo
 } from "@shared/schema";
-import { and, gte, lte, lt, eq, asc, desc, sql, like, or, isNull, isNotNull, inArray, not } from "drizzle-orm";
+import { and, gte, lte, lt, eq, asc, desc, sql, like, ilike, or, isNull, isNotNull, inArray, not } from "drizzle-orm";
 import nodePersist from 'node-persist';
 import { db } from "./db";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 import { pool } from "./db";
+
+export interface NotionProductsQuery {
+  page: number;
+  pageSize: number;
+  search?: string;
+  category?: string;
+  brand?: string;
+  plant?: string;
+  type?: string;
+  saleCategory?: string;
+  linkedOnly?: boolean;
+}
 
 export interface IStorage {
   // Session store for authentication
@@ -65,6 +77,8 @@ export interface IStorage {
   deleteProduct(id: number): Promise<boolean>;
   listProducts(limit?: number, offset?: number): Promise<Product[]>;
   getAllProducts(): Promise<Product[]>; // Get all products without pagination
+  getNotionProductsPage(params: NotionProductsQuery): Promise<{ products: Product[]; total: number }>;
+  getNotionProductFilterOptions(): Promise<{ categories: string[]; brands: string[]; plants: string[]; types: string[]; saleCategories: string[] }>;
   clearInventory(): Promise<void>; // Method to clear all inventory data
   resetInventoryStock(): Promise<number>; // Method to reset all inStock values to zero
 
@@ -837,6 +851,39 @@ export class MemStorage implements IStorage {
         return (dateB?.getTime() || 0) - (dateA?.getTime() || 0);
       })
       .slice(offset, offset + limit);
+  }
+
+  async getNotionProductsPage(params: NotionProductsQuery): Promise<{ products: Product[]; total: number }> {
+    const { page, pageSize, search, category, brand, plant, type, saleCategory, linkedOnly } = params;
+    let all = Array.from(this.products.values());
+    if (linkedOnly) all = all.filter(p => p.notionPageId);
+    if (search?.trim()) {
+      const q = search.trim().toLowerCase();
+      all = all.filter(p =>
+        [p.name, p.barcode, p.srNo, p.newSr, p.notionWiseName, p.brand].some(v => v?.toLowerCase().includes(q))
+      );
+    }
+    if (category) all = all.filter(p => p.category === category);
+    if (brand) all = all.filter(p => p.brand === brand);
+    if (plant) all = all.filter(p => p.plant === plant);
+    if (type) all = all.filter(p => p.type === type);
+    if (saleCategory) all = all.filter(p => p.saleCategory === saleCategory);
+    const total = all.length;
+    const offset = (page - 1) * pageSize;
+    return { products: all.slice(offset, offset + pageSize), total };
+  }
+
+  async getNotionProductFilterOptions(): Promise<{ categories: string[]; brands: string[]; plants: string[]; types: string[]; saleCategories: string[] }> {
+    const all = Array.from(this.products.values());
+    const unique = (fn: (p: Product) => string | null | undefined) =>
+      [...new Set(all.map(fn).filter(Boolean) as string[])].sort();
+    return {
+      categories: unique(p => p.category),
+      brands: unique(p => p.brand),
+      plants: unique(p => p.plant),
+      types: unique(p => p.type),
+      saleCategories: unique(p => p.saleCategory),
+    };
   }
 
   // Scan history operations
@@ -2314,7 +2361,21 @@ export class DBStorage implements IStorage {
   }
 
   async createProduct(product: InsertProduct): Promise<Product> {
-    const result = await db.insert(products).values(product).returning();
+    const productData: Record<string, any> = { ...product };
+
+    for (const key of ["lastUpdated", "createdAt", "updatedAt"]) {
+      const value = productData[key];
+      if (typeof value === "string") {
+        const date = new Date(value);
+        if (!Number.isNaN(date.getTime())) {
+          productData[key] = date;
+        } else {
+          delete productData[key];
+        }
+      }
+    }
+
+    const result = await db.insert(products).values(productData as InsertProduct).returning();
     return result[0];
   }
 
@@ -2340,14 +2401,16 @@ export class DBStorage implements IStorage {
       try {
         if (typeof product.lastUpdated === 'string') {
           // If lastUpdated is a string, convert to Date
-          updateData.updatedAt = new Date(product.lastUpdated);
+          updateData.lastUpdated = new Date(product.lastUpdated);
         } else if (product.lastUpdated instanceof Date) {
           // If it's already a Date, use it directly
-          updateData.updatedAt = product.lastUpdated;
+          updateData.lastUpdated = product.lastUpdated;
         }
+        updateData.updatedAt = new Date();
       } catch (error) {
         console.error("Error converting lastUpdated:", error);
         // Use current date as fallback
+        updateData.lastUpdated = new Date();
         updateData.updatedAt = new Date();
       }
     } else {
@@ -2394,10 +2457,69 @@ export class DBStorage implements IStorage {
     }
   }
 
+  async getNotionProductsPage(params: NotionProductsQuery): Promise<{ products: Product[]; total: number }> {
+    const { page, pageSize, search, category, brand, plant, type, saleCategory, linkedOnly } = params;
+    const offset = (page - 1) * pageSize;
+
+    const conditions: any[] = [];
+    if (search?.trim()) {
+      const q = `%${search.trim()}%`;
+      conditions.push(or(
+        ilike(products.name, q),
+        ilike(products.barcode, q),
+        ilike(products.srNo, q),
+        ilike(products.newSr, q),
+        ilike(products.notionWiseName, q),
+        ilike(products.brand, q),
+      ));
+    }
+    if (category) conditions.push(eq(products.category, category));
+    if (brand) conditions.push(eq(products.brand, brand));
+    if (plant) conditions.push(eq(products.plant, plant));
+    if (type) conditions.push(eq(products.type, type));
+    if (saleCategory) conditions.push(eq(products.saleCategory, saleCategory));
+    if (linkedOnly) conditions.push(isNotNull(products.notionPageId));
+
+    const where = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const [rows, countRows] = await Promise.all([
+      db.select().from(products).where(where).orderBy(products.srNo).limit(pageSize).offset(offset),
+      db.select({ count: sql<number>`count(*)::int` }).from(products).where(where),
+    ]);
+
+    return { products: rows, total: countRows[0]?.count ?? 0 };
+  }
+
+  async getNotionProductFilterOptions(): Promise<{ categories: string[]; brands: string[]; plants: string[]; types: string[]; saleCategories: string[] }> {
+    const [cats, brnds, plnts, typs, saleCats] = await Promise.all([
+      db.selectDistinct({ v: products.category }).from(products).where(isNotNull(products.category)).orderBy(products.category),
+      db.selectDistinct({ v: products.brand }).from(products).where(isNotNull(products.brand)).orderBy(products.brand),
+      db.selectDistinct({ v: products.plant }).from(products).where(isNotNull(products.plant)).orderBy(products.plant),
+      db.selectDistinct({ v: products.type }).from(products).where(isNotNull(products.type)).orderBy(products.type),
+      db.selectDistinct({ v: products.saleCategory }).from(products).where(isNotNull(products.saleCategory)).orderBy(products.saleCategory),
+    ]);
+    return {
+      categories: cats.map(r => r.v!).filter(Boolean),
+      brands: brnds.map(r => r.v!).filter(Boolean),
+      plants: plnts.map(r => r.v!).filter(Boolean),
+      types: typs.map(r => r.v!).filter(Boolean),
+      saleCategories: saleCats.map(r => r.v!).filter(Boolean),
+    };
+  }
+
   async clearInventory(): Promise<void> {
     try {
-      console.log("Attempting to clear all products from inventory...");
-      // Remove all constraints first so we can clear the table
+      console.log("Clearing inventory — nullifying FK references first...");
+
+      // Nullify product_id FK references in all child tables before deleting products
+      await db.execute(sql`UPDATE scan_history SET product_id = NULL WHERE product_id IS NOT NULL`);
+      await db.execute(sql`UPDATE scan_session_items SET product_id = NULL WHERE product_id IS NOT NULL`);
+      await db.execute(sql`UPDATE scan_session_extras SET product_id = NULL WHERE product_id IS NOT NULL`);
+      await db.execute(sql`UPDATE scan_session_pallet_scans SET product_id = NULL WHERE product_id IS NOT NULL`);
+      await db.execute(sql`UPDATE load_operations_items SET product_id = NULL WHERE product_id IS NOT NULL`);
+      await db.execute(sql`UPDATE order_items SET product_id = NULL WHERE product_id IS NOT NULL`);
+      await db.execute(sql`UPDATE purchase_order_items SET product_id = NULL WHERE product_id IS NOT NULL`);
+
       await db.delete(products);
       console.log("All products deleted successfully");
     } catch (error) {

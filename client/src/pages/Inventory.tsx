@@ -37,7 +37,6 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from "react-hook-form";
@@ -47,7 +46,6 @@ import { z } from "zod";
 import {
   Form,
   FormControl,
-  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -61,12 +59,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Search, Plus, Package, Pencil, Trash, Upload, FileUp, Loader2, Database, RefreshCw,
-  ChevronLeft, ChevronRight, ChevronFirst, ChevronLast, CloudDownload
+  Search, Plus, Package, Pencil, Trash, Upload, Loader2, RefreshCw,
+  ChevronLeft, ChevronRight, ChevronFirst, ChevronLast, CloudDownload, Bell, CheckCircle2
 } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { useState, useRef, useEffect } from 'react';
 import { apiRequest } from '@/lib/queryClient';
-import { InsertProduct, Product } from '@shared/schema';
+import { Product } from '@shared/schema';
 
 // Form schema for product creation/editing
 const productFormSchema = z.object({
@@ -225,22 +224,95 @@ const Inventory = () => {
   const [syncReport, setSyncReport] = useState<any | null>(null);
   const [isSyncReportOpen, setIsSyncReportOpen] = useState(false);
 
-  // Notion inventory sync mutation
-  const notionSyncMutation = useMutation({
+  // Pending-changes confirmation dialog state
+  const [isPendingDialogOpen, setIsPendingDialogOpen] = useState(false);
+
+  // Full-import confirmation dialog
+  const [isFullImportConfirmOpen, setIsFullImportConfirmOpen] = useState(false);
+
+  // Poll for pending Notion changes every 5 minutes
+  const { data: pendingData, refetch: refetchPending } = useQuery({
+    queryKey: ['/api/notion-inventory-sync/pending'],
+    queryFn: async () => {
+      const res = await apiRequest('GET', '/api/notion-inventory-sync/pending');
+      return res.json();
+    },
+    refetchInterval: 5 * 60 * 1000,
+    staleTime: 60 * 1000,
+  });
+  const hasPending = pendingData?.hasPending && pendingData?.report?.updated > 0;
+
+  // Detect-only mutation (dry run — stores pending, no DB writes)
+  const detectMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest('POST', '/api/notion-inventory-sync/trigger');
+      const res = await apiRequest('POST', '/api/notion-inventory-sync/detect');
+      return res.json();
+    },
+    onSuccess: async () => {
+      await refetchPending();
+      setIsPendingDialogOpen(true);
+    },
+    onError: (error: any) => {
+      toast({
+        title: 'Detection Failed',
+        description: error.message || 'Could not detect Notion changes.',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  // Apply pending changes mutation
+  const applyPendingMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest('POST', '/api/notion-inventory-sync/apply');
       return res.json();
     },
     onSuccess: async (data) => {
       setSyncReport(data);
+      setIsPendingDialogOpen(false);
       setIsSyncReportOpen(true);
+      refetchPending();
       await queryClient.invalidateQueries({ queryKey: ['/api/products'] });
       refetchProducts();
+      toast({
+        title: 'Changes Applied',
+        description: `${data.created ?? 0} created, ${data.updated} updated from Notion.`,
+        className: 'bg-green-50 border-green-200 text-green-900',
+      });
     },
     onError: (error: any) => {
       toast({
-        title: 'Notion Sync Failed',
-        description: error.message || 'An error occurred during Notion sync.',
+        title: 'Apply Failed',
+        description: error.message || 'Could not apply pending changes.',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  // Full Import mutation (clear DB + import all from Notion — use once to seed notionPageId on all products)
+  const fullSyncMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest('POST', '/api/notion-inventory-sync/full-sync');
+      return res.json();
+    },
+    onSuccess: async (data) => {
+      setSyncReport(data);
+      setIsFullImportConfirmOpen(false);
+      setIsSyncReportOpen(true);
+      refetchPending();
+      await queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      refetchProducts();
+      toast({
+        title: 'Full Import Complete',
+        description: `${data.created} products imported from Notion.`,
+        className: 'bg-green-50 border-green-200 text-green-900',
+      });
+    },
+    onError: (error: any) => {
+      setIsFullImportConfirmOpen(false);
+      toast({
+        title: 'Full Import Failed',
+        description: error.message || 'Could not complete full import.',
         variant: 'destructive',
       });
     },
@@ -282,9 +354,6 @@ const Inventory = () => {
     }
   });
 
-
-
-
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       setImportFile(e.target.files[0]);
@@ -306,8 +375,6 @@ const Inventory = () => {
     formData.append('file', importFile);
     importMutation.mutate(formData);
   };
-
-
 
   // Add product mutation
   const addProductMutation = useMutation({
@@ -605,17 +672,42 @@ const Inventory = () => {
                   >
                     <RefreshCw className="h-4 w-4" />
                   </Button>
+                  {/* Pending-changes bell — shown when 24h detection found changes */}
+                  {hasPending && (
+                    <Button
+                      variant="outline"
+                      className="relative flex items-center gap-1 border-amber-400 text-amber-700 hover:bg-amber-50"
+                      onClick={() => setIsPendingDialogOpen(true)}
+                      title={`${pendingData.report.updated} Notion change(s) ready to review`}
+                    >
+                      <Bell className="h-4 w-4" />
+                      <span>Review Changes</span>
+                      <Badge className="ml-1 bg-amber-500 text-white px-1.5 py-0 text-xs">
+                        {pendingData.report.updated}
+                      </Badge>
+                    </Button>
+                  )}
                   <Button
                     variant="outline"
                     className="flex items-center gap-1"
-                    onClick={() => notionSyncMutation.mutate()}
-                    disabled={notionSyncMutation.isPending}
-                    title="Sync catalog data from Notion (name, category, HSN, SAP, volume, price)"
+                    onClick={() => detectMutation.mutate()}
+                    disabled={detectMutation.isPending || fullSyncMutation.isPending}
+                    title="Fetch changes from Notion — review before applying"
                   >
-                    {notionSyncMutation.isPending
+                    {detectMutation.isPending
                       ? <Loader2 className="h-4 w-4 animate-spin" />
                       : <CloudDownload className="h-4 w-4" />}
-                    <span>{notionSyncMutation.isPending ? 'Syncing...' : 'Sync from Notion'}</span>
+                    <span>{detectMutation.isPending ? 'Fetching...' : 'Sync from Notion'}</span>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="flex items-center gap-1 border-red-300 text-red-700 hover:bg-red-50"
+                    onClick={() => setIsFullImportConfirmOpen(true)}
+                    disabled={detectMutation.isPending || fullSyncMutation.isPending}
+                    title="Clear all products and import everything fresh from Notion"
+                  >
+                    <CloudDownload className="h-4 w-4" />
+                    <span>Full Import from Notion</span>
                   </Button>
                   {syncReport && (
                     <Button
@@ -917,47 +1009,124 @@ const Inventory = () => {
                   <Table className="inventory-table w-max min-w-full">
                     <TableHeader>
                       <TableRow>
+                        {/* ── Core ── */}
                         <TableHead className="whitespace-nowrap frozen-header">
                           <div className="flex items-center gap-1 cursor-pointer" onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}>
-                            Sr. No.
-                            {sortOrder === 'asc' ? ' ↑' : ' ↓'}
+                            New Sr.{sortOrder === 'asc' ? ' ↑' : ' ↓'}
                           </div>
                         </TableHead>
                         <TableHead className="whitespace-nowrap frozen-header">Item Name</TableHead>
-                        <TableHead className="break-words max-w-[150px]">SKU</TableHead>
-                        <TableHead className="break-words max-w-[120px]">Category</TableHead>
-                        <TableHead className="break-words max-w-[120px]">Volume (cu. ft.)</TableHead>
-                        <TableHead className="break-words max-w-[100px]">HSNCode</TableHead>
-                        <TableHead className="break-words max-w-[100px]">SAPCode</TableHead>
-                        <TableHead className="break-words max-w-[100px]">
-                          Items Per<br />Pallet
-                        </TableHead>
-                        <TableHead className="break-words max-w-[80px]">Pallets</TableHead>
-                        <TableHead className="break-words max-w-[130px]">Purchase Price</TableHead>
-                        <TableHead className="break-words max-w-[130px]">Selling Price</TableHead>
-                        <TableHead className="break-words max-w-[120px]">Last Updated</TableHead>
-                        <TableHead className="text-right min-w-[120px]">Actions</TableHead>
+                        <TableHead className="whitespace-nowrap">SKU</TableHead>
+                        <TableHead className="whitespace-nowrap">Brand</TableHead>
+                        <TableHead className="whitespace-nowrap">Category</TableHead>
+                        <TableHead className="whitespace-nowrap">Sale Cat.</TableHead>
+                        <TableHead className="whitespace-nowrap">Plant</TableHead>
+                        <TableHead className="whitespace-nowrap">Type</TableHead>
+                        <TableHead className="whitespace-nowrap">Volume<br/>(cu. ft.)</TableHead>
+                        <TableHead className="whitespace-nowrap">Packets</TableHead>
+                        <TableHead className="whitespace-nowrap">IND PLT</TableHead>
+                        <TableHead className="whitespace-nowrap">VAL PLT</TableHead>
+                        <TableHead className="whitespace-nowrap">Pallets</TableHead>
+                        {/* ── GJ Region ── */}
+                        <TableHead className="whitespace-nowrap bg-blue-50">GJ Sr</TableHead>
+                        <TableHead className="whitespace-nowrap bg-blue-50">GJ HSN</TableHead>
+                        <TableHead className="whitespace-nowrap bg-blue-50">GJ SAP</TableHead>
+                        <TableHead className="whitespace-nowrap bg-blue-50">GJ Sale Rate</TableHead>
+                        <TableHead className="whitespace-nowrap bg-blue-50">GJ IGST</TableHead>
+                        <TableHead className="whitespace-nowrap bg-blue-50">GJ-GA PUR</TableHead>
+                        <TableHead className="whitespace-nowrap bg-blue-50">GJ-MH PUR</TableHead>
+                        <TableHead className="whitespace-nowrap bg-blue-50">GJ-NAGAR PUR</TableHead>
+                        {/* ── MP Region ── */}
+                        <TableHead className="whitespace-nowrap bg-green-50">MP Sr</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP HSN</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP SAP</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-JH PUR</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-MH PUR</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-MP Jabalpur</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-MP Khargone</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-WB PUR</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">Sale MP-JH</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">Sale MP-MH</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">Sale MP-MP</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-JH IGST</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-MH IGST</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-MP CGST</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-MP SGST</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-WB IGST</TableHead>
+                        <TableHead className="whitespace-nowrap bg-green-50">MP-WB Sale</TableHead>
+                        {/* ── UP Region ── */}
+                        <TableHead className="whitespace-nowrap bg-orange-50">UP Sr</TableHead>
+                        <TableHead className="whitespace-nowrap bg-orange-50">UP HSN</TableHead>
+                        <TableHead className="whitespace-nowrap bg-orange-50">UP SAP</TableHead>
+                        <TableHead className="whitespace-nowrap bg-orange-50">UP Rate</TableHead>
+                        <TableHead className="whitespace-nowrap bg-orange-50">UP IGST</TableHead>
+                        {/* ── Generic ── */}
+                        <TableHead className="whitespace-nowrap">HSN Code</TableHead>
+                        <TableHead className="whitespace-nowrap">SAP Code</TableHead>
+                        <TableHead className="whitespace-nowrap">Purchase Price</TableHead>
+                        <TableHead className="whitespace-nowrap">Selling Price</TableHead>
+                        <TableHead className="whitespace-nowrap">Last Updated</TableHead>
+                        <TableHead className="text-right min-w-[100px]">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {paginatedProducts.map((product: any) => (
                         <TableRow key={product.id}>
-                          <TableCell>{product.srNo}</TableCell>
-                          <TableCell className="font-medium">{product.name}</TableCell>
-                          <TableCell className="break-words max-w-[150px]">{product.barcode || 'N/A'}</TableCell>
+                          {/* ── Core ── */}
+                          <TableCell className="text-xs">{product.newSr || product.srNo || '—'}</TableCell>
+                          <TableCell className="font-medium whitespace-nowrap">{product.name}</TableCell>
+                          <TableCell className="text-xs">{product.barcode || 'N/A'}</TableCell>
+                          <TableCell className="text-xs">{product.brand || '—'}</TableCell>
                           <TableCell>
-                            {product.category ? (
-                              <CategoryBadge category={product.category} />
-                            ) : '—'}
+                            {product.category ? <CategoryBadge category={product.category} /> : '—'}
                           </TableCell>
-                          <TableCell>{product.volumeInCuFt || '—'}</TableCell>
-                          <TableCell>{product.hsnCode || '—'}</TableCell>
-                          <TableCell>{product.sapCode || '—'}</TableCell>
-                          <TableCell>{product.itemsPerPallet || 0}</TableCell>
-                          <TableCell>{product.pallets || 0}</TableCell>
-                          <TableCell>{formatIndianRupees(product.purchasePrice)}</TableCell>
-                          <TableCell>{formatIndianRupees(product.sellingPrice)}</TableCell>
-                          <TableCell>
+                          <TableCell className="text-xs">{product.saleCategory || '—'}</TableCell>
+                          <TableCell className="text-xs">{product.plant || '—'}</TableCell>
+                          <TableCell className="text-xs">{product.type || '—'}</TableCell>
+                          <TableCell className="text-xs">{product.volumeInCuFt || '—'}</TableCell>
+                          <TableCell className="text-xs text-center">{product.itemsPerPallet || 0}</TableCell>
+                          <TableCell className="text-xs text-center">{product.indPlt ?? '—'}</TableCell>
+                          <TableCell className="text-xs text-center">{product.valPlt ?? '—'}</TableCell>
+                          <TableCell className="text-xs text-center">{product.pallets || 0}</TableCell>
+                          {/* ── GJ Region ── */}
+                          <TableCell className="text-xs bg-blue-50/40">{product.gjSr || '—'}</TableCell>
+                          <TableCell className="text-xs bg-blue-50/40">{product.gjHsn || '—'}</TableCell>
+                          <TableCell className="text-xs bg-blue-50/40">{product.gjSap || '—'}</TableCell>
+                          <TableCell className="text-xs bg-blue-50/40">{product.gjSaleRate || '—'}</TableCell>
+                          <TableCell className="text-xs bg-blue-50/40">{product.gjIgst || '—'}</TableCell>
+                          <TableCell className="text-xs bg-blue-50/40">{product.gjGaPur || '—'}</TableCell>
+                          <TableCell className="text-xs bg-blue-50/40">{product.gjMhPur || '—'}</TableCell>
+                          <TableCell className="text-xs bg-blue-50/40">{product.gjNagarPur || '—'}</TableCell>
+                          {/* ── MP Region ── */}
+                          <TableCell className="text-xs bg-green-50/40">{product.mpSr || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpHsn || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpSap || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpJhPur || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpMhPur || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpMpPurJabalpur || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpMpPurKhargone || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpWbPur || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.saleMpJh || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.saleMpMh || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.saleMpMp || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpJhIgst || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpMhIgst || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpMpCgst || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpMpSgst || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpWbIgst || '—'}</TableCell>
+                          <TableCell className="text-xs bg-green-50/40">{product.mpWbSale || '—'}</TableCell>
+                          {/* ── UP Region ── */}
+                          <TableCell className="text-xs bg-orange-50/40">{product.upSr || '—'}</TableCell>
+                          <TableCell className="text-xs bg-orange-50/40">{product.upHsn || '—'}</TableCell>
+                          <TableCell className="text-xs bg-orange-50/40">{product.upSap || '—'}</TableCell>
+                          <TableCell className="text-xs bg-orange-50/40">{product.upRate || '—'}</TableCell>
+                          <TableCell className="text-xs bg-orange-50/40">{product.upIgst || '—'}</TableCell>
+                          {/* ── Generic ── */}
+                          <TableCell className="text-xs">{product.hsnCode || '—'}</TableCell>
+                          <TableCell className="text-xs">{product.sapCode || '—'}</TableCell>
+                          <TableCell className="text-xs">{formatIndianRupees(product.purchasePrice)}</TableCell>
+                          <TableCell className="text-xs">{formatIndianRupees(product.sellingPrice)}</TableCell>
+                          <TableCell className="text-xs">
                             {product.lastUpdated ? new Date(product.lastUpdated).toLocaleDateString() : '—'}
                           </TableCell>
                           <TableCell className="text-right">
@@ -987,7 +1156,7 @@ const Inventory = () => {
                     </TableBody>
                     <TableFooter className="bg-muted/30">
                       <TableRow>
-                        <TableCell colSpan={13} className="p-2">
+                        <TableCell colSpan={52} className="p-2">
                           <div className="flex flex-col sm:flex-row items-center justify-between w-full gap-4">
                              <div className="flex items-center gap-2">
                                 <span className="text-xs whitespace-nowrap">Show entries:</span>
@@ -1311,6 +1480,12 @@ const Inventory = () => {
             <div className="flex flex-col gap-4 overflow-hidden">
               {/* Summary badges */}
               <div className="flex flex-wrap gap-3">
+                {syncReport.created > 0 && (
+                  <div className="flex flex-col items-center px-4 py-2 bg-purple-50 border border-purple-200 rounded-lg">
+                    <span className="text-2xl font-bold text-purple-700">{syncReport.created}</span>
+                    <span className="text-xs text-purple-600">Created</span>
+                  </div>
+                )}
                 <div className="flex flex-col items-center px-4 py-2 bg-green-50 border border-green-200 rounded-lg">
                   <span className="text-2xl font-bold text-green-700">{syncReport.updated}</span>
                   <span className="text-xs text-green-600">Updated</span>
@@ -1334,6 +1509,22 @@ const Inventory = () => {
                   </div>
                 )}
               </div>
+
+              {/* Newly created products */}
+              {syncReport.createdProducts?.length > 0 && (
+                <div className="border rounded-md overflow-y-auto max-h-40">
+                  <div className="bg-purple-50 px-3 py-1.5 text-xs font-semibold text-purple-700 border-b">
+                    New products added ({syncReport.createdProducts.length})
+                  </div>
+                  {syncReport.createdProducts.map((cp: any, i: number) => (
+                    <div key={i} className="flex items-center gap-2 px-3 py-1.5 text-xs border-b last:border-0">
+                      <span className="font-medium">{cp.productName}</span>
+                      <span className="text-muted-foreground">·</span>
+                      <span className="text-muted-foreground">{cp.barcode}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Changed products table */}
               {syncReport.changedProducts?.length > 0 ? (
@@ -1404,8 +1595,8 @@ const Inventory = () => {
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsSyncReportOpen(false)}>Close</Button>
             <Button
-              onClick={() => { setIsSyncReportOpen(false); notionSyncMutation.mutate(); }}
-              disabled={notionSyncMutation.isPending}
+              onClick={() => { setIsSyncReportOpen(false); detectMutation.mutate(); }}
+              disabled={detectMutation.isPending}
               className="flex items-center gap-1"
             >
               <CloudDownload className="h-4 w-4" />
@@ -1414,6 +1605,160 @@ const Inventory = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Pending Changes Confirmation Dialog */}
+      <Dialog open={isPendingDialogOpen} onOpenChange={setIsPendingDialogOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bell className="h-5 w-5 text-amber-500" />
+              Review Pending Notion Changes
+            </DialogTitle>
+            <DialogDescription>
+              {pendingData?.report?.syncTime
+                ? `Detected on ${new Date(pendingData.report.syncTime).toLocaleString()} — review before applying`
+                : 'Changes detected from Notion. Review and confirm before applying.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {pendingData?.report && (
+            <div className="flex flex-col gap-4 overflow-hidden">
+              {/* Summary badges */}
+              <div className="flex flex-wrap gap-3">
+                {pendingData.report.created > 0 && (
+                  <div className="flex flex-col items-center px-4 py-2 bg-purple-50 border border-purple-200 rounded-lg">
+                    <span className="text-2xl font-bold text-purple-700">{pendingData.report.created}</span>
+                    <span className="text-xs text-purple-600">To Create</span>
+                  </div>
+                )}
+                <div className="flex flex-col items-center px-4 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+                  <span className="text-2xl font-bold text-amber-700">{pendingData.report.updated}</span>
+                  <span className="text-xs text-amber-600">To Update</span>
+                </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <span className="text-2xl font-bold text-gray-600">{pendingData.report.skipped}</span>
+                  <span className="text-xs text-gray-500">No Change</span>
+                </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <span className="text-2xl font-bold text-yellow-700">{pendingData.report.notFound}</span>
+                  <span className="text-xs text-yellow-600">Unmatched</span>
+                </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+                  <span className="text-2xl font-bold text-blue-700">{pendingData.report.total}</span>
+                  <span className="text-xs text-blue-600">Total Pages</span>
+                </div>
+              </div>
+
+              {/* Changed products table */}
+              {pendingData.report.changedProducts?.length > 0 ? (
+                <div className="overflow-y-auto flex-1 border rounded-md">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/50">
+                        <TableHead className="w-[180px]">Product</TableHead>
+                        <TableHead className="w-[100px]">SKU</TableHead>
+                        <TableHead>Proposed Changes</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {pendingData.report.changedProducts.map((pc: any) => (
+                        <TableRow key={pc.productId}>
+                          <TableCell className="font-medium text-sm align-top py-3">
+                            {pc.productName}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground align-top py-3">
+                            {pc.barcode || pc.srNo || '—'}
+                          </TableCell>
+                          <TableCell className="align-top py-3">
+                            <div className="flex flex-col gap-1">
+                              {pc.changes.map((ch: any, i: number) => (
+                                <div key={i} className="flex items-start gap-1 text-xs">
+                                  <span className="font-medium text-muted-foreground min-w-[110px]">
+                                    {ch.label}:
+                                  </span>
+                                  <span className="line-through text-red-500 max-w-[120px] truncate" title={String(ch.oldValue ?? '—')}>
+                                    {ch.oldValue != null && ch.oldValue !== '' ? String(ch.oldValue) : '—'}
+                                  </span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span className="text-green-700 font-medium max-w-[120px] truncate" title={String(ch.newValue)}>
+                                    {String(ch.newValue)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+                  <CheckCircle2 className="h-10 w-10 mb-2 text-green-400" />
+                  <p className="text-sm">No field changes detected.</p>
+                  <p className="text-xs mt-1">Products already match Notion data.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsPendingDialogOpen(false)}>
+              Dismiss
+            </Button>
+            <Button
+              onClick={() => applyPendingMutation.mutate()}
+              disabled={applyPendingMutation.isPending || (!pendingData?.report?.updated && !pendingData?.report?.created)}
+              className="flex items-center gap-1 bg-amber-600 hover:bg-amber-700 text-white"
+            >
+              {applyPendingMutation.isPending ? (
+                <><Loader2 className="h-4 w-4 animate-spin" /> Applying...</>
+              ) : (
+                <><CheckCircle2 className="h-4 w-4" />
+                  Apply ({(pendingData?.report?.created ?? 0)} new + {pendingData?.report?.updated ?? 0} changed)
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Full Import Confirmation Dialog */}
+      <AlertDialog open={isFullImportConfirmOpen} onOpenChange={setIsFullImportConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-red-700 flex items-center gap-2">
+              <CloudDownload className="h-5 w-5" />
+              Full Import from Notion
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-sm">
+                <p>This will <strong>permanently delete all products</strong> in the inventory and reimport everything fresh from Notion.</p>
+                <div className="bg-red-50 border border-red-200 rounded-md p-3 text-red-700 text-xs space-y-1">
+                  <p>• All existing products will be deleted</p>
+                  <p>• Stock counts (purchased / sold / in-stock) will reset to 0</p>
+                  <p>• Only products with a valid SKU and name in Notion will be imported</p>
+                  <p>• Every product will have its Notion Page ID stored for future syncs</p>
+                </div>
+                <p className="text-muted-foreground">Use this for the initial setup or when products are missing their Notion link.</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={() => fullSyncMutation.mutate()}
+              disabled={fullSyncMutation.isPending}
+            >
+              {fullSyncMutation.isPending ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Importing...</>
+              ) : 'Yes, Clear & Import'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
     </>
   );
 };
