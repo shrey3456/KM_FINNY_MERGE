@@ -107,7 +107,7 @@ import voucherPrefixRoutes from "./routes/voucher-prefix";
 import checkinoutRoutes from "./routes/checkinout";
 import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
-import { syncInventoryFromNotion } from "./services/notionInventorySync";
+import { detectChangesFromNotion, fullSyncFromNotion } from "./services/notionInventorySync";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -471,6 +471,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     },
   );
+
+  // Notion inventory paginated + filtered product listing (admin only)
+  apiRouter.get("/notion-products", async (req: Request, res: Response) => {
+    try {
+      const page     = Math.max(1, parseInt(req.query.page     as string) || 1);
+      const pageSize = Math.min(200, Math.max(10, parseInt(req.query.pageSize as string) || 50));
+      const { search, category, brand, plant, type, saleCategory, linkedOnly } = req.query as Record<string, string>;
+      const result = await storage.getNotionProductsPage({
+        page, pageSize,
+        search:       search       || undefined,
+        category:     category     || undefined,
+        brand:        brand        || undefined,
+        plant:        plant        || undefined,
+        type:         type         || undefined,
+        saleCategory: saleCategory || undefined,
+        linkedOnly:   linkedOnly === 'true',
+      });
+      res.json({ ...result, page, pageSize, totalPages: Math.ceil(result.total / pageSize) });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch notion products", error: String(error) });
+    }
+  });
+
+  apiRouter.get("/notion-products/filters", async (_req: Request, res: Response) => {
+    try {
+      const filters = await storage.getNotionProductFilterOptions();
+      res.json(filters);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch filter options", error: String(error) });
+    }
+  });
 
   // Product endpoints
   apiRouter.get("/products", async (req: Request, res: Response) => {
@@ -8866,18 +8897,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount the API router
   app.use("/api", apiRouter);
 
-  // Start 24-hour Notion inventory sync if the database ID is configured
+  // Every 24 hours: if DB has no products → full import from Notion;
+  // otherwise detect changes and store as pending for admin review.
   if (process.env.NOTION_INVENTORY_DATABASE_ID) {
     const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
-    setInterval(async () => {
+    const runScheduledSync = async () => {
       try {
-        console.log('[Notion Inventory Sync] Running scheduled 24-hour sync...');
-        await syncInventoryFromNotion();
+        const allProducts = await storage.getAllProducts();
+        if (allProducts.length === 0) {
+          console.log('[Notion Inventory Sync] DB is empty — running full import from Notion...');
+          await fullSyncFromNotion();
+        } else {
+          console.log('[Notion Inventory Sync] Running scheduled 24-hour change detection...');
+          await detectChangesFromNotion();
+        }
       } catch (err) {
         console.error('[Notion Inventory Sync] Scheduled sync failed:', err);
       }
-    }, SYNC_INTERVAL_MS);
-    console.log('[Notion Inventory Sync] 24-hour auto-sync scheduler registered');
+    };
+    setInterval(runScheduledSync, SYNC_INTERVAL_MS);
+    // Also run once on startup after a short delay to handle empty-DB on first boot
+    setTimeout(runScheduledSync, 10000);
+    console.log('[Notion Inventory Sync] 24-hour sync scheduler registered');
   }
 
   // Return the HTTP server with WebSocket support

@@ -25,6 +25,7 @@ import {
   PrinterCheck,
   FileBarChart,
   Clock,
+  Database,
   ScanLine,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
@@ -224,6 +225,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
           label: "User Management",
           icon: <Users className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/users",
+        },
+        {
+          label: "Notion Inventory",
+          icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/notion-inventory",
         },
         {
           label: "Plant Management",

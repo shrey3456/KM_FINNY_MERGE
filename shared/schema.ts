@@ -36,24 +36,83 @@ export type InsertUser = z.infer<typeof insertUserSchema>;
 
 export const products = pgTable("products", {
   id: serial("id").primaryKey(),
-  srNo: text("sr_no"),             // serial number from the original CSV import
-  itemNo: text("item_no"),         // internal SKU / item code
-  barcode: text("barcode").notNull().unique(),
-  name: text("name").notNull(),
-  category: text("category"),
-  volumeInCuFt: text("volume_in_cu_ft"),
-  hsnCode: text("hsn_code"),       // GST harmonised system code
-  sapCode: text("sap_code"),       // SAP ERP code
-  purchased: integer("purchased").default(0),  // cumulative units purchased
-  sold: integer("sold").default(0),            // cumulative units sold/dispatched
-  inStock: integer("in_stock").default(0),     // current live stock level
-  itemsPerPallet: integer("items_per_pallet").default(0), // units packed per pallet
-  pallets: integer("pallets").default(0),      // current number of pallets in stock
+
+  // ── Core identity ─────────────────────────────────────────────────────────
+  srNo: text("sr_no"),              // legacy Sr from original CSV import
+  newSr: text("new_sr"),            // "New Sr." column — canonical cross-plant Sr
+  itemNo: text("item_no"),          // internal item code
+  barcode: text("barcode").notNull(), // SKU / barcode
+  name: text("name").notNull(),     // "Products Name {DMS}"
+  notionWiseName: text("notion_wise_name"), // "Products - Notion Wise"
+  brand: text("brand"),             // Brand
+  category: text("category"),       // Category
+  saleCategory: text("sale_category"), // Sale Category (e.g. 01-PW, 03-CP)
+  plant: text("plant"),             // Plant : (e.g. VAL & IND, BARODA, RAJKOT)
+  type: text("type"),               // Type : (BOX / NOS / JAR)
+  productImage: text("product_image"), // Product Image filename
+  notionPageId: text("notion_page_id"), // Notion page.id for unique identification
+
+  // ── Volume / pallet ───────────────────────────────────────────────────────
+  volumeInCuFt: text("volume_in_cu_ft"), // "Vol Master :"
+  itemsPerPallet: integer("items_per_pallet").default(0), // "Packets :"
+  pallets: integer("pallets").default(0),
+  indPlt: integer("ind_plt"),       // "IND PLT :"
+  valPlt: integer("val_plt"),       // "VAL PLT :"
+
+  // ── Stock counters (live totals) ───────────────────────────────────────────
+  purchased: integer("purchased").default(0),
+  sold: integer("sold").default(0),
+  inStock: integer("in_stock").default(0),
+
+  // ── GJ (Gujarat) region fields ────────────────────────────────────────────
+  gjSr: text("gj_sr"),              // "GJ Sr :"
+  gjHsn: text("gj_hsn"),           // "GJ HSN :"
+  gjSap: text("gj_sap"),           // "GJ SAP :"
+  gjSaleRate: text("gj_sale_rate"), // "GJ Sale Rate :"
+  gjIgst: text("gj_igst"),         // "GJ IGST :"
+  gjGaPur: text("gj_ga_pur"),      // "GJ-GA PUR"
+  gjMhPur: text("gj_mh_pur"),      // "GJ-MH PUR"
+  gjNagarPur: text("gj_nagar_pur"),// "GJ-NAGAR PUR"
+  forGjOrderForm: text("for_gj_order_form"), // "For GJ Order Form :"
+
+  // ── MP (Madhya Pradesh) region fields ─────────────────────────────────────
+  mpSr: text("mp_sr"),              // "MP Sr :"
+  mpHsn: text("mp_hsn"),           // "MP HSN :"
+  mpSap: text("mp_sap"),           // "MP SAP :"
+  mpJhPur: text("mp_jh_pur"),      // "MP-JH PUR"
+  mpMhPur: text("mp_mh_pur"),      // "MP-MH PUR"
+  mpMpPurJabalpur: text("mp_mp_pur_jabalpur"), // "MP-MP PUR JABALPUR"
+  mpMpPurKhargone: text("mp_mp_pur_khargone"), // "MP-MP PUR KHARGONE"
+  mpWbPur: text("mp_wb_pur"),      // "MP-WB PUR"
+  saleMpJh: text("sale_mp_jh"),    // "Sale {MP - JH}:"
+  saleMpMh: text("sale_mp_mh"),    // "Sale {MP - MH} :"
+  saleMpMp: text("sale_mp_mp"),    // "Sale {MP-MP} :"
+  mpJhIgst: text("mp_jh_igst"),    // "{MP - JH} IGST :"
+  mpMhIgst: text("mp_mh_igst"),    // "{MP - MH} IGST :"
+  mpMpCgst: text("mp_mp_cgst"),    // "{MP - MP} CGST :"
+  mpMpSgst: text("mp_mp_sgst"),    // "{MP - MP} SGST :"
+  mpWbIgst: text("mp_wb_igst"),    // "{MP-WB} IGST"
+  mpWbSale: text("mp_wb_sale"),    // "{MP-WB} SALE"
+  forMpOrderForm: text("for_mp_order_form"), // "For MP Order Form :"
+
+  // ── UP (Uttar Pradesh) region fields ──────────────────────────────────────
+  upSr: text("up_sr"),              // "UP Sr :"
+  upHsn: text("up_hsn"),           // "UP HSN :"
+  upSap: text("up_sap"),           // "UP SAP :"
+  upRate: text("up_rate"),         // "UP Rate :"
+  upIgst: text("up_igst"),         // "UP IGST :"
+  forUpOrderForm: text("for_up_order_form"), // "For UP Order Form :"
+
+  // ── Generic / fallback price fields ──────────────────────────────────────
+  hsnCode: text("hsn_code"),       // generic HSN (may mirror gjHsn)
+  sapCode: text("sap_code"),       // generic SAP (may mirror gjSap)
   purchasePrice: text("purchase_price"),
-  sellingPrice: text("selling_price"),
+  sellingPrice: text("selling_price"), // generic selling price (may mirror gjSaleRate)
+
+  // ── Misc ──────────────────────────────────────────────────────────────────
   lastUpdated: timestamp("last_updated"),
   description: text("description"),
-  status: text("status").default("in stock"),  // "in stock" | "out of stock"
+  status: text("status").default("in stock"),
   createdByCode: text("created_by_code").references(() => users.userCode),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -62,11 +121,28 @@ export const products = pgTable("products", {
 export const insertProductSchema = createInsertSchema(products, {
   lastUpdated: z.union([z.date(), z.string()]).optional(),
 }).pick({
-  srNo: true, itemNo: true, barcode: true, name: true, category: true,
-  volumeInCuFt: true, hsnCode: true, sapCode: true, purchased: true, sold: true,
-  inStock: true, itemsPerPallet: true, pallets: true, purchasePrice: true,
-  sellingPrice: true, lastUpdated: true, description: true, status: true,
-  createdByCode: true,
+  // core
+  srNo: true, newSr: true, itemNo: true, barcode: true, name: true,
+  notionWiseName: true, brand: true, category: true, saleCategory: true,
+  plant: true, type: true, productImage: true, notionPageId: true,
+  // volume / pallet
+  volumeInCuFt: true, itemsPerPallet: true, pallets: true, indPlt: true, valPlt: true,
+  // stock
+  purchased: true, sold: true, inStock: true,
+  // GJ
+  gjSr: true, gjHsn: true, gjSap: true, gjSaleRate: true, gjIgst: true,
+  gjGaPur: true, gjMhPur: true, gjNagarPur: true, forGjOrderForm: true,
+  // MP
+  mpSr: true, mpHsn: true, mpSap: true,
+  mpJhPur: true, mpMhPur: true, mpMpPurJabalpur: true, mpMpPurKhargone: true, mpWbPur: true,
+  saleMpJh: true, saleMpMh: true, saleMpMp: true,
+  mpJhIgst: true, mpMhIgst: true, mpMpCgst: true, mpMpSgst: true, mpWbIgst: true, mpWbSale: true,
+  forMpOrderForm: true,
+  // UP
+  upSr: true, upHsn: true, upSap: true, upRate: true, upIgst: true, forUpOrderForm: true,
+  // generic price
+  hsnCode: true, sapCode: true, purchasePrice: true, sellingPrice: true,
+  lastUpdated: true, description: true, status: true, createdByCode: true,
 });
 
 export type Product = typeof products.$inferSelect;

@@ -13,7 +13,7 @@ export function handleUnauthorized() {
 }
 
 async function throwIfResNotOk(res: Response) {
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401) {
     handleUnauthorized();
   }
 
@@ -50,12 +50,12 @@ export async function apiRequest(
     credentials: "include",
   });
 
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401) {
     handleUnauthorized();
   }
 
   await throwIfResNotOk(res);
-  
+
   // If parseJson is true, automatically parse the response as JSON
   if (parseJson) {
     try {
@@ -97,7 +97,7 @@ export const getQueryFn: <T>(options: {
       headers: {} as Record<string, string>
     });
 
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       handleUnauthorized();
     }
 
