@@ -5,6 +5,8 @@ import {
   ArrowLeft,
   Camera,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   FileSpreadsheet,
   History,
   Keyboard,
@@ -38,13 +40,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -99,6 +94,24 @@ type ScanActivity = {
   quantity: number;
   scannedAt: string;
   type: "order" | "extra";
+};
+
+type OfflineScanOp = {
+  queueId: string;
+  sessionId: number;
+  itemId?: number;
+  code: string;
+  qty: number;
+  productId?: number;
+  productName?: string;
+  productBarcode?: string;
+  productSku?: string;
+  itemName: string;
+  isExtra: boolean;
+  scannedAt: string;
+  numPallets?: number | null;
+  userCode?: string;
+  userName?: string;
 };
 
 // Full session (used while actively scanning)
@@ -218,6 +231,11 @@ export default function ScanOrderPage() {
   // Used to float recently-scanned rows to the top of the CSV Order Items table.
   const [recentItemIds, setRecentItemIds] = useState<number[]>([]);
 
+  const [csvPage, setCsvPage] = useState(1);
+  const CSV_PAGE_SIZE = 8;
+  const [scanItemPage, setScanItemPage] = useState(1);
+  const SCAN_PAGE_SIZE = 10;
+
   const [csvRows, setCsvRows] = useState<string[][]>([]);
   const [csvName, setCsvName] = useState("");
   const [csvMode, setCsvMode] = useState<CsvMode>("pivot");
@@ -241,6 +259,16 @@ export default function ScanOrderPage() {
   };
   const [pendingScan, setPendingScan] = useState<PendingScan | null>(null);
   const [pendingQty, setPendingQty] = useState<string>("1");
+  const [showCompleteConfirm, setShowCompleteConfirm] = useState(false);
+
+  // Online / offline state + queued scans
+  const [isOnline, setIsOnline] = useState(() => typeof navigator !== "undefined" ? navigator.onLine : true);
+  const [offlineQueue, setOfflineQueue] = useState<OfflineScanOp[]>(() => {
+    try { return JSON.parse(localStorage.getItem("km_offline_scan_queue") || "[]"); } catch { return []; }
+  });
+  const [isSyncing, setIsSyncing] = useState(false);
+  const offlineQueueRef = useRef<OfflineScanOp[]>(offlineQueue);
+  const isSyncingRef = useRef(false);
 
   // ── Queries ──────────────────────────────────────────────────────────────
 
@@ -260,19 +288,19 @@ export default function ScanOrderPage() {
   const sessions: SessionSummary[] = sessionsRaw;
 
   const importsQuery = useQuery<any>({
-    queryKey: ["/api/orders/imports"],
+    queryKey: ["/api/orders/imports", csvPage, CSV_PAGE_SIZE],
     queryFn: async () => {
-      const r = await apiRequest("GET", "/api/orders/imports", undefined, false, true);
-      if (Array.isArray(r)) return r;
-      if (r && Array.isArray(r.results)) return r.results;
-      return [];
+      const r = await apiRequest("GET", `/api/orders/imports?page=${csvPage}&limit=${CSV_PAGE_SIZE}`, undefined, false, true);
+      return r ?? {};
     },
     retry: false,
     staleTime: 0,
   });
-  const { data: importSummariesRaw = [], error: importsError } = importsQuery as any;
-  const importSummaries: { filename: string; orderCount: number; itemCount: number; lastImportedAt: string }[] =
-    Array.isArray(importSummariesRaw) ? importSummariesRaw : [];
+  const { data: importsData = {}, error: importsError } = importsQuery as any;
+  const importSummaries: { filename: string; noteKey: string; orderCount: number; itemCount: number; lastImportedAt: string }[] =
+    Array.isArray(importsData.results) ? importsData.results : (Array.isArray(importsData) ? importsData : []);
+  const importsTotalPages: number = importsData.totalPages ?? 1;
+  const importsTotal: number = importsData.total ?? importSummaries.length;
 
   useEffect(() => {
     if (importsError) toast({ title: "Failed to load uploaded CSVs", description: (importsError as any).message, variant: "destructive" });
@@ -287,6 +315,7 @@ export default function ScanOrderPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions"] });
       setActiveSession({ ...data, items: data.items ?? [], extras: data.extras ?? [] });
       setScanActivities([]);
+      localStorage.removeItem(`km_scan_activities_${data.id}`);
       setRecentItemIds([]);
       resetDraft();
       setView("scan");
@@ -297,9 +326,11 @@ export default function ScanOrderPage() {
   const completeSessionMutation = useMutation({
     mutationFn: async (id: number) =>
       apiRequest("PATCH", `/api/scan-sessions/${id}`, { status: "completed" }),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions"] });
       setActiveSession((s) => s ? { ...s, status: "completed" } : s);
+      localStorage.removeItem("km_scan_restore_id");
+      localStorage.removeItem(`km_scan_activities_${id}`);
     },
   });
 
@@ -376,9 +407,10 @@ export default function ScanOrderPage() {
     setImportItems([]); setFlatSkuColumn(""); setFlatNameColumn(""); setFlatQtyColumn(""); setCsvMode("pivot");
   };
 
-  const loadImportItems = async () => {
-    if (!selectedImport) return;
-    const response = await apiRequest("GET", `/api/orders/imports/items?filename=${encodeURIComponent(selectedImport)}`, undefined, false, true) as ImportItemsResponse;
+  const loadImportItems = async (filename?: string) => {
+    const target = filename ?? selectedImport;
+    if (!target) return;
+    const response = await apiRequest("GET", `/api/orders/imports/items?filename=${encodeURIComponent(target)}`, undefined, false, true) as ImportItemsResponse;
     if (!response?.items?.length) { toast({ title: "No items found", description: "This CSV has no arriving items to scan.", variant: "destructive" }); return; }
     // Load CSV data as-is — no inventory matching at import time
     setImportItems(response.items.map((item) => ({
@@ -439,9 +471,15 @@ export default function ScanOrderPage() {
 
   const loadFullSession = async (id: number) => {
     const data = await apiRequest("GET", `/api/scan-sessions/${id}`, undefined, false, true) as OrderSession;
-    setActiveSession({ ...data, items: data.items ?? [], extras: data.extras ?? [] });
-    setScanActivities([]);
-    setRecentItemIds([]);
+    const items = data.items ?? [];
+    setActiveSession({ ...data, items, extras: data.extras ?? [] });
+    try {
+      const saved = localStorage.getItem(`km_scan_activities_${id}`);
+      setScanActivities(saved ? JSON.parse(saved) : []);
+    } catch {
+      setScanActivities([]);
+    }
+    setRecentItemIds(items.filter((i) => i.scannedQty > 0).map((i) => i.id));
     setView("scan");
   };
 
@@ -487,6 +525,45 @@ export default function ScanOrderPage() {
     });
   };
 
+  // Flush the offline queue to the server. Called automatically when the browser
+  // regains connectivity. Processes ops in order; stops on first failure and keeps
+  // remaining ops in the queue for the next attempt.
+  const syncOfflineQueue = async (queue: OfflineScanOp[]) => {
+    if (!queue.length || isSyncingRef.current) return;
+    isSyncingRef.current = true;
+    setIsSyncing(true);
+    let processed = 0;
+    let remaining: OfflineScanOp[] = [];
+    for (let i = 0; i < queue.length; i++) {
+      const op = queue[i];
+      try {
+        if (!op.isExtra && op.itemId != null) {
+          await apiRequest("PATCH", `/api/scan-sessions/${op.sessionId}/items/${op.itemId}`,
+            { increment: op.qty, productId: op.productId ?? null }, false, true);
+          postPalletScan(op.sessionId, { sessionItemId: op.itemId, barcode: op.productBarcode || op.code, sku: op.productSku || op.code, itemName: op.itemName, productId: op.productId, quantity: op.qty, numPallets: op.numPallets ?? null, isExtra: false, scannedByCode: op.userCode, scannedByName: op.userName });
+        } else if (op.isExtra) {
+          await apiRequest("POST", `/api/scan-sessions/${op.sessionId}/extras`,
+            { code: op.code, itemName: op.itemName, sku: op.productSku || op.code, productId: op.productId, quantity: op.qty, reason: op.productId ? "not_in_order" : "unknown_product", scannedByCode: op.userCode, scannedByName: op.userName }, false, true);
+          postPalletScan(op.sessionId, { barcode: op.productBarcode || op.code, sku: op.productSku || op.code, itemName: op.itemName, productId: op.productId, quantity: op.qty, numPallets: op.numPallets ?? null, isExtra: true, scannedByCode: op.userCode, scannedByName: op.userName });
+        }
+        processed++;
+      } catch {
+        remaining = queue.slice(i); // keep this op and everything after it
+        break;
+      }
+    }
+    setOfflineQueue(remaining);
+    offlineQueueRef.current = remaining;
+    isSyncingRef.current = false;
+    setIsSyncing(false);
+    if (processed > 0) {
+      toast({
+        title: remaining.length === 0 ? "Offline scans synced" : `${processed} scan${processed !== 1 ? "s" : ""} synced`,
+        description: remaining.length > 0 ? `${remaining.length} still pending — will retry on next connection.` : undefined,
+      });
+    }
+  };
+
   const handleScannedCode = async (rawCode: string) => {
     const code = rawCode.trim();
     if (!code || !activeSession || isPostingScan || pendingScan !== null) return;
@@ -515,7 +592,14 @@ export default function ScanOrderPage() {
       const namePalletSize   = product ? extractPalletSize(product) : 0;
       // itemsPerPallet = pallet size (the divisor for the pallet count calculation)
       const itemsPerPallet   = inventoryPallets > 0 ? inventoryPallets : namePalletSize;
-      const defaultQty       = itemsPerPallet > 0 ? itemsPerPallet : 1;
+      // remaining = how many boxes are still needed to fill the order (0 if fully/over scanned)
+      const remaining        = matchedItem ? Math.max(0, matchedItem.expectedQty - matchedItem.scannedQty) : 0;
+      const hasRemaining     = remaining > 0;
+      // If there's still room in the order and it's less than one pallet, default to the gap.
+      // Otherwise (fully scanned or extra) default to a full pallet — the scan will go to extras.
+      const defaultQty       = itemsPerPallet > 0
+        ? (hasRemaining && remaining < itemsPerPallet ? remaining : itemsPerPallet)
+        : (hasRemaining ? remaining : 1);
       setPendingScan({ code, product, matchedItem, palletSize: itemsPerPallet, itemsPerPallet });
       setPendingQty(String(defaultQty));
     } catch (error) {
@@ -529,6 +613,43 @@ export default function ScanOrderPage() {
     if (!pendingScan || !activeSession) return;
     const { code, product, matchedItem } = pendingScan;
     const qty = Math.max(1, parseInt(pendingQty, 10) || 1);
+
+    // ── Offline path: apply optimistic UI updates and queue for later sync ──
+    if (!isOnline) {
+      const scannedAt = new Date().toISOString();
+      const userRaw = localStorage.getItem("currentUser");
+      const user = userRaw ? JSON.parse(userRaw) : null;
+      const ipp = pendingScan.itemsPerPallet;
+
+      const remaining = matchedItem ? Math.max(0, matchedItem.expectedQty - matchedItem.scannedQty) : 0;
+      const orderQty = matchedItem ? Math.min(qty, remaining) : 0;
+      const extraQty = matchedItem ? qty - orderQty : qty;
+
+      if (matchedItem && orderQty > 0) {
+        setActiveSession((s) => s ? { ...s, updatedAt: scannedAt, items: s.items.map((i) => i.id === matchedItem!.id ? { ...i, scannedQty: i.scannedQty + orderQty } : i) } : s);
+        setRecentItemIds((prev) => [matchedItem!.id, ...prev.filter((id) => id !== matchedItem!.id)]);
+        setScanItemPage(1);
+        setOfflineQueue((q) => [...q, { queueId: `q-${Date.now()}`, sessionId: activeSession.id, itemId: matchedItem.id, code, qty: orderQty, productId: product?.id, productName: product?.name, productBarcode: product?.barcode, productSku: product?.itemNo || product?.sapCode || product?.barcode, itemName: matchedItem.itemName, isExtra: false, scannedAt, numPallets: ipp > 0 ? parseFloat((orderQty / ipp).toFixed(2)) : null, userCode: user?.userCode, userName: user?.name || user?.username }]);
+        setScanActivities((prev) => [{ id: `act-${Date.now()}`, code, itemName: matchedItem.itemName, quantity: orderQty, scannedAt, type: "order" as const }, ...prev].slice(0, 50));
+      }
+
+      const extraTarget = matchedItem ? extraQty : qty;
+      if (extraTarget > 0) {
+        const extraName = matchedItem ? matchedItem.itemName : (product?.name ?? "Unknown product");
+        const existing = (activeSession.extras ?? []).find((e) => e.code === code);
+        setActiveSession((s) => !s ? s : { ...s, updatedAt: scannedAt, extras: existing ? s.extras.map((e) => e.code === code ? { ...e, quantity: e.quantity + extraTarget, scannedAt } : e) : [{ id: Date.now(), code, itemName: extraName, sku: product?.itemNo || product?.sapCode || product?.barcode, quantity: extraTarget, scannedAt, productId: product?.id, reason: product ? "not_in_order" as const : "unknown_product" as const }, ...s.extras] });
+        setOfflineQueue((q) => [...q, { queueId: `q-${Date.now()}-x`, sessionId: activeSession.id, code, qty: extraTarget, productId: product?.id, productName: product?.name, productBarcode: product?.barcode, productSku: product?.itemNo || product?.sapCode || product?.barcode, itemName: extraName, isExtra: true, scannedAt, numPallets: ipp > 0 ? parseFloat((extraTarget / ipp).toFixed(2)) : null, userCode: user?.userCode, userName: user?.name || user?.username }]);
+        setScanActivities((prev) => [{ id: `act-${Date.now()}-x`, code, itemName: extraName, quantity: extraTarget, scannedAt, type: "extra" as const }, ...prev].slice(0, 50));
+      }
+
+      toast({ title: "Saved offline", description: "Will sync automatically when you reconnect." });
+      setIsPostingScan(false);
+      setPendingScan(null);
+      setPendingQty("1");
+      lastScanRef.current = { code: "", at: 0 };
+      return;
+    }
+    // ── End offline path ────────────────────────────────────────────────────
     const userRaw = localStorage.getItem("currentUser");
     const user = userRaw ? JSON.parse(userRaw) : null;
     setIsPostingScan(true);
@@ -597,6 +718,7 @@ export default function ScanOrderPage() {
         const extraQty = qty - orderQty;
 
         setRecentItemIds((prev) => [matchedItem!.id, ...prev.filter((id) => id !== matchedItem!.id)]);
+        setScanItemPage(1);
 
         if (orderQty > 0) {
           const orderNumPallets = pendingScan.itemsPerPallet > 0
@@ -742,6 +864,55 @@ export default function ScanOrderPage() {
     };
   }, []);
 
+  // Keep offlineQueueRef in sync so event callbacks see the latest queue
+  useEffect(() => { offlineQueueRef.current = offlineQueue; }, [offlineQueue]);
+
+  // Persist offline queue to localStorage across page refreshes
+  useEffect(() => {
+    localStorage.setItem("km_offline_scan_queue", JSON.stringify(offlineQueue));
+  }, [offlineQueue]);
+
+  // Persist scan activities per session so history survives dashboard navigation
+  useEffect(() => {
+    if (activeSession?.id && scanActivities.length > 0) {
+      localStorage.setItem(`km_scan_activities_${activeSession.id}`, JSON.stringify(scanActivities));
+    }
+  }, [scanActivities, activeSession?.id]);
+
+  // Save the active session ID when scanning so we can auto-restore after a refresh
+  useEffect(() => {
+    if (activeSession && view === "scan") {
+      localStorage.setItem("km_scan_restore_id", String(activeSession.id));
+    }
+  }, [activeSession?.id, view]);
+
+  // On mount: if the user refreshed while scanning, jump straight back into the session
+  useEffect(() => {
+    const savedId = localStorage.getItem("km_scan_restore_id");
+    if (!savedId) return;
+    const id = parseInt(savedId, 10);
+    if (isNaN(id)) return;
+    loadFullSession(id).catch(() => localStorage.removeItem("km_scan_restore_id"));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Online / offline listeners — auto-sync the queue when connectivity is restored
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      if (offlineQueueRef.current.length > 0) syncOfflineQueue(offlineQueueRef.current);
+    };
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  // syncOfflineQueue is stable within this render — queue is read via ref
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const submitManualCode = () => { handleScannedCode(manualCode); setManualCode(""); };
 
   // ─── Views ────────────────────────────────────────────────────────────────
@@ -749,93 +920,93 @@ export default function ScanOrderPage() {
   if (view === "map") {
     return (
       <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
-        <div className="mx-auto max-w-7xl space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <Button variant="ghost" className="mb-2 px-0" onClick={() => setView("dashboard")}>
-                <ArrowLeft className="mr-2 h-4 w-4" />Back
-              </Button>
-              <h1 className="text-2xl font-semibold text-gray-950">Add New Scan Order</h1>
-              <p className="text-sm text-gray-600">Upload yesterday's order CSV, review the rows, then start scanning boxes.</p>
-            </div>
-            <Button onClick={createOrder} disabled={!mappedItems.length || isCreatingOrder} className="bg-[#001d6e] hover:bg-[#00154b]">
-              <ScanLine className="mr-2 h-4 w-4" />{isCreatingOrder ? "Creating…" : "Next"}
+        <div className="mx-auto max-w-lg space-y-4">
+          <div>
+            <Button variant="ghost" className="mb-2 px-0" onClick={() => setView("dashboard")}>
+              <ArrowLeft className="mr-2 h-4 w-4" />Back
             </Button>
+            <h1 className="text-2xl font-semibold text-gray-950">New Scan Order</h1>
+            <p className="text-sm text-gray-600">Select an order CSV to begin scanning.</p>
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
-            <Card className="rounded-md">
-              <CardHeader><CardTitle className="flex items-center text-lg"><FileSpreadsheet className="mr-2 h-5 w-5 text-[#001d6e]" />CSV Mapping</CardTitle></CardHeader>
-              <CardContent className="space-y-5">
-                <div className="space-y-2">
-                  <Label>Arriving Order CSV (Uploaded)</Label>
-                  <Select value={selectedImport} onValueChange={setSelectedImport}>
-                    <SelectTrigger><SelectValue placeholder="Select uploaded CSV" /></SelectTrigger>
-                    <SelectContent>
-                      {importSummaries.length === 0 && <SelectItem value="no-imports" disabled>No uploaded CSVs found</SelectItem>}
-                      {importSummaries.map((s) => <SelectItem key={s.filename} value={s.filename}>{s.filename}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  <Button type="button" variant="outline" className="w-full" onClick={loadImportItems} disabled={!selectedImport}>
-                    <PackageCheck className="mr-2 h-4 w-4" />Load Arriving Orders
-                  </Button>
-                  {selectedImport && <p className="text-xs text-gray-500">Using: {selectedImport}</p>}
-                </div>
+          <div className="space-y-2">
+            {importSummaries.length === 0 ? (
+              <Card className="rounded-md">
+                <CardContent className="py-12 text-center">
+                  <FileSpreadsheet className="h-8 w-8 text-gray-200 mx-auto mb-3" />
+                  <p className="text-gray-500 font-medium">No CSVs uploaded yet</p>
+                  <p className="text-sm text-gray-400 mt-1">Upload an order CSV from the Orders page first.</p>
+                </CardContent>
+              </Card>
+            ) : (
+              <>
+                {importSummaries.map((s) => {
+                  const isSelected = selectedImport === s.noteKey;
+                  return (
+                    <button
+                      key={s.noteKey}
+                      type="button"
+                      onClick={() => { setSelectedImport(s.noteKey); loadImportItems(s.noteKey); }}
+                      className={`w-full text-left rounded-md border px-4 py-3 transition-all ${
+                        isSelected
+                          ? "border-[#001d6e] bg-blue-50 ring-1 ring-[#001d6e]"
+                          : "border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <FileSpreadsheet className={`h-5 w-5 shrink-0 ${isSelected ? "text-[#001d6e]" : "text-gray-400"}`} />
+                        <div className="min-w-0 flex-1">
+                          <p className={`font-medium truncate ${isSelected ? "text-[#001d6e]" : "text-gray-800"}`}>{s.filename}</p>
+                          <p className="text-xs text-gray-400 mt-0.5">
+                            {s.orderCount} orders · {new Date(s.lastImportedAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                        {isSelected && <CheckCircle2 className="h-4 w-4 text-[#001d6e] shrink-0" />}
+                      </div>
+                    </button>
+                  );
+                })}
 
-                {csvRows.length > 0 && csvMode === "pivot" && (
-                  <div className="space-y-2">
-                    <Label>Arriving Order / Dealer</Label>
-                    <Select value={mappedColumn} onValueChange={setMappedColumn}>
-                      <SelectTrigger><SelectValue placeholder="Select CSV order column" /></SelectTrigger>
-                      <SelectContent>{pivotColumns.map((c) => <SelectItem key={c.label} value={c.label}>{c.label}</SelectItem>)}</SelectContent>
-                    </Select>
+                {importsTotalPages > 1 && (
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-xs text-gray-400">
+                      Page {csvPage} of {importsTotalPages} · {importsTotal} CSV{importsTotal !== 1 ? "s" : ""}
+                    </span>
+                    <div className="flex gap-1">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        disabled={csvPage <= 1}
+                        onClick={() => setCsvPage((p) => Math.max(1, p - 1))}
+                      >
+                        <ChevronLeft className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        disabled={csvPage >= importsTotalPages}
+                        onClick={() => setCsvPage((p) => Math.min(importsTotalPages, p + 1))}
+                      >
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </div>
                 )}
-
-                {csvRows.length > 0 && csvMode === "flat" && (
-                  <div className="space-y-3">
-                    <div className="space-y-2">
-                      <Label>SKU / Barcode Column</Label>
-                      <Select value={flatSkuColumn} onValueChange={setFlatSkuColumn}><SelectTrigger><SelectValue placeholder="Select SKU column" /></SelectTrigger><SelectContent>{flatHeaders.map((h) => <SelectItem key={h} value={h}>{h}</SelectItem>)}</SelectContent></Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Item Name Column</Label>
-                      <Select value={flatNameColumn} onValueChange={setFlatNameColumn}><SelectTrigger><SelectValue placeholder="Select name column" /></SelectTrigger><SelectContent>{flatHeaders.map((h) => <SelectItem key={h} value={h}>{h}</SelectItem>)}</SelectContent></Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Quantity Column</Label>
-                      <Select value={flatQtyColumn} onValueChange={setFlatQtyColumn}><SelectTrigger><SelectValue placeholder="Select quantity column" /></SelectTrigger><SelectContent>{flatHeaders.map((h) => <SelectItem key={h} value={h}>{h}</SelectItem>)}</SelectContent></Select>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card className="rounded-md">
-              <CardHeader><CardTitle className="text-lg">Loaded CSV Preview</CardTitle></CardHeader>
-              <CardContent>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Barcode / SKU</TableHead>
-                      <TableHead>Item</TableHead>
-                      <TableHead className="text-right">Order Qty</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {mappedItems.slice(0, 12).map((item, idx) => (
-                      <TableRow key={idx}>
-                        <TableCell className="font-mono text-xs">{bestCode(item)}</TableCell>
-                        <TableCell className="max-w-[160px] truncate">{item.itemName}</TableCell>
-                        <TableCell className="text-right font-medium">{item.expectedQty}</TableCell>
-                      </TableRow>
-                    ))}
-                    {!mappedItems.length && <TableRow><TableCell colSpan={3} className="py-10 text-center text-gray-500">Upload a CSV and choose the correct order column.</TableCell></TableRow>}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
+              </>
+            )}
           </div>
+
+          {mappedItems.length > 0 && (
+            <div className="rounded-md bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm text-emerald-800">
+              <span className="font-semibold">{mappedItems.length}</span> items loaded from <span className="font-medium">{csvName}</span>
+            </div>
+          )}
+
+          <Button onClick={createOrder} disabled={!mappedItems.length || isCreatingOrder} className="w-full bg-[#001d6e] hover:bg-[#00154b]">
+            <ScanLine className="mr-2 h-4 w-4" />{isCreatingOrder ? "Creating…" : "Start Scanning"}
+          </Button>
         </div>
       </div>
     );
@@ -873,8 +1044,18 @@ export default function ScanOrderPage() {
               <h1 className="text-2xl font-semibold text-gray-950">{activeSession.orderName}</h1>
               <p className="text-sm text-gray-600">{activeSession.csvName} — {totals.scanned} of {totals.expected} boxes scanned</p>
             </div>
-            <div className="flex gap-2">
-              <Button variant="outline" onClick={() => completeSessionMutation.mutate(activeSession.id)} disabled={activeSession.status === "completed"}>
+            <div className="flex flex-wrap items-center gap-2">
+              {isSyncing && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 border border-blue-200">
+                  <RotateCcw className="h-3 w-3 animate-spin" />Syncing…
+                </span>
+              )}
+              {!isOnline && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 border border-amber-200">
+                  <AlertTriangle className="h-3 w-3" />Offline{offlineQueue.length > 0 ? ` · ${offlineQueue.length} queued` : ""}
+                </span>
+              )}
+              <Button variant="outline" onClick={() => setShowCompleteConfirm(true)} disabled={activeSession.status === "completed"}>
                 <CheckCircle2 className="mr-2 h-4 w-4" />Complete
               </Button>
               <Button variant="outline" onClick={stopScanner} disabled={!isScanning}>
@@ -885,41 +1066,68 @@ export default function ScanOrderPage() {
 
           <div className="grid gap-4 lg:grid-cols-[1fr_420px]">
             <div className="space-y-4 order-last lg:order-first">
-              <div className="grid gap-3 sm:grid-cols-4">
-                <Card className="rounded-md"><CardContent className="p-4"><p className="text-xs text-gray-500">Order Items</p><p className="text-2xl font-semibold">{sessionItems.length}</p></CardContent></Card>
+              <div className="grid gap-3 sm:grid-cols-3">
                 <Card className="rounded-md"><CardContent className="p-4"><p className="text-xs text-gray-500">Expected</p><p className="text-2xl font-semibold">{totals.expected}</p></CardContent></Card>
                 <Card className="rounded-md"><CardContent className="p-4"><p className="text-xs text-gray-500">Scanned</p><p className="text-2xl font-semibold text-emerald-700">{totals.scanned}</p></CardContent></Card>
                 <Card className="rounded-md"><CardContent className="p-4"><p className="text-xs text-gray-500">Extras</p><p className="text-2xl font-semibold text-amber-700">{sessionExtras.reduce((s, e) => s + e.quantity, 0)}</p></CardContent></Card>
               </div>
 
               <Card className="rounded-md">
-                <CardHeader><CardTitle className="text-lg">CSV Order Items</CardTitle></CardHeader>
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-lg">CSV Order Items</CardTitle>
+                    <span className="text-xs text-gray-400">{sortedSessionItems.length} items</span>
+                  </div>
+                </CardHeader>
                 <CardContent>
+                  <div className="overflow-x-auto">
                   <Table>
                     <TableHeader>
-                      <TableRow>
-                        <TableHead>Barcode / SKU</TableHead>
-                        <TableHead>Item</TableHead>
-                        <TableHead className="text-right">Inv. Stock</TableHead>
-                        <TableHead className="text-right">Scanned / Order</TableHead>
-                        <TableHead>Status</TableHead>
+                      <TableRow className="bg-gray-50">
+                        <TableHead className="w-[45%] min-w-[220px]">Item</TableHead>
+                        <TableHead className="text-right w-[15%]"><span className="block leading-tight">Scan/Exp.</span></TableHead>
+                        <TableHead className="text-right w-[12%]">Pallets</TableHead>
+                        <TableHead className="w-[14%]">Status</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {sortedSessionItems.map((item) => {
+                      {sortedSessionItems.slice((scanItemPage - 1) * SCAN_PAGE_SIZE, scanItemPage * SCAN_PAGE_SIZE).map((item) => {
                         const done = item.scannedQty >= item.expectedQty;
+                        const over = item.scannedQty > item.expectedQty;
+                        const product = item.productId
+                          ? products.find((p) => p.id === item.productId)
+                          : productLookup.get(normalize(item.barcode || item.sku));
+                        const ipp = product ? (product.pallets || extractPalletSize(product)) : 0;
+                        const palletsScanned = ipp > 0 && item.scannedQty > 0
+                          ? parseFloat((item.scannedQty / ipp).toFixed(2))
+                          : null;
+                        const code = bestCode(item);
                         return (
-                          <TableRow key={item.id}>
-                            <TableCell className="font-mono text-xs">{bestCode(item)}</TableCell>
-                            <TableCell className="max-w-[160px] truncate">{item.itemName}</TableCell>
-                            <TableCell className="text-right">{item.inventoryQty != null ? <span className="font-semibold text-gray-700">{item.inventoryQty}</span> : <span className="text-gray-400 text-xs">—</span>}</TableCell>
-                            <TableCell className="text-right font-medium">
-                              <span className={item.scannedQty > 0 ? "text-emerald-700" : ""}>{item.scannedQty}</span>
+                          <TableRow key={item.id} className={done ? "bg-emerald-50/40" : ""}>
+                            <TableCell className="py-3">
+                              <p className="font-medium text-sm text-gray-900 leading-snug">{item.itemName}</p>
+                              {code && <p className="font-mono text-xs text-gray-400 mt-0.5">{code}</p>}
+                            </TableCell>
+                            <TableCell className="text-right font-medium tabular-nums">
+                              <span className={item.scannedQty > 0 ? (over ? "text-amber-600" : "text-emerald-700") : "text-gray-700"}>
+                                {item.scannedQty}
+                              </span>
                               <span className="text-gray-400">/{item.expectedQty}</span>
                             </TableCell>
+                            <TableCell className="text-right">
+                              {palletsScanned !== null
+                                ? <span className="font-semibold text-[#001d6e] tabular-nums">{palletsScanned}</span>
+                                : <span className="text-gray-300 text-xs">—</span>}
+                            </TableCell>
                             <TableCell>
-                              <Badge className={done ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-100" : "bg-blue-100 text-blue-800 hover:bg-blue-100"}>
-                                {done ? "Done" : "Pending"}
+                              <Badge className={
+                                done
+                                  ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-100"
+                                  : over
+                                  ? "bg-amber-100 text-amber-800 hover:bg-amber-100"
+                                  : "bg-blue-50 text-blue-700 hover:bg-blue-50"
+                              }>
+                                {done ? "Done" : over ? "Over" : "Pending"}
                               </Badge>
                             </TableCell>
                           </TableRow>
@@ -927,6 +1135,35 @@ export default function ScanOrderPage() {
                       })}
                     </TableBody>
                   </Table>
+                  </div>
+
+                  {sortedSessionItems.length > SCAN_PAGE_SIZE && (
+                    <div className="flex items-center justify-between mt-4 pt-3 border-t">
+                      <span className="text-xs text-gray-500">
+                        Page {scanItemPage} of {Math.ceil(sortedSessionItems.length / SCAN_PAGE_SIZE)} · {sortedSessionItems.length} items
+                      </span>
+                      <div className="flex gap-1">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 w-7 p-0"
+                          disabled={scanItemPage <= 1}
+                          onClick={() => setScanItemPage((p) => Math.max(1, p - 1))}
+                        >
+                          <ChevronLeft className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 w-7 p-0"
+                          disabled={scanItemPage >= Math.ceil(sortedSessionItems.length / SCAN_PAGE_SIZE)}
+                          onClick={() => setScanItemPage((p) => Math.min(Math.ceil(sortedSessionItems.length / SCAN_PAGE_SIZE), p + 1))}
+                        >
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
 
@@ -1070,6 +1307,40 @@ export default function ScanOrderPage() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Complete order confirmation */}
+        <Dialog open={showCompleteConfirm} onOpenChange={setShowCompleteConfirm}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Complete Scan Order?</DialogTitle>
+              <DialogDescription>
+                <span className="font-medium text-gray-800">{activeSession.orderName}</span>
+                <span className="text-gray-500"> — {totals.scanned} of {totals.expected} boxes scanned.</span>
+                {totals.scanned < totals.expected && (
+                  <p className="mt-2 text-amber-600 text-sm">
+                    Warning: {totals.expected - totals.scanned} boxes are still pending. Marking as complete cannot be undone.
+                  </p>
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter className="gap-2 sm:gap-0">
+              <Button variant="outline" onClick={() => setShowCompleteConfirm(false)}>
+                Cancel
+              </Button>
+              <Button
+                className="bg-[#001d6e] hover:bg-[#00154b]"
+                disabled={completeSessionMutation.isPending}
+                onClick={() => {
+                  completeSessionMutation.mutate(activeSession.id);
+                  setShowCompleteConfirm(false);
+                }}
+              >
+                <CheckCircle2 className="mr-2 h-4 w-4" />
+                {completeSessionMutation.isPending ? "Completing…" : "Yes, Complete"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     );
   }
@@ -1096,8 +1367,8 @@ export default function ScanOrderPage() {
             <h1 className="text-2xl font-semibold text-gray-950">Scan Order Dashboard</h1>
             <p className="text-sm text-gray-500 mt-0.5">Your stock arrival scan orders and history.</p>
           </div>
-          <Button onClick={() => { resetDraft(); importsQuery.refetch(); setView("map"); }} className="bg-[#001d6e] hover:bg-[#00154b]">
-            <Plus className="mr-2 h-4 w-4" />New Scan Order
+          <Button onClick={() => { resetDraft(); importsQuery.refetch(); setView("map"); }} className="bg-[#001d6e] hover:bg-[#00154b] h-11 px-6 text-base">
+            <Plus className="mr-2 h-5 w-5" />New Scan Order
           </Button>
         </div>
 

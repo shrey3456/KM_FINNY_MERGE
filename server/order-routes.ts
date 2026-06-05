@@ -1,10 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { db } from './db';
-import { 
-  orders, 
+import {
+  orders,
   orderItems,
   products,
-  insertOrderSchema, 
+  insertOrderSchema,
   insertOrderItemSchema,
   proformaSlips,
   proformaSlipItems
@@ -12,6 +12,7 @@ import {
 import { asc, eq, desc, ilike, inArray, or } from 'drizzle-orm';
 import { z } from 'zod';
 import multer from 'multer';
+import * as XLSX from 'xlsx';
 
 // Keep uploads in memory for small CSVs, but enforce a conservative file size limit
 // so production instances don't OOM when someone accidentally uploads a very large file.
@@ -432,56 +433,69 @@ export function registerOrderRoutes(apiRouter: Router) {
     }
   });
 
-  // List imported arriving order CSVs
-  apiRouter.get('/orders/imports', async (_req: Request, res: Response) => {
+  // List imported arriving order CSVs (paginated)
+  apiRouter.get('/orders/imports', async (req: Request, res: Response) => {
     try {
-      // Pagination + safe cap to avoid scanning the entire orders table in production.
-      const limitParam = typeof _req.query.limit === 'string' ? parseInt(_req.query.limit, 10) : NaN;
-      const pageParam = typeof _req.query.page === 'string' ? parseInt(_req.query.page, 10) : NaN;
-      const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 500) : 100;
+      const pageParam = typeof req.query.page === 'string' ? parseInt(req.query.page, 10) : NaN;
+      const limitParam = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : NaN;
       const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
-      const offset = (page - 1) * limit;
+      const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 10;
 
-      const importedOrders = await db
-        .select({ id: orders.id, notes: orders.notes, createdAt: orders.createdAt })
+      // Fetch ALL import-tagged orders (no row-level limit) — only 2 tiny columns,
+      // safe even with thousands of orders. Deduplicate by noteKey in JS so we
+      // return one entry per uploaded batch regardless of how many dealer rows it produced.
+      const allImportedOrders = await db
+        .select({ notes: orders.notes, createdAt: orders.createdAt })
         .from(orders)
-        .where(
-          or(
-            ilike(orders.notes, '%Imported from%'),
-            ilike(orders.notes, '%imported from%'),
-          ),
-        )
-        .orderBy(desc(orders.createdAt))
-        .limit(limit)
-        .offset(offset);
+        .where(ilike(orders.notes, '%Imported from%'))
+        .orderBy(desc(orders.createdAt));
 
-      const importsMap = new Map<string, { filename: string; orderCount: number; itemCount: number; lastImportedAt: string }>();
+      const importsMap = new Map<string, { filename: string; noteKey: string; orderCount: number; itemCount: number; lastImportedAt: string }>();
 
-      importedOrders.forEach((order) => {
-  const note = order.notes || '';
-  const excelMatch = note.match(/Imported from Excel file:\s*(.+)$/i);
-  const filename = excelMatch?.[1]?.trim() || note.replace(/^Imported from\s*/i, '').trim();
-        if (!filename) return;
+      for (const order of allImportedOrders) {
+        const note = order.notes || '';
 
-        const existing = importsMap.get(filename);
-        if (existing) {
-          existing.orderCount += 1;
-          return;
+        // New format: "Imported from filename.csv#1234567890"
+        // Legacy format: "Imported from filename.csv" or "Imported from Excel file: filename.xlsx"
+        let filename: string;
+        let noteKey: string;
+
+        const excelMatch = note.match(/Imported from Excel file:\s*(.+?)(?:#\d+)?$/i);
+        if (excelMatch) {
+          filename = excelMatch[1].trim();
+          noteKey = note;
+        } else {
+          // Strip the "Imported from " prefix and any trailing #timestamp
+          const withoutPrefix = note.replace(/^Imported from\s*/i, '').trim();
+          const hashIdx = withoutPrefix.lastIndexOf('#');
+          filename = hashIdx > 0 ? withoutPrefix.substring(0, hashIdx).trim() : withoutPrefix;
+          noteKey = note;
         }
 
-        importsMap.set(filename, {
-          filename,
-          orderCount: 1,
-          itemCount: 0,
-          lastImportedAt: order.createdAt ? new Date(order.createdAt).toISOString() : new Date().toISOString(),
-        });
-      });
+        if (!filename) continue;
 
-      const importList = Array.from(importsMap.values()).sort((a, b) =>
-        b.lastImportedAt.localeCompare(a.lastImportedAt),
-      );
+        const existing = importsMap.get(noteKey);
+        if (existing) {
+          existing.orderCount += 1;
+        } else {
+          importsMap.set(noteKey, {
+            filename,
+            noteKey,
+            orderCount: 1,
+            itemCount: 0,
+            lastImportedAt: order.createdAt ? new Date(order.createdAt).toISOString() : new Date().toISOString(),
+          });
+        }
+      }
 
-      return res.json({ page, limit, results: importList });
+      const allImports = Array.from(importsMap.values());
+      const total = allImports.length;
+      const totalPages = Math.max(1, Math.ceil(total / limit));
+      const safePage = Math.min(page, totalPages);
+      const offset = (safePage - 1) * limit;
+      const results = allImports.slice(offset, offset + limit);
+
+      return res.json({ results, total, page: safePage, limit, totalPages });
     } catch (error) {
       console.error('Error fetching import list:', error);
       return res.status(500).json({ error: 'Failed to fetch import list' });
@@ -496,10 +510,13 @@ export function registerOrderRoutes(apiRouter: Router) {
         return res.status(400).json({ error: 'filename is required' });
       }
 
+      // If the caller passes a full noteKey (starts with "Imported from"), match exactly.
+      // Otherwise treat it as a plain filename substring search (legacy / manual calls).
+      const isNoteKey = /^Imported from /i.test(filename);
       const matchingOrders = await db
         .select({ id: orders.id })
         .from(orders)
-        .where(ilike(orders.notes, `%${filename}%`));
+        .where(isNoteKey ? eq(orders.notes, filename) : ilike(orders.notes, `%${filename}%`));
 
       const orderIds = matchingOrders.map((order) => order.id);
       if (!orderIds.length) {
@@ -551,7 +568,12 @@ export function registerOrderRoutes(apiRouter: Router) {
         });
       });
 
-      return res.json({ filename, items: Array.from(aggregate.values()) });
+      // Return a clean display filename (strip the "Imported from " prefix and #timestamp suffix)
+      const withoutPrefix = filename.replace(/^Imported from\s*/i, '').trim();
+      const hashIdx = withoutPrefix.lastIndexOf('#');
+      const displayFilename = hashIdx > 0 ? withoutPrefix.substring(0, hashIdx).trim() : withoutPrefix;
+
+      return res.json({ filename: displayFilename, items: Array.from(aggregate.values()) });
     } catch (error) {
       console.error('Error fetching import items:', error);
       return res.status(500).json({ error: 'Failed to fetch import items' });
@@ -714,21 +736,22 @@ export function registerOrderRoutes(apiRouter: Router) {
     }
   });
 
-  // Bulk delete orders by CSV filename
+  // Bulk delete orders by CSV noteKey (precise) or filename (all batches for that name)
   apiRouter.post('/orders/batch-delete-by-filename', async (req: Request, res: Response) => {
     try {
-      let { filename } = req.body;
-      
-      if (!filename || typeof filename !== 'string') {
-        return res.status(400).json({ error: 'Filename is required' });
+      let { filename, noteKey } = req.body;
+
+      if (!filename && !noteKey) {
+        return res.status(400).json({ error: 'filename or noteKey is required' });
       }
 
-      // Trim any trailing/leading whitespace and spaces
-      filename = filename.trim();
+      // Use noteKey for precise per-batch delete; fall back to filename wildcard for legacy rows
+      const key = typeof noteKey === 'string' ? noteKey.trim() : (filename as string).trim();
+      const useExact = typeof noteKey === 'string' && noteKey.trim().length > 0;
 
       const deletedOrders = await db
         .delete(orders)
-        .where(ilike(orders.notes, `%${filename}%`))
+        .where(useExact ? eq(orders.notes, key) : ilike(orders.notes, `%${key}%`))
         .returning();
 
       return res.json({ 
@@ -821,15 +844,33 @@ export function registerOrderRoutes(apiRouter: Router) {
     }
   });
 
-  // CSV Import endpoint
+  // CSV / Excel Import endpoint
   apiRouter.post('/orders/import-csv', upload.single('file'), async (req: Request, res: Response) => {
     try {
       if (!req.file) {
-        return res.status(400).json({ message: 'CSV file is required' });
+        return res.status(400).json({ message: 'A CSV or Excel file is required' });
       }
 
-      const csvText = req.file.buffer.toString('utf-8');
-      const rows = parseCsvRows(csvText);
+      const originalName = req.file.originalname.toLowerCase();
+      const isExcel = originalName.endsWith('.xlsx') || originalName.endsWith('.xls');
+
+      let rows: CsvRow[];
+      if (isExcel) {
+        const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+        const firstSheetName = workbook.SheetNames[0];
+        if (!firstSheetName) {
+          return res.status(400).json({ message: 'The Excel file has no sheets.' });
+        }
+        const sheet = workbook.Sheets[firstSheetName];
+        // raw: false formats numbers/dates as display strings instead of raw values
+        const rawRows = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, defval: '', raw: false });
+        rows = (rawRows as any[][])
+          .map((r) => r.map((cell) => String(cell ?? '').trim()))
+          .filter((r) => r.some((cell) => cell !== ''));
+      } else {
+        const csvText = req.file.buffer.toString('utf-8');
+        rows = parseCsvRows(csvText);
+      }
       const normalizedRowsForDebug = mergeWrappedHeaderRows(rows);
       const debugHeaderRowIndex = normalizedRowsForDebug.findIndex((row) =>
         row.some((cell) => normalizeHeader(cell).includes('ordernumber')),
@@ -847,9 +888,11 @@ export function registerOrderRoutes(apiRouter: Router) {
       });
 
       if (parsedOrders.length === 0) {
+        console.error('[import] No orders parsed. File:', req.file.originalname, 'Rows:', rows.length, 'First 5 rows:', JSON.stringify(normalizedRowsForDebug.slice(0, 5)));
         return res.status(400).json({
-          message: 'No arriving orders were found in the CSV. Please check the file format.',
+          message: 'No arriving orders were found in the file. Please check the file format — expected columns: Customer/ProductCode or OrderNumber.',
           debug: {
+            file: req.file.originalname,
             rowCount: rows.length,
             normalizedRowCount: normalizedRowsForDebug.length,
             headerRowIndex: debugHeaderRowIndex,
@@ -863,6 +906,8 @@ export function registerOrderRoutes(apiRouter: Router) {
       const importedOrders = [];
       const importedItems = [];
       const userCode = (req.user as { userCode?: string } | undefined)?.userCode;
+      // Unique batch key so each upload is a distinct entry even if the filename is reused
+      const batchKey = `Imported from ${req.file.originalname}#${Date.now()}`;
 
       for (const parsedOrder of parsedOrders) {
         const [newOrder] = await db.insert(orders).values({
@@ -873,7 +918,7 @@ export function registerOrderRoutes(apiRouter: Router) {
           orderDate: parsedOrder.orderDate,
           status: 'ARRIVING',
           createdByCode: userCode,
-          notes: `Imported from ${req.file.originalname}`,
+          notes: batchKey,
         }).returning();
 
         if (!newOrder) continue;
