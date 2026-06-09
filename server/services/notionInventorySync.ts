@@ -79,6 +79,7 @@ function extractText(prop: any): string {
     case 'title':       return prop.title?.map((t: any) => t.plain_text).join('') || '';
     case 'rich_text':   return prop.rich_text?.map((t: any) => t.plain_text).join('') || '';
     case 'select':      return prop.select?.name || '';
+    case 'status':      return prop.status?.name || '';
     case 'multi_select':return prop.multi_select?.map((s: any) => s.name).join(', ') || '';
     case 'number':      return prop.number != null ? String(prop.number) : '';
     case 'formula':
@@ -103,6 +104,18 @@ function extractInteger(prop: any): number | undefined {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
 }
 
+function extractMultiSelect(prop: any): string[] {
+  if (!prop) return [];
+  if (prop.type === 'multi_select') return (prop.multi_select ?? []).map((s: any) => String(s.name)).filter(Boolean);
+  if (prop.type === 'status')  return prop.status?.name  ? [String(prop.status.name)]  : [];
+  if (prop.type === 'select')  return prop.select?.name  ? [String(prop.select.name)]  : [];
+  return [];
+}
+
+function multiSelectToText(values: string[]): string | null {
+  return values.length > 0 ? values.join(', ') : null;
+}
+
 function firstOf(props: any, ...keys: string[]): string {
   for (const key of keys) {
     const val = extractText(props[key]);
@@ -115,6 +128,7 @@ function firstOf(props: any, ...keys: string[]): string {
 
 function mapNotionPageToFields(page: any) {
   const p = page.properties;
+
   const gjSaleRate = firstOf(p, 'GJ Sale Rate :');
   const gjHsnVal   = firstOf(p, 'GJ HSN :');
   const gjSapVal   = firstOf(p, 'GJ SAP :');
@@ -125,7 +139,7 @@ function mapNotionPageToFields(page: any) {
     name:            firstOf(p, 'Products Name {DMS}', 'new name', 'Name', 'Product Name'),
     notionWiseName:  firstOf(p, 'Products - Notion Wise'),
     brand:           firstOf(p, 'Brand', 'brand'),
-    category:        firstOf(p, 'Category', 'category'),
+    category:        multiSelectToText(extractMultiSelect(p['Category :'] ?? p['Category'] ?? p['category'] ?? p['Categories'])),
     saleCategory:    firstOf(p, 'Sale Category'),
     plant:           firstOf(p, 'Plant :', 'Plant', 'plant'),
     type:            firstOf(p, 'Type :', 'Type', 'type'),
@@ -499,3 +513,22 @@ export function getSyncStatus() {
 
 export function getSyncHistory(): SyncReport[] { return syncHistory; }
 export function getPendingReport(): SyncReport | null { return pendingReport; }
+
+// ─── Debug helper ─────────────────────────────────────────────────────────────
+
+export async function debugNotionProps() {
+  if (!NOTION_INVENTORY_DATABASE_ID) throw new Error('NOTION_INVENTORY_DATABASE_ID is not set');
+  const response: any = await notion.databases.query({
+    database_id: NOTION_INVENTORY_DATABASE_ID,
+    page_size: 1,
+  });
+  const page = response.results[0];
+  if (!page) return { error: 'No pages found in database' };
+  const props = page.properties as Record<string, any>;
+  return {
+    pageId: page.id,
+    properties: Object.fromEntries(
+      Object.entries(props).map(([key, val]) => [key, { type: val.type, sample: val[val.type] }])
+    ),
+  };
+}

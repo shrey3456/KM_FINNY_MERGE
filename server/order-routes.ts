@@ -9,7 +9,7 @@ import {
   proformaSlips,
   proformaSlipItems
 } from '@shared/schema';
-import { asc, eq, desc, ilike, inArray, or } from 'drizzle-orm';
+import { asc, eq, desc, ilike, inArray, or, and } from 'drizzle-orm';
 import { z } from 'zod';
 import multer from 'multer';
 
@@ -180,6 +180,22 @@ function matchProduct(
 
 function buildOrderNumber(prefix: string, orderDate: string, index: number) {
   return `${prefix}-${orderDate.replace(/-/g, '')}-${String(index + 1).padStart(3, '0')}`;
+}
+
+function requireAdminOrSuperAdmin(req: Request, res: Response): boolean {
+  const role = (req.user as { role?: string } | undefined)?.role;
+
+  if (!role) {
+    res.status(401).json({ error: 'Authentication required' });
+    return false;
+  }
+
+  if (role !== 'admin' && role !== 'super-admin') {
+    res.status(403).json({ error: 'Only admin and super-admin users can manage billing CSV imports' });
+    return false;
+  }
+
+  return true;
 }
 
 function parseArrivingOrdersCsv(
@@ -442,35 +458,55 @@ export function registerOrderRoutes(apiRouter: Router) {
       const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
       const offset = (page - 1) * limit;
 
+      // Derive effective plant filter:
+      // - Dispatch users (plant in department) → locked to their dept plant, query param ignored
+      // - Billing users (no plant in department) → honor the ?plant= query param they send
+      // - Admin → honor the ?plant= query param (no restriction)
+      const userDep = String((_req.user as any)?.department ?? '').toLowerCase();
+      const userRoleRaw = String((_req.user as any)?.role ?? '').toLowerCase().replace(/[\s_-]/g, '');
+      const isAdminUser = ['admin', 'superadmin'].includes(userRoleRaw);
+      const plantFromDep = userDep.includes('indore') ? 'indore'
+        : userDep.includes('valsad') ? 'valsad'
+        : null;
+      const queryPlant = typeof _req.query.plant === 'string' ? _req.query.plant.trim().toLowerCase() : '';
+      // If user has a plant locked in their department (dispatch): enforce it.
+      // Otherwise (billing/admin): use whatever plant the frontend requests.
+      const effectivePlant = (!isAdminUser && plantFromDep) ? plantFromDep : queryPlant;
+
+      const notesFilter = or(
+        ilike(orders.notes, '%Imported from%'),
+        ilike(orders.notes, '%imported from%'),
+      );
+
       const importedOrders = await db
-        .select({ id: orders.id, notes: orders.notes, createdAt: orders.createdAt })
+        .select({ id: orders.id, notes: orders.notes, createdAt: orders.createdAt, plant: orders.plant })
         .from(orders)
-        .where(
-          or(
-            ilike(orders.notes, '%Imported from%'),
-            ilike(orders.notes, '%imported from%'),
-          ),
-        )
+        .where(effectivePlant ? and(notesFilter, ilike(orders.plant, effectivePlant)) : notesFilter)
         .orderBy(desc(orders.createdAt))
         .limit(limit)
         .offset(offset);
 
-      const importsMap = new Map<string, { filename: string; orderCount: number; itemCount: number; lastImportedAt: string }>();
+      const importsMap = new Map<string, { filename: string; plant: string; orderCount: number; itemCount: number; lastImportedAt: string }>();
 
       importedOrders.forEach((order) => {
-  const note = order.notes || '';
-  const excelMatch = note.match(/Imported from Excel file:\s*(.+)$/i);
-  const filename = excelMatch?.[1]?.trim() || note.replace(/^Imported from\s*/i, '').trim();
+        const note = order.notes || '';
+        const excelMatch = note.match(/Imported from Excel file:\s*(.+)$/i);
+        const filename = excelMatch?.[1]?.trim() || note.replace(/^Imported from\s*/i, '').trim();
         if (!filename) return;
+        const plant = String(order.plant || '').trim().toUpperCase();
 
         const existing = importsMap.get(filename);
         if (existing) {
           existing.orderCount += 1;
+          if (!existing.plant && plant) {
+            existing.plant = plant;
+          }
           return;
         }
 
         importsMap.set(filename, {
           filename,
+          plant,
           orderCount: 1,
           itemCount: 0,
           lastImportedAt: order.createdAt ? new Date(order.createdAt).toISOString() : new Date().toISOString(),
@@ -717,6 +753,8 @@ export function registerOrderRoutes(apiRouter: Router) {
   // Bulk delete orders by CSV filename
   apiRouter.post('/orders/batch-delete-by-filename', async (req: Request, res: Response) => {
     try {
+      if (!requireAdminOrSuperAdmin(req, res)) return;
+
       let { filename } = req.body;
       
       if (!filename || typeof filename !== 'string') {
@@ -824,6 +862,8 @@ export function registerOrderRoutes(apiRouter: Router) {
   // CSV Import endpoint
   apiRouter.post('/orders/import-csv', upload.single('file'), async (req: Request, res: Response) => {
     try {
+      if (!requireAdminOrSuperAdmin(req, res)) return;
+
       if (!req.file) {
         return res.status(400).json({ message: 'CSV file is required' });
       }

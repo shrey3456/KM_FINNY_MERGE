@@ -1,4 +1,4 @@
-  import React, { useState, useMemo } from 'react';
+  import React, { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { AlertCircle, CheckCircle, ClipboardList, Loader2, RefreshCw, Upload, Trash2 } from 'lucide-react';
@@ -6,11 +6,20 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+  import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+  } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { apiRequest, queryClient } from '@/lib/queryClient';
+  import { apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
+import { useUser } from '@/hooks/use-user';
+import { isAdminOrSuperAdmin } from '@/lib/permissions';
 import { 
   Dialog,
   DialogContent,
@@ -20,6 +29,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import type { Order } from '@shared/schema';
+import type { Plant } from '@shared/schema';
 
 type ImportResult = {
   success: boolean;
@@ -29,12 +39,37 @@ type ImportResult = {
 
 export default function OrderManagement() {
   const queryClient = useQueryClient();
+  const { user, isLoading: isUserLoading } = useUser();
   const [file, setFile] = useState<File | null>(null);
-  const [plant, setPlant] = useState('Valsad');
+  const [plant, setPlant] = useState('');
   const [orderDate, setOrderDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [lastImport, setLastImport] = useState<ImportResult | null>(null);
   const [fileToDelete, setFileToDelete] = useState<string | null>(null);
   const { toast } = useToast();
+  const canManageBillingImports = Boolean(user && isAdminOrSuperAdmin(user.role));
+
+  const { data: plants = [], isLoading: isPlantsLoading } = useQuery<Plant[]>({
+    queryKey: ['/api/plants'],
+    queryFn: async () => {
+      const response = await fetch('/api/plants');
+      if (!response.ok) {
+        throw new Error('Failed to load plants');
+      }
+
+      return response.json();
+    },
+  });
+
+  useEffect(() => {
+    if (plant) {
+      return;
+    }
+
+    const defaultPlant = plants.find((entry) => entry.name.toUpperCase() === 'VALSAD')?.name || plants[0]?.name || '';
+    if (defaultPlant) {
+      setPlant(defaultPlant);
+    }
+  }, [plant, plants]);
 
   const { data: orders = [], isLoading, isError, refetch } = useQuery<Order[]>({
     queryKey: ['/api/orders'],
@@ -157,6 +192,33 @@ export default function OrderManagement() {
       .slice(0, 5); // Just show top 5 recent imports
   }, [orders]);
 
+  if (isUserLoading) {
+    return (
+      <main className="min-h-screen bg-gray-50 p-4 sm:p-6 lg:p-8">
+        <div className="mx-auto max-w-7xl">
+          <div className="rounded-md border bg-white p-6 text-sm text-gray-600">Loading user permissions...</div>
+        </div>
+      </main>
+    );
+  }
+
+  if (!canManageBillingImports) {
+    return (
+      <main className="min-h-screen bg-gray-50 p-4 sm:p-6 lg:p-8">
+        <div className="mx-auto max-w-7xl">
+          <Card className="rounded-md">
+            <CardHeader>
+              <CardTitle className="text-lg">Access Denied</CardTitle>
+              <CardDescription>
+                Only admin and super-admin users can upload billing CSV files here.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-gray-50 p-4 sm:p-6 lg:p-8">
       {/* CSV Delete Confirmation Dialog */}
@@ -192,7 +254,7 @@ export default function OrderManagement() {
             </div>
             <div>
               <h1 className="text-2xl font-semibold text-gray-950">Order Management</h1>
-              <p className="text-sm text-gray-600">Upload arriving order CSV files and review recent imports.</p>
+              <p className="text-sm text-gray-600">Upload billing CSV files and review recent imports.</p>
             </div>
           </div>
           <Button variant="outline" onClick={() => refetch()} disabled={isLoading}>
@@ -204,11 +266,11 @@ export default function OrderManagement() {
         <div className="grid gap-6 xl:grid-cols-[420px_1fr]">
           <Card className="rounded-md">
             <CardHeader>
-              <CardTitle className="text-lg">Upload Arriving Orders</CardTitle>
+              <CardTitle className="text-lg">Upload Billing Orders</CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
               <div className="grid gap-2">
-                <Label htmlFor="arriving-orders-csv">CSV File</Label>
+                <Label htmlFor="arriving-orders-csv">Billing CSV File</Label>
                 <Input
                   id="arriving-orders-csv"
                   type="file"
@@ -229,12 +291,23 @@ export default function OrderManagement() {
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
                 <div className="grid gap-2">
                   <Label htmlFor="order-plant">Plant</Label>
-                  <Input
-                    id="order-plant"
-                    value={plant}
-                    onChange={(event) => setPlant(event.target.value)}
-                    disabled={importMutation.isPending}
-                  />
+                  <Select value={plant} onValueChange={setPlant} disabled={importMutation.isPending || isPlantsLoading || plants.length === 0}>
+                    <SelectTrigger id="order-plant">
+                      <SelectValue placeholder={isPlantsLoading ? 'Loading plants...' : 'Select a plant'} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {plants.map((entry) => (
+                        <SelectItem key={entry.id} value={entry.name}>
+                          {entry.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {!isPlantsLoading && plants.length === 0 && (
+                    <p className="text-sm text-amber-700">
+                      No plants were found. Add plants through the plant settings API before importing orders.
+                    </p>
+                  )}
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="order-date">Order Date</Label>
@@ -287,7 +360,7 @@ export default function OrderManagement() {
                   ) : (
                     <Upload className="mr-2 h-4 w-4" />
                   )}
-                  Import CSV
+                  Import Billing CSV
                 </Button>
               </div>
             </CardContent>
@@ -297,7 +370,7 @@ export default function OrderManagement() {
             {uniqueImports.length > 0 && (
               <Card className="rounded-md">
                 <CardHeader>
-                  <CardTitle className="text-lg">Recent CSV Imports</CardTitle>
+                  <CardTitle className="text-lg">Recent Billing Imports</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-3">

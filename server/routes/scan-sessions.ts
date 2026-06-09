@@ -11,7 +11,7 @@ import {
   insertScanSessionExtraSchema,
   insertScanSessionPalletScanSchema,
 } from '@shared/schema';
-import { eq, desc, inArray, count, asc } from 'drizzle-orm';
+import { eq, desc, inArray, count, asc, and, ilike } from 'drizzle-orm';
 import { z } from 'zod';
 
 const router = Router();
@@ -20,8 +20,21 @@ const router = Router();
 router.get('/', async (req: Request, res: Response) => {
   try {
     const { userCode } = req.query;
-    const sessions = userCode
-      ? await db.select().from(scanSessions).where(eq(scanSessions.createdByCode, String(userCode))).orderBy(desc(scanSessions.createdAt))
+
+    // Plant-based access restriction: non-admin dispatch/billing users only see their plant's sessions.
+    const userDep = String((req.user as any)?.department ?? '').toLowerCase();
+    const userRoleRaw = String((req.user as any)?.role ?? '').toLowerCase().replace(/[\s_-]/g, '');
+    const isAdminUser = ['admin', 'superadmin'].includes(userRoleRaw);
+    const plantFromDep = userDep.includes('indore') ? 'INDORE'
+      : userDep.includes('valsad') ? 'VALSAD'
+      : null;
+
+    const byUser = userCode ? eq(scanSessions.createdByCode, String(userCode)) : undefined;
+    const byPlant = (!isAdminUser && plantFromDep) ? ilike(scanSessions.plant, plantFromDep) : undefined;
+    const whereClause = byUser && byPlant ? and(byUser, byPlant) : (byUser ?? byPlant);
+
+    const sessions = whereClause
+      ? await db.select().from(scanSessions).where(whereClause).orderBy(desc(scanSessions.createdAt))
       : await db.select().from(scanSessions).orderBy(desc(scanSessions.createdAt));
 
     // Attach item/extra counts
@@ -66,6 +79,19 @@ router.get('/:id', async (req: Request, res: Response) => {
     const [session] = await db.select().from(scanSessions).where(eq(scanSessions.id, id));
     if (!session) return res.status(404).json({ error: 'Session not found' });
 
+    // Plant access check: non-admin users can only fetch sessions for their own plant.
+    const userDep2 = String((req.user as any)?.department ?? '').toLowerCase();
+    const userRoleRaw2 = String((req.user as any)?.role ?? '').toLowerCase().replace(/[\s_-]/g, '');
+    const isAdminUser2 = ['admin', 'superadmin'].includes(userRoleRaw2);
+    const plantFromDep2 = userDep2.includes('indore') ? 'INDORE'
+      : userDep2.includes('valsad') ? 'VALSAD'
+      : null;
+    if (!isAdminUser2 && plantFromDep2 && session.plant) {
+      if (String(session.plant).toUpperCase().trim() !== plantFromDep2) {
+        return res.status(403).json({ error: 'Access denied: session belongs to a different plant' });
+      }
+    }
+
     const items = await db
       .select()
       .from(scanSessionItems)
@@ -92,8 +118,19 @@ router.post('/', async (req: Request, res: Response) => {
       items: Array<Omit<z.infer<typeof insertScanSessionItemSchema>, 'sessionId'>>;
     };
 
+    const userDepartment = String((req.user as any)?.department ?? '').toLowerCase();
+    const inferredPlant = userDepartment.includes('indore')
+      ? 'INDORE'
+      : userDepartment.includes('valsad')
+        ? 'VALSAD'
+        : undefined;
+    const normalizedPlant = String(sessionData.plant ?? inferredPlant ?? '').trim().toUpperCase() || undefined;
+    const normalizedStv = String(sessionData.stv ?? '').trim() || undefined;
+
     const validSession = insertScanSessionSchema.parse({
       ...sessionData,
+      plant: normalizedPlant,
+      stv: normalizedStv,
       createdByCode: (req.user as any)?.userCode ?? sessionData.createdByCode,
       createdByName: (req.user as any)?.name ?? sessionData.createdByName,
     });
@@ -271,6 +308,7 @@ router.post('/:id/pallet-scans', async (req: Request, res: Response) => {
       quantity?: number;
       numPallets?: number;   // calculated: quantity ÷ itemsPerPallet (e.g. 1.03)
       isExtra?: boolean;
+      stv?: string;
       scannedByCode?: string;
       scannedByName?: string;
     };
@@ -299,6 +337,7 @@ router.post('/:id/pallet-scans', async (req: Request, res: Response) => {
       quantity: body.quantity ?? 1,
       numPallets: body.numPallets ?? null,
       isExtra: body.isExtra ?? false,
+      stv: body.stv ?? null,
       scannedByCode: (req.user as any)?.userCode ?? body.scannedByCode ?? null,
       scannedByName: (req.user as any)?.name ?? body.scannedByName ?? null,
     });

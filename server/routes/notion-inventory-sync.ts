@@ -6,6 +6,7 @@ import {
   getPendingReport,
   getSyncStatus,
   getSyncHistory,
+  debugNotionProps,
 } from '../services/notionInventorySync';
 
 const router = Router();
@@ -75,6 +76,18 @@ router.get('/notion-inventory-sync/status', (_req, res) => {
 // GET /api/notion-inventory-sync/history
 router.get('/notion-inventory-sync/history', (_req, res) => {
   res.json(getSyncHistory());
+});
+
+// GET /api/notion-inventory-sync/debug-props
+// Returns raw property names + types from the first Notion page — used to verify field mapping.
+router.get('/notion-inventory-sync/debug-props', async (_req, res) => {
+  try {
+    const result = await debugNotionProps();
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    res.status(500).json({ success: false, message });
+  }
 });
 
 export default router;

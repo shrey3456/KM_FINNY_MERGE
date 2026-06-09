@@ -24,6 +24,8 @@ import CameraPermissionBanner from "@/components/CameraPermissionBanner";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/hooks/use-user";
+import type { Plant } from "@shared/schema";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -106,6 +108,8 @@ type OrderSession = {
   id: number;
   orderName: string;
   csvName: string;
+  plant?: string | null;
+  stv?: string | null;
   mappedColumn: string;
   createdAt: string;
   updatedAt: string;
@@ -119,6 +123,8 @@ type SessionSummary = {
   id: number;
   orderName: string;
   csvName: string;
+  plant?: string | null;
+  stv?: string | null;
   status: "scanning" | "completed";
   totalExpected: number;
   totalScanned: number;
@@ -136,8 +142,6 @@ type ImportItemsResponse = {
   filename: string;
   items: Array<Omit<OrderItem, "id"> & { id?: number }>;
 };
-
-type CsvMode = "pivot" | "flat";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -157,39 +161,6 @@ const parseQuantity = (value?: string) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-const parseCsv = (text: string) => {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let inQuotes = false;
-
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    const next = text[index + 1];
-    if (char === '"' && inQuotes && next === '"') { cell += '"'; index += 1; }
-    else if (char === '"') { inQuotes = !inQuotes; }
-    else if (char === "," && !inQuotes) { row.push(cell.trim()); cell = ""; }
-    else if ((char === "\n" || char === "\r") && !inQuotes) {
-      if (char === "\r" && next === "\n") index += 1;
-      row.push(cell.trim());
-      if (row.some(Boolean)) rows.push(row);
-      row = []; cell = "";
-    } else { cell += char; }
-  }
-  row.push(cell.trim());
-  if (row.some(Boolean)) rows.push(row);
-  return rows;
-};
-
-const detectCsvMode = (rows: string[][]): CsvMode => {
-  const headers = rows[0] ?? [];
-  const normalized = headers.map((h) => normalize(h));
-  if (normalized.includes("productbarcode") || normalized.includes("quantity")) return "flat";
-  const firstCell = normalize(rows[0]?.[0]);
-  const secondFirst = normalize(rows[1]?.[0]);
-  if (firstCell.includes("customer") || secondFirst.includes("productcode")) return "pivot";
-  return "flat";
-};
 
 const extractPalletSize = (product: { itemsPerPallet?: number | null; name?: string | null }): number => {
   if (product.itemsPerPallet != null && product.itemsPerPallet > 0) return product.itemsPerPallet;
@@ -199,6 +170,18 @@ const extractPalletSize = (product: { itemsPerPallet?: number | null; name?: str
   const standalone = nameStr.match(/\b(\d{1,4})\b/);
   if (standalone) { const n = parseInt(standalone[1], 10); if (Number.isFinite(n) && n > 1) return n; }
   return 0;
+};
+
+const normalizeScopeKey = (value?: string | null) =>
+  String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+const derivePlantFromDepartment = (department?: string | null) => {
+  const normalizedDepartment = normalizeScopeKey(department);
+  const knownPlants = ["valsad", "indore", "baroda", "rajkot", "lucknow"];
+  const matchedPlant = knownPlants.find((plant) => normalizedDepartment.includes(plant));
+  return matchedPlant ? matchedPlant.toUpperCase() : "";
 };
 
 // ─── Component ─────────────────────────────────────────────────────────────
@@ -211,22 +194,33 @@ export default function ScanOrderPage() {
   const scannerRef = useRef<BarcodeScanner | null>(null);
   const lastScanRef = useRef({ code: "", at: 0 });
 
-  const [view, setView] = useState<"dashboard" | "map" | "scan">("dashboard");
+  const [view, setView] = useState<"landing" | "dashboard" | "map" | "scan">("landing");
   const [activeSession, setActiveSession] = useState<OrderSession | null>(null);
   const [scanActivities, setScanActivities] = useState<ScanActivity[]>([]);
   // Tracks item IDs in the order they were last scanned (newest first).
   // Used to float recently-scanned rows to the top of the CSV Order Items table.
   const [recentItemIds, setRecentItemIds] = useState<number[]>([]);
 
-  const [csvRows, setCsvRows] = useState<string[][]>([]);
+  const departmentPlant = useMemo(() => derivePlantFromDepartment(currentUser?.department), [currentUser?.department]);
+
+  // Only admin, super admin, and billing dept users can create new scan orders (load CSV + pick STV).
+  // Dispatch users can only scan against existing sessions.
+  const canCreateScanOrder = useMemo(() => {
+    const role = String((currentUser as any)?.role ?? '').toLowerCase().replace(/[\s_-]/g, '');
+    if (['admin', 'superadmin'].includes(role)) return true;
+    const dept = String((currentUser as any)?.department ?? '').toLowerCase();
+    return dept.includes('billing');
+  }, [currentUser]);
+
   const [csvName, setCsvName] = useState("");
-  const [csvMode, setCsvMode] = useState<CsvMode>("pivot");
-  const [mappedColumn, setMappedColumn] = useState("");
   const [selectedImport, setSelectedImport] = useState("");
   const [importItems, setImportItems] = useState<Array<Omit<OrderItem, "id">>>([]);
-  const [flatSkuColumn, setFlatSkuColumn] = useState("");
-  const [flatNameColumn, setFlatNameColumn] = useState("");
-  const [flatQtyColumn, setFlatQtyColumn] = useState("");
+  const [selectedPlant, setSelectedPlant] = useState("");
+  const [selectedStv, setSelectedStv] = useState("");
+  const [scanStv, setScanStv] = useState(""); // STV selected per item in the scan view
+
+  // canStartScan — true once a plant is chosen (auto for dispatch from dept, manual for billing)
+  const canStartScan = Boolean(selectedPlant);
   const [manualCode, setManualCode] = useState("");
   const [isScanning, setIsScanning] = useState(false);
   const [isPostingScan, setIsPostingScan] = useState(false);
@@ -242,6 +236,10 @@ export default function ScanOrderPage() {
   const [pendingScan, setPendingScan] = useState<PendingScan | null>(null);
   const [pendingQty, setPendingQty] = useState<string>("1");
 
+  useEffect(() => {
+    setSelectedPlant(departmentPlant);
+  }, [departmentPlant]);
+
   // ── Queries ──────────────────────────────────────────────────────────────
 
   const { data: productsRaw = [] } = useQuery<any>({
@@ -249,13 +247,74 @@ export default function ScanOrderPage() {
   });
   const products: Product[] = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.results ?? []);
 
-  const { data: sessionsRaw = [], refetch: refetchSessions } = useQuery<SessionSummary[]>({
-    queryKey: ["/api/scan-sessions", currentUser?.userCode],
+  const { data: plants = [] } = useQuery<Plant[]>({
+    queryKey: ["/api/plants"],
     queryFn: async () => {
-      const params = currentUser?.userCode ? `?userCode=${encodeURIComponent(currentUser.userCode)}` : "";
-      const r = await apiRequest("GET", `/api/scan-sessions${params}`, undefined, false, true);
+      const response = await fetch('/api/plants');
+      if (!response.ok) {
+        throw new Error('Failed to load plants');
+      }
+      return response.json();
+    },
+  });
+
+  const selectedPlantRecord = useMemo(
+    () => plants.find((plant) => normalizeScopeKey(plant.name) === normalizeScopeKey(selectedPlant)) ?? null,
+    [plants, selectedPlant],
+  );
+
+  const { data: plantStvs = [] } = useQuery<Array<{ id: number; stv: string }>>({
+    queryKey: ["/api/plants", selectedPlantRecord?.id, "stvs"],
+    queryFn: async () => {
+      if (!selectedPlantRecord?.id) return [];
+      const response = await fetch(`/api/plants/${selectedPlantRecord.id}/stvs`);
+      if (!response.ok) {
+        throw new Error('Failed to load STVs');
+      }
+      return response.json();
+    },
+    enabled: !!selectedPlantRecord?.id && canCreateScanOrder,
+  });
+
+  useEffect(() => {
+    if (selectedPlantRecord?.id && plantStvs.length > 0) {
+      if (!plantStvs.some((entry) => entry.stv === selectedStv)) {
+        setSelectedStv(plantStvs[0].stv);
+      }
+    } else if (!selectedPlantRecord?.id) {
+      setSelectedStv("");
+    }
+  }, [plantStvs, selectedPlantRecord?.id, selectedStv]);
+
+  // STVs for the active session's plant — loaded for dispatch users in the scan view
+  const sessionPlantRecord = useMemo(
+    () => activeSession
+      ? (plants.find((p) => normalizeScopeKey(p.name) === normalizeScopeKey(activeSession.plant)) ?? null)
+      : null,
+    [plants, activeSession],
+  );
+  const { data: sessionStvs = [] } = useQuery<Array<{ id: number; stv: string }>>({
+    queryKey: ["/api/plants", sessionPlantRecord?.id, "stvs"],
+    queryFn: async () => {
+      if (!sessionPlantRecord?.id) return [];
+      const response = await fetch(`/api/plants/${sessionPlantRecord.id}/stvs`);
+      if (!response.ok) throw new Error('Failed to load STVs');
+      return response.json();
+    },
+    enabled: !!sessionPlantRecord?.id,
+  });
+
+  const { data: sessionsRaw = [], refetch: refetchSessions } = useQuery<SessionSummary[]>({
+    // No userCode filter — the backend enforces plant-based access, so every member of
+    // the same plant (billing who creates sessions + dispatch who scans them) sees the
+    // same session list. Admins see everything.
+    queryKey: ["/api/scan-sessions", departmentPlant || "all"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", "/api/scan-sessions", undefined, false, true);
       return Array.isArray(r) ? r : [];
     },
+    // Refetch when user tabs back so dispatch users see sessions that billing just created.
+    refetchOnWindowFocus: true,
   });
   const sessions: SessionSummary[] = sessionsRaw;
 
@@ -269,10 +328,48 @@ export default function ScanOrderPage() {
     },
     retry: false,
     staleTime: 0,
+    // Only billing/admin users need the imports list — dispatch users only scan existing sessions.
+    enabled: canCreateScanOrder,
   });
   const { data: importSummariesRaw = [], error: importsError } = importsQuery as any;
-  const importSummaries: { filename: string; orderCount: number; itemCount: number; lastImportedAt: string }[] =
+  const importSummaries: { filename: string; plant?: string; orderCount: number; itemCount: number; lastImportedAt: string }[] =
     Array.isArray(importSummariesRaw) ? importSummariesRaw : [];
+
+  const visibleImportSummaries = useMemo(() => {
+    if (!selectedPlant) return importSummaries;
+    // Show CSVs that match the selected plant, OR that have no plant tag (e.g., older imports).
+    return importSummaries.filter(
+      (s) => !s.plant || normalizeScopeKey(s.plant) === normalizeScopeKey(selectedPlant),
+    );
+  }, [importSummaries, selectedPlant]);
+
+  useEffect(() => {
+    if (selectedImport) return;
+    const firstImport = visibleImportSummaries[0];
+    if (firstImport) {
+      setSelectedImport(firstImport.filename);
+    }
+  }, [selectedImport, visibleImportSummaries]);
+
+  useEffect(() => {
+    if (!selectedImport) return;
+    const currentImport = visibleImportSummaries.find((summary) => summary.filename === selectedImport);
+    if (!currentImport && visibleImportSummaries[0]) {
+      setSelectedImport(visibleImportSummaries[0].filename);
+    }
+  }, [selectedImport, visibleImportSummaries]);
+
+  // Use departmentPlant (not selectedPlant) so billing users see all plants' sessions,
+  // while dispatch users only see sessions for their locked plant.
+  const visibleSessions = useMemo(
+    () => sessions.filter((session) => {
+      if (!departmentPlant) return true; // billing/admin: show all plants
+      const sessionPlant = normalizeScopeKey(session.plant);
+      if (sessionPlant) return sessionPlant === normalizeScopeKey(departmentPlant);
+      return normalizeScopeKey(`${session.orderName} ${session.csvName}`).includes(normalizeScopeKey(departmentPlant));
+    }),
+    [sessions, departmentPlant],
+  );
 
   useEffect(() => {
     if (importsError) toast({ title: "Failed to load uploaded CSVs", description: (importsError as any).message, variant: "destructive" });
@@ -283,13 +380,13 @@ export default function ScanOrderPage() {
   const createSessionMutation = useMutation({
     mutationFn: async (payload: { session: any; items: any[] }) =>
       apiRequest("POST", "/api/scan-sessions", payload, false, true) as Promise<OrderSession>,
-    onSuccess: (data) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions"] });
-      setActiveSession({ ...data, items: data.items ?? [], extras: data.extras ?? [] });
-      setScanActivities([]);
-      setRecentItemIds([]);
       resetDraft();
-      setView("scan");
+      // Billing user created the session — dispatch user will open and scan it.
+      // Send billing/admin back to dashboard so dispatch can pick it up.
+      setView("dashboard");
+      toast({ title: "Scan order created", description: "Dispatch users can now open and scan this session." });
     },
     onError: () => toast({ title: "Failed to create scan order", variant: "destructive" }),
   });
@@ -318,47 +415,9 @@ export default function ScanOrderPage() {
 
   // ── CSV helpers ───────────────────────────────────────────────────────────
 
-  const pivotColumns = useMemo(() => {
-    if (csvMode !== "pivot" || csvRows.length < 2) return [];
-    return (csvRows[0] ?? []).slice(1)
-      .map((label, index) => ({ label, index: index + 1 }))
-      .filter((c) => c.label && normalize(c.label) !== "total");
-  }, [csvMode, csvRows]);
-
-  const flatHeaders = useMemo(() => (csvMode === "flat" ? csvRows[0] ?? [] : []), [csvMode, csvRows]);
-
   const mappedItems = useMemo(() => {
-    if (importItems.length) return importItems;
-    if (!csvRows.length) return [];
-
-    if (csvMode === "pivot") {
-      const selected = pivotColumns.find((c) => c.label === mappedColumn);
-      if (!selected) return [];
-      return csvRows.slice(2).reduce<Array<Omit<OrderItem, "id">>>((acc, row) => {
-        const barcode = row[11] ?? "";
-        const internalCode = row[10] ?? "";
-        const productDescription = row[12] ?? "";
-        const qty = parseQuantity(row[selected.index]);
-        if (!barcode || qty <= 0) return acc;
-        // Load directly from CSV — no inventory lookup at this stage
-        acc.push({ sku: barcode, itemName: productDescription || barcode, expectedQty: qty, scannedQty: 0, productId: undefined, barcode, itemNo: internalCode || undefined, sapCode: undefined, inventoryQty: null });
-        return acc;
-      }, []);
-    }
-
-    const skuIndex = flatHeaders.indexOf(flatSkuColumn);
-    const nameIndex = flatHeaders.indexOf(flatNameColumn);
-    const qtyIndex = flatHeaders.indexOf(flatQtyColumn);
-    if (skuIndex < 0 || qtyIndex < 0) return [];
-    return csvRows.slice(1).reduce<Array<Omit<OrderItem, "id">>>((acc, row) => {
-      const sku = row[skuIndex] ?? "";
-      const qty = parseQuantity(row[qtyIndex]);
-      if (!sku || qty <= 0) return acc;
-      // Load directly from CSV — no inventory lookup at this stage
-      acc.push({ sku, itemName: row[nameIndex] ?? sku, expectedQty: qty, scannedQty: 0, productId: undefined, barcode: sku, itemNo: undefined, sapCode: undefined, inventoryQty: null });
-      return acc;
-    }, []);
-  }, [csvMode, csvRows, flatHeaders, flatNameColumn, flatQtyColumn, flatSkuColumn, importItems, mappedColumn, pivotColumns]);
+    return importItems;
+  }, [importItems]);
 
   const totals = useMemo(() => {
     const items = activeSession?.items ?? [];
@@ -372,8 +431,9 @@ export default function ScanOrderPage() {
   // ── Actions ───────────────────────────────────────────────────────────────
 
   const resetDraft = () => {
-    setCsvRows([]); setCsvName(""); setMappedColumn(""); setSelectedImport([].toString());
-    setImportItems([]); setFlatSkuColumn(""); setFlatNameColumn(""); setFlatQtyColumn(""); setCsvMode("pivot");
+    setCsvName("");
+    setSelectedImport("");
+    setImportItems([]);
   };
 
   const loadImportItems = async () => {
@@ -389,35 +449,31 @@ export default function ScanOrderPage() {
       inventoryQty: null,
     })));
     setCsvName(response.filename);
-    setMappedColumn("Arriving Orders Import");
-    setCsvMode("pivot");
   };
 
-  const loadCsvText = (text: string, name: string) => {
-    const rows = parseCsv(text);
-    if (rows.length < 2) { toast({ title: "CSV not readable", description: "Please upload a CSV with product and quantity rows.", variant: "destructive" }); return; }
-    const mode = detectCsvMode(rows);
-    setCsvRows(rows); setCsvName(name); setCsvMode(mode); setMappedColumn(""); setSelectedImport(""); setImportItems([]);
-    if (mode === "flat") {
-      const headers = rows[0] ?? [];
-      const find = (patterns: RegExp[]) => headers.find((h) => patterns.some((p) => p.test(h))) ?? "";
-      setFlatSkuColumn(find([/^productbarcode$/i, /^barcode$/i, /^sku$/i, /barcode/i, /sku/i, /sap/i]));
-      setFlatNameColumn(find([/^productname$/i, /^name$/i, /product/i]));
-      setFlatQtyColumn(find([/^quantity$/i, /^qty$/i, /quantity/i]));
-    }
-  };
+  useEffect(() => {
+    if (!selectedImport) return;
+    if (importItems.length > 0) return;
+    void loadImportItems();
+    // Auto-load the latest billing CSV so the operator does not have to choose it manually.
+  }, [selectedImport]);
 
   const createOrder = async () => {
-    if (!mappedItems.length) { toast({ title: "Map the order first", description: "Choose the CSV column that represents the arriving order.", variant: "destructive" }); return; }
+    if (!selectedImport) { toast({ title: "CSV not ready", description: "No billing CSV is available for the selected plant.", variant: "destructive" }); return; }
+    if (!mappedItems.length) { toast({ title: "No items found", description: "The selected CSV does not contain any rows to scan.", variant: "destructive" }); return; }
+    if (!selectedPlant) { toast({ title: "Plant not mapped", description: "Your department is not mapped to a plant.", variant: "destructive" }); return; }
+    if (!selectedStv) { toast({ title: "Choose an STV", description: "Select an STV for this scan session.", variant: "destructive" }); return; }
     setIsCreatingOrder(true);
     const userRaw = localStorage.getItem("currentUser");
     const user = userRaw ? JSON.parse(userRaw) : null;
     try {
       await createSessionMutation.mutateAsync({
         session: {
-          orderName: mappedColumn || csvName.replace(/\.csv$/i, "") || "Stock Arrival",
+          orderName: csvName.replace(/\.csv$/i, "") || selectedImport || "Stock Arrival",
           csvName,
-          mappedColumn: mappedColumn || "Mapped order",
+          plant: selectedPlant,
+          stv: selectedStv,
+          mappedColumn: "Billing import",
           status: "scanning",
           createdByName: user?.name || user?.username,
         },
@@ -439,6 +495,12 @@ export default function ScanOrderPage() {
 
   const loadFullSession = async (id: number) => {
     const data = await apiRequest("GET", `/api/scan-sessions/${id}`, undefined, false, true) as OrderSession;
+    // Only restrict dispatch users (who have a plant locked in their department).
+    // Billing users have no departmentPlant and can open sessions for any plant.
+    if (departmentPlant && normalizeScopeKey(data.plant) !== normalizeScopeKey(departmentPlant)) {
+      toast({ title: "Access denied", description: "You can only view scan data for your department plant.", variant: "destructive" });
+      return;
+    }
     setActiveSession({ ...data, items: data.items ?? [], extras: data.extras ?? [] });
     setScanActivities([]);
     setRecentItemIds([]);
@@ -572,6 +634,7 @@ export default function ScanOrderPage() {
           quantity: extraQty,
           numPallets: extraNumPallets,
           isExtra: true,
+          stv: scanStv || undefined,
           scannedByCode: user?.userCode,
           scannedByName: user?.name || user?.username,
         });
@@ -637,6 +700,7 @@ export default function ScanOrderPage() {
             quantity: orderQty,
             numPallets: orderNumPallets,
             isExtra: false,
+            stv: scanStv || undefined,
             scannedByCode: user?.userCode,
             scannedByName: user?.name || user?.username,
           });
@@ -744,7 +808,75 @@ export default function ScanOrderPage() {
 
   const submitManualCode = () => { handleScannedCode(manualCode); setManualCode(""); };
 
+  const openDashboard = () => {
+    setView("dashboard");
+  };
+
+  const openNewScanOrder = () => {
+    resetDraft();
+    setView("map");
+  };
+
+  // Dispatch users skip the landing page — they can only scan existing sessions.
+  // Wait for currentUser to load before redirecting to avoid a flash for billing/admin users.
+  useEffect(() => {
+    if (!currentUser) return;
+    if (view === "landing" && !canCreateScanOrder) {
+      setView("dashboard");
+    }
+  }, [view, canCreateScanOrder, currentUser]);
+
   // ─── Views ────────────────────────────────────────────────────────────────
+
+  if (view === "landing") {
+    return (
+      <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
+        <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-4xl items-center">
+          <div className="w-full space-y-5">
+            <div>
+              <p className="text-sm font-medium uppercase tracking-wide text-gray-500">Scan</p>
+              <h1 className="text-3xl font-semibold text-gray-950">Choose what you want to do</h1>
+              <p className="mt-1 text-sm text-gray-600">Open the scan dashboard or start a new scan order.</p>
+            </div>
+
+            <div className={`grid gap-4 ${canCreateScanOrder ? "md:grid-cols-2" : "md:grid-cols-1 max-w-sm"}`}>
+              <Card className="cursor-pointer rounded-xl border-0 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md" onClick={openDashboard}>
+                <CardContent className="flex h-full flex-col justify-between p-6">
+                  <div>
+                    <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-blue-50 text-[#001d6e]">
+                      <History className="h-6 w-6" />
+                    </div>
+                    <h2 className="text-xl font-semibold text-gray-950">Dashboard</h2>
+                    <p className="mt-2 text-sm text-gray-600">View active sessions, completed orders, and scan history.</p>
+                  </div>
+                  <Button className="mt-6 w-full bg-[#001d6e] hover:bg-[#00154b]" onClick={openDashboard}>
+                    Open Dashboard
+                  </Button>
+                </CardContent>
+              </Card>
+
+              {canCreateScanOrder && (
+                <Card className="cursor-pointer rounded-xl border-0 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md" onClick={openNewScanOrder}>
+                  <CardContent className="flex h-full flex-col justify-between p-6">
+                    <div>
+                      <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-50 text-emerald-700">
+                        <Plus className="h-6 w-6" />
+                      </div>
+                      <h2 className="text-xl font-semibold text-gray-950">New Scan Order</h2>
+                      <p className="mt-2 text-sm text-gray-600">Select the billing CSV for your plant, choose STV, and create the session for dispatch to scan.</p>
+                    </div>
+                    <Button className="mt-6 w-full bg-emerald-600 hover:bg-emerald-700" onClick={openNewScanOrder}>
+                      Start New Order
+                    </Button>
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (view === "map") {
     return (
@@ -752,67 +884,131 @@ export default function ScanOrderPage() {
         <div className="mx-auto max-w-7xl space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <Button variant="ghost" className="mb-2 px-0" onClick={() => setView("dashboard")}>
+              <Button variant="ghost" className="mb-2 px-0" onClick={() => setView("landing")}> 
                 <ArrowLeft className="mr-2 h-4 w-4" />Back
               </Button>
-              <h1 className="text-2xl font-semibold text-gray-950">Add New Scan Order</h1>
-              <p className="text-sm text-gray-600">Upload yesterday's order CSV, review the rows, then start scanning boxes.</p>
+              <h1 className="text-2xl font-semibold text-gray-950">Start Scan Order</h1>
+              <p className="text-sm text-gray-600">Billing CSV loads automatically. Your department sets the plant, then you choose STV and start scanning boxes.</p>
             </div>
-            <Button onClick={createOrder} disabled={!mappedItems.length || isCreatingOrder} className="bg-[#001d6e] hover:bg-[#00154b]">
+            <Button onClick={createOrder} disabled={!canStartScan || !mappedItems.length || isCreatingOrder} className="bg-[#001d6e] hover:bg-[#00154b]">
               <ScanLine className="mr-2 h-4 w-4" />{isCreatingOrder ? "Creating…" : "Next"}
             </Button>
           </div>
+
+          {/* No CSV available for the selected plant */}
+          {selectedPlant && !importsQuery.isLoading && visibleImportSummaries.length === 0 && (
+            <Alert variant="destructive">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription>
+                No billing CSV found for plant <strong>{selectedPlant}</strong>. Ask your admin to upload a CSV for this plant in Order Management.
+              </AlertDescription>
+            </Alert>
+          )}
 
           <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
             <Card className="rounded-md">
               <CardHeader><CardTitle className="flex items-center text-lg"><FileSpreadsheet className="mr-2 h-5 w-5 text-[#001d6e]" />CSV Mapping</CardTitle></CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-2">
-                  <Label>Arriving Order CSV (Uploaded)</Label>
-                  <Select value={selectedImport} onValueChange={setSelectedImport}>
-                    <SelectTrigger><SelectValue placeholder="Select uploaded CSV" /></SelectTrigger>
-                    <SelectContent>
-                      {importSummaries.length === 0 && <SelectItem value="no-imports" disabled>No uploaded CSVs found</SelectItem>}
-                      {importSummaries.map((s) => <SelectItem key={s.filename} value={s.filename}>{s.filename}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  <Button type="button" variant="outline" className="w-full" onClick={loadImportItems} disabled={!selectedImport}>
-                    <PackageCheck className="mr-2 h-4 w-4" />Load Arriving Orders
-                  </Button>
-                  {selectedImport && <p className="text-xs text-gray-500">Using: {selectedImport}</p>}
+                  <Label>Plant</Label>
+                  {departmentPlant ? (
+                    // Dispatch user — plant is locked to their department
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 text-sm font-medium text-gray-700">
+                      {selectedPlant}
+                    </div>
+                  ) : (
+                    // Billing/admin user — manually select which plant's CSV to prepare
+                    <Select
+                      value={selectedPlant}
+                      onValueChange={(val) => {
+                        setSelectedPlant(val);
+                        setSelectedImport("");
+                        setImportItems([]);
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select plant…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {plants.map((p) => (
+                          <SelectItem key={p.id} value={p.name}>
+                            {p.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <p className="text-xs text-gray-500">
+                    {departmentPlant
+                      ? "Plant is locked to your department."
+                      : "Select the plant you are preparing a billing scan order for."}
+                  </p>
                 </div>
 
-                {csvRows.length > 0 && csvMode === "pivot" && (
-                  <div className="space-y-2">
-                    <Label>Arriving Order / Dealer</Label>
-                    <Select value={mappedColumn} onValueChange={setMappedColumn}>
-                      <SelectTrigger><SelectValue placeholder="Select CSV order column" /></SelectTrigger>
-                      <SelectContent>{pivotColumns.map((c) => <SelectItem key={c.label} value={c.label}>{c.label}</SelectItem>)}</SelectContent>
-                    </Select>
-                  </div>
-                )}
+                <div className="space-y-2">
+                  <Label>STV</Label>
+                  <Select value={selectedStv} onValueChange={setSelectedStv} disabled={!selectedPlantRecord?.id || plantStvs.length === 0}>
+                    <SelectTrigger>
+                      <SelectValue placeholder={selectedPlantRecord?.id ? "Select STV" : "Select a plant first"} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {plantStvs.length === 0 && <SelectItem value="no-stv" disabled>No STVs found</SelectItem>}
+                      {plantStvs.map((stv) => (
+                        <SelectItem key={stv.id} value={stv.stv}>
+                          {stv.stv}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
-                {csvRows.length > 0 && csvMode === "flat" && (
-                  <div className="space-y-3">
-                    <div className="space-y-2">
-                      <Label>SKU / Barcode Column</Label>
-                      <Select value={flatSkuColumn} onValueChange={setFlatSkuColumn}><SelectTrigger><SelectValue placeholder="Select SKU column" /></SelectTrigger><SelectContent>{flatHeaders.map((h) => <SelectItem key={h} value={h}>{h}</SelectItem>)}</SelectContent></Select>
+                <div className="space-y-2">
+                  <Label>Billing CSV</Label>
+                  {importsQuery.isLoading ? (
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 text-sm text-gray-400 italic">Loading CSV…</div>
+                  ) : visibleImportSummaries.length === 0 ? (
+                    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                      No billing CSV found for this plant
                     </div>
-                    <div className="space-y-2">
-                      <Label>Item Name Column</Label>
-                      <Select value={flatNameColumn} onValueChange={setFlatNameColumn}><SelectTrigger><SelectValue placeholder="Select name column" /></SelectTrigger><SelectContent>{flatHeaders.map((h) => <SelectItem key={h} value={h}>{h}</SelectItem>)}</SelectContent></Select>
+                  ) : visibleImportSummaries.length === 1 ? (
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                      {visibleImportSummaries[0].filename}
                     </div>
-                    <div className="space-y-2">
-                      <Label>Quantity Column</Label>
-                      <Select value={flatQtyColumn} onValueChange={setFlatQtyColumn}><SelectTrigger><SelectValue placeholder="Select quantity column" /></SelectTrigger><SelectContent>{flatHeaders.map((h) => <SelectItem key={h} value={h}>{h}</SelectItem>)}</SelectContent></Select>
-                    </div>
-                  </div>
-                )}
+                  ) : (
+                    <Select
+                      value={selectedImport}
+                      onValueChange={(val) => {
+                        setSelectedImport(val);
+                        setImportItems([]);
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select a billing CSV" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {visibleImportSummaries.map((summary) => (
+                          <SelectItem key={summary.filename} value={summary.filename}>
+                            {summary.filename}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <p className="text-xs text-gray-500">
+                    {visibleImportSummaries.length > 1
+                      ? "Multiple CSVs available — select the one to scan against."
+                      : "The latest billing CSV for your plant loads automatically."}
+                  </p>
+                  <Button type="button" variant="outline" className="w-full" onClick={loadImportItems} disabled={!selectedImport}>
+                    <PackageCheck className="mr-2 h-4 w-4" />Reload Billing CSV
+                  </Button>
+                </div>
+
               </CardContent>
             </Card>
 
             <Card className="rounded-md">
-              <CardHeader><CardTitle className="text-lg">Loaded CSV Preview</CardTitle></CardHeader>
+              <CardHeader><CardTitle className="text-lg">Loaded Billing Preview</CardTitle></CardHeader>
               <CardContent>
                 <Table>
                   <TableHeader>
@@ -830,7 +1026,7 @@ export default function ScanOrderPage() {
                         <TableCell className="text-right font-medium">{item.expectedQty}</TableCell>
                       </TableRow>
                     ))}
-                    {!mappedItems.length && <TableRow><TableCell colSpan={3} className="py-10 text-center text-gray-500">Upload a CSV and choose the correct order column.</TableCell></TableRow>}
+                    {!mappedItems.length && <TableRow><TableCell colSpan={3} className="py-10 text-center text-gray-500">The latest billing import for your plant will appear here automatically.</TableCell></TableRow>}
                   </TableBody>
                 </Table>
               </CardContent>
@@ -1041,6 +1237,28 @@ export default function ScanOrderPage() {
                   })()}
                 </div>
 
+                {/* STV selection — required before each confirmed scan */}
+                {sessionStvs.length > 0 && (
+                  <div className="space-y-2">
+                    <Label htmlFor="scan-stv-select" className="flex items-center gap-1.5">
+                      <Layers className="h-3.5 w-3.5" />STV <span className="text-red-500 ml-0.5">*</span>
+                    </Label>
+                    <Select value={scanStv} onValueChange={setScanStv}>
+                      <SelectTrigger id="scan-stv-select">
+                        <SelectValue placeholder="Select STV…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {sessionStvs.map((s) => (
+                          <SelectItem key={s.id} value={s.stv}>{s.stv}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {!scanStv && (
+                      <p className="text-xs text-red-500">Select an STV before confirming this scan.</p>
+                    )}
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label htmlFor="confirm-qty" className="flex items-center gap-1.5">
                     <Pencil className="h-3.5 w-3.5" />Quantity to Add
@@ -1064,7 +1282,11 @@ export default function ScanOrderPage() {
 
             <DialogFooter className="gap-2 sm:gap-0">
               <Button variant="outline" onClick={() => { setPendingScan(null); setPendingQty("1"); lastScanRef.current = { code: "", at: 0 }; }} disabled={isPostingScan}>Cancel</Button>
-              <Button onClick={confirmPendingScan} disabled={isPostingScan || !pendingQty || parseInt(pendingQty) < 1} className="bg-[#001d6e] hover:bg-[#00154b]">
+              <Button
+                onClick={confirmPendingScan}
+                disabled={isPostingScan || !pendingQty || parseInt(pendingQty) < 1 || (sessionStvs.length > 0 && !scanStv)}
+                className="bg-[#001d6e] hover:bg-[#00154b]"
+              >
                 {isPostingScan ? "Saving…" : `Confirm — Add ${pendingQty || 0} unit${parseInt(pendingQty || "0") !== 1 ? "s" : ""}`}
               </Button>
             </DialogFooter>
@@ -1076,15 +1298,15 @@ export default function ScanOrderPage() {
 
   // ── Dashboard ─────────────────────────────────────────────────────────────
 
-  const activeSessions = sessions.filter((s) => s.status === "scanning");
-  const completedSessions = sessions.filter((s) => s.status === "completed");
-  const totalScanned = sessions.reduce((sum, s) => sum + (s.totalScanned ?? 0), 0);
-  const totalExtras = sessions.reduce((sum, s) => sum + (s.totalExtras ?? 0), 0);
+  const activeSessions = visibleSessions.filter((s) => s.status === "scanning");
+  const completedSessions = visibleSessions.filter((s) => s.status === "completed");
+  const totalScanned = visibleSessions.reduce((sum, s) => sum + (s.totalScanned ?? 0), 0);
+  const totalExtras = visibleSessions.reduce((sum, s) => sum + (s.totalExtras ?? 0), 0);
 
   return (
     <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
       <div className="mx-auto max-w-5xl space-y-5">
-        <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
+        <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: canCreateScanOrder ? "You can now start scanning. Click 'New Scan Order' to begin." : "You can now start scanning. Open an active session to begin." })} />
 
         {/* Header */}
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1096,9 +1318,11 @@ export default function ScanOrderPage() {
             <h1 className="text-2xl font-semibold text-gray-950">Scan Order Dashboard</h1>
             <p className="text-sm text-gray-500 mt-0.5">Your stock arrival scan orders and history.</p>
           </div>
-          <Button onClick={() => { resetDraft(); importsQuery.refetch(); setView("map"); }} className="bg-[#001d6e] hover:bg-[#00154b]">
-            <Plus className="mr-2 h-4 w-4" />New Scan Order
-          </Button>
+          {canCreateScanOrder && (
+            <Button onClick={() => { openNewScanOrder(); importsQuery.refetch(); }} className="bg-[#001d6e] hover:bg-[#00154b]">
+              <Plus className="mr-2 h-4 w-4" />New Scan Order
+            </Button>
+          )}
         </div>
 
         {/* Stats */}
@@ -1208,7 +1432,11 @@ export default function ScanOrderPage() {
               <CardContent className="py-16 text-center">
                 <ScanLine className="h-10 w-10 text-gray-200 mx-auto mb-3" />
                 <p className="text-gray-500 font-medium">No scan orders yet</p>
-                <p className="text-sm text-gray-400 mt-1">Click "New Scan Order" to get started.</p>
+                <p className="text-sm text-gray-400 mt-1">
+                  {canCreateScanOrder
+                    ? "Click \"New Scan Order\" to load a billing CSV and create a session."
+                    : "No active sessions for your plant. Ask billing to create a scan order."}
+                </p>
               </CardContent>
             </Card>
           ) : completedSessions.length === 0 ? (
