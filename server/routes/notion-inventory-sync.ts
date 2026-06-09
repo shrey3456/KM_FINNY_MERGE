@@ -1,12 +1,33 @@
-import { Router } from 'express';
-import { syncInventoryFromNotion, getSyncStatus, getSyncHistory } from '../services/notionInventorySync';
+import { Router, Request, Response, NextFunction } from 'express';
+import {
+  detectChangesFromNotion,
+  applyPendingChanges,
+  fullSyncFromNotion,
+  getPendingReport,
+  getSyncStatus,
+  getSyncHistory,
+} from '../services/notionInventorySync';
 
 const router = Router();
 
-// POST /api/notion-inventory-sync/trigger — run a sync immediately, returns full report
-router.post('/notion-inventory-sync/trigger', async (req, res) => {
+function requireAdminRole(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated()) {
+    return res.status(401).json({ success: false, message: 'Not authenticated' });
+  }
+  const user = req.user as any;
+  const role = (user?.role ?? '').toLowerCase();
+  if (role !== 'admin' && role !== 'super-admin') {
+    return res.status(403).json({ success: false, message: 'Admin access required' });
+  }
+  next();
+}
+
+router.use('/notion-inventory-sync', requireAdminRole);
+
+// POST /api/notion-inventory-sync/detect
+router.post('/notion-inventory-sync/detect', async (_req, res) => {
   try {
-    const report = await syncInventoryFromNotion();
+    const report = await detectChangesFromNotion();
     res.json({ success: true, ...report });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -15,12 +36,43 @@ router.post('/notion-inventory-sync/trigger', async (req, res) => {
   }
 });
 
-// GET /api/notion-inventory-sync/status — current sync state + last report
+// GET /api/notion-inventory-sync/pending
+router.get('/notion-inventory-sync/pending', (_req, res) => {
+  const report = getPendingReport();
+  if (!report) return res.json({ hasPending: false, report: null });
+  res.json({ hasPending: report.updated > 0 || report.created > 0, report });
+});
+
+// POST /api/notion-inventory-sync/apply
+router.post('/notion-inventory-sync/apply', async (_req, res) => {
+  try {
+    const report = await applyPendingChanges();
+    res.json({ success: true, ...report });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    const status = message.includes('already in progress') ? 409 : 500;
+    res.status(status).json({ success: false, message });
+  }
+});
+
+// POST /api/notion-inventory-sync/full-sync
+router.post('/notion-inventory-sync/full-sync', async (_req, res) => {
+  try {
+    const report = await fullSyncFromNotion();
+    res.json({ success: true, ...report });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    const status = message.includes('already in progress') ? 409 : 500;
+    res.status(status).json({ success: false, message });
+  }
+});
+
+// GET /api/notion-inventory-sync/status
 router.get('/notion-inventory-sync/status', (_req, res) => {
   res.json(getSyncStatus());
 });
 
-// GET /api/notion-inventory-sync/history — last 10 sync reports
+// GET /api/notion-inventory-sync/history
 router.get('/notion-inventory-sync/history', (_req, res) => {
   res.json(getSyncHistory());
 });

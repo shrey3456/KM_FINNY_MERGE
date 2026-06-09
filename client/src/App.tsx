@@ -7,6 +7,7 @@ import Home from "@/pages/Dashboard";
 import ScanOrder from "@/pages/Scanning/Scan";
 import StockReport from "@/pages/Scanning/StockReport";
 import Inventory from "@/pages/Inventory";
+import NotionInventory from "@/pages/NotionInventory";
 import Reports from "@/pages/Reports";
 import Users from "@/pages/Users";
 import Settings from "@/pages/Settings";
@@ -240,6 +241,7 @@ function Router() {
         <Route path="/scan" component={ScanOrder} />
         <Route path="/scan-stock-report" component={StockReport} />
         <ProtectedRoute path="/inventory" component={Inventory} requireInventoryAccess={true} />
+        <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} />
         <Route path="/load-operations" component={LoadOperations} /> {/* Updated route */}
         <Route path="/print-operations" component={PrintOperations} /> {/* Print Operations route - simplified */}
@@ -377,7 +379,7 @@ function App() {
 
     window.fetch = async (...args) => {
       const response = await originalFetch(...args);
-      if (response.status === 401 || response.status === 403) {
+      if (response.status === 401) {
         handleUnauthorized();
       }
       return response;
