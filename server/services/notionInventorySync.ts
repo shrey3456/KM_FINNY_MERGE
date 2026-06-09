@@ -79,6 +79,7 @@ function extractText(prop: any): string {
     case 'title':       return prop.title?.map((t: any) => t.plain_text).join('') || '';
     case 'rich_text':   return prop.rich_text?.map((t: any) => t.plain_text).join('') || '';
     case 'select':      return prop.select?.name || '';
+    case 'status':      return prop.status?.name || '';
     case 'multi_select':return prop.multi_select?.map((s: any) => s.name).join(', ') || '';
     case 'number':      return prop.number != null ? String(prop.number) : '';
     case 'formula':
@@ -103,6 +104,18 @@ function extractInteger(prop: any): number | undefined {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
 }
 
+function extractMultiSelect(prop: any): string[] {
+  if (!prop) return [];
+  if (prop.type === 'multi_select') return (prop.multi_select ?? []).map((s: any) => String(s.name)).filter(Boolean);
+  if (prop.type === 'status')  return prop.status?.name  ? [String(prop.status.name)]  : [];
+  if (prop.type === 'select')  return prop.select?.name  ? [String(prop.select.name)]  : [];
+  return [];
+}
+
+function multiSelectToText(values: string[]): string | null {
+  return values.length > 0 ? values.join(', ') : null;
+}
+
 function firstOf(props: any, ...keys: string[]): string {
   for (const key of keys) {
     const val = extractText(props[key]);
@@ -125,7 +138,7 @@ function mapNotionPageToFields(page: any) {
     name:            firstOf(p, 'Products Name {DMS}', 'new name', 'Name', 'Product Name'),
     notionWiseName:  firstOf(p, 'Products - Notion Wise'),
     brand:           firstOf(p, 'Brand', 'brand'),
-    category:        firstOf(p, 'Category', 'category'),
+    category:        multiSelectToText(extractMultiSelect(p['Category :'] ?? p['Category'] ?? p['category'] ?? p['Categories'])),
     saleCategory:    firstOf(p, 'Sale Category'),
     plant:           firstOf(p, 'Plant :', 'Plant', 'plant'),
     type:            firstOf(p, 'Type :', 'Type', 'type'),
@@ -221,7 +234,7 @@ async function fetchAllNotionPages(): Promise<any[]> {
 async function computeChanges(notionPages: any[], allProducts: any[]) {
   const byNotionPageId = new Map(allProducts.filter(p => p.notionPageId).map(p => [p.notionPageId!, p]));
   // Fallback: match products that have no notionPageId yet by barcode
-  const byBarcode = new Map(allProducts.filter(p => !p.notionPageId && p.barcode).map(p => [p.barcode!, p]));
+  // const byBarcode = new Map(allProducts.filter(p => !p.notionPageId && p.barcode).map(p => [p.barcode!, p]));
 
   const changedProducts: ProductChange[] = [];
   const toCreate: ReturnType<typeof buildProductData>[] = [];
@@ -236,7 +249,7 @@ async function computeChanges(notionPages: any[], allProducts: any[]) {
       if (!fields.barcode && !fields.name) { notFound++; continue; }
 
       // Match by notionPageId first; fall back to barcode for products not yet linked
-      const product = byNotionPageId.get(fields.notionPageId) ?? (fields.barcode ? byBarcode.get(fields.barcode) ?? null : null);
+      const product = byNotionPageId.get(fields.notionPageId);
 
       // ── Product not in DB → create it ────────────────────────────────────
       if (!product) {
@@ -396,23 +409,23 @@ export async function applyPendingChanges(): Promise<SyncReport> {
       } catch (createErr) {
         // Insert failed (e.g. barcode conflict from a prior import without a Notion ID).
         // Fall back to finding the existing row by barcode and patching it instead.
-        if (data.barcode) {
-          try {
-            const existing = await storage.getProductByBarcode(data.barcode);
-            if (existing) {
-              // Don't overwrite stock counters that belong to the existing record.
-              const { purchased: _p, sold: _s, inStock: _i, pallets: _pl, ...safeData } = data as any;
-              await storage.updateProduct(existing.id, safeData);
-              updated++;
-            } else {
-              errors.push(`Create ${data.barcode}: ${createErr instanceof Error ? createErr.message : String(createErr)}`);
-            }
-          } catch (fallbackErr) {
-            errors.push(`Create ${data.barcode}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
-          }
-        } else {
-          errors.push(`Create (no barcode): ${createErr instanceof Error ? createErr.message : String(createErr)}`);
-        }
+        // if (data.barcode) {
+        //   try {
+        //     const existing = await storage.getProductByBarcode(data.barcode);
+        //     if (existing) {
+        //       // Don't overwrite stock counters that belong to the existing record.
+        //       const { purchased: _p, sold: _s, inStock: _i, pallets: _pl, ...safeData } = data as any;
+        //       await storage.updateProduct(existing.id, safeData);
+        //       updated++;
+        //     } else {
+        //       errors.push(`Create ${data.barcode}: ${createErr instanceof Error ? createErr.message : String(createErr)}`);
+        //     }
+        //   } catch (fallbackErr) {
+        //     errors.push(`Create ${data.barcode}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
+        //   }
+        // } else {
+        //   errors.push(`Create (no barcode): ${createErr instanceof Error ? createErr.message : String(createErr)}`);
+        // }
       }
     }
 
@@ -499,3 +512,4 @@ export function getSyncStatus() {
 
 export function getSyncHistory(): SyncReport[] { return syncHistory; }
 export function getPendingReport(): SyncReport | null { return pendingReport; }
+

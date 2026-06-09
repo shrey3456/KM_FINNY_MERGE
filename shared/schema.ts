@@ -225,6 +225,8 @@ export const scanSessions = pgTable("scan_sessions", {
   id: serial("id").primaryKey(),
   orderName: text("order_name").notNull(),   // label chosen by the user (e.g. dealer name)
   csvName: text("csv_name").notNull(),        // original filename of the uploaded CSV
+  plant: text("plant"),                       // plant scope for dispatch filtering (e.g. VALSAD / INDORE)
+  stv: text("stv"),                           // selected STV for dispatch flow
   mappedColumn: text("mapped_column").notNull(), // which CSV column was selected as the order
   status: text("status").default("scanning"), // "scanning" | "completed"
   createdByCode: text("created_by_code").references(() => users.userCode),
@@ -278,13 +280,14 @@ export const scanSessionPalletScans = pgTable("scan_session_pallet_scans", {
   quantity: integer("quantity").notNull().default(1),
   numPallets: real("num_pallets"),                  // calculated: quantity ÷ itemsPerPallet (e.g. 1.03)
   isExtra: boolean("is_extra").default(false),      // true = not matched to the order
+  stv: text("stv"),                                 // STV selected by dispatch user for this scan
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
   scannedByName: text("scanned_by_name"),
   scannedAt: timestamp("scanned_at").defaultNow(),
 });
 
 export const insertScanSessionSchema = createInsertSchema(scanSessions).pick({
-  orderName: true, csvName: true, mappedColumn: true, status: true,
+  orderName: true, csvName: true, plant: true, stv: true, mappedColumn: true, status: true,
   createdByCode: true, createdByName: true,
 });
 
@@ -301,7 +304,7 @@ export const insertScanSessionExtraSchema = createInsertSchema(scanSessionExtras
 export const insertScanSessionPalletScanSchema = createInsertSchema(scanSessionPalletScans).pick({
   sessionId: true, sessionItemId: true, barcode: true, sku: true, itemName: true,
   productId: true, palletNumber: true, quantity: true, numPallets: true, isExtra: true,
-  scannedByCode: true, scannedByName: true,
+  stv: true, scannedByCode: true, scannedByName: true,
 });
 
 export type ScanSession = typeof scanSessions.$inferSelect;
