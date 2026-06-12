@@ -29,15 +29,18 @@ import {
   ScanLine,
   FileUp,
   PackageCheck,
+  ChevronsLeft,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
 
 interface SidebarProps {
   onLogout?: () => void;
+  onCollapse?: () => void;
+  isMobile?: boolean;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
+const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => {
   const [location] = useLocation();
   const { user: authUser } = useAuth();
   const [fallbackUser, setFallbackUser] = useState(null);
@@ -289,9 +292,20 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
   });
 
   return (
-    <aside className="hidden lg:flex lg:flex-col lg:w-64 bg-white border-r border-gray-200 h-screen">
+    <aside className={isMobile ? "flex flex-col w-64 bg-white h-full" : "hidden lg:flex lg:flex-col lg:w-64 bg-white border-r border-gray-200 h-screen"}>
+      {/* Collapse button */}
+      <div className="flex justify-end px-3 pt-3 pb-1">
+        <button
+          onClick={onCollapse}
+          className="p-1.5 text-[#001d6e] hover:bg-gray-100 rounded-md transition-colors"
+          aria-label="Collapse sidebar"
+        >
+          <ChevronsLeft className="h-5 w-5" />
+        </button>
+      </div>
+
       {/* Sidebar content */}
-      <div className="flex-1 py-4 overflow-y-auto">
+      <div className="flex-1 py-2 overflow-y-auto">
         {filteredCategories.map((category, index) => (
           <div key={index} className="mb-6 px-4">
             <h3 className="text-xs font-medium text-gray-700 mb-2">
