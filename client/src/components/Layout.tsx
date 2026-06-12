@@ -25,6 +25,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   const [location] = useLocation();
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   
   useEffect(() => {
     // Get user information from localStorage
@@ -57,7 +58,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
       {/* Sidebar for desktop - conditionally shown based on sidebarVisible state */}
       {sidebarVisible && (
         <div className="hidden lg:block">
-          <Sidebar onLogout={onLogout} />
+          <Sidebar onLogout={onLogout} onCollapse={toggleSidebar} />
         </div>
       )}
       
@@ -79,14 +80,38 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
         </div>
         
         {/* Mobile Header with tribe logo, welcome text and (on non-home pages) a home icon - Hidden on messages and profile */}
+        {/* Mobile Sidebar Drawer */}
+        {mobileMenuOpen && (
+          <div className="lg:hidden fixed inset-0 z-50 flex">
+            <div
+              className="fixed inset-0 bg-black bg-opacity-50"
+              onClick={() => setMobileMenuOpen(false)}
+            />
+            <div className="relative z-10 flex flex-col h-full shadow-xl">
+              <Sidebar
+                onLogout={onLogout}
+                onCollapse={() => setMobileMenuOpen(false)}
+                isMobile
+              />
+            </div>
+          </div>
+        )}
+
         <div className={`lg:hidden bg-white border-b border-gray-200 p-4 w-full ${location === '/messages' || location === '/profile' ? 'hidden' : ''}`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-4">
+              <button
+                onClick={() => setMobileMenuOpen(true)}
+                className="p-1.5 text-[#001d6e] hover:bg-gray-100 rounded-md transition-colors"
+                aria-label="Open sidebar"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
               <div className="w-10 h-10 sm:w-12 sm:h-12">
-                <img 
-                  src={finnyLogo} 
-                  alt="Finny Logo" 
-                  className="w-full h-full object-contain" 
+                <img
+                  src={finnyLogo}
+                  alt="Finny Logo"
+                  className="w-full h-full object-contain"
                 />
               </div>
               <div>
