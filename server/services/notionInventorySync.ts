@@ -59,6 +59,7 @@ export interface SyncReport {
   updated: number;
   skipped: number;
   notFound: number;
+  triggeredBy: string;
   changedProducts: ProductChange[];
   createdProducts: CreatedProduct[];
   errors: string[];
@@ -191,8 +192,8 @@ function mapNotionPageToFields(page: any) {
 // Build a full product insert object from mapped Notion fields
 function buildProductData(fields: ReturnType<typeof mapNotionPageToFields>): Record<string, any> {
   const data: Record<string, any> = {
-    barcode:   fields.barcode,
-    name:      fields.name,
+    barcode:   fields.barcode || '',
+    name:      fields.name || '',
     notionPageId: fields.notionPageId,
     lastUpdated: new Date(),
     purchased: 0, sold: 0, inStock: 0, pallets: 0,
@@ -231,7 +232,7 @@ async function fetchAllNotionPages(): Promise<any[]> {
 
 // ─── Core change-detection (shared by all sync modes) ────────────────────────
 
-async function computeChanges(notionPages: any[], allProducts: any[]) {
+async function computeChanges(notionPages: any[], allProducts: any[], triggeredBy = 'system') {
   const byNotionPageId = new Map(allProducts.filter(p => p.notionPageId).map(p => [p.notionPageId!, p]));
   // Fallback: match products that have no notionPageId yet by barcode
   // const byBarcode = new Map(allProducts.filter(p => !p.notionPageId && p.barcode).map(p => [p.barcode!, p]));
@@ -251,12 +252,11 @@ async function computeChanges(notionPages: any[], allProducts: any[]) {
       // Match by notionPageId first; fall back to barcode for products not yet linked
       const product = byNotionPageId.get(fields.notionPageId);
 
-      // ── Product not in DB → create it ────────────────────────────────────
+      // ── Product not in DB → create it (notionPageId is the key; barcode/name can be empty) ──
       if (!product) {
-        if (!fields.barcode || !fields.name) { notFound++; continue; }
-        const data = buildProductData(fields);
+        const data = { ...buildProductData(fields), lastChangedBy: triggeredBy };
         toCreate.push(data);
-        createdProducts.push({ productName: fields.name, barcode: fields.barcode, notionPageId: fields.notionPageId });
+        createdProducts.push({ productName: fields.name || '', barcode: fields.barcode || '', notionPageId: fields.notionPageId });
         continue;
       }
 
@@ -337,6 +337,7 @@ async function computeChanges(notionPages: any[], allProducts: any[]) {
       if (fieldChanges.length === 0 && product.notionPageId) { skipped++; continue; }
 
       updates.lastUpdated = new Date();
+      updates.lastChangedBy = triggeredBy;
       updatesMap.set(product.id, updates);
 
       if (fieldChanges.length > 0) {
@@ -356,7 +357,7 @@ async function computeChanges(notionPages: any[], allProducts: any[]) {
 
 // ─── Detect-only (dry-run): stores pending, no DB writes ─────────────────────
 
-export async function detectChangesFromNotion(): Promise<SyncReport> {
+export async function detectChangesFromNotion(triggeredBy = 'system'): Promise<SyncReport> {
   if (!NOTION_INVENTORY_DATABASE_ID) throw new Error('NOTION_INVENTORY_DATABASE_ID is not set');
   if (isSyncing) throw new Error('A sync is already in progress — please wait');
 
@@ -366,12 +367,12 @@ export async function detectChangesFromNotion(): Promise<SyncReport> {
     const notionPages = await fetchAllNotionPages();
     const allProducts = await storage.getAllProducts();
     const { changedProducts, toCreate, createdProducts, updatesMap, errors, skipped, notFound } =
-      await computeChanges(notionPages, allProducts);
+      await computeChanges(notionPages, allProducts, triggeredBy);
 
     const report: SyncReport = {
       syncTime: new Date(), total: notionPages.length,
       created: toCreate.length, updated: changedProducts.length,
-      skipped, notFound, changedProducts, createdProducts, errors,
+      skipped, notFound, triggeredBy, changedProducts, createdProducts, errors,
     };
 
     pendingReport = report;
@@ -445,7 +446,7 @@ export async function applyPendingChanges(): Promise<SyncReport> {
 
 // ─── Full sync: clear inventory → import everything from Notion ───────────────
 
-export async function fullSyncFromNotion(): Promise<SyncReport> {
+export async function fullSyncFromNotion(triggeredBy = 'system'): Promise<SyncReport> {
   if (!NOTION_INVENTORY_DATABASE_ID) throw new Error('NOTION_INVENTORY_DATABASE_ID is not set');
   if (isSyncing) throw new Error('A sync is already in progress — please wait');
 
@@ -465,8 +466,8 @@ export async function fullSyncFromNotion(): Promise<SyncReport> {
     for (const page of notionPages) {
       try {
         const fields = mapNotionPageToFields(page);
-        if (!fields.barcode || !fields.name) continue;
-        const data = buildProductData(fields);
+        if (!fields.barcode && !fields.name) continue; // skip truly empty Notion rows
+        const data = { ...buildProductData(fields), lastChangedBy: triggeredBy };
         await storage.createProduct(data as any);
         created++;
         createdProducts.push({ productName: fields.name, barcode: fields.barcode, notionPageId: fields.notionPageId });
@@ -481,7 +482,7 @@ export async function fullSyncFromNotion(): Promise<SyncReport> {
       syncTime: new Date(), total: notionPages.length,
       created, updated: 0, skipped: 0,
       notFound: notionPages.length - created - errors.length,
-      changedProducts: [], createdProducts, errors,
+      triggeredBy, changedProducts: [], createdProducts, errors,
     };
     syncHistory.unshift(report);
     if (syncHistory.length > MAX_HISTORY) syncHistory.splice(MAX_HISTORY);

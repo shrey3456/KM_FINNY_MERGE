@@ -27,6 +27,8 @@ import {
   Clock,
   Database,
   ScanLine,
+  FileUp,
+  PackageCheck,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -192,6 +194,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
           path: "/scan",
         },
         {
+          label: "Order Scan",
+          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-scan",
+        },
+        {
           label: "Pallet Stock Report",
           icon: <FileBarChart className="h-5 w-5 mr-3 text-[#001d6e]" style={{ fill: "#a78bfa" }} />,
           path: "/scan-stock-report",
@@ -245,6 +252,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
           label: "Order Management",
           icon: <ClipboardList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/order-management",
+        },
+        {
+          label: "Order Import",
+          icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-import",
         },
         {
           label: "Activities",

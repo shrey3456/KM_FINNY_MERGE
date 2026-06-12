@@ -23,6 +23,8 @@ import ExpenseVoucher from "./pages/ExpenseVoucher";
 import TollVoucher from "./pages/TollVoucher";
 import StockSheets from "./pages/StockSheets";
 import OrderManagement from "./pages/OrderManagement";
+import OrderImport from "./pages/OrderImport";
+import OrderScan from "./pages/OrderScan";
 // BackupPage removed as requested
 import MessagesPage from "./pages/MessagesPage";
 import CheckInOutPage from "./pages/CheckInOutPage";
@@ -256,6 +258,8 @@ function Router() {
         <ProtectedRoute path="/settings" component={Settings} requireAdmin={true} />
         <ProtectedRoute path="/plant-settings" component={PlantSettings} requireAdmin={true} />
         <ProtectedRoute path="/order-management" component={OrderManagement} requireAdmin={true} />
+        <ProtectedRoute path="/order-import" component={OrderImport} requireAdmin={true} />
+        <Route path="/order-scan" component={OrderScan} />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />
         <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />

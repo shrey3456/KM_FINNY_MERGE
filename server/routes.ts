@@ -107,6 +107,8 @@ import voucherPrefixRoutes from "./routes/voucher-prefix";
 import checkinoutRoutes from "./routes/checkinout";
 import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
+import orderImportRoutes from "./routes/order-import";
+import orderScanRoutes from "./routes/order-scan";
 import { detectChangesFromNotion, fullSyncFromNotion } from "./services/notionInventorySync";
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -8893,6 +8895,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount Notion inventory sync routes
   apiRouter.use(notionInventorySyncRoutes);
+
+  // Mount order import routes
+  apiRouter.use(orderImportRoutes);
+
+  // Mount order scan routes
+  apiRouter.use(orderScanRoutes);
 
   // Mount the API router
   app.use("/api", apiRouter);

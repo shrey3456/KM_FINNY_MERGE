@@ -111,6 +111,7 @@ export const products = pgTable("products", {
 
   // ── Misc ──────────────────────────────────────────────────────────────────
   lastUpdated: timestamp("last_updated"),
+  lastChangedBy: text("last_changed_by"), // user who last changed this product via Notion sync
   description: text("description"),
   status: text("status").default("in stock"),
   createdByCode: text("created_by_code").references(() => users.userCode),
@@ -142,7 +143,7 @@ export const insertProductSchema = createInsertSchema(products, {
   upSr: true, upHsn: true, upSap: true, upRate: true, upIgst: true, forUpOrderForm: true,
   // generic price
   hsnCode: true, sapCode: true, purchasePrice: true, sellingPrice: true,
-  lastUpdated: true, description: true, status: true, createdByCode: true,
+  lastUpdated: true, lastChangedBy: true, description: true, status: true, createdByCode: true,
 });
 
 export type Product = typeof products.$inferSelect;
@@ -722,6 +723,121 @@ export const insertVoucherPrefixSchema = createInsertSchema(voucherPrefixes).pic
 
 export type VoucherPrefix = typeof voucherPrefixes.$inferSelect;
 export type InsertVoucherPrefix = z.infer<typeof insertVoucherPrefixSchema>;
+
+// ============================================================================
+// ORDER IMPORT  (CSV-based Order Import — new flow, separate from legacy orders)
+// Purpose : Allows admin to upload a CSV order file, map CSV columns to the
+//           fixed schema (barcode, item name, SAP code, quantity, pallets),
+//           and persist the rows into the database grouped by import session.
+// Used by : Order Import page (/order-import, admin only).
+// ============================================================================
+
+export const orderImportSessions = pgTable("order_import_sessions", {
+  id: serial("id").primaryKey(),
+  plant: text("plant").notNull(),
+  csvFileName: text("csv_file_name").notNull(),
+  rowCount: integer("row_count").default(0),
+  importedByCode: text("imported_by_code").references(() => users.userCode),
+  createdAt: timestamp("created_at").defaultNow(),
+  // Scan tracking
+  scanStatus: text("scan_status").default("available"), // available | active | completed
+  scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
+  scanActivatedAt: timestamp("scan_activated_at"),
+  scanCompletedAt: timestamp("scan_completed_at"),
+});
+
+export const orderImportItems = pgTable("order_import_items", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id")
+    .references(() => orderImportSessions.id, { onDelete: "cascade" })
+    .notNull(),
+  barcode: text("barcode"),
+  itemName: text("item_name"),
+  sapCode: text("sap_code"),
+  quantity: integer("quantity").default(0),
+  expectedPallets: real("expected_pallets"),
+  date: text("date"),
+  plant: text("plant"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertOrderImportSessionSchema = createInsertSchema(orderImportSessions).pick({
+  plant: true, csvFileName: true, rowCount: true, importedByCode: true,
+});
+
+export const insertOrderImportItemSchema = createInsertSchema(orderImportItems).pick({
+  sessionId: true, barcode: true, itemName: true, sapCode: true,
+  quantity: true, expectedPallets: true, date: true, plant: true,
+});
+
+export type OrderImportSession = typeof orderImportSessions.$inferSelect;
+export type InsertOrderImportSession = z.infer<typeof insertOrderImportSessionSchema>;
+export type OrderImportItem = typeof orderImportItems.$inferSelect;
+export type InsertOrderImportItem = z.infer<typeof insertOrderImportItemSchema>;
+
+// ============================================================================
+// ORDER SCAN  (Pallet scanning against an imported CSV order)
+// Purpose : After a CSV is imported via Order Import, warehouse staff scan
+//           each arriving box. One orderScanItem per CSV row tracks progress.
+//           orderScanEvents is the per-scan audit trail.
+// Used by : Order Scan page (/order-scan).
+// ============================================================================
+
+export const orderScanItems = pgTable("order_scan_items", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id")
+    .references(() => orderImportSessions.id, { onDelete: "cascade" })
+    .notNull(),
+  orderImportItemId: integer("order_import_item_id")
+    .references(() => orderImportItems.id, { onDelete: "set null" }),
+  barcode: text("barcode"),
+  itemName: text("item_name"),
+  sapCode: text("sap_code"),
+  expectedQty: integer("expected_qty").default(0),
+  itemsPerPallet: integer("items_per_pallet").default(0), // plant-specific snapshot at activation
+  scannedPallets: real("scanned_pallets").default(0),
+  scannedLooseQty: integer("scanned_loose_qty").default(0),
+  totalScannedQty: integer("total_scanned_qty").default(0),
+  status: text("status").default("pending"), // pending | partial | complete
+  lastScannedAt: timestamp("last_scanned_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const orderScanEvents = pgTable("order_scan_events", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id")
+    .references(() => orderImportSessions.id, { onDelete: "cascade" })
+    .notNull(),
+  scanItemId: integer("scan_item_id")
+    .references(() => orderScanItems.id, { onDelete: "set null" }),
+  barcode: text("barcode").notNull(),
+  itemName: text("item_name"),
+  pallets: real("pallets").default(0),
+  looseQty: integer("loose_qty").default(0),
+  totalQty: integer("total_qty").default(0),
+  itemsPerPallet: integer("items_per_pallet").default(0),
+  isExtra: boolean("is_extra").default(false),
+  stv: text("stv"),
+  scannedByCode: text("scanned_by_code").references(() => users.userCode),
+  scannedByName: text("scanned_by_name"),
+  scannedAt: timestamp("scanned_at").defaultNow(),
+});
+
+export const insertOrderScanItemSchema = createInsertSchema(orderScanItems).pick({
+  sessionId: true, orderImportItemId: true, barcode: true, itemName: true,
+  sapCode: true, expectedQty: true, itemsPerPallet: true,
+});
+
+export const insertOrderScanEventSchema = createInsertSchema(orderScanEvents).pick({
+  sessionId: true, scanItemId: true, barcode: true, itemName: true,
+  pallets: true, looseQty: true, totalQty: true, itemsPerPallet: true,
+  isExtra: true, stv: true, scannedByCode: true, scannedByName: true,
+});
+
+export type OrderScanItem = typeof orderScanItems.$inferSelect;
+export type InsertOrderScanItem = z.infer<typeof insertOrderScanItemSchema>;
+export type OrderScanEvent = typeof orderScanEvents.$inferSelect;
+export type InsertOrderScanEvent = z.infer<typeof insertOrderScanEventSchema>;
 
 // ============================================================================
 // ACTIVITIES  (Global Audit Log)

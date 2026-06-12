@@ -1,13 +1,14 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import Papa from "papaparse";
 import {
   AlertTriangle,
-  ArrowRight,
   Bell,
   CheckCircle2,
   CloudDownload,
   Database,
   Eye,
+  FileUp,
   Loader2,
   PackagePlus,
   RefreshCw,
@@ -32,6 +33,8 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -101,10 +104,10 @@ type ProductColumn = {
 };
 
 const productColumns: ProductColumn[] = [
-  { key: "newSr", label: "New Sr." },
-  { key: "srNo", label: "Sr. No." },
-  { key: "barcode", label: "SKU" },
-  { key: "name", label: "Products Name" },
+  { key: "newSr",  label: "New Sr."       },
+  { key: "srNo",   label: "Sr. No."       },
+  { key: "barcode",label: "SKU"           },
+  { key: "name",   label: "Products Name" },
   { key: "notionWiseName", label: "Notion Wise Name" },
   { key: "brand", label: "Brand" },
   { key: "category", label: "Category" },
@@ -149,6 +152,7 @@ const productColumns: ProductColumn[] = [
   { key: "upRate", label: "UP Rate", tone: "up" },
   { key: "upIgst", label: "UP IGST", tone: "up" },
   { key: "forUpOrderForm", label: "For UP Order Form", tone: "up" },
+  { key: "lastChangedBy", label: "Changed By" },
   { key: "lastUpdated", label: "Last Updated" },
 ];
 
@@ -172,7 +176,7 @@ function toneHeaderClass(tone?: ProductColumn["tone"]) {
   if (tone === "gj") return "bg-sky-100 text-sky-800";
   if (tone === "mp") return "bg-emerald-100 text-emerald-800";
   if (tone === "up") return "bg-amber-100 text-amber-800";
-  return "bg-[#001d6e]/5 text-[#001d6e]";
+  return "bg-slate-100 text-[#001d6e]";
 }
 
 export default function NotionInventory() {
@@ -180,8 +184,16 @@ export default function NotionInventory() {
   const [searchTerm, setSearchTerm] = useState("");
   const [showFullSyncConfirm, setShowFullSyncConfirm] = useState(false);
   const [lastApplyReport, setLastApplyReport] = useState<SyncReport | null>(null);
-  const [expandedProduct, setExpandedProduct] = useState<number | null>(null);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
+
+  // CSV import state
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [csvPreview, setCsvPreview] = useState<{
+    rows: Record<string, string>[];
+    headers: string[];
+    fileName: string;
+  } | null>(null);
+  const [showCsvDialog, setShowCsvDialog] = useState(false);
 
   const productsQuery = useQuery({
     queryKey: ["/api/products", { all: "true" }],
@@ -242,7 +254,6 @@ export default function NotionInventory() {
     },
     onSuccess: async (data) => {
       setLastApplyReport(null);
-      setExpandedProduct(null);
       await queryClient.invalidateQueries({ queryKey: ["/api/notion-inventory-sync/status"] });
       await queryClient.invalidateQueries({ queryKey: ["/api/notion-inventory-sync/pending"] });
       const total = (data.created ?? 0) + (data.updated ?? 0);
@@ -268,7 +279,6 @@ export default function NotionInventory() {
     },
     onSuccess: async (data) => {
       setLastApplyReport(data);
-      setExpandedProduct(null);
       setShowReviewDialog(false);
       await queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       await queryClient.invalidateQueries({ queryKey: ["/api/notion-inventory-sync/status"] });
@@ -291,6 +301,51 @@ export default function NotionInventory() {
       });
     },
   });
+
+  const csvImportMutation = useMutation({
+    mutationFn: async (rows: Record<string, string>[]) => {
+      const response = await apiRequest("POST", "/api/products/csv-import", { rows });
+      return response.json();
+    },
+    onSuccess: async (data) => {
+      setShowCsvDialog(false);
+      setCsvPreview(null);
+      await queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      toast({
+        title: "CSV import complete",
+        description: `${data.created ?? 0} created, ${data.updated ?? 0} updated, ${data.skipped ?? 0} skipped.`,
+        className: "bg-green-50 border-green-200 text-green-900",
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "CSV import failed",
+        description: error.message || "Could not import CSV data.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  function handleCsvFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    Papa.parse<Record<string, string>>(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (result) => {
+        setCsvPreview({
+          rows: result.data,
+          headers: result.meta.fields ?? [],
+          fileName: file.name,
+        });
+        setShowCsvDialog(true);
+      },
+      error: () => {
+        toast({ title: "Failed to parse CSV", variant: "destructive" });
+      },
+    });
+    e.target.value = "";
+  }
 
   const products = productsQuery.data ?? [];
   const linkedCount = products.filter((p) => p.notionPageId).length;
@@ -408,6 +463,20 @@ export default function NotionInventory() {
               : <CloudDownload className="mr-1.5 h-4 w-4" />}
             Check Notion
           </Button>
+          {isPending && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowReviewDialog(true)}
+              className="border-amber-400 bg-amber-50 text-amber-700 hover:bg-amber-100 flex items-center gap-1"
+            >
+              <Bell className="h-4 w-4" />
+              Review Changes
+              <Badge className="ml-1 bg-amber-500 text-white px-1.5 py-0 text-xs">
+                {(pendingReport?.created ?? 0) + (pendingReport?.updated ?? 0)}
+              </Badge>
+            </Button>
+          )}
           <Button
             size="sm"
             onClick={() => applyMutation.mutate()}
@@ -419,48 +488,62 @@ export default function NotionInventory() {
               : <Zap className="mr-1.5 h-4 w-4" />}
             Apply {statusQuery.data?.pendingCount ? `(${statusQuery.data.pendingCount})` : "Pending"}
           </Button>
+          {products.length === 0 && (
+            <Button
+              size="sm"
+              onClick={() => setShowFullSyncConfirm(true)}
+              disabled={isBusy || !isConfigured}
+              className="bg-[#001d6e] text-white hover:bg-[#001552]"
+            >
+              {fullSyncMutation.isPending
+                ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                : <Database className="mr-1.5 h-4 w-4" />}
+              First Sync
+            </Button>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv"
+            className="hidden"
+            onChange={handleCsvFile}
+          />
           <Button
             size="sm"
-            onClick={() => setShowFullSyncConfirm(true)}
-            disabled={isBusy || !isConfigured}
-            className="bg-[#001d6e] text-white hover:bg-[#001552]"
+            variant="outline"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={csvImportMutation.isPending}
+            className="border-emerald-400 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
           >
-            {fullSyncMutation.isPending
+            {csvImportMutation.isPending
               ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-              : <Database className="mr-1.5 h-4 w-4" />}
-            First Sync
+              : <FileUp className="mr-1.5 h-4 w-4" />}
+            Import CSV
           </Button>
         </div>
       </div>
 
-      {/* Compact changes banner */}
-      {reportToShow && (
-        <div className={`mb-4 flex items-center gap-3 rounded-lg border px-4 py-3 shadow-sm ${
-          isPending ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50"
-        }`}>
-          <Bell className={`h-4 w-4 shrink-0 ${isPending ? "text-amber-500" : "text-emerald-600"}`} />
+      {/* Last apply result banner — shown only after applying (not for pending, handled by action bar button) */}
+      {lastApplyReport && !isPending && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 shadow-sm">
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
-            <span className={`text-sm font-semibold ${isPending ? "text-amber-900" : "text-emerald-900"}`}>
-              {isPending ? "Pending Changes from Notion" : "Last Apply Result"}
-            </span>
+            <span className="text-sm font-semibold text-emerald-900">Changes Applied</span>
             <div className="flex flex-wrap gap-1.5">
-              {(reportToShow.created ?? 0) > 0 && (
+              {(lastApplyReport.created ?? 0) > 0 && (
                 <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 px-1.5 text-xs">
                   <PackagePlus className="mr-1 h-3 w-3" />
-                  {reportToShow.created} new
+                  {lastApplyReport.created} created
                 </Badge>
               )}
-              {(reportToShow.updated ?? 0) > 0 && (
-                <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 px-1.5 text-xs">
-                  {reportToShow.updated} changed
+              {(lastApplyReport.updated ?? 0) > 0 && (
+                <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100 px-1.5 text-xs">
+                  {lastApplyReport.updated} updated
                 </Badge>
-              )}
-              {(reportToShow.skipped ?? 0) > 0 && (
-                <Badge variant="outline" className="px-1.5 text-xs">{reportToShow.skipped} unchanged</Badge>
               )}
             </div>
             <span className="text-xs text-muted-foreground">
-              {new Date(reportToShow.syncTime).toLocaleString()}
+              {new Date(lastApplyReport.syncTime).toLocaleString()}
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -468,14 +551,10 @@ export default function NotionInventory() {
               size="sm"
               variant="outline"
               onClick={() => setShowReviewDialog(true)}
-              className={`h-7 px-3 text-xs ${
-                isPending
-                  ? "border-amber-300 text-amber-800 hover:bg-amber-100"
-                  : "border-emerald-300 text-emerald-800 hover:bg-emerald-100"
-              }`}
+              className="h-7 px-3 text-xs border-emerald-300 text-emerald-800 hover:bg-emerald-100"
             >
               <Eye className="mr-1.5 h-3.5 w-3.5" />
-              Review
+              View Report
             </Button>
             <Button
               size="sm"
@@ -491,9 +570,9 @@ export default function NotionInventory() {
       )}
 
       {/* Product table */}
-      <div className="rounded-lg border border-[#001d6e]/10 bg-white shadow-sm overflow-hidden">
-        <div className="flex items-center justify-between border-b border-[#001d6e]/10 bg-[#001d6e]/[0.03] px-5 py-3">
-          <div className="font-semibold text-[#001d6e]">Product Master</div>
+      <div className="rounded-lg border border-[#001d6e]/10 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-[#001d6e]/10 bg-[#001d6e]/[0.03] px-5 py-3 rounded-t-lg">
+          <div className="text-2xl font-bold text-[#001d6e]">Product Master</div>
           <div className="flex items-center gap-3">
             {searchTerm && (
               <span className="text-xs text-muted-foreground">
@@ -545,229 +624,304 @@ export default function NotionInventory() {
 
         {/* Table — only show when there are products */}
         {(productsQuery.isLoading || products.length > 0) && (
-          <div className="max-h-[68vh] overflow-auto">
-            <Table>
-              <TableHeader className="sticky top-0 z-10">
-                <TableRow>
+          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-200px)] min-h-[500px] rounded-b-lg">
+            <table className="w-max min-w-full caption-bottom text-sm border-collapse">
+              <thead>
+                <tr>
                   {productColumns.map((col) => (
-                    <TableHead
+                    <th
                       key={col.key}
-                      className={`min-w-[130px] whitespace-nowrap border-r text-xs font-semibold ${toneHeaderClass(col.tone)}`}
+                      className={`sticky top-0 z-10 min-w-[170px] whitespace-nowrap border-r border-b-2 border-b-gray-300 px-4 py-3.5 text-left text-base font-semibold ${toneHeaderClass(col.tone)}`}
                     >
                       {col.label}
-                    </TableHead>
+                    </th>
                   ))}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+                </tr>
+              </thead>
+              <tbody>
                 {productsQuery.isLoading ? (
-                  <TableRow>
-                    <TableCell colSpan={productColumns.length} className="h-40 text-center text-muted-foreground">
+                  <tr>
+                    <td colSpan={productColumns.length} className="h-40 text-center text-muted-foreground">
                       <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-[#001d6e]" />
                       <div className="text-sm">Loading product master…</div>
-                    </TableCell>
-                  </TableRow>
+                    </td>
+                  </tr>
                 ) : filteredProducts.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={productColumns.length} className="h-32 text-center text-muted-foreground">
+                  <tr>
+                    <td colSpan={productColumns.length} className="h-32 text-center text-muted-foreground">
                       <Search className="mx-auto mb-2 h-5 w-5 opacity-30" />
                       <div className="text-sm">No products match your search.</div>
-                    </TableCell>
-                  </TableRow>
+                    </td>
+                  </tr>
                 ) : (
-                  filteredProducts.map((product) => (
-                    <TableRow key={product.id} className="hover:bg-[#001d6e]/[0.02]">
+                  filteredProducts.map((product, i) => (
+                    <tr
+                      key={product.id}
+                      className={`border-b hover:bg-[#001d6e]/[0.02] ${i % 2 === 0 ? "" : "bg-gray-50/40"}`}
+                    >
                       {productColumns.map((col) => (
-                        <TableCell
+                        <td
                           key={`${product.id}-${col.key}`}
-                          className={`max-w-[220px] truncate whitespace-nowrap border-r text-xs ${toneClass(col.tone)}`}
+                          className={`max-w-[240px] truncate whitespace-nowrap border-r px-4 py-2.5 text-sm ${toneClass(col.tone)}`}
                           title={cellValue(product, col.key)}
                         >
                           {cellValue(product, col.key)}
-                        </TableCell>
+                        </td>
                       ))}
-                    </TableRow>
+                    </tr>
                   ))
                 )}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </div>
         )}
       </div>
 
-      {/* Review dialog — centered modal */}
+      {/* Review dialog — Inventory-style with stat boxes + flat changes table */}
       <Dialog open={showReviewDialog} onOpenChange={setShowReviewDialog}>
-        <DialogContent className="flex max-h-[90vh] w-full max-w-3xl flex-col gap-0 overflow-hidden p-0">
-          {/* Dialog header */}
-          <DialogHeader className="border-b border-[#001d6e]/10 bg-[#001d6e]/[0.03] px-6 py-4">
-            <div className="flex items-center justify-between">
-              <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
-                <Bell className="h-4 w-4 text-amber-500" />
-                {isPending ? "Pending Changes from Notion" : "Last Apply Result"}
-              </DialogTitle>
-              {reportToShow && (
-                <span className="text-xs text-muted-foreground">
-                  {new Date(reportToShow.syncTime).toLocaleString()}
-                </span>
-              )}
-            </div>
-            {reportToShow && (
-              <div className="flex flex-wrap items-center gap-2 pt-2">
-                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10">
-                  <PackagePlus className="mr-1 h-3 w-3" />
-                  {reportToShow.created} new
-                </Badge>
-                <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">
-                  {reportToShow.updated} changed
-                </Badge>
-                <Badge variant="outline">{reportToShow.skipped} unchanged</Badge>
-                <Badge variant="outline">{reportToShow.total} checked</Badge>
-                {isPending && (
-                  <Button
-                    size="sm"
-                    onClick={() => applyMutation.mutate()}
-                    disabled={isBusy}
-                    className="ml-auto h-7 bg-[#001d6e] px-3 text-xs text-white hover:bg-[#001552]"
-                  >
-                    {applyMutation.isPending
-                      ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                      : <Zap className="mr-1.5 h-3.5 w-3.5" />}
-                    Apply All
-                  </Button>
-                )}
-              </div>
-            )}
+        <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bell className="h-5 w-5 text-amber-500" />
+              {isPending ? "Review Pending Notion Changes" : "Last Apply Result"}
+            </DialogTitle>
+            <DialogDescription>
+              {reportToShow?.syncTime
+                ? `${isPending ? "Detected" : "Applied"} on ${new Date(reportToShow.syncTime).toLocaleString()}${isPending ? " — review before applying" : ""}`
+                : "Changes detected from Notion. Review and confirm before applying."}
+            </DialogDescription>
           </DialogHeader>
 
-          {/* Scrollable body */}
           {reportToShow && (
-            <div className="flex-1 divide-y overflow-y-auto">
-              {/* New products */}
-              <div className="p-5">
-                <div className="mb-3 flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-[#001d6e]" />
-                  <span className="text-sm font-semibold text-[#001d6e]">New Products</span>
-                  <Badge className="ml-auto bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10">
-                    {reportToShow.createdProducts?.length ?? 0}
-                  </Badge>
+            <div className="flex flex-col gap-4 overflow-hidden">
+              {/* Summary stat boxes */}
+              <div className="flex flex-wrap gap-3">
+                {(reportToShow.created ?? 0) > 0 && (
+                  <div className="flex flex-col items-center px-4 py-2 bg-purple-50 border border-purple-200 rounded-lg">
+                    <span className="text-2xl font-bold text-purple-700">{reportToShow.created}</span>
+                    <span className="text-xs text-purple-600">To Create</span>
+                  </div>
+                )}
+                <div className="flex flex-col items-center px-4 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+                  <span className="text-2xl font-bold text-amber-700">{reportToShow.updated}</span>
+                  <span className="text-xs text-amber-600">To Update</span>
                 </div>
-                <div className="divide-y rounded-lg border border-[#001d6e]/10">
-                  {reportToShow.createdProducts?.length ? (
-                    reportToShow.createdProducts.map((product) => (
-                      <div
-                        key={product.notionPageId}
-                        className="flex items-center gap-3 px-3 py-2.5 transition-colors hover:bg-[#001d6e]/[0.03]"
-                      >
-                        <PackagePlus className="h-3.5 w-3.5 shrink-0 text-[#001d6e]/60" />
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-xs font-medium text-[#001d6e]" title={product.productName}>
-                            {product.productName}
-                          </div>
-                          <div className="truncate text-xs text-muted-foreground" title={product.barcode}>
-                            SKU: {product.barcode}
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
-                      No new products
-                    </div>
-                  )}
+                <div className="flex flex-col items-center px-4 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <span className="text-2xl font-bold text-gray-600">{reportToShow.skipped}</span>
+                  <span className="text-xs text-gray-500">No Change</span>
                 </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <span className="text-2xl font-bold text-yellow-700">{reportToShow.notFound}</span>
+                  <span className="text-xs text-yellow-600">Unmatched</span>
+                </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+                  <span className="text-2xl font-bold text-blue-700">{reportToShow.total}</span>
+                  <span className="text-xs text-blue-600">Total Pages</span>
+                </div>
+                {(reportToShow.errors?.length ?? 0) > 0 && (
+                  <div className="flex flex-col items-center px-4 py-2 bg-red-50 border border-red-200 rounded-lg">
+                    <span className="text-2xl font-bold text-red-700">{reportToShow.errors.length}</span>
+                    <span className="text-xs text-red-600">Errors</span>
+                  </div>
+                )}
               </div>
 
-              {/* Changed products */}
-              <div className="p-5">
-                <div className="mb-3 flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-amber-500" />
-                  <span className="text-sm font-semibold text-[#001d6e]">Changed Products</span>
-                  <Badge className="ml-auto bg-amber-100 text-amber-700 hover:bg-amber-100">
-                    {reportToShow.changedProducts?.length ?? 0}
-                  </Badge>
-                </div>
-                <div className="divide-y rounded-lg border border-[#001d6e]/10">
-                  {reportToShow.changedProducts?.length ? (
-                    reportToShow.changedProducts.map((product) => (
-                      <div key={product.productId} className="divide-y">
-                        <button
-                          className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[#001d6e]/[0.03]"
-                          onClick={() =>
-                            setExpandedProduct(expandedProduct === product.productId ? null : product.productId)
-                          }
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-xs font-semibold text-[#001d6e]" title={product.productName}>
-                              {product.productName}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {product.barcode || product.srNo || "—"} &middot;{" "}
-                              {product.changes.length} field{product.changes.length !== 1 ? "s" : ""} changed
-                            </div>
-                          </div>
-                          <Badge className="shrink-0 bg-amber-100 text-amber-700 hover:bg-amber-100">
-                            {product.changes.length}
-                          </Badge>
-                        </button>
-
-                        {expandedProduct === product.productId && (
-                          <div className="space-y-1.5 bg-gray-50 px-3 py-2">
-                            {product.changes.map((change, index) => (
-                              <div
-                                key={`${product.productId}-${change.field}-${index}`}
-                                className="rounded-md border border-[#001d6e]/10 bg-white px-3 py-2"
-                              >
-                                <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#001d6e]/60">
-                                  {change.label}
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span
-                                    className="max-w-[40%] truncate rounded bg-red-50 px-2 py-0.5 text-xs text-red-600 line-through"
-                                    title={String(change.oldValue ?? "—")}
-                                  >
-                                    {change.oldValue != null && change.oldValue !== "" ? String(change.oldValue) : "—"}
-                                  </span>
-                                  <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
-                                  <span
-                                    className="max-w-[40%] truncate rounded bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700"
-                                    title={String(change.newValue ?? "—")}
-                                  >
-                                    {change.newValue != null && change.newValue !== "" ? String(change.newValue) : "—"}
-                                  </span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
-                      No changed products
+              {/* New products list (compact) */}
+              {(reportToShow.createdProducts?.length ?? 0) > 0 && (
+                <div className="border rounded-md overflow-y-auto max-h-40">
+                  <div className="bg-purple-50 px-3 py-1.5 text-xs font-semibold text-purple-700 border-b">
+                    New products to add ({reportToShow.createdProducts.length})
+                  </div>
+                  {reportToShow.createdProducts.map((cp) => (
+                    <div key={cp.notionPageId} className="flex items-center gap-2 px-3 py-1.5 text-xs border-b last:border-0">
+                      <PackagePlus className="h-3.5 w-3.5 shrink-0 text-purple-500" />
+                      <span className="font-medium">{cp.productName}</span>
+                      <span className="text-muted-foreground">·</span>
+                      <span className="text-muted-foreground">{cp.barcode}</span>
                     </div>
-                  )}
+                  ))}
                 </div>
-              </div>
+              )}
 
-              {/* Errors */}
-              {reportToShow.errors?.length > 0 && (
-                <div className="bg-red-50 px-5 py-4">
-                  <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-red-700">
-                    <AlertTriangle className="h-4 w-4" />
-                    {reportToShow.errors.length} sync issue{reportToShow.errors.length !== 1 ? "s" : ""}
-                  </div>
-                  <div className="space-y-1">
-                    {reportToShow.errors.slice(0, 10).map((error, index) => (
-                      <div key={index} className="text-xs text-red-600">{error}</div>
-                    ))}
-                    {reportToShow.errors.length > 10 && (
-                      <div className="text-xs text-red-500">+{reportToShow.errors.length - 10} more…</div>
-                    )}
-                  </div>
+              {/* Changed products flat table */}
+              {(reportToShow.changedProducts?.length ?? 0) > 0 ? (
+                <div className="overflow-y-auto flex-1 border rounded-md">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/50">
+                        <TableHead className="w-[180px]">Product</TableHead>
+                        <TableHead className="w-[100px]">SKU</TableHead>
+                        <TableHead>Proposed Changes</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {reportToShow.changedProducts.map((pc) => (
+                        <TableRow key={pc.productId}>
+                          <TableCell className="font-medium text-sm align-top py-3">{pc.productName}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground align-top py-3">
+                            {pc.barcode || pc.srNo || "—"}
+                          </TableCell>
+                          <TableCell className="align-top py-3">
+                            <div className="flex flex-col gap-1">
+                              {pc.changes.map((ch, i) => (
+                                <div key={i} className="flex items-start gap-1 text-xs">
+                                  <span className="font-medium text-muted-foreground min-w-[110px]">{ch.label}:</span>
+                                  <span
+                                    className="line-through text-red-500 max-w-[120px] truncate"
+                                    title={String(ch.oldValue ?? "—")}
+                                  >
+                                    {ch.oldValue != null && ch.oldValue !== "" ? String(ch.oldValue) : "—"}
+                                  </span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span
+                                    className="text-green-700 font-medium max-w-[120px] truncate"
+                                    title={String(ch.newValue)}
+                                  >
+                                    {String(ch.newValue)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+                  <CheckCircle2 className="h-10 w-10 mb-2 text-green-400" />
+                  <p className="text-sm">No field changes detected.</p>
+                  <p className="text-xs mt-1">Products already match Notion data.</p>
+                </div>
+              )}
+
+              {/* Errors section */}
+              {(reportToShow.errors?.length ?? 0) > 0 && (
+                <div className="bg-red-50 border border-red-200 rounded-md p-3">
+                  <p className="text-xs font-semibold text-red-700 mb-1">
+                    Errors ({reportToShow.errors.length})
+                  </p>
+                  {reportToShow.errors.slice(0, 5).map((err, i) => (
+                    <p key={i} className="text-xs text-red-600">{err}</p>
+                  ))}
+                  {reportToShow.errors.length > 5 && (
+                    <p className="text-xs text-red-400 mt-1">...and {reportToShow.errors.length - 5} more</p>
+                  )}
                 </div>
               )}
             </div>
           )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowReviewDialog(false)}>
+              Dismiss
+            </Button>
+            {isPending && (
+              <Button
+                onClick={() => applyMutation.mutate()}
+                disabled={isBusy || (!(reportToShow?.updated) && !(reportToShow?.created))}
+                className="flex items-center gap-1 bg-amber-600 hover:bg-amber-700 text-white"
+              >
+                {applyMutation.isPending ? (
+                  <><Loader2 className="h-4 w-4 animate-spin" /> Applying...</>
+                ) : (
+                  <><Zap className="h-4 w-4" />
+                    Apply ({reportToShow?.created ?? 0} new + {reportToShow?.updated ?? 0} changed)
+                  </>
+                )}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* CSV import preview dialog */}
+      <Dialog open={showCsvDialog} onOpenChange={(open) => { setShowCsvDialog(open); if (!open) setCsvPreview(null); }}>
+        <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileUp className="h-5 w-5 text-emerald-600" />
+              Import CSV
+            </DialogTitle>
+            <DialogDescription>
+              {csvPreview
+                ? `"${csvPreview.fileName}" — ${csvPreview.rows.length} rows, ${csvPreview.headers.length} columns detected`
+                : "Review before importing"}
+            </DialogDescription>
+          </DialogHeader>
+
+          {csvPreview && (
+            <div className="flex flex-col gap-4 overflow-hidden flex-1 min-h-0">
+              {/* Stats */}
+              <div className="flex flex-wrap gap-3">
+                <div className="flex flex-col items-center px-4 py-2 bg-emerald-50 border border-emerald-200 rounded-lg">
+                  <span className="text-2xl font-bold text-emerald-700">{csvPreview.rows.length}</span>
+                  <span className="text-xs text-emerald-600">Rows</span>
+                </div>
+                <div className="flex flex-col items-center px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+                  <span className="text-2xl font-bold text-blue-700">{csvPreview.headers.length}</span>
+                  <span className="text-xs text-blue-600">Columns</span>
+                </div>
+              </div>
+
+              {/* Column headers detected */}
+              <div className="rounded-md border bg-gray-50 px-3 py-2">
+                <p className="text-xs font-semibold text-gray-500 mb-1.5">Detected columns</p>
+                <div className="flex flex-wrap gap-1">
+                  {csvPreview.headers.map((h) => (
+                    <span key={h} className="rounded bg-white border px-2 py-0.5 text-xs text-gray-700">{h}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Preview first 5 rows */}
+              <div className="overflow-auto flex-1 border rounded-md">
+                <table className="w-max min-w-full text-xs border-collapse">
+                  <thead>
+                    <tr>
+                      {csvPreview.headers.slice(0, 6).map((h) => (
+                        <th key={h} className="sticky top-0 bg-gray-100 px-3 py-2 text-left font-semibold border-r border-b whitespace-nowrap">{h}</th>
+                      ))}
+                      {csvPreview.headers.length > 6 && (
+                        <th className="sticky top-0 bg-gray-100 px-3 py-2 text-left font-semibold border-b text-gray-400">+{csvPreview.headers.length - 6} more</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {csvPreview.rows.slice(0, 5).map((row, i) => (
+                      <tr key={i} className="border-b hover:bg-gray-50">
+                        {csvPreview.headers.slice(0, 6).map((h) => (
+                          <td key={h} className="px-3 py-1.5 border-r whitespace-nowrap max-w-[160px] truncate" title={row[h]}>{row[h] || "—"}</td>
+                        ))}
+                        {csvPreview.headers.length > 6 && <td className="px-3 py-1.5 text-gray-400">…</td>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {csvPreview.rows.length > 5 && (
+                  <p className="px-3 py-2 text-xs text-muted-foreground border-t">
+                    …and {csvPreview.rows.length - 5} more rows
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setShowCsvDialog(false); setCsvPreview(null); }}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => csvPreview && csvImportMutation.mutate(csvPreview.rows)}
+              disabled={csvImportMutation.isPending || !csvPreview}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+            >
+              {csvImportMutation.isPending
+                ? <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>
+                : <><FileUp className="mr-1.5 h-4 w-4" />Import {csvPreview?.rows.length ?? 0} rows</>}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
