@@ -30,6 +30,7 @@ type ExtraItem = {
   itemName: string;
   sku: string | null;
   quantity: number;
+  pallets: number | null;
   reason: "not_in_order" | "unknown_product";
   scannedByName: string | null;
   scannedAt: string | null;
@@ -526,7 +527,7 @@ export default function StockReport() {
                 className="h-8 text-xs"
                 onClick={() => {
                   const csv = [
-                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Reason", "Scanned By", "Time"].join(","),
+                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Pallets", "Reason", "Scanned By", "Time"].join(","),
                     ...extras.map((e, idx) => [
                       idx + 1,
                       `"${e.orderName}"`,
@@ -534,6 +535,7 @@ export default function StockReport() {
                       `"${e.itemName}"`,
                       e.code || e.sku || "",
                       e.quantity ?? 0,
+                      e.pallets != null && Number(e.pallets) > 0 ? parseFloat(String(e.pallets)).toFixed(2) : "",
                       e.reason === "not_in_order" ? "Not in order" : "Unknown product",
                       `"${e.scannedByName || ""}"`,
                       e.scannedAt ? format(new Date(e.scannedAt.replace(/Z$/, "")), "yyyy-MM-dd h:mm a") : "",
@@ -554,7 +556,7 @@ export default function StockReport() {
                 disabled={extras.length === 0}
                 onClick={() => {
                   const rows = [
-                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Reason", "Scanned By", "Time"],
+                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Pallets", "Reason", "Scanned By", "Time"],
                     ...extras.map((e, idx) => [
                       idx + 1,
                       e.orderName,
@@ -562,6 +564,7 @@ export default function StockReport() {
                       e.itemName,
                       e.code || e.sku || "",
                       e.quantity ?? 0,
+                      e.pallets != null && Number(e.pallets) > 0 ? parseFloat(String(e.pallets)).toFixed(2) : "",
                       e.reason === "not_in_order" ? "Not in order" : "Unknown product",
                       e.scannedByName || "",
                       e.scannedAt ? format(new Date(e.scannedAt.replace(/Z$/, "")), "yyyy-MM-dd h:mm a") : "",
@@ -582,7 +585,7 @@ export default function StockReport() {
                 disabled={extras.length === 0}
                 onClick={() => {
                   const rows = [
-                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Reason", "Scanned By", "Time"],
+                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Pallets", "Reason", "Scanned By", "Time"],
                     ...extras.map((e, idx) => [
                       idx + 1,
                       e.orderName,
@@ -590,6 +593,7 @@ export default function StockReport() {
                       e.itemName,
                       e.code || e.sku || "",
                       e.quantity ?? 0,
+                      e.pallets != null && Number(e.pallets) > 0 ? parseFloat(String(e.pallets)).toFixed(2) : "",
                       e.reason === "not_in_order" ? "Not in order" : "Unknown product",
                       e.scannedByName || "",
                       e.scannedAt ? format(new Date(e.scannedAt.replace(/Z$/, "")), "yyyy-MM-dd h:mm a") : "",
@@ -608,7 +612,7 @@ export default function StockReport() {
           </div>
 
           <div className="rounded-md border bg-white overflow-x-auto">
-            <Table className="min-w-[860px] text-xs sm:text-sm">
+            <Table className="min-w-[960px] text-xs sm:text-sm">
               <TableHeader>
                 <TableRow className="bg-amber-600 hover:bg-amber-600">
                     <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 z-20 bg-amber-600 w-[52px] text-[11px] sm:text-xs">#</TableHead>
@@ -616,6 +620,7 @@ export default function StockReport() {
                     <TableHead className="text-white font-semibold uppercase tracking-wide">Order</TableHead>
                     <TableHead className="text-white font-semibold uppercase tracking-wide">Barcode / SKU</TableHead>
                     <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Qty</TableHead>
+                    <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Pallets</TableHead>
                     <TableHead className="text-white font-semibold uppercase tracking-wide">Reason</TableHead>
                     <TableHead className="text-white font-semibold uppercase tracking-wide">
                     <span className="flex items-center gap-1"><UserCircle className="h-3.5 w-3.5" />SCANNED BY</span>
@@ -626,7 +631,7 @@ export default function StockReport() {
               <TableBody>
                 {extras.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="py-12 text-center text-sm text-gray-400">
+                    <TableCell colSpan={9} className="py-12 text-center text-sm text-gray-400">
                       No extra items recorded{selectedDate ? " for this date" : ""}.
                     </TableCell>
                   </TableRow>
@@ -650,6 +655,11 @@ export default function StockReport() {
                         </TableCell>
                         <TableCell className="text-right font-bold text-amber-700 py-2">
                           {(extra.quantity ?? 0).toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right font-semibold text-[#001d6e] py-2">
+                          {extra.pallets != null && Number(extra.pallets) > 0
+                            ? parseFloat(String(extra.pallets)).toFixed(2)
+                            : <span className="text-gray-300 font-normal">—</span>}
                         </TableCell>
                         <TableCell>
                           <Badge
