@@ -3,6 +3,7 @@ import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { getCurrentUserPermissions } from "../lib/permissions";
 import { useAuth } from "../hooks/use-auth";
+import { apiRequest } from "../lib/queryClient";
 import { formatUsername } from "@/lib/format-username";
 import {
   Home,
@@ -20,7 +21,6 @@ import {
   Receipt,
   IndianRupee,
   Factory,
-  ClipboardList,
   Printer,
   PrinterCheck,
   FileBarChart,
@@ -93,6 +93,23 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
     }
   };
   const userPermissions = getCurrentUserPermissions();
+
+  // Notification badge: poll for active scan session for non-admin users
+  const ADMIN_ROLES = ['admin', 'super-admin', 'billing'];
+  const isSuperAdmin = ['admin', 'super-admin'].includes(
+    ((currentUser as any)?.role ?? '').toLowerCase().trim()
+  );
+  const isAdminRole = ADMIN_ROLES.includes(
+    ((currentUser as any)?.role ?? '').toLowerCase().trim()
+  );
+  const { data: scanNotif } = useQuery<{ active: boolean; session: any }>({
+    queryKey: ['/api/order-scan/notification'],
+    queryFn: () => apiRequest('GET', '/api/order-scan/notification').then((r) => r.json()),
+    enabled: !!currentUser && !isAdminRole,
+    refetchInterval: 30000,
+  });
+  const hasScanBadge = !isAdminRole && scanNotif?.active === true;
+
   // Group menu items by categories as shown in the image
   const menuCategories = [
     {
@@ -197,9 +214,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/scan",
         },
         {
-          label: "Order Scan",
+          label: "Order Management",
           icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/order-scan",
+          badge: hasScanBadge ? 1 : 0,
+          adminOnly: true,
         },
         {
           label: "Pallet Stock Report",
@@ -250,11 +269,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/plant-settings",
-        },
-        {
-          label: "Order Management",
-          icon: <ClipboardList className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/order-management",
         },
         {
           label: "Order Import",
@@ -314,6 +328,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             <ul className="space-y-1">
               {category.items
                 .filter((item) => {
+                  // @ts-ignore
+                  if (item.adminOnly && !isSuperAdmin) return false;
                   // Check if item requires permission
                   if (item.permission) {
                     // @ts-ignore - We know the permission exists
@@ -345,7 +361,13 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
                         }`}
                       >
                         {item.icon}
-                        {item.label}
+                        <span className="flex-1">{item.label}</span>
+                        {/* @ts-ignore */}
+                        {item.badge > 0 && location !== item.path && (
+                          <span className="mr-2 h-5 w-5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center animate-pulse">
+                            1
+                          </span>
+                        )}
                       </Link>
                     </li>
                   );

@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   History,
   Keyboard,
+  Loader2,
   PackageCheck,
   Layers,
   Pencil,
@@ -17,8 +18,11 @@ import {
   Plus,
   RotateCcw,
   ScanLine,
+  Search,
   Square,
   User,
+  X,
+  Zap,
 } from "lucide-react";
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
@@ -48,6 +52,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -61,6 +72,8 @@ type Product = {
   inStock?: number | null;
   itemsPerPallet?: number | null;
   pallets?: number | null;
+  indPlt?: number | null;   // Indore plant pallet qty
+  valPlt?: number | null;   // Valsad plant pallet qty
 };
 
 type OrderItem = {
@@ -144,6 +157,14 @@ type SessionSummary = {
 };
 
 
+
+type OsScanItem = {
+  id: number; sessionId: number;
+  barcode: string | null; itemName: string | null; sapCode: string | null;
+  expectedQty: number; itemsPerPallet: number;
+  scannedPallets: number; scannedLooseQty: number; totalScannedQty: number;
+  status: string; lastScannedAt: string | null;
+};
 
 type ImportItemsResponse = {
   filename: string;
@@ -286,6 +307,220 @@ export default function ScanOrderPage() {
     },
   });
   const sessions: SessionSummary[] = sessionsRaw;
+
+  // Poll for admin-loaded order-import session (from /order-scan flow)
+  const { data: orderScanNotif } = useQuery<{ active: boolean; session: any }>({
+    queryKey: ["/api/order-scan/notification"],
+    queryFn: () => apiRequest("GET", "/api/order-scan/notification").then((r) => r.json()),
+    refetchInterval: 20000,
+  });
+  const activeOrderScanSession = orderScanNotif?.active ? orderScanNotif.session : null;
+
+  // ── Embedded order-scan state (admin-loaded CSV) ───────────────────────────
+  const osVideoRef = useRef<HTMLVideoElement>(null);
+  const osScannerRef = useRef<BarcodeScanner | null>(null);
+  const [osScanMode, setOsScanMode] = useState<"camera" | "manual">("manual");
+  const [osCameraReady, setOsCameraReady] = useState(false);
+  const [osCameraError, setOsCameraError] = useState<string | null>(null);
+  const [osPending, setOsPending] = useState<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
+  const osPendingRef = useRef<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
+  const [osPallets, setOsPallets] = useState(1);
+  const [osLooseQty, setOsLooseQty] = useState(0);
+  const [osQty, setOsQty] = useState(1); // total boxes — user-editable; pallets auto-calculated
+  const [osSelectedStv, setOsSelectedStv] = useState("");
+  const [osSearch, setOsSearch] = useState("");
+  const [osManualCode, setOsManualCode] = useState("");
+  const [osRecentScans, setOsRecentScans] = useState<{ barcode: string; name: string; total: number; isExtra: boolean }[]>([]);
+  useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
+
+  const osItemsQuery = useQuery<OsScanItem[]>({
+    queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"],
+    queryFn: () =>
+      apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/items`).then((r) => r.json()),
+    enabled: !!activeOrderScanSession,
+    refetchInterval: 30000, // SSE handles real-time; this is a fallback reconciliation only
+  });
+  const osItemsRef = useRef<OsScanItem[]>([]);
+  useEffect(() => { osItemsRef.current = osItemsQuery.data ?? []; }, [osItemsQuery.data]);
+
+  const osStvsQuery = useQuery<string[]>({
+    queryKey: ["/api/order-scan/stvs", activeOrderScanSession?.plant],
+    queryFn: () =>
+      apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(activeOrderScanSession!.plant)}`).then((r) => r.json()),
+    enabled: !!activeOrderScanSession?.plant,
+  });
+
+  const osScanMutation = useMutation({
+    mutationFn: (payload: { barcode: string; pallets: number; looseQty: number; isExtra: boolean; stv: string | null }) =>
+      apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/scan`, payload).then((r) => r.json()),
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] });
+      // Recent scans are updated via SSE broadcast (which fires for all devices including this one).
+      // Do NOT also update here — that would cause duplicates every time.
+      setOsPending(null);
+      osPendingRef.current = null;
+      setOsQty(1);
+      setOsSelectedStv("");
+      setOsManualCode("");
+    },
+    onError: (err: any) => toast({ title: "Scan failed", description: err?.message ?? "Unknown error", variant: "destructive" }),
+  });
+
+  const stopOsCamera = () => {
+    if (osScannerRef.current) { osScannerRef.current.stop(); osScannerRef.current = null; }
+    setOsCameraReady(false);
+  };
+
+  const handleOsBarcode = (barcode: string) => {
+    if (osPendingRef.current) return;
+    const match = osItemsRef.current.find((i) => i.barcode === barcode) ?? null;
+
+    // Look up inventory product for name / SAP code / plant-specific pallet size
+    const invProduct = productLookup.get(normalize(barcode)) ?? null;
+
+    // valPlt / indPlt = items per pallet for that plant (the "size", NOT number of pallets)
+    // Use it as the multiplier; pallets input always starts at 1
+    const plantLower = (activeOrderScanSession?.plant ?? "").toLowerCase();
+    let plantPalletSize = match?.itemsPerPallet ?? 1;
+    if (invProduct) {
+      if (plantLower.includes("valsad") || plantLower.includes("val")) {
+        plantPalletSize = invProduct.valPlt ?? invProduct.itemsPerPallet ?? plantPalletSize;
+      } else if (plantLower.includes("indore") || plantLower.includes("ind")) {
+        plantPalletSize = invProduct.indPlt ?? invProduct.itemsPerPallet ?? plantPalletSize;
+      } else {
+        plantPalletSize = invProduct.itemsPerPallet ?? plantPalletSize;
+      }
+    }
+
+    setOsQty(Math.max(1, plantPalletSize || 1)); // pre-fill with 1 pallet worth of boxes
+    setOsPallets(1);
+    setOsLooseQty(0);
+    setOsSelectedStv("");
+    setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize: Math.max(1, plantPalletSize || 1) });
+  };
+
+  const handleOsConfirmScan = () => {
+    if (!osPending) return;
+    const stvs = osStvsQuery.data ?? [];
+    if (stvs.length > 0 && !osSelectedStv) {
+      toast({ title: "Select an STV first", variant: "destructive" });
+      return;
+    }
+    const plt = osPending.plantPalletSize ?? osPending.matchedItem?.itemsPerPallet ?? 1;
+    const qty = Math.max(1, osQty);
+    const pallets = plt > 1 ? Math.floor(qty / plt) : qty;
+    const looseQty = plt > 1 ? qty % plt : 0;
+    const itemAlreadyComplete = osPending.matchedItem
+      ? (osPending.matchedItem.totalScannedQty ?? 0) >= (osPending.matchedItem.expectedQty ?? 1)
+      : false;
+    osScanMutation.mutate({
+      barcode: osPending.barcode,
+      pallets,
+      looseQty,
+      isExtra: !osPending.matchedItem || itemAlreadyComplete,
+      stv: osSelectedStv || null,
+    });
+  };
+
+  useEffect(() => {
+    if (!activeOrderScanSession || osScanMode !== "camera") return;
+    let cancelled = false;
+    (async () => {
+      if (!osVideoRef.current || cancelled) return;
+      setOsCameraError(null);
+      setOsCameraReady(false);
+      const scanner = new BarcodeScanner({
+        onDetected: (result: Result) => {
+          const code = result.getText();
+          if (code && !osPendingRef.current) handleOsBarcode(code);
+        },
+        onError: (err: Error) => {
+          if (!cancelled) { setOsCameraError(err.message); setOsScanMode("manual"); }
+        },
+      });
+      osScannerRef.current = scanner;
+      try {
+        await scanner.initialize();
+        if (!cancelled) await scanner.start(osVideoRef.current!);
+        if (!cancelled) setOsCameraReady(true);
+      } catch (err: any) {
+        if (!cancelled) { setOsCameraError(err?.message ?? "Camera failed"); setOsScanMode("manual"); }
+      }
+    })();
+    return () => { cancelled = true; stopOsCamera(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrderScanSession?.id, osScanMode]);
+
+  // Order completion dialog state
+  const [showOsComplete, setShowOsComplete] = useState(false);
+  const osCompletionPromptedRef = useRef(false);
+
+  // Reset prompt flag when session changes so a new session can trigger it again
+  useEffect(() => {
+    osCompletionPromptedRef.current = false;
+    setShowOsComplete(false);
+  }, [activeOrderScanSession?.id]);
+
+  // Auto-show completion dialog once all CSV items are fully scanned
+  useEffect(() => {
+    if (!activeOrderScanSession || osCompletionPromptedRef.current) return;
+    const items = osItemsQuery.data ?? [];
+    if (items.length === 0) return;
+    if (items.every((i) => i.status === "complete")) {
+      osCompletionPromptedRef.current = true;
+      setShowOsComplete(true);
+    }
+  }, [osItemsQuery.data, activeOrderScanSession]);
+
+  const osCompleteMutation = useMutation({
+    mutationFn: () =>
+      apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/complete`).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+      setShowOsComplete(false);
+      toast({ title: "Order completed!", description: "Session closed. Great work!" });
+    },
+    onError: (err: any) => toast({ title: "Failed to complete order", description: err?.message, variant: "destructive" }),
+  });
+
+  // SSE subscription — receives push updates from every scan on this session
+  useEffect(() => {
+    if (!activeOrderScanSession) return;
+    const es = new EventSource(`/api/order-scan/sessions/${activeOrderScanSession.id}/stream`);
+
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type !== 'scan') return;
+
+        // Patch the single changed item in the cache — no full refetch needed
+        if (data.item) {
+          queryClient.setQueryData(
+            ["/api/order-scan/sessions", activeOrderScanSession.id, "items"],
+            (old: OsScanItem[] = []) =>
+              old.map((i) => i.id === data.item.id ? { ...i, ...data.item } : i),
+          );
+        }
+
+        // Append to recent scans list
+        if (data.event) {
+          setOsRecentScans((prev) => [
+            {
+              barcode: data.event.barcode,
+              name:    data.event.itemName ?? data.event.barcode,
+              total:   data.event.totalQty,
+              isExtra: data.event.isExtra,
+            },
+            ...prev.slice(0, 4),
+          ]);
+        }
+      } catch { /* ignore malformed frames */ }
+    };
+
+    // onerror: EventSource auto-reconnects; nothing extra needed
+    return () => es.close();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrderScanSession?.id]);
 
   const importsQuery = useQuery<any>({
     queryKey: ["/api/orders/imports", csvPage, CSV_PAGE_SIZE],
@@ -1351,6 +1586,447 @@ export default function ScanOrderPage() {
   const completedSessions = sessions.filter((s) => s.status === "completed");
   const totalScanned = sessions.reduce((sum, s) => sum + (s.totalScanned ?? 0), 0);
   const totalExtras = sessions.reduce((sum, s) => sum + (s.totalExtras ?? 0), 0);
+
+  // ── Embedded order-scan view (replaces dashboard when admin CSV is active) ─
+  if (activeOrderScanSession) {
+    const osItems = osItemsQuery.data ?? [];
+    const osFiltered = osSearch
+      ? osItems.filter((i) =>
+          [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(osSearch.toLowerCase()))
+        )
+      : osItems;
+    const osDoneCount = osItems.filter((i) => i.status === "complete").length;
+    const osTotalCount = osItems.length;
+    const osPct = osTotalCount ? Math.round((osDoneCount / osTotalCount) * 100) : 0;
+    const stvs = osStvsQuery.data ?? [];
+    // Use plant-specific pallet size from inventory (valPlt/indPlt) as the multiplier
+    const plt = osPending?.plantPalletSize ?? osPending?.matchedItem?.itemsPerPallet ?? 1;
+    const NO_STV = "__none__";
+    // True when the CSV item exists but is already fully scanned — extra boxes coming in
+    const osItemIsComplete = osPending?.matchedItem
+      ? (osPending.matchedItem.totalScannedQty ?? 0) >= (osPending.matchedItem.expectedQty ?? 1)
+      : false;
+
+    return (
+      <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
+        <div className="mx-auto max-w-7xl space-y-4">
+
+          {/* Header row */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400">
+                <Zap className="h-4 w-4 text-white" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-gray-900 leading-tight truncate max-w-xs sm:max-w-sm">{activeOrderScanSession.csvFileName}</p>
+                <p className="text-xs text-gray-500 truncate">
+                  {activeOrderScanSession.plant}
+                  {activeOrderScanSession.importedByName && ` · loaded by ${activeOrderScanSession.importedByName}`}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <div className="hidden sm:flex items-center gap-2">
+                <Progress value={osPct} className="w-28 h-2" />
+                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
+              </div>
+              <Button
+                size="sm" variant="outline"
+                onClick={() => { setOsSearch(""); stopOsCamera(); setOsScanMode("manual"); setView("map"); }}
+              >
+                New Scan Order
+              </Button>
+            </div>
+          </div>
+
+          {/* Mobile progress */}
+          <div className="sm:hidden flex items-center gap-2">
+            <Progress value={osPct} className="flex-1 h-1.5" />
+            <span className="text-xs text-gray-500 shrink-0">{osPct}% · {osDoneCount}/{osTotalCount}</span>
+          </div>
+
+          {/* Two-column layout */}
+          <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
+
+            {/* Items table */}
+            <div className="order-2 lg:order-1">
+              <Card className="rounded-xl shadow-sm">
+                <CardHeader className="pb-2 pt-4 px-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <CardTitle className="text-base">CSV Items</CardTitle>
+                    <span className="text-xs text-gray-400">{osDoneCount} / {osTotalCount} done</span>
+                  </div>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                    <Input
+                      value={osSearch}
+                      onChange={(e) => setOsSearch(e.target.value)}
+                      placeholder="Search by name or barcode…"
+                      className="pl-8 h-8 text-sm"
+                    />
+                    {osSearch && (
+                      <button className="absolute right-2 top-2" onClick={() => setOsSearch("")}>
+                        <X className="h-4 w-4 text-gray-400" />
+                      </button>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent className="p-0">
+                  {osItemsQuery.isLoading ? (
+                    <div className="flex justify-center py-10">
+                      <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b bg-slate-50">
+                            <th className="w-8 px-3 py-2" />
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Item</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Barcode</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600">Exp</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600">Done</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-amber-600">Extra</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {osFiltered.map((item) => (
+                            <tr
+                              key={item.id}
+                              className={`border-b transition-colors ${
+                                item.status === "complete" ? "bg-green-50/40" :
+                                item.status === "partial" ? "bg-amber-50/30" : ""
+                              }`}
+                            >
+                              <td className="px-3 py-2.5">
+                                {item.status === "complete"
+                                  ? <CheckCircle2 className="h-4 w-4 text-green-500" />
+                                  : item.status === "partial"
+                                  ? <ScanLine className="h-4 w-4 text-amber-500" />
+                                  : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                              </td>
+                              <td className="max-w-[200px] truncate px-3 py-2.5 text-xs font-medium">{item.itemName ?? "—"}</td>
+                              <td className="px-3 py-2.5 font-mono text-xs text-gray-400">{item.barcode ?? "—"}</td>
+                              <td className="px-3 py-2.5 text-xs text-right">{item.expectedQty}</td>
+                              <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                {Math.min(item.totalScannedQty ?? 0, item.expectedQty ?? 0)}
+                              </td>
+                              <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                {(item.totalScannedQty ?? 0) > (item.expectedQty ?? 0)
+                                  ? <span className="text-amber-600">+{(item.totalScannedQty ?? 0) - (item.expectedQty ?? 0)}</span>
+                                  : <span className="text-gray-300">—</span>}
+                              </td>
+                              <td className="px-3 py-2.5">
+                                {item.status === "complete"
+                                  ? <Badge className="bg-green-100 text-green-800 text-[11px] border-0 px-1.5 hover:bg-green-100">Done</Badge>
+                                  : item.status === "partial"
+                                  ? <Badge className="bg-amber-100 text-amber-800 text-[11px] border-0 px-1.5 hover:bg-amber-100">Partial</Badge>
+                                  : <Badge variant="outline" className="text-gray-400 text-[11px] px-1.5">Pending</Badge>}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {osFiltered.length === 0 && !osItemsQuery.isLoading && (
+                        <p className="py-10 text-center text-sm text-gray-400">
+                          {osItems.length === 0 ? "Loading items…" : "No items match the search."}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Scanner panel */}
+            <div className="order-1 lg:order-2 space-y-3">
+              {/* Mode toggle */}
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant={osScanMode === "camera" ? "default" : "outline"}
+                  className={`flex-1 ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                  onClick={() => setOsScanMode("camera")}
+                >
+                  <Camera className="mr-2 h-4 w-4" /> Camera
+                </Button>
+                <Button
+                  size="sm"
+                  variant={osScanMode === "manual" ? "default" : "outline"}
+                  className={`flex-1 ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                  onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}
+                >
+                  <Keyboard className="mr-2 h-4 w-4" /> Manual
+                </Button>
+              </div>
+
+              {/* Camera feed */}
+              {osScanMode === "camera" && (
+                <Card className="rounded-xl overflow-hidden shadow-sm">
+                  <div className="relative bg-black aspect-video">
+                    <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline />
+                    {!osCameraReady && !osCameraError && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
+                        <Loader2 className="h-8 w-8 animate-spin" />
+                        <p className="text-sm">Starting camera…</p>
+                      </div>
+                    )}
+                    {osCameraReady && (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                        <div className="h-16 w-48 rounded border-2 border-white/70" />
+                      </div>
+                    )}
+                  </div>
+                  {osCameraError && (
+                    <div className="flex items-center gap-2 bg-red-50 p-3 text-xs text-red-700">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      {osCameraError}
+                    </div>
+                  )}
+                </Card>
+              )}
+
+              {/* Manual input */}
+              {osScanMode === "manual" && (
+                <Card className="rounded-xl shadow-sm">
+                  <CardContent className="p-4 space-y-2">
+                    <Label className="text-sm font-medium">Enter barcode</Label>
+                    <div className="flex gap-2">
+                      <Input
+                        value={osManualCode}
+                        onChange={(e) => setOsManualCode(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && osManualCode.trim()) {
+                            handleOsBarcode(osManualCode.trim());
+                            setOsManualCode("");
+                          }
+                        }}
+                        placeholder="Scan or type barcode…"
+                        disabled={!!osPending}
+                        className="font-mono text-sm"
+                        autoFocus
+                      />
+                      <Button
+                        size="sm"
+                        disabled={!osManualCode.trim() || !!osPending}
+                        onClick={() => {
+                          if (osManualCode.trim()) {
+                            handleOsBarcode(osManualCode.trim());
+                            setOsManualCode("");
+                          }
+                        }}
+                        className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0"
+                      >
+                        <ScanLine className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Recent scans */}
+              {osRecentScans.length > 0 && (
+                <Card className="rounded-xl shadow-sm">
+                  <CardHeader className="pb-2 pt-3 px-4">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wide text-gray-500">Recent Scans</CardTitle>
+                  </CardHeader>
+                  <CardContent className="px-4 pb-3 space-y-1.5">
+                    {osRecentScans.map((s, i) => (
+                      <div key={i} className={`flex items-center justify-between rounded px-2 py-1.5 text-xs ${s.isExtra ? "bg-orange-50" : "bg-green-50"}`}>
+                        <p className="truncate font-medium max-w-[170px]">{s.name}</p>
+                        <span className={`font-mono shrink-0 ml-2 ${s.isExtra ? "text-orange-700" : "text-green-700"}`}>
+                          {s.isExtra ? "EXTRA" : `qty: ${s.total}`}
+                        </span>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Scan confirmation dialog */}
+        <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; setOsSelectedStv(""); } }}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle className={`flex items-center gap-2 ${
+                !osPending?.matchedItem ? "text-red-700"
+                : osItemIsComplete ? "text-amber-700"
+                : "text-[#001d6e]"
+              }`}>
+                {!osPending?.matchedItem
+                  ? <><AlertTriangle className="h-5 w-5" /> Not in order</>
+                  : osItemIsComplete
+                    ? <><AlertTriangle className="h-5 w-5" /> Extra item</>
+                    : <><CheckCircle2 className="h-5 w-5" /> Match found</>}
+              </DialogTitle>
+              <DialogDescription className="text-left pt-1 space-y-0.5">
+                <p className="font-semibold text-gray-900 text-sm">{osPending?.matchedItem?.itemName ?? "Unknown item"}</p>
+                <p className="font-mono text-xs text-gray-400">{osPending?.barcode}</p>
+                {!osPending?.matchedItem && (
+                  <p className="text-xs text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
+                )}
+                {osItemIsComplete && (
+                  <p className="text-xs text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
+                )}
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4 py-1">
+              {/* Inventory + CSV info */}
+              {(osPending?.inventoryProduct || osPending?.matchedItem) && (
+                <div className="rounded-md bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-1">
+                  {osPending.inventoryProduct && (
+                    <>
+                      <p className="font-semibold text-gray-800 truncate">{osPending.inventoryProduct.name}</p>
+                      {osPending.inventoryProduct.sapCode && (
+                        <p>SAP: <span className="font-mono font-bold text-gray-700">{osPending.inventoryProduct.sapCode}</span></p>
+                      )}
+                    </>
+                  )}
+                  {osPending.matchedItem && (
+                    <div className={`space-y-0.5 ${osPending.inventoryProduct ? "border-t border-gray-200 pt-1" : ""}`}>
+                      <p>
+                        Items per pallet:{" "}
+                        <strong>{osPending.plantPalletSize || "—"}</strong>
+                        {osPending.plantPalletSize !== (osPending.matchedItem.itemsPerPallet ?? 0) && osPending.matchedItem.itemsPerPallet ? (
+                          <span className="text-blue-500 ml-1">
+                            ({(() => {
+                              const p = (activeOrderScanSession?.plant ?? "").toLowerCase();
+                              if (p.includes("valsad") || p.includes("val")) return "VAL PLT";
+                              if (p.includes("indore") || p.includes("ind")) return "IND PLT";
+                              return "inventory";
+                            })()})
+                          </span>
+                        ) : null}
+                      </p>
+                      <p>Expected: <strong>{osPending.matchedItem.expectedQty}</strong> · Already scanned: <strong>{osPending.matchedItem.totalScannedQty}</strong></p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Qty input — user edits boxes; pallets auto-calculated */}
+              <div className="space-y-1">
+                <Label className="text-sm">Qty (boxes)</Label>
+                <Input
+                  type="number" min={0}
+                  value={osQty === 0 ? "" : osQty}
+                  onChange={(e) => setOsQty(parseInt(e.target.value) || 0)}
+                  onBlur={(e) => { if (!e.target.value || parseInt(e.target.value) < 1) setOsQty(1); }}
+                  className="text-center text-3xl font-bold h-14"
+                  autoFocus
+                />
+              </div>
+
+              {/* Auto-calculated pallets (read-only) */}
+              {plt > 1 && (
+                <div className="rounded-md bg-[#001d6e]/5 border border-[#001d6e]/20 px-4 py-3 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs text-gray-500">Pallets</p>
+                    <p className="text-2xl font-bold text-[#001d6e]">
+                      {osQty > 0 ? (osQty / plt).toFixed(2) : "—"}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-gray-500">Pallet size</p>
+                    <p className="text-lg font-semibold text-gray-700">{plt} <span className="text-xs font-normal text-gray-400">boxes</span></p>
+                  </div>
+                </div>
+              )}
+
+              {stvs.length > 0 && (
+                <div className="space-y-1">
+                  <Label className="text-sm">STV <span className="text-red-500">*</span></Label>
+                  <Select value={osSelectedStv || NO_STV} onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}>
+                    <SelectTrigger className={`w-full ${!osSelectedStv ? "border-dashed text-gray-400" : ""}`}>
+                      <SelectValue placeholder="Select STV…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                      {stvs.map((s) => (
+                        <SelectItem key={s} value={s}>{s}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+
+            <DialogFooter className="gap-2">
+              <Button variant="outline" onClick={() => { setOsPending(null); osPendingRef.current = null; setOsSelectedStv(""); }}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleOsConfirmScan}
+                disabled={osScanMutation.isPending || (stvs.length > 0 && !osSelectedStv)}
+                className={(!osPending?.matchedItem || osItemIsComplete)
+                  ? "bg-amber-600 hover:bg-amber-700 text-white"
+                  : "bg-[#001d6e] hover:bg-[#00154b] text-white"}
+              >
+                {osScanMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {(!osPending?.matchedItem || osItemIsComplete) ? "Log as Extra" : "Confirm Scan"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Order completion dialog — auto-shown when all CSV items reach "complete" */}
+        <Dialog open={showOsComplete} onOpenChange={(o) => { if (!o) setShowOsComplete(false); }}>
+          <DialogContent className="max-w-sm text-center">
+            <DialogHeader>
+              <div className="flex justify-center mb-2">
+                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-green-100">
+                  <CheckCircle2 className="h-9 w-9 text-green-600" />
+                </div>
+              </div>
+              <DialogTitle className="text-xl text-green-700 text-center">All Items Scanned!</DialogTitle>
+              <DialogDescription className="text-center space-y-1 pt-1">
+                <p className="text-sm text-gray-600">
+                  Every item in <span className="font-semibold text-gray-900">{activeOrderScanSession?.csvFileName}</span> has been fully scanned.
+                </p>
+                <p className="text-xs text-gray-400">{activeOrderScanSession?.plant}</p>
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="grid grid-cols-2 gap-3 py-2">
+              <div className="rounded-lg bg-green-50 px-3 py-3 text-center">
+                <p className="text-2xl font-bold text-green-700">{osItemsQuery.data?.length ?? 0}</p>
+                <p className="text-xs text-green-600 mt-0.5">Items done</p>
+              </div>
+              <div className="rounded-lg bg-blue-50 px-3 py-3 text-center">
+                <p className="text-2xl font-bold text-[#001d6e]">
+                  {osItemsQuery.data?.reduce((s, i) => s + i.totalScannedQty, 0) ?? 0}
+                </p>
+                <p className="text-xs text-blue-600 mt-0.5">Total boxes</p>
+              </div>
+            </div>
+
+            <DialogFooter className="flex-col gap-2 sm:flex-col">
+              <Button
+                onClick={() => osCompleteMutation.mutate()}
+                disabled={osCompleteMutation.isPending}
+                className="w-full bg-green-600 hover:bg-green-700 text-white"
+              >
+                {osCompleteMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Complete Order
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => setShowOsComplete(false)}
+                disabled={osCompleteMutation.isPending}
+              >
+                Keep Scanning (add extras)
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </div>
+    );
+  }
 
   return (
     <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">

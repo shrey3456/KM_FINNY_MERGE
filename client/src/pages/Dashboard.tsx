@@ -1,6 +1,8 @@
 import { Package, History, Upload, PieChart, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, Receipt, IndianRupee, Activity, Factory, PrinterCheck, Truck } from 'lucide-react';
 import useEmblaCarousel from 'embla-carousel-react';
 import { useCallback, useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { apiRequest } from '@/lib/queryClient';
 import { isAdminOrSuperAdmin, getCurrentUserPermissions } from '@/lib/permissions';
 
 // Import the requested images
@@ -14,6 +16,7 @@ const Home = () => {
   const [isAdmin, setIsAdmin] = useState(false);
   const [showSalesPage, setShowSalesPage] = useState(false);
   const [canAccessExpenseVoucher, setCanAccessExpenseVoucher] = useState(false);
+  const [isScanUser, setIsScanUser] = useState(false);
 
   // Check user permissions
   useEffect(() => {
@@ -22,16 +25,28 @@ const Home = () => {
       if (currentUserStr) {
         const currentUser = JSON.parse(currentUserStr);
         setIsAdmin(isAdminOrSuperAdmin(currentUser.role));
-        
+
         // Check if user should see Sales page instead of Reports
         const userPermissions = getCurrentUserPermissions();
         setShowSalesPage(userPermissions.canAccessSalesPage);
         setCanAccessExpenseVoucher(userPermissions.canAccessExpenseVoucher);
+
+        // Non-admin/billing users are scanning dept users
+        const role = (currentUser.role ?? '').toLowerCase().trim();
+        setIsScanUser(!['admin', 'super-admin', 'billing'].includes(role));
       }
     } catch (error) {
       console.error('Error checking user permissions:', error);
     }
   }, []);
+
+  // Poll for active scan session (scanning dept users only)
+  const { data: scanNotif } = useQuery<{ active: boolean; session: any }>({
+    queryKey: ['/api/order-scan/notification'],
+    queryFn: () => apiRequest('GET', '/api/order-scan/notification').then((r) => r.json()),
+    enabled: isScanUser,
+    refetchInterval: 30000,
+  });
 
   // Automatically scroll every 5 seconds
   useEffect(() => {
@@ -113,6 +128,24 @@ const Home = () => {
           </div>
         </div>
         
+        {/* Active scan banner — scanning dept users only */}
+        {isScanUser && scanNotif?.active && scanNotif.session && (
+          <div className="mb-5 flex items-center gap-3 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 shadow-sm">
+            <span className="h-3 w-3 shrink-0 rounded-full bg-amber-400 animate-pulse" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-amber-900">Scan Available!</p>
+              <p className="text-xs text-amber-700 truncate">{scanNotif.session.csvFileName}</p>
+              <p className="text-[11px] text-amber-600">{scanNotif.session.plant} · {scanNotif.session.rowCount} rows</p>
+            </div>
+            <a
+              href="/order-scan"
+              className="shrink-0 rounded-lg bg-[#001d6e] px-3 py-2 text-xs font-semibold text-white shadow hover:bg-[#00154b] transition-colors"
+            >
+              Scan Now
+            </a>
+          </div>
+        )}
+
         {/* Main action buttons in a grid layout (4x2) */}
         <div className="grid grid-cols-4 gap-4">
           {/* Row 1 */}

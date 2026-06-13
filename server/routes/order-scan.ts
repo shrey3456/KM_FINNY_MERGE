@@ -14,6 +14,20 @@ function plantEq(filter: string) {
 
 const router = Router();
 
+// ── SSE registry ──────────────────────────────────────────────────────────────
+// Keeps one Set of active SSE Response objects per session ID.
+// Written to by broadcastScanEvent() after every successful scan.
+const sseClients = new Map<number, Set<Response>>();
+
+function broadcastScanEvent(sessionId: number, payload: object) {
+  const clients = sseClients.get(sessionId);
+  if (!clients || clients.size === 0) return;
+  const frame = `data: ${JSON.stringify(payload)}\n\n`;
+  clients.forEach((res) => {
+    try { res.write(frame); } catch { /* client already disconnected */ }
+  });
+}
+
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 
 function requireScanRole(req: Request, res: Response, next: NextFunction) {
@@ -70,6 +84,40 @@ function getPalletSize(product: any, plant: string): number {
 }
 
 router.use('/order-scan', requireScanRole);
+
+// ── GET /api/order-scan/notification ─────────────────────────────────────────
+// Returns whether there is an active scan session for the user's plant.
+// Used by the sidebar badge and dashboard banner.
+// Admin/billing: sees all plants (returns active count).
+// Scanner users: returns their plant's active session only.
+router.get('/order-scan/notification', async (req: Request, res: Response) => {
+  try {
+    const plantFilter = getPlantFilter(req.user);
+    const importedBy  = alias(users, 'imported_by');
+
+    const conditions: any[] = [eq(orderImportSessions.scanStatus, 'active')];
+    if (plantFilter) conditions.push(plantEq(plantFilter));
+
+    const [session] = await db
+      .select({
+        id:          orderImportSessions.id,
+        plant:       orderImportSessions.plant,
+        csvFileName: orderImportSessions.csvFileName,
+        rowCount:    orderImportSessions.rowCount,
+        importedByName: importedBy.name,
+        scanActivatedAt: orderImportSessions.scanActivatedAt,
+      })
+      .from(orderImportSessions)
+      .leftJoin(importedBy, eq(orderImportSessions.importedByCode, importedBy.userCode))
+      .where(and(...conditions))
+      .orderBy(desc(orderImportSessions.scanActivatedAt))
+      .limit(1);
+
+    res.json({ active: !!session, session: session ?? null });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed' });
+  }
+});
 
 // ── GET /api/order-scan/whoami — returns what plant the server sees for this user ──
 router.get('/order-scan/whoami', (req: Request, res: Response) => {
@@ -366,8 +414,9 @@ router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response)
     }).returning();
 
     // Update scan item totals atomically (avoid race conditions)
+    // Skip update when isExtra=true — extra boxes should not inflate total_scanned_qty
     let updatedItem = null;
-    if (scanItem) {
+    if (scanItem && !isExtra) {
       await pool.query(
         `UPDATE order_scan_items
          SET scanned_pallets    = COALESCE(scanned_pallets, 0)    + $1,
@@ -387,10 +436,63 @@ router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response)
       updatedItem = result.rows[0];
     }
 
+    // Push the scan result to all SSE subscribers for this session
+    broadcastScanEvent(sessionId, {
+      type: 'scan',
+      item: updatedItem ? {
+        id:               updatedItem.id,
+        barcode:          updatedItem.barcode,
+        totalScannedQty:  updatedItem.total_scanned_qty,
+        scannedPallets:   updatedItem.scanned_pallets,
+        scannedLooseQty:  updatedItem.scanned_loose_qty,
+        status:           updatedItem.status,
+        lastScannedAt:    updatedItem.last_scanned_at,
+      } : null,
+      event: {
+        barcode:       event.barcode,
+        itemName:      event.itemName,
+        totalQty:      event.totalQty,
+        isExtra:       event.isExtra,
+        scannedByName: event.scannedByName,
+      },
+    });
+
     res.status(201).json({ event, updatedItem });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Scan failed' });
   }
+});
+
+// ── GET /api/order-scan/sessions/:id/stream ──────────────────────────────────
+// SSE endpoint — clients connect once and receive push updates on every scan
+router.get('/order-scan/sessions/:id/stream', requireScanRole, (req: Request, res: Response) => {
+  const sessionId = parseInt(req.params.id);
+  if (isNaN(sessionId)) { res.status(400).json({ message: 'Invalid session ID' }); return; }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // prevent nginx from buffering the stream
+  res.flushHeaders();
+
+  // Confirm connection immediately
+  res.write(': connected\n\n');
+
+  // Register this client
+  if (!sseClients.has(sessionId)) sseClients.set(sessionId, new Set());
+  sseClients.get(sessionId)!.add(res);
+
+  // Keep connection alive through proxies with a periodic heartbeat
+  const heartbeat = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch { clearInterval(heartbeat); }
+  }, 25000);
+
+  // Cleanup on client disconnect
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    const set = sseClients.get(sessionId);
+    if (set) { set.delete(res); if (set.size === 0) sseClients.delete(sessionId); }
+  });
 });
 
 // ── GET /api/order-scan/sessions/:id/events ──────────────────────────────────

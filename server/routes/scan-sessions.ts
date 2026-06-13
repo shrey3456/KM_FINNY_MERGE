@@ -549,7 +549,7 @@ router.get('/reports/stock-sheet', async (_req: Request, res: Response) => {
   }
 });
 
-// Extra orders report: all extras across all sessions
+// Extra orders report: all extras across all sessions (old scan_session_extras + new order_scan_events)
 router.get('/reports/extras', async (_req: Request, res: Response) => {
   try {
     const req = _req;
@@ -559,51 +559,91 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
       ? req.query.date.trim()
       : null;
 
-    const params: Array<string | number> = [];
-    const whereSql = dateParam
-      ? `WHERE DATE(se.scanned_at) = $${params.push(dateParam)}`
-      : '';
+    const dateParams: string[] = dateParam ? [dateParam] : [];
+    const oldWhere   = dateParam ? `WHERE DATE(se.scanned_at) = $1` : '';
+    const osDateAnd  = dateParam ? `AND DATE(ose.scanned_at) = $1` : '';
 
-    const countResult = await pool.query(
-      `SELECT COUNT(*)::int AS total,
-              COALESCE(SUM(se.quantity), 0)::int AS total_quantity
-       FROM scan_session_extras se
-       ${whereSql}`,
-      params,
-    );
-
-    const total = countResult.rows[0]?.total ?? 0;
-    const totalQuantity = countResult.rows[0]?.total_quantity ?? 0;
-
-    const pageParams = [...params, limit, offset];
-    const rows = await pool.query(
+    // Fetch old extras (scan_session_extras)
+    // Join products by product_id first; fall back to barcode match so product_id=null rows still get pallets
+    const oldRows = await pool.query(
       `SELECT
          se.id,
-         se.session_id AS "sessionId",
-         ss.order_name AS "orderName",
-         ss.csv_name AS "csvName",
+         se.session_id        AS "sessionId",
+         ss.order_name        AS "orderName",
+         ss.csv_name          AS "csvName",
          se.code,
-         se.item_name AS "itemName",
+         se.item_name         AS "itemName",
          se.sku,
          se.quantity,
          se.reason,
-         se.scanned_by_name AS "scannedByName",
-         se.scanned_at AS "scannedAt"
+         se.scanned_by_name   AS "scannedByName",
+         se.scanned_at        AS "scannedAt",
+         CASE
+           WHEN COALESCE(p.items_per_pallet, 0) > 0
+           THEN ROUND(CAST(se.quantity AS NUMERIC) / p.items_per_pallet, 2)
+           ELSE NULL
+         END                  AS pallets
        FROM scan_session_extras se
        INNER JOIN scan_sessions ss ON se.session_id = ss.id
-       ${whereSql}
-       ORDER BY se.scanned_at DESC
-       LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
-      pageParams,
+       LEFT  JOIN products p ON p.id = se.product_id
+                             OR (se.product_id IS NULL AND LOWER(p.barcode) = LOWER(se.code))
+       ${oldWhere}
+       ORDER BY se.scanned_at DESC`,
+      dateParams,
     );
 
-    return res.json({
-      items: rows.rows,
-      total,
-      totalQuantity,
-      limit,
-      offset,
+    // Fetch extras from new order-scan system (order_scan_events where is_extra = true)
+    // Priority: stored pallets → stored items_per_pallet → product lookup by barcode
+    const osRows = await pool.query(
+      `SELECT
+         ose.id,
+         ose.session_id                       AS "sessionId",
+         ois.csv_file_name                    AS "orderName",
+         ois.csv_file_name                    AS "csvName",
+         ose.barcode                          AS code,
+         COALESCE(ose.item_name, p.name, ose.barcode) AS "itemName",
+         NULL::text                           AS sku,
+         ose.total_qty                        AS quantity,
+         'not_in_order'                       AS reason,
+         ose.scanned_by_name                  AS "scannedByName",
+         ose.scanned_at                       AS "scannedAt",
+         CASE
+           WHEN COALESCE(ose.pallets, 0) > 0
+             THEN ROUND(CAST(ose.pallets AS NUMERIC), 2)
+           WHEN COALESCE(ose.items_per_pallet, 0) > 0
+             THEN ROUND(CAST(ose.total_qty AS NUMERIC) / ose.items_per_pallet, 2)
+           WHEN COALESCE(p.items_per_pallet, 0) > 0
+             THEN ROUND(CAST(ose.total_qty AS NUMERIC) / p.items_per_pallet, 2)
+           ELSE NULL
+         END                                  AS pallets
+       FROM order_scan_events ose
+       INNER JOIN order_import_sessions ois ON ois.id = ose.session_id
+       LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
+       WHERE ose.is_extra = true
+         ${osDateAnd}
+       ORDER BY ose.scanned_at DESC`,
+      dateParams,
+    );
+
+    type ExtraRow = {
+      id: number; sessionId: number; orderName: string; csvName: string;
+      code: string; itemName: string; sku: string | null; quantity: number;
+      reason: string; scannedByName: string | null; scannedAt: string | null;
+      pallets: number | null;
+    };
+
+    // Merge both sources and sort by scannedAt DESC
+    const merged: ExtraRow[] = [...oldRows.rows, ...osRows.rows].sort((a, b) => {
+      const ta = a.scannedAt ? new Date(a.scannedAt).getTime() : 0;
+      const tb = b.scannedAt ? new Date(b.scannedAt).getTime() : 0;
+      return tb - ta;
     });
+
+    const total = merged.length;
+    const totalQuantity = merged.reduce((s, e) => s + (Number(e.quantity) || 0), 0);
+    const items = merged.slice(offset, offset + limit);
+
+    return res.json({ items, total, totalQuantity, limit, offset });
   } catch (error) {
     console.error('Error generating extras report:', error);
     return res.status(500).json({ error: 'Failed to generate extras report' });
@@ -767,7 +807,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
         ${dateFilter}
       ORDER BY sci.item_name ASC
     `, queryParams);
-    const rows: Array<{
+    type StockRow = {
       sku: string; barcode: string | null; itemName: string; itemNo: string | null;
       sapCode: string | null; scannedQty: number; sessionId: number;
       sessionOrderName: string; sessionStatus: string | null; sessionCreatedAt: Date | null;
@@ -775,7 +815,54 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
       category: string | null; itemsPerPallet: number | null; volumeInCuFt: string | null;
       productSapCode: string | null; productItemNo: string | null; productName: string | null;
       storedNumPallets: number | null;
-    }> = rawRows.rows;
+    };
+    const rows: StockRow[] = rawRows.rows;
+
+    // Also include scans from the new order-scan system (order_scan_items / order_import_sessions)
+    const osDateFilter = dateParam ? `AND DATE(ois.created_at) = $1` : '';
+    const osRawRows = await pool.query(`
+      SELECT
+        COALESCE(osi.barcode, '')                                                AS sku,
+        osi.barcode,
+        COALESCE(p.name, osi.item_name)                                         AS "itemName",
+        NULL::text                                                               AS "itemNo",
+        COALESCE(p.sap_code, osi.sap_code)                                      AS "sapCode",
+        osi.total_scanned_qty                                                   AS "scannedQty",
+        ois.id                                                                  AS "sessionId",
+        ois.csv_file_name                                                       AS "sessionOrderName",
+        ois.scan_status                                                         AS "sessionStatus",
+        ois.created_at                                                          AS "sessionCreatedAt",
+        p.id                                                                    AS "productId",
+        p.in_stock                                                              AS "inStock",
+        p.hsn_code                                                              AS "hsnCode",
+        p.category,
+        COALESCE(
+          NULLIF(osi.items_per_pallet, 0),
+          NULLIF(p.items_per_pallet, 0),
+          NULLIF(p.pallets, 0)
+        )                                                                       AS "itemsPerPallet",
+        p.volume_in_cu_ft                                                       AS "volumeInCuFt",
+        p.sap_code                                                              AS "productSapCode",
+        p.item_no                                                               AS "productItemNo",
+        p.name                                                                  AS "productName",
+        CASE
+          WHEN COALESCE(osi.items_per_pallet, 0) > 0
+            THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / osi.items_per_pallet, 2)
+          WHEN COALESCE(p.items_per_pallet, 0) > 0
+            THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / p.items_per_pallet, 2)
+          WHEN COALESCE(p.pallets, 0) > 0
+            THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / p.pallets, 2)
+          ELSE NULL
+        END                                                                     AS "storedNumPallets"
+      FROM  order_scan_items osi
+      JOIN  order_import_sessions ois ON ois.id = osi.session_id
+      LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(osi.barcode)
+                            OR (osi.sap_code IS NOT NULL AND LOWER(p.sap_code) = LOWER(osi.sap_code))
+      WHERE osi.total_scanned_qty > 0
+        ${osDateFilter}
+      ORDER BY osi.item_name ASC
+    `, queryParams);
+    const allRows: StockRow[] = [...rows, ...osRawRows.rows];
 
     // Group by barcode (fall back to sku), sum scannedQty and storedNumPallets across all sessions
     const skuMap = new Map<string, {
@@ -796,7 +883,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
     }>();
 
     let srNo = 1;
-    for (const row of rows) {
+    for (const row of allRows) {
       const key = row.barcode ?? row.sku;
       if (!skuMap.has(key)) {
         skuMap.set(key, {
