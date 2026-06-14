@@ -51,7 +51,24 @@ export function initOrderScanWs(httpServer: HttpServer) {
     }
   });
 
-  wss.on('connection', (ws: WebSocket) => {
+  // Heartbeat: ping every 20s to prevent IIS ARR / nginx from silently dropping
+  // idle WebSocket connections. If a client doesn't respond within the next cycle
+  // it is terminated, which fires onclose on the browser and triggers reconnect.
+  const pingInterval = setInterval(() => {
+    wss.clients.forEach((client) => {
+      const c = client as WebSocket & { _isAlive?: boolean };
+      if (c._isAlive === false) { c.terminate(); return; }
+      c._isAlive = false;
+      c.ping();
+    });
+  }, 20_000);
+
+  wss.on('close', () => clearInterval(pingInterval));
+
+  wss.on('connection', (ws: WebSocket & { _isAlive?: boolean }) => {
+    ws._isAlive = true;
+    ws.on('pong', () => { ws._isAlive = true; });
+
     let joinedSessionId: number | null = null;
 
     ws.on('message', (raw) => {

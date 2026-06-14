@@ -463,7 +463,8 @@ export default function ScanOrderPage() {
 
   const handleOsBarcode = (barcode: string) => {
     if (osPendingRef.current) return;
-    const match = osItemsRef.current.find((i) => i.barcode === barcode) ?? null;
+    const normBarcode = normalize(barcode);
+    const match = osItemsRef.current.find((i) => normalize(i.barcode ?? "") === normBarcode) ?? null;
 
     // Look up inventory product for name / SAP code / plant-specific pallet size
     const invProduct = productLookup.get(normalize(barcode)) ?? null;
@@ -581,6 +582,25 @@ export default function ScanOrderPage() {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
+    // Detect silently-dropped connections: IIS ARR can close the TCP socket
+    // without sending a WS CLOSE frame, leaving the client thinking it's connected.
+    // The server pings every 20s; if we get no message for 55s the connection is dead.
+    let lastMsgAt = Date.now();
+    let deadTimer: ReturnType<typeof setInterval> | null = null;
+
+    function startDeadTimer() {
+      if (deadTimer) clearInterval(deadTimer);
+      deadTimer = setInterval(() => {
+        if (ws && Date.now() - lastMsgAt > 55_000) {
+          // No server ping received in 55s — connection is silently dead
+          ws.close();
+        }
+      }, 10_000);
+    }
+
+    function stopDeadTimer() {
+      if (deadTimer) { clearInterval(deadTimer); deadTimer = null; }
+    }
 
     function connect() {
       if (closed) return;
@@ -588,11 +608,14 @@ export default function ScanOrderPage() {
       ws = new WebSocket(`${proto}//${window.location.host}/ws/order-scan`);
 
       ws.onopen = () => {
+        lastMsgAt = Date.now();
         setWsConnected(true);
         ws!.send(JSON.stringify({ type: 'join', sessionId }));
+        startDeadTimer();
       };
 
       ws.onmessage = (e) => {
+        lastMsgAt = Date.now(); // reset dead-connection timer on any message
         try {
           const data = JSON.parse(e.data);
 
@@ -626,6 +649,7 @@ export default function ScanOrderPage() {
       ws.onerror = () => { /* onclose fires next — handled there */ };
 
       ws.onclose = () => {
+        stopDeadTimer();
         ws = null;
         setWsConnected(false);
         if (!closed) reconnectTimer = setTimeout(connect, 3000);
@@ -636,6 +660,7 @@ export default function ScanOrderPage() {
 
     return () => {
       closed = true;
+      stopDeadTimer();
       setWsConnected(false);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       ws?.close();
