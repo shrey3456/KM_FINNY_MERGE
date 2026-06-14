@@ -617,17 +617,6 @@ export default function StockReport() {
             <Table className="min-w-[960px] text-xs sm:text-sm">
               <TableHeader>
                 <TableRow className="bg-amber-600 hover:bg-amber-600">
-<<<<<<< Updated upstream
-                    <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 z-20 bg-amber-600 w-[52px] text-[11px] sm:text-xs">#</TableHead>
-                    <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 sm:left-[52px] z-30 bg-amber-600 min-w-[180px] text-[11px] sm:text-xs shadow-[2px_0_6px_rgba(0,0,0,0.08)]">Item</TableHead>
-                    <TableHead className="text-white font-semibold uppercase tracking-wide">Order</TableHead>
-                    <TableHead className="text-white font-semibold uppercase tracking-wide">Barcode / SKU</TableHead>
-                    <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Qty</TableHead>
-                    <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Pallets</TableHead>
-                    <TableHead className="text-white font-semibold uppercase tracking-wide">Reason</TableHead>
-                    <TableHead className="text-white font-semibold uppercase tracking-wide">
-                    <span className="flex items-center gap-1"><UserCircle className="h-3.5 w-3.5" />SCANNED BY</span>
-=======
                   <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 z-20 bg-amber-600 w-[52px] text-[11px] sm:text-xs">#</TableHead>
                   <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 sm:left-[52px] z-30 bg-amber-600 min-w-[180px] text-[11px] sm:text-xs shadow-[2px_0_6px_rgba(0,0,0,0.08)]">Item</TableHead>
                   <TableHead className="text-white font-semibold uppercase tracking-wide">Order</TableHead>
@@ -637,7 +626,6 @@ export default function StockReport() {
                   <TableHead className="text-white font-semibold uppercase tracking-wide">Reason</TableHead>
                   <TableHead className="text-white font-semibold uppercase tracking-wide">
                     <span className="flex items-center gap-1"><UserCircle className="h-3.5 w-3.5" />Scanned By</span>
->>>>>>> Stashed changes
                   </TableHead>
                   <TableHead className="text-white font-semibold uppercase tracking-wide">Time</TableHead>
                 </TableRow>
