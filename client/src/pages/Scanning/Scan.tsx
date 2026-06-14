@@ -338,8 +338,11 @@ export default function ScanOrderPage() {
     queryFn: () =>
       apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/items`).then((r) => r.json()),
     enabled: !!activeOrderScanSession,
-    // No refetchInterval — SSE patches the cache in real-time; polling would
-    // overwrite those patches every 30s and cause quantities to "jump back".
+    // Poll every 4 s as a guaranteed fallback for devices where the WebSocket
+    // connection is blocked by a proxy. WebSocket invalidateQueries() fires
+    // immediately when it works; this covers the case when it doesn't.
+    refetchInterval: 4000,
+    refetchIntervalInBackground: true,
   });
   const osItemsRef = useRef<OsScanItem[]>([]);
   useEffect(() => { osItemsRef.current = osItemsQuery.data ?? []; }, [osItemsQuery.data]);
@@ -356,7 +359,7 @@ export default function ScanOrderPage() {
       apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/scan`, payload).then((r) => r.json()),
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] });
-      // Recent scans are updated via SSE broadcast (which fires for all devices including this one).
+      // Recent scans are updated via WS broadcast (which fires for all devices including this one).
       // Do NOT also update here — that would cause duplicates every time.
       setOsPending(null);
       osPendingRef.current = null;
@@ -484,42 +487,74 @@ export default function ScanOrderPage() {
     onError: (err: any) => toast({ title: "Failed to complete order", description: err?.message, variant: "destructive" }),
   });
 
-  // SSE subscription — receives push updates from every scan on this session
+  // WebSocket subscription — receives push updates from every scan on this session
   useEffect(() => {
     if (!activeOrderScanSession) return;
-    const es = new EventSource(`/api/order-scan/sessions/${activeOrderScanSession.id}/stream`);
+    const sessionId = activeOrderScanSession.id;
 
-    es.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.type !== 'scan') return;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let closed = false;
 
-        // Patch the single changed item in the cache — no full refetch needed
-        if (data.item) {
-          queryClient.setQueryData(
-            ["/api/order-scan/sessions", activeOrderScanSession.id, "items"],
-            (old: OsScanItem[] = []) =>
-              old.map((i) => i.id === data.item.id ? { ...i, ...data.item } : i),
-          );
+    function connect() {
+      if (closed) return;
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${window.location.host}/ws/order-scan`);
+
+      ws.onopen = () => {
+        console.log(`[WS] Connected to /ws/order-scan — joining session ${sessionId}`);
+        ws!.send(JSON.stringify({ type: 'join', sessionId }));
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+
+          if (data.type === 'joined') {
+            console.log(`[WS] Successfully joined session ${data.sessionId}`);
+            return;
+          }
+
+          if (data.type !== 'scan') return;
+
+          // Force a fresh fetch — simpler and more reliable than patching the cache in-place
+          queryClient.invalidateQueries({
+            queryKey: ["/api/order-scan/sessions", sessionId, "items"],
+          });
+
+          // Append to recent scans list
+          if (data.event) {
+            setOsRecentScans((prev) => [
+              {
+                barcode: data.event.barcode,
+                name:    data.event.itemName ?? data.event.barcode,
+                total:   data.event.totalQty,
+                isExtra: data.event.isExtra,
+              },
+              ...prev.slice(0, 4),
+            ]);
+          }
+        } catch { /* ignore malformed frames */ }
+      };
+
+      ws.onerror = () => { /* onclose fires next — handled there */ };
+
+      ws.onclose = () => {
+        ws = null;
+        if (!closed) {
+          console.log(`[WS] Disconnected — reconnecting in 3s...`);
+          reconnectTimer = setTimeout(connect, 3000);
         }
+      };
+    }
 
-        // Append to recent scans list
-        if (data.event) {
-          setOsRecentScans((prev) => [
-            {
-              barcode: data.event.barcode,
-              name:    data.event.itemName ?? data.event.barcode,
-              total:   data.event.totalQty,
-              isExtra: data.event.isExtra,
-            },
-            ...prev.slice(0, 4),
-          ]);
-        }
-      } catch { /* ignore malformed frames */ }
+    connect();
+
+    return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ws?.close();
     };
-
-    // onerror: EventSource auto-reconnects; nothing extra needed
-    return () => es.close();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrderScanSession?.id]);
 

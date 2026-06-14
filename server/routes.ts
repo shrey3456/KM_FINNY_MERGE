@@ -108,7 +108,7 @@ import checkinoutRoutes from "./routes/checkinout";
 import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
 import orderImportRoutes from "./routes/order-import";
-import orderScanRoutes from "./routes/order-scan";
+import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import { detectChangesFromNotion, fullSyncFromNotion } from "./services/notionInventorySync";
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -118,6 +118,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Create HTTP server - will be returned at the end of the function
   const httpServer = createServer(app);
+
+  // WebSocket server for real-time order-scan sync
+  initOrderScanWs(httpServer);
 
   // WEBSOCKET DISABLED - uncomment to re-enable WebSocket server
   /* WebSocket server setup commented out to prevent connection issues
