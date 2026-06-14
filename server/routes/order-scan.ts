@@ -51,15 +51,26 @@ export function initOrderScanWs(httpServer: HttpServer) {
     }
   });
 
-  // Heartbeat: ping every 20s to prevent IIS ARR / nginx from silently dropping
-  // idle WebSocket connections. If a client doesn't respond within the next cycle
-  // it is terminated, which fires onclose on the browser and triggers reconnect.
+  // Heartbeat every 20s: two-pronged keepalive for reverse-proxy environments.
+  //
+  // 1. Protocol-level ping (c.ping()) — prevents IIS ARR / nginx from timing out
+  //    idle TCP connections. Browser responds with pong automatically.
+  //    _isAlive tracking detects dead sockets; terminate() forces onclose on client.
+  //
+  // 2. Application-level JSON { type:'ping' } — browsers don't expose protocol
+  //    pings to JS, so the client's onmessage-based dead-timer would never reset
+  //    and would kill healthy idle connections every 55s. This JSON message reaches
+  //    onmessage, resets lastMsgAt, and keeps the client's timer from misfiring.
+  const PING_MSG = JSON.stringify({ type: 'ping' });
   const pingInterval = setInterval(() => {
     wss.clients.forEach((client) => {
       const c = client as WebSocket & { _isAlive?: boolean };
       if (c._isAlive === false) { c.terminate(); return; }
       c._isAlive = false;
       c.ping();
+      if (c.readyState === WebSocket.OPEN) {
+        try { c.send(PING_MSG); } catch { /* will be cleaned up next cycle */ }
+      }
     });
   }, 20_000);
 

@@ -619,7 +619,7 @@ export default function ScanOrderPage() {
         try {
           const data = JSON.parse(e.data);
 
-          if (data.type === 'joined') return;
+          if (data.type === 'joined' || data.type === 'ping') return;
           if (data.type !== 'scan') return;
 
           // Patch cache directly — no HTTP refetch needed.
