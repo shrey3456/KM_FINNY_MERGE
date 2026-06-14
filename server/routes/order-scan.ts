@@ -1,10 +1,12 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { WebSocketServer, WebSocket } from 'ws';
+import type { Server as HttpServer } from 'http';
 import { db, pool } from '../db';
 import {
-  orderImportSessions, orderImportItems, orderScanItems, orderScanEvents,
-  products, users, plants, plantStvs,
+  orderImportSessions, orderScanItems, orderScanEvents,
+  users, plants, plantStvs,
 } from '../../shared/schema';
-import { eq, and, ne, desc, asc, gte, sql } from 'drizzle-orm';
+import { eq, and, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
@@ -14,17 +16,70 @@ function plantEq(filter: string) {
 
 const router = Router();
 
-// ── SSE registry ──────────────────────────────────────────────────────────────
-// Keeps one Set of active SSE Response objects per session ID.
-// Written to by broadcastScanEvent() after every successful scan.
-const sseClients = new Map<number, Set<Response>>();
+// ── WebSocket registry ────────────────────────────────────────────────────────
+// Keeps one Set of open WebSocket connections per session ID.
+// Clients send { type: 'join', sessionId } after connecting to subscribe.
+const wsClients = new Map<number, Set<WebSocket>>();
 
 function broadcastScanEvent(sessionId: number, payload: object) {
-  const clients = sseClients.get(sessionId);
+  const clients = wsClients.get(sessionId);
+  console.log(`[WS] broadcast session=${sessionId} clients=${clients?.size ?? 0}`);
   if (!clients || clients.size === 0) return;
-  const frame = `data: ${JSON.stringify(payload)}\n\n`;
-  clients.forEach((res) => {
-    try { res.write(frame); } catch { /* client already disconnected */ }
+  const frame = JSON.stringify(payload);
+  clients.forEach((ws) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      try { ws.send(frame); } catch { /* client disconnected mid-send */ }
+    }
+  });
+}
+
+export function initOrderScanWs(httpServer: HttpServer) {
+  // Use noServer so we manually control which upgrades we handle.
+  // This prevents conflicts with Vite HMR, which also listens on the same
+  // HTTP server's 'upgrade' event.
+  const wss = new WebSocketServer({ noServer: true });
+
+  httpServer.on('upgrade', (request, socket, head) => {
+    try {
+      const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+      if (url.pathname !== '/ws/order-scan') return; // let Vite HMR or others handle their own paths
+      wss.handleUpgrade(request, socket as any, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    } catch {
+      // Malformed URL — ignore
+    }
+  });
+
+  wss.on('connection', (ws: WebSocket) => {
+    let joinedSessionId: number | null = null;
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === 'join' && typeof msg.sessionId === 'number') {
+          // Leave previous session if client re-joins
+          if (joinedSessionId !== null) {
+            wsClients.get(joinedSessionId)?.delete(ws);
+          }
+          joinedSessionId = msg.sessionId as number;
+          if (!wsClients.has(joinedSessionId)) wsClients.set(joinedSessionId, new Set());
+          wsClients.get(joinedSessionId)!.add(ws);
+          const roomSize = wsClients.get(joinedSessionId)!.size;
+          console.log(`[WS] Client joined session ${joinedSessionId} — ${roomSize} device(s) connected`);
+          ws.send(JSON.stringify({ type: 'joined', sessionId: joinedSessionId }));
+        }
+      } catch { /* ignore malformed messages */ }
+    });
+
+    const cleanup = () => {
+      if (joinedSessionId !== null) {
+        const set = wsClients.get(joinedSessionId);
+        if (set) { set.delete(ws); if (set.size === 0) wsClients.delete(joinedSessionId); }
+      }
+    };
+    ws.on('close', cleanup);
+    ws.on('error', cleanup);
   });
 }
 
@@ -35,13 +90,6 @@ function requireScanRole(req: Request, res: Response, next: NextFunction) {
   next(); // any logged-in user may access scan routes; plant filtering handles the rest
 }
 
-function requireImportRole(req: Request, res: Response, next: NextFunction) {
-  if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
-  const role = ((req.user as any)?.role ?? '').toLowerCase();
-  if (!['admin', 'super-admin', 'billing'].includes(role))
-    return res.status(403).json({ message: 'Only admin/billing can manage sessions' });
-  next();
-}
 
 // Extract plant filter for dispatch users (fully case-insensitive).
 // All inputs are lowercased; DB comparisons use LOWER() via plantEq().
@@ -84,6 +132,12 @@ function getPalletSize(product: any, plant: string): number {
 }
 
 router.use('/order-scan', requireScanRole);
+
+// ── GET /api/order-scan/sessions/:id/ws-status  (debug) ──────────────────────
+router.get('/order-scan/sessions/:id/ws-status', (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  res.json({ sessionId: id, connectedClients: wsClients.get(id)?.size ?? 0 });
+});
 
 // ── GET /api/order-scan/notification ─────────────────────────────────────────
 // Returns whether there is an active scan session for the user's plant.
@@ -453,10 +507,13 @@ router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response)
     );
     const event = eventResult.rows[0];
 
-    // Update running totals — only for in-order scans, using RETURNING to get
-    // the committed value in the same round-trip (no stale read-after-write).
+    // Always update order_scan_items when the barcode is in the CSV — even for
+    // extra scans. This lets total_scanned_qty exceed expected_qty, which is
+    // exactly what the "Extra" column reads: totalScannedQty - expectedQty.
+    // Without this update, extra scans were silently recorded in events but
+    // the item row never changed, so the UI showed nothing.
     let updatedItem: any = null;
-    if (scanItem && !isExtraActual) {
+    if (scanItem) {
       const updateResult = await client.query(
         `UPDATE order_scan_items
          SET scanned_pallets    = COALESCE(scanned_pallets,   0) + $1,
@@ -507,37 +564,6 @@ router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response)
   }
 });
 
-// ── GET /api/order-scan/sessions/:id/stream ──────────────────────────────────
-// SSE endpoint — clients connect once and receive push updates on every scan
-router.get('/order-scan/sessions/:id/stream', requireScanRole, (req: Request, res: Response) => {
-  const sessionId = parseInt(req.params.id);
-  if (isNaN(sessionId)) { res.status(400).json({ message: 'Invalid session ID' }); return; }
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // prevent nginx from buffering the stream
-  res.flushHeaders();
-
-  // Confirm connection immediately
-  res.write(': connected\n\n');
-
-  // Register this client
-  if (!sseClients.has(sessionId)) sseClients.set(sessionId, new Set());
-  sseClients.get(sessionId)!.add(res);
-
-  // Keep connection alive through proxies with a periodic heartbeat
-  const heartbeat = setInterval(() => {
-    try { res.write(': ping\n\n'); } catch { clearInterval(heartbeat); }
-  }, 25000);
-
-  // Cleanup on client disconnect
-  req.on('close', () => {
-    clearInterval(heartbeat);
-    const set = sseClients.get(sessionId);
-    if (set) { set.delete(res); if (set.size === 0) sseClients.delete(sessionId); }
-  });
-});
 
 // ── GET /api/order-scan/sessions/:id/events ──────────────────────────────────
 // Last 20 scan events for a session (for the "recent scans" panel)
