@@ -331,6 +331,7 @@ export default function ScanOrderPage() {
   const [osSearch, setOsSearch] = useState("");
   const [osManualCode, setOsManualCode] = useState("");
   const [osRecentScans, setOsRecentScans] = useState<{ barcode: string; name: string; total: number; isExtra: boolean }[]>([]);
+  const [wsConnected, setWsConnected] = useState(false);
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
 
   const osItemsQuery = useQuery<OsScanItem[]>({
@@ -338,8 +339,10 @@ export default function ScanOrderPage() {
     queryFn: () =>
       apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/items`).then((r) => r.json()),
     enabled: !!activeOrderScanSession,
-    // SSE patches the cache on every scan — poll only as a fallback for dropped connections.
-    refetchInterval: 30000,
+    // When WS is live it pushes every update — poll every 30s as a safety net only.
+    // When WS is disconnected (proxy drop, production firewall) poll every 8s so
+    // other devices don't fall behind waiting for the reconnect.
+    refetchInterval: wsConnected ? 30000 : 8000,
     refetchIntervalInBackground: false,
   });
   const osItemsRef = useRef<OsScanItem[]>([]);
@@ -564,7 +567,7 @@ export default function ScanOrderPage() {
       ws = new WebSocket(`${proto}//${window.location.host}/ws/order-scan`);
 
       ws.onopen = () => {
-        console.log(`[WS] Connected to /ws/order-scan — joining session ${sessionId}`);
+        setWsConnected(true);
         ws!.send(JSON.stringify({ type: 'join', sessionId }));
       };
 
@@ -572,17 +575,17 @@ export default function ScanOrderPage() {
         try {
           const data = JSON.parse(e.data);
 
-          if (data.type === 'joined') {
-            console.log(`[WS] Successfully joined session ${data.sessionId}`);
-            return;
-          }
-
+          if (data.type === 'joined') return;
           if (data.type !== 'scan') return;
 
-          // Force a fresh fetch — simpler and more reliable than patching the cache in-place
-          queryClient.invalidateQueries({
-            queryKey: ["/api/order-scan/sessions", sessionId, "items"],
-          });
+          // Patch cache directly — no HTTP refetch needed.
+          // The WS message already carries the committed DB values for this item.
+          if (data.item) {
+            queryClient.setQueryData<OsScanItem[]>(
+              ["/api/order-scan/sessions", sessionId, "items"],
+              (old = []) => old.map((i) => i.id === data.item.id ? { ...i, ...data.item } : i),
+            );
+          }
 
           // Append to recent scans list
           if (data.event) {
@@ -603,10 +606,8 @@ export default function ScanOrderPage() {
 
       ws.onclose = () => {
         ws = null;
-        if (!closed) {
-          console.log(`[WS] Disconnected — reconnecting in 3s...`);
-          reconnectTimer = setTimeout(connect, 3000);
-        }
+        setWsConnected(false);
+        if (!closed) reconnectTimer = setTimeout(connect, 3000);
       };
     }
 
@@ -614,6 +615,7 @@ export default function ScanOrderPage() {
 
     return () => {
       closed = true;
+      setWsConnected(false);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       ws?.close();
     };
