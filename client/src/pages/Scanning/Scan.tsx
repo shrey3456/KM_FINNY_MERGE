@@ -338,11 +338,9 @@ export default function ScanOrderPage() {
     queryFn: () =>
       apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/items`).then((r) => r.json()),
     enabled: !!activeOrderScanSession,
-    // Poll every 4 s as a guaranteed fallback for devices where the WebSocket
-    // connection is blocked by a proxy. WebSocket invalidateQueries() fires
-    // immediately when it works; this covers the case when it doesn't.
-    refetchInterval: 4000,
-    refetchIntervalInBackground: true,
+    // SSE patches the cache on every scan — poll only as a fallback for dropped connections.
+    refetchInterval: 30000,
+    refetchIntervalInBackground: false,
   });
   const osItemsRef = useRef<OsScanItem[]>([]);
   useEffect(() => { osItemsRef.current = osItemsQuery.data ?? []; }, [osItemsQuery.data]);
@@ -354,20 +352,84 @@ export default function ScanOrderPage() {
     enabled: !!activeOrderScanSession?.plant,
   });
 
+  const osItemsKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] as const;
+
   const osScanMutation = useMutation({
     mutationFn: (payload: { barcode: string; pallets: number; looseQty: number; isExtra: boolean; stv: string | null }) =>
       apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/scan`, payload).then((r) => r.json()),
-    onSuccess: (data: any) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] });
-      // Recent scans are updated via WS broadcast (which fires for all devices including this one).
-      // Do NOT also update here — that would cause duplicates every time.
+
+    onMutate: async (payload) => {
+      // Cancel any in-flight refetch so it doesn't overwrite our optimistic update
+      await queryClient.cancelQueries({ queryKey: osItemsKey });
+      const previousItems = queryClient.getQueryData<OsScanItem[]>(osItemsKey);
+      const previousPending = osPendingRef.current; // save before clearing
+
+      // Only optimistically update if the barcode matched a CSV item (not an extra)
+      const matched = previousPending?.matchedItem;
+      if (matched && !payload.isExtra) {
+        const itemsPerPallet = previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
+        const addedQty = Math.round(payload.pallets * Math.max(1, itemsPerPallet)) + payload.looseQty;
+
+        queryClient.setQueryData<OsScanItem[]>(osItemsKey, (old = []) =>
+          old.map((item) => {
+            if (item.id !== matched.id) return item;
+            const newTotal = (item.totalScannedQty ?? 0) + addedQty;
+            return {
+              ...item,
+              totalScannedQty: newTotal,
+              scannedPallets: (item.scannedPallets ?? 0) + payload.pallets,
+              scannedLooseQty: (item.scannedLooseQty ?? 0) + payload.looseQty,
+              status: newTotal >= item.expectedQty ? "complete" : newTotal > 0 ? "partial" : "pending",
+              lastScannedAt: new Date().toISOString(),
+            };
+          })
+        );
+      }
+
+      // Close dialog immediately — user sees instant response
       setOsPending(null);
       osPendingRef.current = null;
       setOsQty(1);
       setOsSelectedStv("");
       setOsManualCode("");
+
+      return { previousItems, previousPending };
     },
-    onError: (err: any) => toast({ title: "Scan failed", description: err?.message ?? "Unknown error", variant: "destructive" }),
+
+    onSuccess: (data: any) => {
+      // Reconcile with exact server values (handles rounding, status edge cases)
+      if (data?.updatedItem) {
+        const u = data.updatedItem;
+        queryClient.setQueryData<OsScanItem[]>(osItemsKey, (old = []) =>
+          old.map((item) =>
+            item.id === u.id
+              ? {
+                  ...item,
+                  totalScannedQty: u.total_scanned_qty,
+                  scannedPallets:  u.scanned_pallets,
+                  scannedLooseQty: u.scanned_loose_qty,
+                  status:          u.status,
+                  lastScannedAt:   u.last_scanned_at,
+                }
+              : item
+          )
+        );
+      }
+      // SSE handles recent-scans feed and other devices — no invalidateQueries needed
+    },
+
+    onError: (err: any, _payload, context: any) => {
+      // Roll back the optimistic update
+      if (context?.previousItems) {
+        queryClient.setQueryData(osItemsKey, context.previousItems);
+      }
+      // Re-open dialog so user can retry with the saved pending state
+      if (context?.previousPending) {
+        setOsPending(context.previousPending);
+        osPendingRef.current = context.previousPending;
+      }
+      toast({ title: "Scan failed", description: err?.message ?? "Unknown error", variant: "destructive" });
+    },
   });
 
   const stopOsCamera = () => {
