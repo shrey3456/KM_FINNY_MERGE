@@ -361,13 +361,24 @@ export default function ScanOrderPage() {
     mutationFn: (payload: { barcode: string; pallets: number; looseQty: number; isExtra: boolean; stv: string | null }) =>
       apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/scan`, payload).then((r) => r.json()),
 
-    onMutate: async (payload) => {
-      // Cancel any in-flight refetch so it doesn't overwrite our optimistic update
-      await queryClient.cancelQueries({ queryKey: osItemsKey });
+    onMutate: (payload) => {
+      // Fire-and-forget — do NOT await. Awaiting cancelQueries blocks the optimistic
+      // update until any in-flight refetch finishes cancelling, causing the exact
+      // delay the user feels. We accept the tiny risk of a stale refetch overwriting;
+      // onSuccess/WS message will immediately reconcile if that happens.
+      queryClient.cancelQueries({ queryKey: osItemsKey });
+
       const previousItems = queryClient.getQueryData<OsScanItem[]>(osItemsKey);
       const previousPending = osPendingRef.current; // save before clearing
 
-      // Only optimistically update if the barcode matched a CSV item (not an extra)
+      // Close dialog immediately — 0ms perceived delay
+      setOsPending(null);
+      osPendingRef.current = null;
+      setOsQty(1);
+      setOsSelectedStv("");
+      setOsManualCode("");
+
+      // Optimistically update the table for the scanning device
       const matched = previousPending?.matchedItem;
       if (matched && !payload.isExtra) {
         const itemsPerPallet = previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
@@ -387,14 +398,24 @@ export default function ScanOrderPage() {
             };
           })
         );
-      }
 
-      // Close dialog immediately — user sees instant response
-      setOsPending(null);
-      osPendingRef.current = null;
-      setOsQty(1);
-      setOsSelectedStv("");
-      setOsManualCode("");
+        // Update recent scans feed immediately — don't wait for WS round-trip
+        setOsRecentScans((prev) => [
+          {
+            barcode: payload.barcode,
+            name: matched.itemName ?? payload.barcode,
+            total: addedQty,
+            isExtra: false,
+          },
+          ...prev.slice(0, 4),
+        ]);
+      } else if (payload.isExtra) {
+        // Extra item — update feed instantly too
+        setOsRecentScans((prev) => [
+          { barcode: payload.barcode, name: payload.barcode, total: payload.pallets, isExtra: true },
+          ...prev.slice(0, 4),
+        ]);
+      }
 
       return { previousItems, previousPending };
     },
