@@ -338,7 +338,8 @@ export default function ScanOrderPage() {
     queryFn: () =>
       apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/items`).then((r) => r.json()),
     enabled: !!activeOrderScanSession,
-    refetchInterval: 30000, // SSE handles real-time; this is a fallback reconciliation only
+    // No refetchInterval — SSE patches the cache in real-time; polling would
+    // overwrite those patches every 30s and cause quantities to "jump back".
   });
   const osItemsRef = useRef<OsScanItem[]>([]);
   useEffect(() => { osItemsRef.current = osItemsQuery.data ?? []; }, [osItemsQuery.data]);

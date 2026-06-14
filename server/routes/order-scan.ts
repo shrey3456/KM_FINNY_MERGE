@@ -241,84 +241,111 @@ router.post('/order-scan/sessions/:id/activate', async (req: Request, res: Respo
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 
+  const client = await pool.connect();
   try {
-    const [session] = await db.select().from(orderImportSessions).where(eq(orderImportSessions.id, id));
-    if (!session) return res.status(404).json({ message: 'Session not found' });
-    if (session.scanStatus === 'completed') return res.status(409).json({ message: 'Session already completed' });
+    await client.query('BEGIN');
 
-    // Check for another active session on the same plant
+    // Lock the session row — prevents two simultaneous activations of the same
+    // session from both passing the status/conflict checks.
+    const sessResult = await client.query(
+      'SELECT * FROM order_import_sessions WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    const session = sessResult.rows[0];
+    if (!session) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Session not found' });
+    }
+    if (session.scan_status === 'completed') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Session already completed' });
+    }
+
+    // Check for a conflicting active session on the same plant
     const plantFilter = getPlantFilter(req.user);
-    const conflictCheck = plantFilter
-      ? plantEq(plantFilter)
-      : sql`LOWER(${orderImportSessions.plant}) = LOWER(${session.plant})`;
-
-    const [conflict] = await db
-      .select({ id: orderImportSessions.id, csvFileName: orderImportSessions.csvFileName })
-      .from(orderImportSessions)
-      .where(and(
-        conflictCheck,
-        eq(orderImportSessions.scanStatus, 'active'),
-        ne(orderImportSessions.id, id),
-      ));
-
-    if (conflict) {
+    const conflictResult = await client.query(
+      `SELECT id, csv_file_name FROM order_import_sessions
+       WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active' AND id != $2`,
+      [plantFilter ?? session.plant, id],
+    );
+    if (conflictResult.rows[0]) {
+      const c = conflictResult.rows[0];
+      await client.query('ROLLBACK');
       return res.status(409).json({
         message: `Another session is already active for ${session.plant}`,
-        conflictSessionId: conflict.id,
-        conflictFileName: conflict.csvFileName,
+        conflictSessionId: c.id,
+        conflictFileName: c.csv_file_name,
       });
     }
 
     const userCode = (req.user as any)?.userCode ?? null;
 
-    // Mark session active
-    await db.update(orderImportSessions)
-      .set({ scanStatus: 'active', scanActivatedByCode: userCode, scanActivatedAt: new Date() })
-      .where(eq(orderImportSessions.id, id));
+    // Mark session active (inside the same transaction)
+    await client.query(
+      `UPDATE order_import_sessions
+       SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = NOW()
+       WHERE id = $2`,
+      [userCode, id],
+    );
 
-    // Pre-populate orderScanItems if not already done
-    const existingItems = await db.select({ id: orderScanItems.id })
-      .from(orderScanItems).where(eq(orderScanItems.sessionId, id));
+    // Pre-populate orderScanItems only if none exist yet.
+    // The lock on the session row above means only one request can reach here
+    // at a time, so there is no double-insert race.
+    const existingResult = await client.query(
+      'SELECT id FROM order_scan_items WHERE session_id = $1 LIMIT 1',
+      [id],
+    );
 
-    if (existingItems.length === 0) {
-      const importItems = await db.select().from(orderImportItems)
-        .where(eq(orderImportItems.sessionId, id));
+    if (existingResult.rows.length === 0) {
+      const importItemsResult = await client.query(
+        'SELECT * FROM order_import_items WHERE session_id = $1',
+        [id],
+      );
+      const importItems = importItemsResult.rows;
 
       if (importItems.length > 0) {
-        // Batch-fetch products for pallet size lookup
-        const barcodes = importItems.map((i) => i.barcode).filter(Boolean) as string[];
-        const productRows = barcodes.length
-          ? await db.select({
-              barcode: products.barcode,
-              itemsPerPallet: products.itemsPerPallet,
-              valPlt: products.valPlt,
-              indPlt: products.indPlt,
-            }).from(products)
-          : [];
+        const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
+        let productMap = new Map<string, any>();
+        if (barcodes.length > 0) {
+          const prodResult = await client.query(
+            `SELECT barcode, items_per_pallet, val_plt, ind_plt
+             FROM products WHERE barcode = ANY($1)`,
+            [barcodes],
+          );
+          prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
+        }
 
-        const productMap = new Map(productRows.map((p) => [p.barcode, p]));
+        const vals: any[] = [];
+        const placeholders: string[] = [];
+        let pi = 1;
+        for (const item of importItems) {
+          const prod = item.barcode ? productMap.get(item.barcode) : null;
+          // Reuse getPalletSize but with snake_case keys from pg driver
+          const prodObj = prod
+            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet }
+            : null;
+          const palletSize = prodObj ? getPalletSize(prodObj, session.plant) : 0;
+          vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
+          placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
+          pi += 7;
+        }
 
-        await db.insert(orderScanItems).values(
-          importItems.map((item) => {
-            const prod = item.barcode ? productMap.get(item.barcode) : null;
-            const palletSize = prod ? getPalletSize(prod, session.plant) : 0;
-            return {
-              sessionId: id,
-              orderImportItemId: item.id,
-              barcode: item.barcode,
-              itemName: item.itemName,
-              sapCode: item.sapCode,
-              expectedQty: item.quantity ?? 0,
-              itemsPerPallet: palletSize,
-            };
-          }),
+        await client.query(
+          `INSERT INTO order_scan_items
+             (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+           VALUES ${placeholders.join(',')}`,
+          vals,
         );
       }
     }
 
+    await client.query('COMMIT');
     res.json({ success: true });
   } catch (err) {
+    await client.query('ROLLBACK');
     res.status(500).json({ message: err instanceof Error ? err.message : 'Activation failed' });
+  } finally {
+    client.release();
   }
 });
 
@@ -366,99 +393,117 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
 });
 
 // ── POST /api/order-scan/sessions/:id/scan ───────────────────────────────────
-// Records a scan event. Updates the matching orderScanItem totals atomically.
-// Body: { barcode, pallets, looseQty, isExtra }
+// Records a scan event inside a serialised transaction.
+// The server determines isExtra from the LOCKED current DB state — the client
+// hint is ignored — so concurrent scans by different users never race on the
+// order-vs-extra decision. UPDATE...RETURNING eliminates the stale read-after-
+// write that previously caused SSE broadcasts to carry an old snapshot.
 router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ message: 'Invalid session ID' });
 
+  const { barcode, pallets = 1, looseQty = 0, stv = null } = req.body as {
+    barcode: string; pallets: number; looseQty: number; isExtra?: boolean; stv?: string | null;
+  };
+  if (!barcode) return res.status(400).json({ message: 'barcode is required' });
+
+  const client = await pool.connect();
   try {
-    const { barcode, pallets = 1, looseQty = 0, isExtra = false, stv = null } = req.body as {
-      barcode: string; pallets: number; looseQty: number; isExtra: boolean; stv?: string | null;
-    };
+    await client.query('BEGIN');
 
-    if (!barcode) return res.status(400).json({ message: 'barcode is required' });
+    // Verify session exists (no lock needed — session row isn't mutated here)
+    const sessResult = await client.query(
+      'SELECT id, plant FROM order_import_sessions WHERE id = $1',
+      [sessionId],
+    );
+    if (!sessResult.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Session not found' });
+    }
 
-    const [session] = await db.select().from(orderImportSessions)
-      .where(eq(orderImportSessions.id, sessionId));
-    if (!session) return res.status(404).json({ message: 'Session not found' });
+    // Lock the scan-item row for this barcode so concurrent scans on the same
+    // item are serialised and each sees the previous scan's committed qty.
+    const itemResult = await client.query(
+      `SELECT * FROM order_scan_items
+       WHERE session_id = $1 AND barcode = $2
+       FOR UPDATE`,
+      [sessionId, barcode],
+    );
+    const scanItem = itemResult.rows[0] ?? null;
 
-    // Find matching scan item
-    const [scanItem] = await db.select().from(orderScanItems)
-      .where(and(
-        eq(orderScanItems.sessionId, sessionId),
-        eq(orderScanItems.barcode, barcode),
-      ));
-
-    const itemsPerPallet = scanItem?.itemsPerPallet ?? 0;
+    const itemsPerPallet = Number(scanItem?.items_per_pallet ?? 0);
     const totalQty = Math.round(pallets * Math.max(1, itemsPerPallet)) + looseQty;
-
     const userCode = (req.user as any)?.userCode ?? null;
     const userName  = (req.user as any)?.name ?? null;
 
-    // Insert scan event
-    const [event] = await db.insert(orderScanEvents).values({
-      sessionId,
-      scanItemId: scanItem?.id ?? null,
-      barcode,
-      itemName: scanItem?.itemName ?? null,
-      pallets,
-      looseQty,
-      totalQty,
-      itemsPerPallet,
-      isExtra: isExtra || !scanItem,
-      stv: stv ?? null,
-      scannedByCode: userCode,
-      scannedByName: userName,
-    }).returning();
+    // Server-side isExtra: barcode not in order OR item already fully received
+    const isExtraActual = !scanItem
+      || (Number(scanItem.total_scanned_qty ?? 0) >= Number(scanItem.expected_qty ?? 0));
 
-    // Update scan item totals atomically (avoid race conditions)
-    // Skip update when isExtra=true — extra boxes should not inflate total_scanned_qty
-    let updatedItem = null;
-    if (scanItem && !isExtra) {
-      await pool.query(
+    // Record the scan event
+    const eventResult = await client.query(
+      `INSERT INTO order_scan_events
+         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+          items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING *`,
+      [sessionId, scanItem?.id ?? null, barcode, scanItem?.item_name ?? null,
+       pallets, looseQty, totalQty, itemsPerPallet, isExtraActual,
+       stv ?? null, userCode, userName],
+    );
+    const event = eventResult.rows[0];
+
+    // Update running totals — only for in-order scans, using RETURNING to get
+    // the committed value in the same round-trip (no stale read-after-write).
+    let updatedItem: any = null;
+    if (scanItem && !isExtraActual) {
+      const updateResult = await client.query(
         `UPDATE order_scan_items
-         SET scanned_pallets    = COALESCE(scanned_pallets, 0)    + $1,
-             scanned_loose_qty  = COALESCE(scanned_loose_qty, 0)  + $2,
-             total_scanned_qty  = COALESCE(total_scanned_qty, 0)  + $3,
+         SET scanned_pallets    = COALESCE(scanned_pallets,   0) + $1,
+             scanned_loose_qty  = COALESCE(scanned_loose_qty, 0) + $2,
+             total_scanned_qty  = COALESCE(total_scanned_qty, 0) + $3,
              status             = CASE
                WHEN COALESCE(total_scanned_qty, 0) + $3 >= expected_qty THEN 'complete'
                WHEN COALESCE(total_scanned_qty, 0) + $3 > 0             THEN 'partial'
                ELSE 'pending'
              END,
              last_scanned_at    = NOW()
-         WHERE id = $4`,
+         WHERE id = $4
+         RETURNING *`,
         [pallets, looseQty, totalQty, scanItem.id],
       );
-
-      const result = await pool.query('SELECT * FROM order_scan_items WHERE id = $1', [scanItem.id]);
-      updatedItem = result.rows[0];
+      updatedItem = updateResult.rows[0];
     }
 
-    // Push the scan result to all SSE subscribers for this session
+    await client.query('COMMIT');
+
+    // Broadcast after commit so subscribers always see the committed state
     broadcastScanEvent(sessionId, {
       type: 'scan',
       item: updatedItem ? {
-        id:               updatedItem.id,
-        barcode:          updatedItem.barcode,
-        totalScannedQty:  updatedItem.total_scanned_qty,
-        scannedPallets:   updatedItem.scanned_pallets,
-        scannedLooseQty:  updatedItem.scanned_loose_qty,
-        status:           updatedItem.status,
-        lastScannedAt:    updatedItem.last_scanned_at,
+        id:              updatedItem.id,
+        barcode:         updatedItem.barcode,
+        totalScannedQty: updatedItem.total_scanned_qty,
+        scannedPallets:  updatedItem.scanned_pallets,
+        scannedLooseQty: updatedItem.scanned_loose_qty,
+        status:          updatedItem.status,
+        lastScannedAt:   updatedItem.last_scanned_at,
       } : null,
       event: {
         barcode:       event.barcode,
-        itemName:      event.itemName,
-        totalQty:      event.totalQty,
-        isExtra:       event.isExtra,
-        scannedByName: event.scannedByName,
+        itemName:      event.item_name,
+        totalQty:      event.total_qty,
+        isExtra:       event.is_extra,
+        scannedByName: event.scanned_by_name,
       },
     });
 
     res.status(201).json({ event, updatedItem });
   } catch (err) {
+    await client.query('ROLLBACK');
     res.status(500).json({ message: err instanceof Error ? err.message : 'Scan failed' });
+  } finally {
+    client.release();
   }
 });
 
