@@ -744,6 +744,9 @@ export const orderImportSessions = pgTable("order_import_sessions", {
   scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
   scanActivatedAt: timestamp("scan_activated_at"),
   scanCompletedAt: timestamp("scan_completed_at"),
+  // Soft-delete: keeps scan_items/scan_events intact so history/reports survive
+  isDeleted: boolean("is_deleted").default(false).notNull(),
+  deletedAt: timestamp("deleted_at"),
 });
 
 export const orderImportItems = pgTable("order_import_items", {

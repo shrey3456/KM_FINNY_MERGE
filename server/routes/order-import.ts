@@ -27,11 +27,12 @@ router.get('/order-import/sessions', async (req, res) => {
     if (dateTo) dateTo.setHours(23, 59, 59, 999);
 
     const conditions = [
+      eq(orderImportSessions.isDeleted, false),
       dateFrom ? gte(orderImportSessions.createdAt, dateFrom) : null,
       dateTo   ? lte(orderImportSessions.createdAt, dateTo)   : null,
     ].filter(Boolean);
 
-    const where = conditions.length > 0 ? and(...(conditions as any[])) : undefined;
+    const where = and(...(conditions as any[]));
 
     const [{ total }] = await db
       .select({ total: sql<number>`count(*)::int` })
@@ -120,10 +121,15 @@ router.get('/order-import/sessions/:id/items', async (req: Request, res: Respons
 });
 
 // DELETE /api/order-import/sessions/:id
+// Soft-delete: marks the session as deleted so it disappears from the import list
+// but all related scan_items and scan_events are preserved for history and reports.
 router.delete('/order-import/sessions/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    await db.delete(orderImportSessions).where(eq(orderImportSessions.id, id));
+    await db
+      .update(orderImportSessions)
+      .set({ isDeleted: true, deletedAt: new Date() })
+      .where(eq(orderImportSessions.id, id));
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Delete failed' });

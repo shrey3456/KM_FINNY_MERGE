@@ -228,7 +228,9 @@ export default function OrderImport() {
       setSelectedFile(null);
       setLastImport({ rowCount: data.rowCount });
       setCurrentPage(1);
+      // Invalidate both tables so they reflect the new import immediately
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       toast({
         title: "Import complete",
         description: `${data.rowCount} rows imported.`,
@@ -242,7 +244,14 @@ export default function OrderImport() {
   const loadForScanMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
-    onSuccess: () => navigate("/order-scan"),
+    onSuccess: () => {
+      // Refresh all queries that depend on session state so every view updates
+      // immediately — the scanner's /scan page, the monitor, and the import list.
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+      navigate("/order-scan");
+    },
     onError: (err: any) =>
       toast({ title: "Cannot load for scan", description: err.message, variant: "destructive" }),
   });

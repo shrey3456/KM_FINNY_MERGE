@@ -931,4 +931,88 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
   }
 });
 
+// ── Scan History: every individual scan event with scanner, time, item, qty ──
+// Supports filters: date, scanner name, type (regular/extra), free-text search.
+router.get('/reports/scan-history', async (_req: Request, res: Response) => {
+  try {
+    const req = _req;
+    const limit  = Math.max(1, Math.min(100, parseInt(String(req.query.limit  ?? '20'), 10) || 20));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+
+    const dateParam    = typeof req.query.date    === 'string' && req.query.date.trim()    ? req.query.date.trim()    : null;
+    const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
+    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra'].includes(req.query.type) ? req.query.type : null;
+    const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
+
+    const conditions: string[] = [];
+    const params: (string | boolean)[] = [];
+
+    if (dateParam)    { params.push(dateParam);    conditions.push(`DATE(ose.scanned_at) = $${params.length}`); }
+    if (scannerParam) { params.push(scannerParam); conditions.push(`ose.scanned_by_name = $${params.length}`); }
+    if (typeParam === 'regular') conditions.push(`ose.is_extra = false`);
+    if (typeParam === 'extra')   conditions.push(`ose.is_extra = true`);
+    if (searchParam) {
+      params.push(`%${searchParam.toLowerCase()}%`);
+      const n = params.length;
+      conditions.push(`(LOWER(COALESCE(ose.item_name,'')) LIKE $${n} OR LOWER(COALESCE(ose.barcode,'')) LIKE $${n} OR LOWER(COALESCE(ose.scanned_by_name,'')) LIKE $${n})`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const baseFrom = `FROM order_scan_events ose JOIN order_import_sessions ois ON ois.id = ose.session_id ${where}`;
+
+    const [dataRes, countRes, summaryRes, scannersRes] = await Promise.all([
+      pool.query(
+        `SELECT
+           ose.id,
+           ose.barcode,
+           ose.item_name        AS "itemName",
+           ose.pallets,
+           ose.total_qty        AS "totalQty",
+           ose.items_per_pallet AS "itemsPerPallet",
+           ose.loose_qty        AS "looseQty",
+           ose.is_extra         AS "isExtra",
+           ose.stv,
+           ose.scanned_by_code  AS "scannedByCode",
+           ose.scanned_by_name  AS "scannedByName",
+           ose.scanned_at       AS "scannedAt",
+           ois.csv_file_name    AS "orderName",
+           ois.plant
+         ${baseFrom}
+         ORDER BY ose.scanned_at DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limit, offset],
+      ),
+      pool.query(`SELECT COUNT(*) AS total ${baseFrom}`, params),
+      pool.query(
+        `SELECT
+           COALESCE(SUM(ose.total_qty), 0)                          AS "totalBoxes",
+           COALESCE(SUM(ose.pallets), 0)                            AS "totalPallets",
+           COUNT(*) FILTER (WHERE ose.is_extra = true)              AS "extraCount"
+         ${baseFrom}`,
+        params,
+      ),
+      pool.query(
+        `SELECT DISTINCT ose.scanned_by_name AS name
+         FROM order_scan_events ose
+         WHERE ose.scanned_by_name IS NOT NULL
+         ORDER BY ose.scanned_by_name`,
+      ),
+    ]);
+
+    return res.json({
+      items:        dataRes.rows,
+      total:        parseInt(countRes.rows[0].total, 10),
+      totalBoxes:   parseInt(summaryRes.rows[0].totalBoxes, 10),
+      totalPallets: parseFloat(summaryRes.rows[0].totalPallets),
+      extraCount:   parseInt(summaryRes.rows[0].extraCount, 10),
+      scanners:     scannersRes.rows.map((r: any) => r.name as string),
+      limit,
+      offset,
+    });
+  } catch (error) {
+    console.error('Error generating scan history:', error);
+    return res.status(500).json({ error: 'Failed to generate scan history' });
+  }
+});
+
 export default router;

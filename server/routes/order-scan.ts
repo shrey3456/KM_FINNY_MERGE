@@ -4,7 +4,7 @@ import {
   orderImportSessions, orderImportItems, orderScanItems, orderScanEvents,
   products, users, plants, plantStvs,
 } from '../../shared/schema';
-import { eq, and, ne, desc, asc, gte, lte, sql } from 'drizzle-orm';
+import { eq, and, ne, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
@@ -186,15 +186,14 @@ router.get('/order-scan/stvs', async (req: Request, res: Response) => {
 });
 
 // ── GET /api/order-scan/sessions ─────────────────────────────────────────────
-// Returns today's import sessions with scan status + importer/activator names.
+// Returns recent import sessions (last 48 h) with scan status + names.
+// Using a 48-hour window avoids midnight-boundary timezone issues where
+// sessions imported late at night would disappear from "today" the next morning.
 // Dispatch users see only their plant.
 router.get('/order-scan/sessions', async (req: Request, res: Response) => {
   try {
     const plantFilter = getPlantFilter(req.user);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
     const importedBy  = alias(users, 'imported_by');
     const activatedBy = alias(users, 'activated_by');
@@ -219,8 +218,8 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
       .leftJoin(activatedBy, eq(orderImportSessions.scanActivatedByCode, activatedBy.userCode))
       .where(
         and(
-          gte(orderImportSessions.createdAt, today),
-          lte(orderImportSessions.createdAt, tomorrow),
+          eq(orderImportSessions.isDeleted, false),
+          gte(orderImportSessions.createdAt, cutoff),
           ...(plantFilter
             ? [plantEq(plantFilter)]
             : []),
