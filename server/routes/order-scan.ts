@@ -42,12 +42,17 @@ export function initOrderScanWs(httpServer: HttpServer) {
   httpServer.on('upgrade', (request, socket, head) => {
     try {
       const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
-      if (url.pathname !== '/ws/order-scan') return; // let Vite HMR or others handle their own paths
+      if (url.pathname !== '/ws/order-scan') {
+        // In production there is no Vite HMR, so no other handler will claim this socket.
+        // Destroy it to prevent file-descriptor leaks from unhandled upgrade requests.
+        if (process.env.NODE_ENV === 'production') socket.destroy();
+        return;
+      }
       wss.handleUpgrade(request, socket as any, head, (ws) => {
         wss.emit('connection', ws, request);
       });
     } catch {
-      // Malformed URL — ignore
+      socket.destroy();
     }
   });
 
