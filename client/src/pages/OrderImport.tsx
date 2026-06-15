@@ -135,6 +135,22 @@ type ScanSession = {
   scanActivatedByName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null;
 };
 
+// Timestamps from Drizzle come without 'Z', so the browser treats them as local
+// time instead of UTC. Append 'Z' to force UTC parsing, then display in IST.
+function fmtIST(dt: string | Date | null | undefined): string {
+  if (!dt) return "—";
+  const s = String(dt);
+  const d = new Date(s.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(s) ? s : s + "Z");
+  return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+}
+
+function getLocalISODate(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export default function OrderImport() {
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -146,7 +162,7 @@ export default function OrderImport() {
 
   // Form state
   const [plant, setPlant] = useState("");
-  const [orderDate, setOrderDate] = useState(new Date().toISOString().split("T")[0]);
+  const [orderDate, setOrderDate] = useState(getLocalISODate());
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   // CSV parse result
@@ -166,12 +182,15 @@ export default function OrderImport() {
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
 
-  // Server-side pagination + date filters (default to today)
-  const todayStr = new Date().toISOString().split("T")[0];
+  // Server-side pagination + date filter (default to today)
+  const todayStr = getLocalISODate();
   const [pageSize, setPageSize] = useState(10);
   const [currentPage, setCurrentPage] = useState(1);
-  const [dateFrom, setDateFrom] = useState(todayStr);
-  const [dateTo, setDateTo] = useState(todayStr);
+  const [filterDate, setFilterDate] = useState(todayStr);
+
+  // Load CSV for Scan — plant and date filters
+  const [scanPlant, setScanPlant] = useState("");
+  const [scanDate, setScanDate] = useState(todayStr);
 
   // ── Queries ────────────────────────────────────────────────────────────────
   type SessionsResponse = {
@@ -183,14 +202,13 @@ export default function OrderImport() {
   };
 
   const sessionsQuery = useQuery<SessionsResponse>({
-    queryKey: ["/api/order-import/sessions", currentPage, pageSize, dateFrom, dateTo],
+    queryKey: ["/api/order-import/sessions", currentPage, pageSize, filterDate],
     queryFn: async () => {
       const params = new URLSearchParams({
         page: String(currentPage),
         pageSize: String(pageSize),
       });
-      if (dateFrom) params.set("dateFrom", dateFrom);
-      if (dateTo)   params.set("dateTo",   dateTo);
+      if (filterDate) params.set("date", filterDate);
       return (await apiRequest("GET", `/api/order-import/sessions?${params}`)).json();
     },
   });
@@ -207,10 +225,17 @@ export default function OrderImport() {
     queryFn: async () => (await apiRequest("GET", "/api/plants")).json(),
   });
 
-  // Today's sessions for the "Load for Scan" panel (billing/admin/super-admin only)
+  // Sessions for the "Load for Scan" panel (billing/admin/super-admin only)
+  // Filtered by selected plant and date
   const scanSessionsQuery = useQuery<ScanSession[]>({
-    queryKey: ["/api/order-scan/sessions"],
-    queryFn: async () => (await apiRequest("GET", "/api/order-scan/sessions")).json(),
+    queryKey: ["/api/order-scan/sessions", scanPlant, scanDate],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (scanPlant) params.set("plant", scanPlant);
+      if (scanDate)  params.set("date",  scanDate);
+      const qs = params.toString();
+      return (await apiRequest("GET", `/api/order-scan/sessions${qs ? `?${qs}` : ""}`)).json();
+    },
     enabled: isImportRole,
     refetchInterval: 20000,
   });
@@ -257,13 +282,22 @@ export default function OrderImport() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: async (id: number) =>
-      (await apiRequest("DELETE", `/api/order-import/sessions/${id}`)).json(),
+    mutationFn: async (id: number) => {
+      await apiRequest("DELETE", `/api/order-import/sessions/${id}`);
+    },
     onSuccess: (_, id) => {
       setDeleteTarget(null);
       if (expandedId === id) setExpandedId(null);
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+
+      // Remove immediately from both caches so the UI updates without waiting for refetch
+      qc.setQueriesData<ScanSession[]>(
+        { queryKey: ["/api/order-scan/sessions"], exact: false },
+        (old) => old?.filter((s) => s.id !== id) ?? old,
+      );
+
+      // Then invalidate to sync fresh data from the server
+      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], exact: false });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], exact: false });
       toast({ title: "Session deleted" });
     },
     onError: (err: any) =>
@@ -370,7 +404,7 @@ export default function OrderImport() {
   function clearForm() {
     setSelectedFile(null);
     setLastImport(null);
-    setOrderDate(new Date().toISOString().split("T")[0]);
+    setOrderDate(getLocalISODate());
     if (fileRef.current) fileRef.current.value = "";
   }
 
@@ -561,34 +595,36 @@ export default function OrderImport() {
                 </div>
               </div>
 
-              {/* Date filters */}
+              {/* Date filter — single date, defaults to today; clear to show all */}
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex items-center gap-1.5">
-                  <Label className="text-xs text-gray-500 whitespace-nowrap">From</Label>
+                  <Label className="text-xs text-gray-500 whitespace-nowrap">Date</Label>
                   <Input
                     type="date"
-                    value={dateFrom}
-                    onChange={(e) => { setDateFrom(e.target.value); setCurrentPage(1); }}
+                    value={filterDate}
+                    onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
                     className="h-8 w-[140px] text-xs"
                   />
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <Label className="text-xs text-gray-500 whitespace-nowrap">To</Label>
-                  <Input
-                    type="date"
-                    value={dateTo}
-                    onChange={(e) => { setDateTo(e.target.value); setCurrentPage(1); }}
-                    className="h-8 w-[140px] text-xs"
-                  />
-                </div>
-                {(dateFrom || dateTo) && (
+                {filterDate && (
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="h-8 px-2 text-xs text-gray-500 hover:text-red-600"
-                    onClick={() => { setDateFrom(""); setDateTo(""); setCurrentPage(1); }}
+                    className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                    title="Clear date filter"
+                    onClick={() => { setFilterDate(""); setCurrentPage(1); }}
                   >
-                    <X className="mr-1 h-3 w-3" /> Clear
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                {filterDate !== todayStr && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                    onClick={() => { setFilterDate(todayStr); setCurrentPage(1); }}
+                  >
+                    Today
                   </Button>
                 )}
                 {sessionsQuery.isFetching && (
@@ -604,7 +640,7 @@ export default function OrderImport() {
               ) : sessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                   <FileUp className="h-10 w-10 mb-2 opacity-20" />
-                  <p className="text-sm">{dateFrom || dateTo ? "No sessions match the selected dates." : "No imports yet."}</p>
+                  <p className="text-sm">{filterDate ? `No imports found for ${filterDate}.` : "No imports yet. Try selecting a date or importing a CSV."}</p>
                 </div>
               ) : (
                 <>
@@ -634,7 +670,7 @@ export default function OrderImport() {
                                 <span className="text-xs text-gray-500">{session.plant}</span>
                                 <span className="text-xs text-gray-300">·</span>
                                 <span className="text-xs text-gray-500">
-                                  {new Date(session.createdAt!).toLocaleString()}
+                                  {fmtIST(session.createdAt)}
                                 </span>
                                 <span className="text-xs text-gray-300">·</span>
                                 <span className="inline-flex items-center gap-1 text-xs text-[#001d6e] font-medium">
@@ -795,7 +831,7 @@ export default function OrderImport() {
         {isImportRole && (
           <Card className="rounded-md">
             <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <div className="flex h-8 w-8 items-center justify-center rounded bg-[#001d6e]/10">
                     <PackageCheck className="h-4 w-4 text-[#001d6e]" />
@@ -807,14 +843,63 @@ export default function OrderImport() {
                     </p>
                   </div>
                 </div>
-                <Button
-                  size="sm" variant="outline"
-                  onClick={() => scanSessionsQuery.refetch()}
-                  disabled={scanSessionsQuery.isFetching}
-                >
-                  <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
-                  Refresh
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Plant filter */}
+                  {plantOptions.length > 0 ? (
+                    <Select value={scanPlant || "_all_"} onValueChange={(v) => setScanPlant(v === "_all_" ? "" : v)}>
+                      <SelectTrigger className="h-8 w-[150px] text-xs">
+                        <SelectValue placeholder="All plants" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="_all_">All plants</SelectItem>
+                        {plantOptions.map((p) => (
+                          <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input
+                      value={scanPlant}
+                      onChange={(e) => setScanPlant(e.target.value)}
+                      placeholder="Plant…"
+                      className="h-8 w-[120px] text-xs"
+                    />
+                  )}
+                  {/* Date filter */}
+                  <Input
+                    type="date"
+                    value={scanDate}
+                    onChange={(e) => setScanDate(e.target.value)}
+                    className="h-8 w-[140px] text-xs"
+                  />
+                  {scanDate && (
+                    <Button
+                      size="sm" variant="ghost"
+                      className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                      title="Clear date filter"
+                      onClick={() => setScanDate("")}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                  {scanDate !== todayStr && (
+                    <Button
+                      size="sm" variant="ghost"
+                      className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                      onClick={() => setScanDate(todayStr)}
+                    >
+                      Today
+                    </Button>
+                  )}
+                  <Button
+                    size="sm" variant="outline"
+                    onClick={() => scanSessionsQuery.refetch()}
+                    disabled={scanSessionsQuery.isFetching}
+                  >
+                    <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
+                    Refresh
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="pt-0">
@@ -825,7 +910,9 @@ export default function OrderImport() {
               ) : (scanSessionsQuery.data ?? []).length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-10 text-gray-400">
                   <ScanLine className="h-8 w-8 mb-2 opacity-30" />
-                  <p className="text-sm">No sessions found for today. Import a CSV first.</p>
+                  <p className="text-sm">
+                    No sessions found{scanPlant ? ` for ${scanPlant}` : ""} on {scanDate === todayStr ? "today" : scanDate}.
+                  </p>
                 </div>
               ) : (
                 <div className="divide-y rounded-md border overflow-hidden">
@@ -862,7 +949,7 @@ export default function OrderImport() {
                             )}
                             {isCompleted && s.scanCompletedAt && (
                               <span className="text-xs text-green-700 font-medium">
-                                · Done {new Date(s.scanCompletedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                · Done {fmtIST(s.scanCompletedAt)}
                               </span>
                             )}
                           </div>
