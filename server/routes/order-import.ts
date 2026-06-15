@@ -1,35 +1,35 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { db } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
-import { eq, desc, and, gte, lte, sql } from 'drizzle-orm';
+import { eq, desc, and, sql } from 'drizzle-orm';
 
 const router = Router();
 
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
   const role = ((req.user as any)?.role ?? '').toLowerCase();
-  if (role !== 'admin' && role !== 'super-admin')
-    return res.status(403).json({ message: 'Admin access required' });
+  if (!['admin', 'super-admin', 'billing'].includes(role))
+    return res.status(403).json({ message: 'Access required' });
   next();
 }
 
 router.use('/order-import', requireAdmin);
 
-// GET /api/order-import/sessions?page=1&pageSize=10&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD
+// GET /api/order-import/sessions?page=1&pageSize=10&date=YYYY-MM-DD
 router.get('/order-import/sessions', async (req, res) => {
   try {
     const page     = Math.max(1, parseInt(String(req.query.page     ?? '1')));
     const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? '10'))));
-    const dateFrom = req.query.dateFrom ? new Date(String(req.query.dateFrom)) : null;
-    const dateTo   = req.query.dateTo   ? new Date(String(req.query.dateTo))   : null;
 
-    // dateTo should cover the full day
-    if (dateTo) dateTo.setHours(23, 59, 59, 999);
+    // Single date filter using IST timezone so UTC-stored timestamps are compared correctly.
+    // (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date = '2025-06-16'
+    const dateCondition = req.query.date
+      ? sql`(${orderImportSessions.createdAt} AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date = ${String(req.query.date)}::date`
+      : null;
 
     const conditions = [
       eq(orderImportSessions.isDeleted, false),
-      dateFrom ? gte(orderImportSessions.createdAt, dateFrom) : null,
-      dateTo   ? lte(orderImportSessions.createdAt, dateTo)   : null,
+      dateCondition,
     ].filter(Boolean);
 
     const where = and(...(conditions as any[]));

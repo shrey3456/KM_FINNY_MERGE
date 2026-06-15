@@ -273,19 +273,28 @@ router.get('/order-scan/stvs', async (req: Request, res: Response) => {
 });
 
 // ── GET /api/order-scan/sessions ─────────────────────────────────────────────
-// Returns recent import sessions (last 48 h) with scan status + names.
-// Using a 48-hour window avoids midnight-boundary timezone issues where
-// sessions imported late at night would disappear from "today" the next morning.
+// Returns import sessions with scan status + names.
 // Dispatch users see only their plant.
+// Admin/billing: no plant filter by default; may pass ?plant= to filter by plant.
+// ?date=YYYY-MM-DD filters to that day; defaults to today's sessions (last 48 h).
 router.get('/order-scan/sessions', async (req: Request, res: Response) => {
   try {
-    const plantFilter = getPlantFilter(req.user);
-    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const userPlantFilter = getPlantFilter(req.user);
+
+    // Admin/billing can filter by plant via query param; dispatch uses their own plant
+    const queryPlant = req.query.plant ? String(req.query.plant).trim() : null;
+    const plantFilter = userPlantFilter ?? (queryPlant || null);
+
+    // Date filter using IST timezone so UTC-stored timestamps compare correctly.
+    // No date param → fall back to last 48 hours (avoids midnight boundary edge cases).
+    const dateCondition = req.query.date
+      ? sql`(${orderImportSessions.createdAt} AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date = ${String(req.query.date)}::date`
+      : gte(orderImportSessions.createdAt, new Date(Date.now() - 48 * 60 * 60 * 1000));
 
     const importedBy  = alias(users, 'imported_by');
     const activatedBy = alias(users, 'activated_by');
 
-    let q = db
+    const sessions = await db
       .select({
         id:                   orderImportSessions.id,
         plant:                orderImportSessions.plant,
@@ -306,15 +315,12 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
       .where(
         and(
           eq(orderImportSessions.isDeleted, false),
-          gte(orderImportSessions.createdAt, cutoff),
-          ...(plantFilter
-            ? [plantEq(plantFilter)]
-            : []),
+          dateCondition,
+          ...(plantFilter ? [plantEq(plantFilter)] : []),
         ),
       )
       .orderBy(desc(orderImportSessions.createdAt));
 
-    const sessions = await q;
     res.json(sessions);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch sessions' });

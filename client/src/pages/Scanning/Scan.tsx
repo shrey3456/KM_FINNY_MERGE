@@ -328,11 +328,16 @@ export default function ScanOrderPage() {
   const [osLooseQty, setOsLooseQty] = useState(0);
   const [osQty, setOsQty] = useState(1); // total boxes — user-editable; pallets auto-calculated
   const [osSelectedStv, setOsSelectedStv] = useState("");
+  const lastSelectedStvRef = useRef("");
   const [osSearch, setOsSearch] = useState("");
   const [osManualCode, setOsManualCode] = useState("");
   const [osRecentScans, setOsRecentScans] = useState<{ barcode: string; name: string; total: number; isExtra: boolean }[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
+  useEffect(() => {
+    lastSelectedStvRef.current = "";
+    setOsSelectedStv("");
+  }, [activeOrderScanSession?.id]);
 
   const osItemsQuery = useQuery<OsScanItem[]>({
     queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"],
@@ -361,24 +366,13 @@ export default function ScanOrderPage() {
     mutationFn: (payload: { barcode: string; pallets: number; looseQty: number; isExtra: boolean; stv: string | null }) =>
       apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/scan`, payload).then((r) => r.json()),
 
-    onMutate: (payload) => {
-      // Fire-and-forget — do NOT await. Awaiting cancelQueries blocks the optimistic
-      // update until any in-flight refetch finishes cancelling, causing the exact
-      // delay the user feels. We accept the tiny risk of a stale refetch overwriting;
-      // onSuccess/WS message will immediately reconcile if that happens.
-      queryClient.cancelQueries({ queryKey: osItemsKey });
-
+    onMutate: async (payload) => {
+      // Cancel any in-flight refetch so it doesn't overwrite our optimistic update
+      await queryClient.cancelQueries({ queryKey: osItemsKey });
       const previousItems = queryClient.getQueryData<OsScanItem[]>(osItemsKey);
       const previousPending = osPendingRef.current; // save before clearing
 
-      // Close dialog immediately — 0ms perceived delay
-      setOsPending(null);
-      osPendingRef.current = null;
-      setOsQty(1);
-      setOsSelectedStv("");
-      setOsManualCode("");
-
-      // Optimistically update the table for the scanning device
+      // Only optimistically update if the barcode matched a CSV item (not an extra)
       const matched = previousPending?.matchedItem;
       if (matched && !payload.isExtra) {
         const itemsPerPallet = previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
@@ -416,6 +410,12 @@ export default function ScanOrderPage() {
           ...prev.slice(0, 4),
         ]);
       }
+
+      // Close dialog immediately — user sees instant response
+      setOsPending(null);
+      osPendingRef.current = null;
+      setOsQty(1);
+      setOsManualCode("");
 
       return { previousItems, previousPending };
     },
@@ -486,7 +486,7 @@ export default function ScanOrderPage() {
     setOsQty(Math.max(1, plantPalletSize || 1)); // pre-fill with 1 pallet worth of boxes
     setOsPallets(1);
     setOsLooseQty(0);
-    setOsSelectedStv("");
+    setOsSelectedStv(lastSelectedStvRef.current);
     setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize: Math.max(1, plantPalletSize || 1) });
   };
 
@@ -2053,7 +2053,30 @@ export default function ScanOrderPage() {
                   )}
                 </div>
               )}
-
+               {stvs.length > 0 && (
+                <div className="space-y-1">
+                  <Label className="text-sm">STV <span className="text-red-500">*</span></Label>
+                  <Select
+                    value={osSelectedStv || NO_STV}
+                    onValueChange={(v) => {
+                      const nextValue = v === NO_STV ? "" : v;
+                      setOsSelectedStv(nextValue);
+                      lastSelectedStvRef.current = nextValue;
+                    }}
+                  >
+                    <SelectTrigger className={`w-full ${!osSelectedStv ? "border-dashed text-gray-400" : ""}`}>
+                      <SelectValue placeholder="Select STV…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                      {stvs.map((s) => (
+                        <SelectItem key={s} value={s}>{s}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              
               {/* Qty input — user edits boxes; pallets auto-calculated */}
               <div className="space-y-1">
                 <Label className="text-sm">Qty (boxes)</Label>
@@ -2082,27 +2105,10 @@ export default function ScanOrderPage() {
                   </div>
                 </div>
               )}
-
-              {stvs.length > 0 && (
-                <div className="space-y-1">
-                  <Label className="text-sm">STV <span className="text-red-500">*</span></Label>
-                  <Select value={osSelectedStv || NO_STV} onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}>
-                    <SelectTrigger className={`w-full ${!osSelectedStv ? "border-dashed text-gray-400" : ""}`}>
-                      <SelectValue placeholder="Select STV…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NO_STV}>— Select STV —</SelectItem>
-                      {stvs.map((s) => (
-                        <SelectItem key={s} value={s}>{s}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
             </div>
 
             <DialogFooter className="gap-2">
-              <Button variant="outline" onClick={() => { setOsPending(null); osPendingRef.current = null; setOsSelectedStv(""); }}>
+              <Button variant="outline" onClick={() => { setOsPending(null); osPendingRef.current = null; }}>
                 Cancel
               </Button>
               <Button
