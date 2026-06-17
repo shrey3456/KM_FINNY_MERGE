@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   FileUp,
+  History,
   Loader2,
   PackageCheck,
   RefreshCw,
@@ -135,13 +136,15 @@ type ScanSession = {
   scanActivatedByName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null;
 };
 
-// Timestamps from Drizzle come without 'Z', so the browser treats them as local
-// time instead of UTC. Append 'Z' to force UTC parsing, then display in IST.
+// DB stores timestamps in IST (server local time). The pg driver reads them as UTC
+// and JSON serializes with Z, shifting the time by +5:30. To undo this, display
+// using timeZone "UTC" so the raw stored value (= actual IST time) is shown as-is.
 function fmtIST(dt: string | Date | null | undefined): string {
   if (!dt) return "—";
-  const s = String(dt);
-  const d = new Date(s.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(s) ? s : s + "Z");
-  return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  const s = dt instanceof Date ? dt.toISOString() : String(dt);
+  const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-IN", { timeZone: "UTC" });
 }
 
 function getLocalISODate(date = new Date()): string {
@@ -177,16 +180,17 @@ export default function OrderImport() {
   const [showMappingDialog, setShowMappingDialog] = useState(false);
 
   // Session view
+  const [showHistory, setShowHistory] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [itemSearch, setItemSearch] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
 
-  // Server-side pagination + date filter (default to today)
+  // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
   const [pageSize, setPageSize] = useState(10);
   const [currentPage, setCurrentPage] = useState(1);
-  const [filterDate, setFilterDate] = useState(todayStr);
+  const [filterDate, setFilterDate] = useState("");
 
   // Load CSV for Scan — plant and date filters
   const [scanPlant, setScanPlant] = useState("");
@@ -253,6 +257,10 @@ export default function OrderImport() {
       setSelectedFile(null);
       setLastImport({ rowCount: data.rowCount });
       setCurrentPage(1);
+      // Clear date filter so the new session is always visible regardless of timezone
+      setFilterDate("");
+      // Auto-open history so user sees the new import immediately
+      setShowHistory(true);
       // Invalidate both tables so they reflect the new import immediately
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
@@ -425,45 +433,60 @@ export default function OrderImport() {
   const plantOptions = (plantsQuery.data ?? []).filter((p) => p.name && p.name.trim() !== "");
 
   return (
-    <main className="min-h-screen bg-gray-50 p-4 sm:p-6 lg:p-8">
-      {/* ── Header ── */}
-      <div className="mx-auto max-w-7xl space-y-6">
+    <main className="min-h-screen bg-gray-50 p-3 sm:p-5 lg:p-8">
+      <div className="mx-auto max-w-3xl space-y-4">
+
+        {/* ── Header ── */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-md bg-[#001d6e] text-white">
-              <FileUp className="h-6 w-6" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[#001d6e] text-white">
+              <FileUp className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold text-gray-950">Order Import</h1>
-              <p className="text-sm text-gray-600">
-                Upload a CSV, map columns to the fixed schema, and import order rows.
-              </p>
+              <h1 className="text-xl font-semibold text-gray-950">Order Import</h1>
+              <p className="text-xs text-gray-500">Upload CSV, map columns, and import order rows.</p>
             </div>
           </div>
-          <Button
-            variant="outline"
-            onClick={() => sessionsQuery.refetch()}
-            disabled={sessionsQuery.isFetching}
-          >
-            <RefreshCw className={`mr-2 h-4 w-4 ${sessionsQuery.isFetching ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
+          <div className="flex gap-2 flex-wrap">
+            <Button
+              variant={showHistory ? "default" : "outline"}
+              size="sm"
+              onClick={() => setShowHistory(!showHistory)}
+              className={showHistory ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}
+            >
+              <History className="mr-2 h-4 w-4" />
+              Import History
+              {totalSessions > 0 && (
+                <Badge className={`ml-1.5 px-1.5 py-0 text-xs ${showHistory ? "bg-white/20 text-white" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
+                  {totalSessions}
+                </Badge>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => sessionsQuery.refetch()}
+              disabled={sessionsQuery.isFetching}
+            >
+              <RefreshCw className={`mr-2 h-4 w-4 ${sessionsQuery.isFetching ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
         </div>
 
-        {/* ── Two-column layout ── */}
-        <div className="grid gap-6 xl:grid-cols-[420px_1fr]">
-          {/* Left: upload card */}
-          <Card className="rounded-md">
-            <CardHeader>
-              <CardTitle className="text-lg">Upload CSV File</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-5">
-              {/* Plant */}
-              <div className="grid gap-2">
-                <Label htmlFor="oi-plant">Plant</Label>
+        {/* ── Upload Card ── */}
+        <Card className="rounded-md">
+          <CardHeader className="pb-4">
+            <CardTitle className="text-base">Upload CSV File</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Plant + Date row */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="grid gap-1.5">
+                <Label htmlFor="oi-plant" className="text-sm">Plant</Label>
                 {plantOptions.length > 0 ? (
                   <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
-                    <SelectTrigger id="oi-plant" className="w-full">
+                    <SelectTrigger id="oi-plant" className="h-10 w-full">
                       <SelectValue placeholder="Select plant…" />
                     </SelectTrigger>
                     <SelectContent>
@@ -476,113 +499,116 @@ export default function OrderImport() {
                 ) : (
                   <Input
                     id="oi-plant"
+                    className="h-10"
                     value={plant}
                     onChange={(e) => setPlant(e.target.value)}
                     placeholder="e.g. Valsad"
                   />
                 )}
               </div>
-
-              {/* Order Date */}
-              <div className="grid gap-2">
-                <Label htmlFor="oi-date">Order Date</Label>
+              <div className="grid gap-1.5">
+                <Label htmlFor="oi-date" className="text-sm">Order Date</Label>
                 <Input
                   id="oi-date"
                   type="date"
+                  className="h-10"
                   value={orderDate}
                   onChange={(e) => setOrderDate(e.target.value)}
                 />
               </div>
+            </div>
 
-              {/* File input */}
-              <div className="grid gap-2">
-                <Label htmlFor="oi-file">CSV File</Label>
-                <Input
-                  ref={fileRef}
-                  id="oi-file"
-                  type="file"
-                  accept=".csv"
-                  onChange={handleFileChange}
-                  disabled={importMutation.isPending}
-                />
-                {selectedFile && (
-                  <p className="text-sm text-gray-600">
-                    {selectedFile.name} ({Math.max(1, Math.round(selectedFile.size / 1024))} KB)
-                  </p>
+            {/* File input */}
+            <div className="grid gap-1.5">
+              <Label htmlFor="oi-file" className="text-sm">CSV File</Label>
+              <Input
+                ref={fileRef}
+                id="oi-file"
+                type="file"
+                accept=".csv"
+                className="h-10"
+                onChange={handleFileChange}
+                disabled={importMutation.isPending}
+              />
+              {selectedFile && (
+                <p className="text-xs text-gray-500">
+                  {selectedFile.name} ({Math.max(1, Math.round(selectedFile.size / 1024))} KB)
+                </p>
+              )}
+            </div>
+
+            {/* Success */}
+            {lastImport && (
+              <Alert className="border-green-200 bg-green-50 text-green-900">
+                <CheckCircle className="h-4 w-4 text-green-700" />
+                <AlertDescription>
+                  Successfully imported <strong>{lastImport.rowCount}</strong> rows.
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {/* Error */}
+            {importMutation.isError && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{(importMutation.error as Error).message}</AlertDescription>
+              </Alert>
+            )}
+
+            {/* Actions */}
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button
+                variant="outline"
+                className="h-10"
+                onClick={clearForm}
+                disabled={!selectedFile || importMutation.isPending}
+              >
+                Clear
+              </Button>
+              <Button
+                className="h-10 bg-[#001d6e] hover:bg-[#00154b] text-white"
+                onClick={handleImportClick}
+                disabled={!selectedFile || !plant.trim() || importMutation.isPending}
+              >
+                {importMutation.isPending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Upload className="mr-2 h-4 w-4" />
                 )}
+                Map &amp; Import
+              </Button>
+            </div>
+
+            {/* Fixed schema info */}
+            <div className="rounded-md border border-dashed bg-gray-50 px-3 py-2.5">
+              <p className="mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">Target columns</p>
+              <div className="flex flex-wrap gap-1.5">
+                {TARGET_FIELDS.map((f) => (
+                  <span key={f.key} className="rounded bg-[#001d6e]/10 px-2 py-0.5 text-xs font-medium text-[#001d6e]">
+                    {f.label}
+                  </span>
+                ))}
               </div>
+            </div>
+          </CardContent>
+        </Card>
 
-              {/* Success */}
-              {lastImport && (
-                <Alert className="border-green-200 bg-green-50 text-green-900">
-                  <CheckCircle className="h-4 w-4 text-green-700" />
-                  <AlertDescription>
-                    Successfully imported <strong>{lastImport.rowCount}</strong> rows.
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {/* Error */}
-              {importMutation.isError && (
-                <Alert variant="destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{(importMutation.error as Error).message}</AlertDescription>
-                </Alert>
-              )}
-
-              {/* Actions */}
-              <div className="flex justify-end gap-2">
-                <Button
-                  variant="outline"
-                  onClick={clearForm}
-                  disabled={!selectedFile || importMutation.isPending}
-                >
-                  Clear
-                </Button>
-                <Button
-                  onClick={handleImportClick}
-                  disabled={!selectedFile || !plant.trim() || importMutation.isPending}
-                  className="bg-[#001d6e] hover:bg-[#00154b] text-white"
-                >
-                  {importMutation.isPending ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Upload className="mr-2 h-4 w-4" />
-                  )}
-                  Map &amp; Import
-                </Button>
-              </div>
-
-              {/* Fixed schema info */}
-              <div className="rounded-md border border-dashed bg-gray-50 px-4 py-3">
-                <p className="mb-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Target columns</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {TARGET_FIELDS.map((f) => (
-                    <span key={f.key} className="rounded bg-[#001d6e]/10 px-2 py-0.5 text-xs font-medium text-[#001d6e]">
-                      {f.label}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Right: import history */}
+        {/* ── Import History (toggled) ── */}
+        {showHistory && (
           <Card className="rounded-md">
             <CardHeader className="pb-3 space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <CardTitle className="text-lg">Import History</CardTitle>
+                  <CardTitle className="text-base">Import History</CardTitle>
                   <p className="text-xs text-gray-500 mt-0.5">{totalSessions} total sessions</p>
                 </div>
-                {/* Page size selector */}
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-gray-500">Show</span>
                   <Select
                     value={String(pageSize)}
                     onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1); }}
                   >
-                    <SelectTrigger className="h-8 w-[70px] text-xs">
+                    <SelectTrigger className="h-8 w-[65px] text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -591,56 +617,44 @@ export default function OrderImport() {
                       <SelectItem value="50">50</SelectItem>
                     </SelectContent>
                   </Select>
-                  <span className="text-xs text-gray-500">per page</span>
                 </div>
               </div>
 
-              {/* Date filter — single date, defaults to today; clear to show all */}
+              {/* Date filter */}
               <div className="flex flex-wrap items-center gap-2">
-                <div className="flex items-center gap-1.5">
-                  <Label className="text-xs text-gray-500 whitespace-nowrap">Date</Label>
-                  <Input
-                    type="date"
-                    value={filterDate}
-                    onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
-                    className="h-8 w-[140px] text-xs"
-                  />
-                </div>
+                <Label className="text-xs text-gray-500 whitespace-nowrap">Date</Label>
+                <Input
+                  type="date"
+                  value={filterDate}
+                  onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
+                  className="h-8 w-[140px] text-xs"
+                />
                 {filterDate && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
-                    title="Clear date filter"
-                    onClick={() => { setFilterDate(""); setCurrentPage(1); }}
-                  >
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                    onClick={() => { setFilterDate(""); setCurrentPage(1); }}>
                     <X className="h-3.5 w-3.5" />
                   </Button>
                 )}
                 {filterDate !== todayStr && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
-                    onClick={() => { setFilterDate(todayStr); setCurrentPage(1); }}
-                  >
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                    onClick={() => { setFilterDate(todayStr); setCurrentPage(1); }}>
                     Today
                   </Button>
                 )}
-                {sessionsQuery.isFetching && (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />
-                )}
+                {sessionsQuery.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
               </div>
             </CardHeader>
             <CardContent className="p-0">
               {sessionsQuery.isLoading ? (
-                <div className="flex items-center justify-center py-16">
+                <div className="flex items-center justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
               ) : sessions.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
-                  <FileUp className="h-10 w-10 mb-2 opacity-20" />
-                  <p className="text-sm">{filterDate ? `No imports found for ${filterDate}.` : "No imports yet. Try selecting a date or importing a CSV."}</p>
+                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                  <FileUp className="h-9 w-9 mb-2 opacity-20" />
+                  <p className="text-sm text-center px-4">
+                    {filterDate ? `No imports found for ${filterDate}.` : "No imports yet."}
+                  </p>
                 </div>
               ) : (
                 <>
@@ -649,100 +663,97 @@ export default function OrderImport() {
                       const importerName = (session as any).importedByName || session.importedByCode || "Unknown";
                       return (
                         <div key={session.id}>
-                          {/* Session header row */}
+                          {/* Session row */}
                           <div
-                            className="flex cursor-pointer items-center gap-3 px-5 py-3 hover:bg-gray-50"
+                            className="cursor-pointer px-4 py-3 hover:bg-gray-50 active:bg-gray-100"
                             onClick={() => {
                               setExpandedId(expandedId === session.id ? null : session.id);
                               setItemSearch("");
                             }}
                           >
-                            <span className="shrink-0 text-gray-400">
-                              {expandedId === session.id
-                                ? <ChevronDown className="h-4 w-4" />
-                                : <ChevronRight className="h-4 w-4" />}
-                            </span>
-                            <div className="flex-1 min-w-0">
-                              <p className="truncate text-sm font-medium text-gray-900">
-                                {session.csvFileName}
-                              </p>
-                              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
-                                <span className="text-xs text-gray-500">{session.plant}</span>
-                                <span className="text-xs text-gray-300">·</span>
-                                <span className="text-xs text-gray-500">
-                                  {fmtIST(session.createdAt)}
-                                </span>
-                                <span className="text-xs text-gray-300">·</span>
-                                <span className="inline-flex items-center gap-1 text-xs text-[#001d6e] font-medium">
-                                  <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-                                  </svg>
-                                  {importerName}
-                                </span>
+                            <div className="flex items-start gap-2">
+                              <span className="mt-0.5 shrink-0 text-gray-400">
+                                {expandedId === session.id
+                                  ? <ChevronDown className="h-4 w-4" />
+                                  : <ChevronRight className="h-4 w-4" />}
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                <p className="truncate text-sm font-medium text-gray-900">{session.csvFileName}</p>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                  <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{session.plant}</span>
+                                  <span className="text-xs text-gray-400">{fmtIST(session.createdAt)}</span>
+                                  <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+                                    <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                      <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+                                    </svg>
+                                    {importerName}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1 ml-1">
+                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5">
+                                  {session.rowCount}
+                                </Badge>
+                                {(session as any).scanStatus !== "completed" && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    title="Load for scanning"
+                                    className="h-8 w-8 p-0 text-gray-400 hover:text-[#001d6e]"
+                                    disabled={loadForScanMutation.isPending}
+                                    onClick={(e) => { e.stopPropagation(); loadForScanMutation.mutate(session.id); }}
+                                  >
+                                    {loadForScanMutation.isPending
+                                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                      : <ScanLine className="h-3.5 w-3.5" />}
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-8 w-8 p-0 text-gray-400 hover:text-red-600"
+                                  onClick={(e) => { e.stopPropagation(); setDeleteTarget(session.id); }}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
                               </div>
                             </div>
-                            <Badge className="shrink-0 bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs">
-                              {session.rowCount} rows
-                            </Badge>
-                            {(session as any).scanStatus !== "completed" && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                title="Load for scanning"
-                                className="h-7 w-7 shrink-0 p-0 text-gray-400 hover:text-[#001d6e]"
-                                disabled={loadForScanMutation.isPending}
-                                onClick={(e) => { e.stopPropagation(); loadForScanMutation.mutate(session.id); }}
-                              >
-                                {loadForScanMutation.isPending
-                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                  : <ScanLine className="h-3.5 w-3.5" />}
-                              </Button>
-                            )}
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 w-7 shrink-0 p-0 text-gray-400 hover:text-red-600"
-                              onClick={(e) => { e.stopPropagation(); setDeleteTarget(session.id); }}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
                           </div>
 
-                          {/* Expanded rows */}
+                          {/* Expanded items */}
                           {expandedId === session.id && (
-                            <div className="border-t bg-gray-50/60 px-5 py-4">
+                            <div className="border-t bg-gray-50/60 px-4 py-3">
                               <div className="mb-3 flex items-center gap-2">
-                                <div className="relative flex-1 max-w-xs">
+                                <div className="relative flex-1">
                                   <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                                   <Input
                                     value={itemSearch}
                                     onChange={(e) => setItemSearch(e.target.value)}
                                     placeholder="Search rows…"
-                                    className="pl-8 h-8 text-sm"
+                                    className="pl-8 h-9 text-sm"
                                   />
                                 </div>
                                 {itemSearch && (
-                                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0"
+                                  <Button size="sm" variant="ghost" className="h-9 w-9 p-0"
                                     onClick={() => setItemSearch("")}>
                                     <X className="h-3.5 w-3.5" />
                                   </Button>
                                 )}
-                                <span className="ml-auto text-xs text-gray-500">
-                                  {filteredItems.length} of {allItems.length}
+                                <span className="text-xs text-gray-500 whitespace-nowrap">
+                                  {filteredItems.length}/{allItems.length}
                                 </span>
                               </div>
-
                               {itemsQuery.isLoading ? (
                                 <div className="flex justify-center py-6">
                                   <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
                                 </div>
                               ) : (
                                 <div className="overflow-x-auto rounded-md border">
-                                  <table className="w-max min-w-full border-collapse text-sm">
+                                  <table className="w-max min-w-full border-collapse text-xs">
                                     <thead>
                                       <tr>
-                                        {["#", "Barcode", "Item Name", "SAP Code", "Qty", "Exp. Pallets", "Date"].map((h) => (
-                                          <th key={h} className="sticky top-0 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-2 text-left text-xs font-semibold text-[#001d6e]">
+                                        {["#", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "Date"].map((h) => (
+                                          <th key={h} className="sticky top-0 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-2 text-left font-semibold text-[#001d6e]">
                                             {h}
                                           </th>
                                         ))}
@@ -751,13 +762,13 @@ export default function OrderImport() {
                                     <tbody>
                                       {filteredItems.map((item, idx) => (
                                         <tr key={item.id} className={`border-b ${idx % 2 === 1 ? "bg-gray-50" : "bg-white"} hover:bg-blue-50/30`}>
-                                          <td className="border-r px-3 py-1.5 text-xs text-gray-400">{idx + 1}</td>
-                                          <td className="border-r px-3 py-1.5 text-xs">{item.barcode || "—"}</td>
-                                          <td className="max-w-[240px] truncate border-r px-3 py-1.5 text-xs" title={item.itemName ?? ""}>{item.itemName || "—"}</td>
-                                          <td className="border-r px-3 py-1.5 text-xs">{item.sapCode || "—"}</td>
-                                          <td className="border-r px-3 py-1.5 text-right text-xs">{item.quantity ?? 0}</td>
-                                          <td className="border-r px-3 py-1.5 text-right text-xs">{item.expectedPallets ?? "—"}</td>
-                                          <td className="px-3 py-1.5 text-xs">{(item as any).date || "—"}</td>
+                                          <td className="border-r px-3 py-1.5 text-gray-400">{idx + 1}</td>
+                                          <td className="border-r px-3 py-1.5">{item.barcode || "—"}</td>
+                                          <td className="max-w-[200px] truncate border-r px-3 py-1.5" title={item.itemName ?? ""}>{item.itemName || "—"}</td>
+                                          <td className="border-r px-3 py-1.5">{item.sapCode || "—"}</td>
+                                          <td className="border-r px-3 py-1.5 text-right">{item.quantity ?? 0}</td>
+                                          <td className="border-r px-3 py-1.5 text-right">{item.expectedPallets ?? "—"}</td>
+                                          <td className="px-3 py-1.5">{(item as any).date || "—"}</td>
                                         </tr>
                                       ))}
                                     </tbody>
@@ -771,51 +782,37 @@ export default function OrderImport() {
                     })}
                   </div>
 
-                  {/* Pagination controls */}
+                  {/* Pagination */}
                   {totalPages > 1 && (
-                    <div className="flex items-center justify-between border-t px-5 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3">
                       <span className="text-xs text-gray-500">
-                        Page {safePage} of {totalPages} &nbsp;·&nbsp; {totalSessions} sessions
+                        Page {safePage} of {totalPages} · {totalSessions} sessions
                       </span>
                       <div className="flex items-center gap-1">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 px-2 text-xs"
-                          disabled={safePage <= 1}
-                          onClick={() => setCurrentPage(safePage - 1)}
-                        >
+                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs"
+                          disabled={safePage <= 1} onClick={() => setCurrentPage(safePage - 1)}>
                           ← Prev
                         </Button>
                         {Array.from({ length: totalPages }, (_, i) => i + 1)
                           .filter((p) => p === 1 || p === totalPages || Math.abs(p - safePage) <= 1)
                           .reduce<(number | "…")[]>((acc, p, i, arr) => {
                             if (i > 0 && (p as number) - (arr[i - 1] as number) > 1) acc.push("…");
-                            acc.push(p);
-                            return acc;
+                            acc.push(p); return acc;
                           }, [])
                           .map((p, i) =>
                             p === "…" ? (
                               <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
                             ) : (
-                              <Button
-                                key={p}
-                                size="sm"
+                              <Button key={p} size="sm"
                                 variant={p === safePage ? "default" : "outline"}
-                                className={`h-7 w-7 p-0 text-xs ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
-                                onClick={() => setCurrentPage(p as number)}
-                              >
+                                className={`h-8 w-8 p-0 text-xs ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
+                                onClick={() => setCurrentPage(p as number)}>
                                 {p}
                               </Button>
                             )
                           )}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 px-2 text-xs"
-                          disabled={safePage >= totalPages}
-                          onClick={() => setCurrentPage(safePage + 1)}
-                        >
+                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs"
+                          disabled={safePage >= totalPages} onClick={() => setCurrentPage(safePage + 1)}>
                           Next →
                         </Button>
                       </div>
@@ -825,29 +822,26 @@ export default function OrderImport() {
               )}
             </CardContent>
           </Card>
-        </div>{/* end two-column grid */}
+        )}
 
-        {/* ── Load CSV for Scan — full width ── */}
+        {/* ── Load CSV for Scan ── */}
         {isImportRole && (
           <Card className="rounded-md">
             <CardHeader className="pb-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded bg-[#001d6e]/10">
+                  <div className="flex h-8 w-8 items-center justify-center rounded bg-[#001d6e]/10 shrink-0">
                     <PackageCheck className="h-4 w-4 text-[#001d6e]" />
                   </div>
                   <div>
                     <CardTitle className="text-base">Load CSV for Scan</CardTitle>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      Select a session and load it so dispatch staff can scan against it
-                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5">Load a session so dispatch staff can scan against it</p>
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {/* Plant filter */}
                   {plantOptions.length > 0 ? (
                     <Select value={scanPlant || "_all_"} onValueChange={(v) => setScanPlant(v === "_all_" ? "" : v)}>
-                      <SelectTrigger className="h-8 w-[150px] text-xs">
+                      <SelectTrigger className="h-8 w-[130px] text-xs">
                         <SelectValue placeholder="All plants" />
                       </SelectTrigger>
                       <SelectContent>
@@ -858,44 +852,25 @@ export default function OrderImport() {
                       </SelectContent>
                     </Select>
                   ) : (
-                    <Input
-                      value={scanPlant}
-                      onChange={(e) => setScanPlant(e.target.value)}
-                      placeholder="Plant…"
-                      className="h-8 w-[120px] text-xs"
-                    />
+                    <Input value={scanPlant} onChange={(e) => setScanPlant(e.target.value)}
+                      placeholder="Plant…" className="h-8 w-[110px] text-xs" />
                   )}
-                  {/* Date filter */}
-                  <Input
-                    type="date"
-                    value={scanDate}
-                    onChange={(e) => setScanDate(e.target.value)}
-                    className="h-8 w-[140px] text-xs"
-                  />
+                  <Input type="date" value={scanDate} onChange={(e) => setScanDate(e.target.value)}
+                    className="h-8 w-[140px] text-xs" />
                   {scanDate && (
-                    <Button
-                      size="sm" variant="ghost"
-                      className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
-                      title="Clear date filter"
-                      onClick={() => setScanDate("")}
-                    >
+                    <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                      onClick={() => setScanDate("")}>
                       <X className="h-3.5 w-3.5" />
                     </Button>
                   )}
                   {scanDate !== todayStr && (
-                    <Button
-                      size="sm" variant="ghost"
-                      className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
-                      onClick={() => setScanDate(todayStr)}
-                    >
+                    <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                      onClick={() => setScanDate(todayStr)}>
                       Today
                     </Button>
                   )}
-                  <Button
-                    size="sm" variant="outline"
-                    onClick={() => scanSessionsQuery.refetch()}
-                    disabled={scanSessionsQuery.isFetching}
-                  >
+                  <Button size="sm" variant="outline" onClick={() => scanSessionsQuery.refetch()}
+                    disabled={scanSessionsQuery.isFetching}>
                     <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                     Refresh
                   </Button>
@@ -910,8 +885,8 @@ export default function OrderImport() {
               ) : (scanSessionsQuery.data ?? []).length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-10 text-gray-400">
                   <ScanLine className="h-8 w-8 mb-2 opacity-30" />
-                  <p className="text-sm">
-                    No sessions found{scanPlant ? ` for ${scanPlant}` : ""} on {scanDate === todayStr ? "today" : scanDate}.
+                  <p className="text-sm text-center">
+                    No sessions found{scanPlant ? ` for ${scanPlant}` : ""}{scanDate ? ` on ${scanDate === todayStr ? "today" : scanDate}` : ""}.
                   </p>
                 </div>
               ) : (
@@ -921,84 +896,58 @@ export default function OrderImport() {
                     const isCompleted = s.scanStatus === "completed";
                     const canLoad     = !isCompleted;
                     return (
-                      <div
-                        key={s.id}
-                        className={`flex items-center gap-4 px-4 py-3 ${
-                          isActive    ? "bg-amber-50/40" :
-                          isCompleted ? "bg-green-50/30 opacity-75" :
-                                        "bg-white hover:bg-gray-50"
-                        }`}
-                      >
-                        {/* Status dot */}
-                        <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-                          isActive ? "bg-amber-400 animate-pulse" :
-                          isCompleted ? "bg-green-400" : "bg-gray-300"
-                        }`} />
-
-                        {/* File + meta */}
-                        <div className="flex-1 min-w-0">
-                          <p className="truncate text-sm font-medium text-gray-900">{s.csvFileName}</p>
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
-                            <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
-                            <span className="text-xs text-gray-400">{s.rowCount} rows</span>
-                            {s.importedByName && (
-                              <span className="text-xs text-gray-400">· {s.importedByName}</span>
-                            )}
-                            {isActive && s.scanActivatedByName && (
-                              <span className="text-xs text-amber-700 font-medium">· Scanning: {s.scanActivatedByName}</span>
-                            )}
-                            {isCompleted && s.scanCompletedAt && (
-                              <span className="text-xs text-green-700 font-medium">
-                                · Done {fmtIST(s.scanCompletedAt)}
-                              </span>
-                            )}
+                      <div key={s.id}
+                        className={`px-4 py-3 ${isActive ? "bg-amber-50/40" : isCompleted ? "bg-green-50/30 opacity-75" : "bg-white hover:bg-gray-50"}`}>
+                        <div className="flex items-start gap-3">
+                          <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${
+                            isActive ? "bg-amber-400 animate-pulse" : isCompleted ? "bg-green-400" : "bg-gray-300"
+                          }`} />
+                          <div className="flex-1 min-w-0">
+                            <p className="truncate text-sm font-medium text-gray-900">{s.csvFileName}</p>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                              <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
+                              <span className="text-xs text-gray-400">{s.rowCount} rows</span>
+                              {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
+                              {isActive && s.scanActivatedByName && (
+                                <span className="text-xs text-amber-700 font-medium">· Scanning: {s.scanActivatedByName}</span>
+                              )}
+                              {isCompleted && s.scanCompletedAt && (
+                                <span className="text-xs text-green-700 font-medium">· Done {fmtIST(s.scanCompletedAt)}</span>
+                              )}
+                            </div>
+                            {/* Mobile action row */}
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              {isCompleted ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">
+                                  <CheckCircle2 className="h-3 w-3" /> Done
+                                </span>
+                              ) : isActive ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700">
+                                  <ScanLine className="h-3 w-3" /> Active
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-500">Available</span>
+                              )}
+                              {canLoad && (
+                                <Button
+                                  size="sm"
+                                  className={`h-8 text-xs ${isActive ? "bg-amber-600 hover:bg-amber-700 text-white" : "bg-[#001d6e] hover:bg-[#00154b] text-white"}`}
+                                  disabled={loadForScanMutation.isPending}
+                                  onClick={() => loadForScanMutation.mutate(s.id)}
+                                >
+                                  {loadForScanMutation.isPending
+                                    ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                                    : <ScanLine className="mr-1.5 h-3.5 w-3.5" />}
+                                  {isActive ? "View Scan" : "Load for Scan"}
+                                </Button>
+                              )}
+                              <Button size="sm" variant="ghost"
+                                className="h-8 w-8 p-0 text-gray-400 hover:text-red-600"
+                                onClick={() => setDeleteTarget(s.id)}>
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
                           </div>
-                        </div>
-
-                        {/* Status badge */}
-                        <div className="shrink-0">
-                          {isCompleted ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">
-                              <CheckCircle2 className="h-3 w-3" /> Done
-                            </span>
-                          ) : isActive ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700">
-                              <ScanLine className="h-3 w-3" /> Active
-                            </span>
-                          ) : (
-                            <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-500">
-                              Available
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Action buttons */}
-                        <div className="flex shrink-0 items-center gap-2">
-                          {canLoad && (
-                            <Button
-                              size="sm"
-                              className={`text-xs ${
-                                isActive
-                                  ? "bg-amber-600 hover:bg-amber-700 text-white"
-                                  : "bg-[#001d6e] hover:bg-[#00154b] text-white"
-                              }`}
-                              disabled={loadForScanMutation.isPending}
-                              onClick={() => loadForScanMutation.mutate(s.id)}
-                            >
-                              {loadForScanMutation.isPending
-                                ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                                : <ScanLine className="mr-1.5 h-3.5 w-3.5" />}
-                              {isActive ? "View Scan" : "Load for Scan"}
-                            </Button>
-                          )}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-8 w-8 p-0 text-gray-400 hover:text-red-600"
-                            onClick={() => setDeleteTarget(s.id)}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
                         </div>
                       </div>
                     );
@@ -1008,7 +957,7 @@ export default function OrderImport() {
             </CardContent>
           </Card>
         )}
-      </div>{/* end max-w-7xl */}
+      </div>{/* end max-w-3xl */}
 
       {/* ── Column mapping dialog ── */}
       <Dialog

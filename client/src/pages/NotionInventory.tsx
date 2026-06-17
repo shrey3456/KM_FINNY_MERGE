@@ -101,13 +101,15 @@ type ProductColumn = {
   key: keyof Product;
   label: string;
   tone?: "gj" | "mp" | "up";
+  stickyLeft?: number;
+  colWidth?: number;
 };
 
 const productColumns: ProductColumn[] = [
-  { key: "newSr",  label: "New Sr."       },
-  { key: "srNo",   label: "Sr. No."       },
-  { key: "barcode",label: "SKU"           },
-  { key: "name",   label: "Products Name" },
+  { key: "newSr",  label: "New Sr.",       colWidth: 65  },
+  { key: "srNo",   label: "Sr. No.",       colWidth: 70  },
+  { key: "barcode",label: "SKU",           colWidth: 105 },
+  { key: "name",   label: "Products Name", stickyLeft: 0, colWidth: 210 },
   { key: "notionWiseName", label: "Notion Wise Name" },
   { key: "brand", label: "Brand" },
   { key: "category", label: "Category" },
@@ -201,7 +203,8 @@ export default function NotionInventory() {
       const response = await apiRequest("GET", "/api/products?all=true");
       return response.json();
     },
-    staleTime: 15000,
+    staleTime: 5000,
+    refetchOnWindowFocus: true,
   });
 
   const statusQuery = useQuery({
@@ -210,7 +213,8 @@ export default function NotionInventory() {
       const response = await apiRequest("GET", "/api/notion-inventory-sync/status");
       return response.json();
     },
-    refetchInterval: 30000,
+    refetchInterval: 10000,
+    refetchOnWindowFocus: true,
   });
 
   const pendingQuery = useQuery({
@@ -219,7 +223,8 @@ export default function NotionInventory() {
       const response = await apiRequest("GET", "/api/notion-inventory-sync/pending");
       return response.json();
     },
-    refetchInterval: 30000,
+    refetchInterval: 10000,
+    refetchOnWindowFocus: true,
   });
 
   const fullSyncMutation = useMutation({
@@ -624,18 +629,22 @@ export default function NotionInventory() {
 
         {/* Table — only show when there are products */}
         {(productsQuery.isLoading || products.length > 0) && (
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-200px)] min-h-[500px] rounded-b-lg">
-            <table className="w-max min-w-full caption-bottom text-sm border-collapse">
+          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-220px)] min-h-[400px] rounded-b-lg">
+            <table className="w-max min-w-full caption-bottom text-xs border-collapse">
               <thead>
                 <tr>
-                  {productColumns.map((col) => (
-                    <th
-                      key={col.key}
-                      className={`sticky top-0 z-10 min-w-[170px] whitespace-nowrap border-r border-b-2 border-b-gray-300 px-4 py-3.5 text-left text-base font-semibold ${toneHeaderClass(col.tone)}`}
-                    >
-                      {col.label}
-                    </th>
-                  ))}
+                  {productColumns.map((col) => {
+                    const isNameCol = col.key === "name";
+                    return (
+                      <th
+                        key={col.key}
+                        style={{ minWidth: col.colWidth ? `${col.colWidth}px` : "110px" }}
+                        className={`sticky top-0 ${isNameCol ? "md:left-0 md:z-20 z-10" : "z-10"} whitespace-nowrap border-r border-b-2 border-b-gray-300 px-2.5 py-2 text-left text-xs font-semibold ${toneHeaderClass(col.tone)}`}
+                      >
+                        {col.label}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
@@ -659,15 +668,19 @@ export default function NotionInventory() {
                       key={product.id}
                       className={`border-b hover:bg-[#001d6e]/[0.02] ${i % 2 === 0 ? "" : "bg-gray-50/40"}`}
                     >
-                      {productColumns.map((col) => (
-                        <td
-                          key={`${product.id}-${col.key}`}
-                          className={`max-w-[240px] truncate whitespace-nowrap border-r px-4 py-2.5 text-sm ${toneClass(col.tone)}`}
-                          title={cellValue(product, col.key)}
-                        >
-                          {cellValue(product, col.key)}
-                        </td>
-                      ))}
+                      {productColumns.map((col) => {
+                        const isNameCol = col.key === "name";
+                        return (
+                          <td
+                            key={`${product.id}-${col.key}`}
+                            style={{ minWidth: col.colWidth ? `${col.colWidth}px` : "110px" }}
+                            className={`border-r px-2.5 py-1.5 text-xs ${isNameCol ? "md:sticky md:left-0 md:z-[5] whitespace-normal break-words leading-tight" : "whitespace-nowrap max-w-[180px] truncate"} ${toneClass(col.tone)}`}
+                            title={cellValue(product, col.key)}
+                          >
+                            {cellValue(product, col.key)}
+                          </td>
+                        );
+                      })}
                     </tr>
                   ))
                 )}
@@ -749,32 +762,34 @@ export default function NotionInventory() {
                   <Table>
                     <TableHeader>
                       <TableRow className="bg-muted/50">
-                        <TableHead className="w-[180px]">Product</TableHead>
-                        <TableHead className="w-[100px]">SKU</TableHead>
+                        <TableHead className="w-[220px] min-w-[220px]">Product</TableHead>
+                        <TableHead className="w-[90px] min-w-[90px]">SKU</TableHead>
                         <TableHead>Proposed Changes</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {reportToShow.changedProducts.map((pc) => (
                         <TableRow key={pc.productId}>
-                          <TableCell className="font-medium text-sm align-top py-3">{pc.productName}</TableCell>
-                          <TableCell className="text-xs text-muted-foreground align-top py-3">
+                          <TableCell className="font-medium text-xs align-top py-2.5 break-words whitespace-normal leading-tight" title={pc.productName}>
+                            {pc.productName}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground align-top py-2.5">
                             {pc.barcode || pc.srNo || "—"}
                           </TableCell>
-                          <TableCell className="align-top py-3">
+                          <TableCell className="align-top py-2.5">
                             <div className="flex flex-col gap-1">
                               {pc.changes.map((ch, i) => (
                                 <div key={i} className="flex items-start gap-1 text-xs">
-                                  <span className="font-medium text-muted-foreground min-w-[110px]">{ch.label}:</span>
+                                  <span className="font-medium text-muted-foreground min-w-[100px]">{ch.label}:</span>
                                   <span
-                                    className="line-through text-red-500 max-w-[120px] truncate"
+                                    className="line-through text-red-500 max-w-[130px] truncate"
                                     title={String(ch.oldValue ?? "—")}
                                   >
                                     {ch.oldValue != null && ch.oldValue !== "" ? String(ch.oldValue) : "—"}
                                   </span>
                                   <span className="text-gray-400 mx-1">→</span>
                                   <span
-                                    className="text-green-700 font-medium max-w-[120px] truncate"
+                                    className="text-green-700 font-medium max-w-[130px] truncate"
                                     title={String(ch.newValue)}
                                   >
                                     {String(ch.newValue)}
