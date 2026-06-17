@@ -8,7 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import {
   AlertTriangle, ArrowLeft, Camera, CheckCircle2, Clock, Eye,
-  Keyboard, Loader2, PackageCheck, RefreshCw, ScanLine, Search, X,
+  Filter, Keyboard, Loader2, PackageCheck, RefreshCw, ScanLine,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +23,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -306,12 +307,12 @@ function SessionMonitorCard({
                 <Progress value={expandPct} className="h-2 flex-1" />
                 <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{expandDone}/{items.length} done ({expandPct}%)</span>
               </div>
-              <div className="overflow-x-auto rounded border bg-white">
+              <div className="overflow-x-auto overflow-y-auto max-h-64 rounded border bg-white">
                 <table className="w-full border-collapse text-xs">
                   <thead>
                     <tr>
                       {["", "Item", "Expected", "Scanned", "Status"].map((h) => (
-                        <th key={h} className="border-b bg-gray-50 px-3 py-2 text-left text-[11px] font-semibold text-gray-500 whitespace-nowrap">{h}</th>
+                        <th key={h} className="sticky top-0 z-10 border-b bg-gray-50 px-3 py-2 text-left text-[11px] font-semibold text-gray-500 whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -357,7 +358,8 @@ function ScanView() {
   const [, navigate] = useLocation();
 
   const [scanMode, setScanMode] = useState<"camera" | "manual">("camera");
-  const [search, setSearch]     = useState("");
+  const [colFilters, setColFilters] = useState<{ item: string; barcode: string; status: string }>({ item: "", barcode: "", status: "" });
+  const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [pendingScan, setPendingScan] = useState<PendingScan | null>(null);
   const [pallets, setPallets]   = useState(1);
   const [looseQty, setLooseQty] = useState(0);
@@ -486,13 +488,12 @@ function ScanView() {
 
   const items     = itemsQuery.data ?? [];
   const stvs      = stvsQuery.data  ?? [];
-  const filtered  = search
-    ? items.filter((i) =>
-        [i.barcode, i.itemName, i.sapCode].some((v) =>
-          v?.toLowerCase().includes(search.toLowerCase())
-        )
-      )
-    : items;
+  const filtered = items.filter((i) => {
+    if (colFilters.item && !i.itemName?.toLowerCase().includes(colFilters.item.toLowerCase())) return false;
+    if (colFilters.barcode && !i.barcode?.toLowerCase().includes(colFilters.barcode.toLowerCase())) return false;
+    if (colFilters.status && i.status !== colFilters.status) return false;
+    return true;
+  });
 
   const totalItems   = items.length;
   const doneItems    = items.filter((i) => i.status === "complete").length;
@@ -590,27 +591,20 @@ function ScanView() {
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base">Items ({totalItems})</CardTitle>
-                <div className="hidden sm:flex items-center gap-3 text-xs text-gray-500">
-                  <span className="flex items-center gap-1">
-                    <CheckCircle2 className="h-3 w-3 text-green-500" />{doneItems} done
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <ScanLine className="h-3 w-3 text-amber-500" />{partialItems} partial
-                  </span>
+                <div className="flex items-center gap-2">
+                  {(colFilters.item || colFilters.barcode || colFilters.status) && (
+                    <button
+                      className="text-xs text-red-500 hover:underline"
+                      onClick={() => setColFilters({ item: "", barcode: "", status: "" })}
+                    >
+                      Clear filters
+                    </button>
+                  )}
+                  <div className="hidden sm:flex items-center gap-3 text-xs text-gray-500">
+                    <span className="flex items-center gap-1"><CheckCircle2 className="h-3 w-3 text-green-500" />{doneItems} done</span>
+                    <span className="flex items-center gap-1"><ScanLine className="h-3 w-3 text-amber-500" />{partialItems} partial</span>
+                  </div>
                 </div>
-              </div>
-              <div className="relative">
-                <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                <Input
-                  value={search} onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search barcode, name…"
-                  className="pl-8 h-8 text-sm"
-                />
-                {search && (
-                  <button className="absolute right-2 top-2" onClick={() => setSearch("")}>
-                    <X className="h-4 w-4 text-gray-400" />
-                  </button>
-                )}
               </div>
             </CardHeader>
             <CardContent className="p-0">
@@ -619,13 +613,82 @@ function ScanView() {
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
               ) : (
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto overflow-y-auto max-h-[480px]">
                   <table className="w-full border-collapse text-sm">
                     <thead>
                       <tr>
-                        {["", "Item", "Barcode", "Exp", "Pallets", "Loose", "Total", "Status"].map((h) => (
-                          <th key={h} className="sticky top-0 border-b bg-slate-50 px-3 py-2 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">{h}</th>
+                        <th className="sticky top-0 z-10 border-b bg-slate-50 px-3 py-2 w-8" />
+
+                        {/* Item — text filter */}
+                        <th className="sticky top-0 z-10 border-b bg-slate-50 px-3 py-2 text-left whitespace-nowrap">
+                          <Popover open={openFilter === "item"} onOpenChange={(o) => setOpenFilter(o ? "item" : null)}>
+                            <PopoverTrigger asChild>
+                              <button className={`flex items-center gap-1 text-xs font-semibold ${colFilters.item ? "text-[#001d6e]" : "text-gray-600"} hover:text-[#001d6e]`}>
+                                Item
+                                <Filter className={`h-3 w-3 ${colFilters.item ? "fill-[#001d6e]" : "text-gray-400"}`} />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-52 p-3" align="start">
+                              <p className="text-xs font-semibold text-gray-500 mb-2">Filter by Item</p>
+                              <Input autoFocus placeholder="Search item name…" value={colFilters.item}
+                                onChange={(e) => setColFilters((f) => ({ ...f, item: e.target.value }))}
+                                className="h-7 text-xs" />
+                              {colFilters.item && (
+                                <button className="mt-1.5 text-xs text-red-400 hover:underline"
+                                  onClick={() => setColFilters((f) => ({ ...f, item: "" }))}>Clear</button>
+                              )}
+                            </PopoverContent>
+                          </Popover>
+                        </th>
+
+                        {/* Barcode — text filter */}
+                        <th className="sticky top-0 z-10 border-b bg-slate-50 px-3 py-2 text-left whitespace-nowrap">
+                          <Popover open={openFilter === "barcode"} onOpenChange={(o) => setOpenFilter(o ? "barcode" : null)}>
+                            <PopoverTrigger asChild>
+                              <button className={`flex items-center gap-1 text-xs font-semibold ${colFilters.barcode ? "text-[#001d6e]" : "text-gray-600"} hover:text-[#001d6e]`}>
+                                Barcode
+                                <Filter className={`h-3 w-3 ${colFilters.barcode ? "fill-[#001d6e]" : "text-gray-400"}`} />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-52 p-3" align="start">
+                              <p className="text-xs font-semibold text-gray-500 mb-2">Filter by Barcode</p>
+                              <Input autoFocus placeholder="Search barcode…" value={colFilters.barcode}
+                                onChange={(e) => setColFilters((f) => ({ ...f, barcode: e.target.value }))}
+                                className="h-7 text-xs" />
+                              {colFilters.barcode && (
+                                <button className="mt-1.5 text-xs text-red-400 hover:underline"
+                                  onClick={() => setColFilters((f) => ({ ...f, barcode: "" }))}>Clear</button>
+                              )}
+                            </PopoverContent>
+                          </Popover>
+                        </th>
+
+                        {/* Non-filterable columns */}
+                        {["Exp", "Pallets", "Loose", "Total"].map((h) => (
+                          <th key={h} className="sticky top-0 z-10 border-b bg-slate-50 px-3 py-2 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">{h}</th>
                         ))}
+
+                        {/* Status — option filter */}
+                        <th className="sticky top-0 z-10 border-b bg-slate-50 px-3 py-2 text-left whitespace-nowrap">
+                          <Popover open={openFilter === "status"} onOpenChange={(o) => setOpenFilter(o ? "status" : null)}>
+                            <PopoverTrigger asChild>
+                              <button className={`flex items-center gap-1 text-xs font-semibold ${colFilters.status ? "text-[#001d6e]" : "text-gray-600"} hover:text-[#001d6e]`}>
+                                Status
+                                <Filter className={`h-3 w-3 ${colFilters.status ? "fill-[#001d6e]" : "text-gray-400"}`} />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-40 p-2" align="start">
+                              <p className="text-xs font-semibold text-gray-500 mb-1.5">Filter by Status</p>
+                              {([["", "All"], ["complete", "Done"], ["partial", "Partial"], ["pending", "Pending"]] as [string, string][]).map(([val, label]) => (
+                                <button key={val}
+                                  className={`w-full text-left rounded px-2 py-1.5 text-xs transition-colors ${colFilters.status === val ? "bg-[#001d6e] text-white" : "hover:bg-gray-100 text-gray-700"}`}
+                                  onClick={() => { setColFilters((f) => ({ ...f, status: val })); setOpenFilter(null); }}>
+                                  {label}
+                                </button>
+                              ))}
+                            </PopoverContent>
+                          </Popover>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>

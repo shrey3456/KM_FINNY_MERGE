@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, ArrowLeft, Download, Search, RefreshCw,
-  CalendarDays, X, UserCircle, FileDown, History, User,
+  CalendarDays, X, UserCircle, FileDown, History, User, Filter,
 } from "lucide-react";
 import { Link } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
@@ -31,19 +31,15 @@ import { format } from "date-fns";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+// Grouped (merged) extra item — one row per unique barcode, quantities summed across all CSVs
 type ExtraItem = {
-  id: number;
-  sessionId: number;
-  orderName: string;
-  csvName: string;
-  code: string;
+  barcode: string;
   itemName: string;
-  sku: string | null;
-  quantity: number;
-  pallets: number | null;
-  reason: "not_in_order" | "unknown_product";
-  scannedByName: string | null;
-  scannedAt: string | null;
+  totalQuantity: number;
+  totalPallets: number | null;
+  itemsPerPallet: number | null;
+  firstArrived: string | null;
+  lastArrived: string | null;
 };
 
 type StockItem = {
@@ -61,6 +57,7 @@ type StockItem = {
   totalScanned: number;
   totalPallets: number | null;
   orders: Array<{ name: string; status: string }>;
+  lastArrived: string | null;
 };
 
 type ScanHistoryItem = {
@@ -152,6 +149,118 @@ function downloadPdf(filename: string, title: string, rows: Array<Array<string |
   doc.save(filename);
 }
 
+// ─── Column-filter header ─────────────────────────────────────────────────────
+
+function FilterHead({
+  label, colKey, openCol, filters, onToggle, onChange, onClear, className, type = "text",
+}: {
+  label: string; colKey: string; openCol: string | null;
+  filters: Record<string, string>;
+  onToggle: (c: string) => void;
+  onChange:  (c: string, v: string) => void;
+  onClear:   (c: string) => void;
+  className?: string;
+  type?: "text" | "date";
+}) {
+  const isOpen    = openCol === colKey;
+  const hasFilter = !!filters[colKey];
+  const displayVal = type === "date" && filters[colKey]
+    ? format(new Date(filters[colKey] + "T00:00:00"), "MMM d, yyyy")
+    : filters[colKey] ?? "";
+  return (
+    <TableHead className={className}>
+      <div className="relative">
+        <button
+          className="flex items-center gap-1.5 w-full text-white font-semibold uppercase tracking-wide text-[11px] sm:text-xs"
+          onClick={() => onToggle(colKey)}
+        >
+          <span className="flex-1 text-left">
+            {hasFilter && type === "date" ? displayVal : label}
+          </span>
+          <Filter className={`h-3 w-3 shrink-0 ${hasFilter ? "text-yellow-300" : "text-white/50"}`} />
+        </button>
+        {isOpen && (
+          <div
+            className="absolute top-full left-0 z-50 mt-1 bg-white border border-gray-200 rounded-md shadow-xl p-2 min-w-[180px]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {type === "date" ? (
+              <input
+                autoFocus
+                type="date"
+                value={filters[colKey] ?? ""}
+                onChange={(e) => onChange(colKey, e.target.value)}
+                className="h-7 w-full rounded border border-gray-300 px-2 text-xs text-gray-900 focus:outline-none focus:ring-1 focus:ring-[#001d6e]"
+              />
+            ) : (
+              <Input
+                autoFocus
+                value={filters[colKey] ?? ""}
+                onChange={(e) => onChange(colKey, e.target.value)}
+                placeholder={`Filter ${label.toLowerCase()}…`}
+                className="h-7 text-xs text-gray-900"
+              />
+            )}
+            {filters[colKey] && (
+              <button
+                className="mt-1.5 text-[11px] text-red-500 hover:underline block"
+                onClick={() => onClear(colKey)}
+              >
+                Clear filter
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </TableHead>
+  );
+}
+
+function ActiveFilters({
+  filters, labels, onClear, onClearAll, chipCls,
+}: {
+  filters: Record<string, string>;
+  labels: Record<string, string>;
+  onClear: (col: string) => void;
+  onClearAll: () => void;
+  chipCls: string;
+}) {
+  const entries = Object.entries(filters).filter(([, v]) => v);
+  if (entries.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 border-b bg-gray-50/80">
+      <span className="text-[11px] text-gray-400 font-medium shrink-0">Active filters:</span>
+      {entries.map(([col, val]) => (
+        <span
+          key={col}
+          className={`inline-flex items-center gap-1 text-[11px] font-medium rounded-full px-2 py-0.5 border ${chipCls}`}
+        >
+          <span className="opacity-70 font-normal">{labels[col] ?? col}:</span>
+          <span>
+            {col === "lastArrived"
+              ? format(new Date(val + "T00:00:00"), "MMM d, yyyy")
+              : val}
+          </span>
+          <button
+            className="ml-0.5 leading-none hover:opacity-60"
+            onClick={() => onClear(col)}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      {entries.length > 1 && (
+        <button
+          className="text-[11px] text-red-400 hover:underline ml-1"
+          onClick={onClearAll}
+        >
+          Clear all
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function StockReport() {
@@ -164,6 +273,37 @@ export default function StockReport() {
 
   // ── Extras table state ──
   const [extrasPage, setExtrasPage] = useState(1);
+
+  // ── Column filters (Stock table) ──
+  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
+  const [openFilterCol, setOpenFilterCol] = useState<string | null>(null);
+  const toggleFilterCol   = (col: string) => setOpenFilterCol((p) => (p === col ? null : col));
+  const handleColFilter   = (col: string, val: string) => setColumnFilters((p) => ({ ...p, [col]: val }));
+  const clearColFilter    = (col: string) => setColumnFilters((p) => { const n = { ...p }; delete n[col]; return n; });
+  const clearAllColFilters = () => setColumnFilters({});
+
+  // Close filter dropdown on outside click
+  useEffect(() => {
+    if (!openFilterCol) return;
+    const close = () => setOpenFilterCol(null);
+    const t = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => { clearTimeout(t); document.removeEventListener("click", close); };
+  }, [openFilterCol]);
+
+  // ── Extra Items column filters ──
+  const [extraColumnFilters, setExtraColumnFilters] = useState<Record<string, string>>({});
+  const [openExtraFilterCol, setOpenExtraFilterCol] = useState<string | null>(null);
+  const toggleExtraFilterCol   = (col: string) => setOpenExtraFilterCol((p) => (p === col ? null : col));
+  const handleExtraColFilter   = (col: string, val: string) => setExtraColumnFilters((p) => ({ ...p, [col]: val }));
+  const clearExtraColFilter    = (col: string) => setExtraColumnFilters((p) => { const n = { ...p }; delete n[col]; return n; });
+  const clearAllExtraColFilters = () => setExtraColumnFilters({});
+
+  useEffect(() => {
+    if (!openExtraFilterCol) return;
+    const close = () => setOpenExtraFilterCol(null);
+    const t = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => { clearTimeout(t); document.removeEventListener("click", close); };
+  }, [openExtraFilterCol]);
 
   // ── Scan History state ──
   const [historyPage,    setHistoryPage]    = useState(1);
@@ -192,9 +332,10 @@ export default function StockReport() {
     offset: stockOffset,
   });
   const extrasUrl = buildQueryUrl("/api/scan-sessions/reports/extras", {
-    date:   selectedDate || undefined,
-    limit:  EXTRAS_PAGE_SIZE,
-    offset: extrasOffset,
+    date:    selectedDate || undefined,
+    grouped: "true",
+    limit:   EXTRAS_PAGE_SIZE,
+    offset:  extrasOffset,
   });
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
     date:    selectedDate                                    || undefined,
@@ -248,7 +389,7 @@ export default function StockReport() {
   // ── Derived values ──
   const extras         = extrasData?.items ?? [];
   const extrasTotal    = extrasData?.total ?? 0;
-  const totalExtraQty  = extrasData?.totalQuantity ?? extras.reduce((s, e) => s + (e.quantity ?? 0), 0);
+  const totalExtraQty  = extrasData?.totalQuantity ?? extras.reduce((s, e) => s + (e.totalQuantity ?? 0), 0);
   const extrasHasMore  = extrasOffset + extras.length < extrasTotal;
   const extrasPageCount = Math.max(1, Math.ceil(extrasTotal / EXTRAS_PAGE_SIZE));
 
@@ -257,19 +398,50 @@ export default function StockReport() {
   const stockHasMore    = stockOffset + stockItems.length < stockTotal;
   const stockPageCount  = Math.max(1, Math.ceil(stockTotal / STOCK_PAGE_SIZE));
 
-  const filteredStock = search
-    ? stockItems.filter((i) => {
-        const q = search.toLowerCase();
-        return (
-          i.itemName.toLowerCase().includes(q) ||
-          (i.barcode ?? "").toLowerCase().includes(q) ||
-          (i.sku ?? "").toLowerCase().includes(q) ||
-          (i.sapCode ?? "").toLowerCase().includes(q) ||
-          (i.hsnCode ?? "").toLowerCase().includes(q) ||
-          (i.category ?? "").toLowerCase().includes(q)
-        );
-      })
-    : stockItems;
+  const filteredStock = useMemo(() => {
+    let result = stockItems;
+    if (search) {
+      const q = search.toLowerCase();
+      result = result.filter((i) =>
+        i.itemName.toLowerCase().includes(q) ||
+        (i.barcode ?? "").toLowerCase().includes(q) ||
+        (i.sku ?? "").toLowerCase().includes(q) ||
+        (i.sapCode ?? "").toLowerCase().includes(q) ||
+        (i.hsnCode ?? "").toLowerCase().includes(q) ||
+        (i.category ?? "").toLowerCase().includes(q),
+      );
+    }
+    Object.entries(columnFilters).forEach(([col, val]) => {
+      if (!val) return;
+      const v = val.toLowerCase();
+      result = result.filter((i) => {
+        if (col === "itemName") return (i.itemName ?? "").toLowerCase().includes(v);
+        if (col === "barcode")  return ((i.barcode ?? "") || (i.sku ?? "")).toLowerCase().includes(v);
+        if (col === "category") return (i.category ?? "").toLowerCase().includes(v);
+        if (col === "sapCode")  return (i.sapCode ?? "").toLowerCase().includes(v);
+        if (col === "hsnCode")     return (i.hsnCode ?? "").toLowerCase().includes(v);
+        if (col === "lastArrived") return i.lastArrived
+          ? i.lastArrived.startsWith(v)
+          : false;
+        return true;
+      });
+    });
+    return result;
+  }, [stockItems, search, columnFilters]);
+
+  const filteredExtras = useMemo(() => {
+    let result = extras;
+    Object.entries(extraColumnFilters).forEach(([col, val]) => {
+      if (!val) return;
+      const v = val.toLowerCase();
+      result = result.filter((e) => {
+        if (col === "itemName") return (e.itemName ?? "").toLowerCase().includes(v);
+        if (col === "barcode")  return (e.barcode ?? "").toLowerCase().includes(v);
+        return true;
+      });
+    });
+    return result;
+  }, [extras, extraColumnFilters]);
 
   const historyItems      = historyData?.items ?? [];
   const historyTotal      = historyData?.total ?? 0;
@@ -420,19 +592,26 @@ export default function StockReport() {
             </div>
           </div>
 
+          <ActiveFilters
+            filters={columnFilters}
+            labels={{ itemName: "Item", barcode: "Barcode/SKU", category: "Category", sapCode: "SAP Code", hsnCode: "HSN Code", lastArrived: "Date" }}
+            onClear={clearColFilter}
+            onClearAll={clearAllColFilters}
+            chipCls="bg-blue-50 text-blue-700 border-blue-200"
+          />
           <Table className="min-w-[980px] text-xs sm:text-sm">
             <TableHeader>
               <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
                 <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 z-20 bg-[#001d6e] w-[52px] text-[11px] sm:text-xs">SR</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 sm:left-[52px] z-30 bg-[#001d6e] min-w-[180px] text-[11px] sm:text-xs shadow-[2px_0_6px_rgba(0,0,0,0.06)]">Item</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide">Barcode / SKU</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide">Category</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide">SAP Code</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide">HSN Code</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide">Volume (FT³)</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Pallets</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Stock Qty</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide min-w-[220px]">Order(s)</TableHead>
+                <FilterHead label="Item" colKey="itemName" openCol={openFilterCol} filters={columnFilters} onToggle={toggleFilterCol} onChange={handleColFilter} onClear={clearColFilter} className="text-white sticky left-0 sm:left-[52px] z-30 bg-[#001d6e] min-w-[180px] shadow-[2px_0_6px_rgba(0,0,0,0.06)]" />
+                <FilterHead label="Barcode / SKU" colKey="barcode" openCol={openFilterCol} filters={columnFilters} onToggle={toggleFilterCol} onChange={handleColFilter} onClear={clearColFilter} className="text-white bg-[#001d6e]" />
+                <FilterHead label="Category" colKey="category" openCol={openFilterCol} filters={columnFilters} onToggle={toggleFilterCol} onChange={handleColFilter} onClear={clearColFilter} className="text-white bg-[#001d6e]" />
+                <FilterHead label="SAP Code" colKey="sapCode" openCol={openFilterCol} filters={columnFilters} onToggle={toggleFilterCol} onChange={handleColFilter} onClear={clearColFilter} className="text-white bg-[#001d6e]" />
+                <FilterHead label="HSN Code" colKey="hsnCode" openCol={openFilterCol} filters={columnFilters} onToggle={toggleFilterCol} onChange={handleColFilter} onClear={clearColFilter} className="text-white bg-[#001d6e]" />
+                <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px] sm:text-xs">Volume (FT³)</TableHead>
+                <TableHead className="text-white font-semibold uppercase tracking-wide text-right text-[11px] sm:text-xs">Pallets</TableHead>
+                <TableHead className="text-white font-semibold uppercase tracking-wide text-right text-[11px] sm:text-xs">Stock Qty</TableHead>
+                <FilterHead label="Date" colKey="lastArrived" type="date" openCol={openFilterCol} filters={columnFilters} onToggle={toggleFilterCol} onChange={handleColFilter} onClear={clearColFilter} className="text-white bg-[#001d6e] min-w-[140px]" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -488,25 +667,10 @@ export default function StockReport() {
                           {item.totalScanned.toLocaleString()}
                         </span>
                       </TableCell>
-                      <TableCell className="min-w-[220px] max-w-[320px] py-2">
-                        {item.orders.length === 0
-                          ? <span className="text-gray-300 text-xs">—</span>
-                          : (
-                            <div className="flex flex-wrap gap-1.5">
-                              {item.orders.map((o) => (
-                                <Badge
-                                  key={o.name} variant="outline"
-                                  className={`text-xs ${
-                                    o.status === "scanning"
-                                      ? "border-blue-300 bg-blue-50 text-blue-700"
-                                      : "border-emerald-300 bg-emerald-50 text-emerald-700"
-                                  }`}
-                                >
-                                  {o.name}
-                                </Badge>
-                              ))}
-                            </div>
-                          )}
+                      <TableCell className="text-xs text-gray-500 whitespace-nowrap py-2 min-w-[140px]">
+                        {item.lastArrived
+                          ? format(new Date(item.lastArrived), "MMM d, yyyy")
+                          : <span className="text-gray-300">—</span>}
                       </TableCell>
                     </TableRow>
                   );
@@ -542,30 +706,25 @@ export default function StockReport() {
               <Badge variant="outline" className="border-[#001d6e] bg-blue-50 text-[#001d6e] text-sm px-3 py-1">
                 {totalExtraQty.toLocaleString()} total qty
               </Badge>
-              {/* CSV quick download (existing "Get Sheet") */}
               <Button
                 size="sm" variant="outline" className="h-8 text-xs"
                 disabled={extras.length === 0}
                 onClick={() => {
-                  const csv = [
-                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Pallets", "Reason", "Scanned By", "Time"].join(","),
+                  const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                  const rows = [
+                    ["#", "Item Name", "Barcode", "Total Qty", "Total Pallets", "Items/Pallet", "First Arrived", "Last Arrived"],
                     ...extras.map((e, idx) => [
                       idx + 1,
-                      `"${e.orderName}"`,
-                      `"${e.csvName}"`,
-                      `"${e.itemName}"`,
-                      e.code || e.sku || "",
-                      e.quantity ?? 0,
-                      e.pallets != null && Number(e.pallets) > 0 ? parseFloat(String(e.pallets)).toFixed(2) : "",
-                      e.reason === "not_in_order" ? "Not in order" : "Unknown product",
-                      `"${e.scannedByName || ""}"`,
-                      e.scannedAt ? format(new Date(e.scannedAt.replace(/Z$/, "")), "yyyy-MM-dd h:mm a") : "",
-                    ].join(",")),
-                  ].join("\n");
-                  const a = document.createElement("a");
-                  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-                  a.download = `extra-items${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}.csv`;
-                  a.click();
+                      e.itemName,
+                      e.barcode,
+                      e.totalQuantity,
+                      e.totalPallets != null ? parseFloat(String(e.totalPallets)).toFixed(2) : "",
+                      e.itemsPerPallet ?? "",
+                      e.firstArrived ? format(new Date(e.firstArrived), "yyyy-MM-dd") : "",
+                      e.lastArrived  ? format(new Date(e.lastArrived),  "yyyy-MM-dd") : "",
+                    ]),
+                  ];
+                  downloadCsv(`extra-items${suffix}.csv`, rows);
                 }}
               >
                 <Download className="h-4 w-4 mr-1.5" />CSV
@@ -574,18 +733,21 @@ export default function StockReport() {
                 size="sm" variant="outline" className="h-8 text-xs"
                 disabled={extras.length === 0}
                 onClick={() => {
+                  const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
                   const rows = [
-                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Pallets", "Reason", "Scanned By", "Time"],
+                    ["#", "Item Name", "Barcode", "Total Qty", "Total Pallets", "Items/Pallet", "First Arrived", "Last Arrived"],
                     ...extras.map((e, idx) => [
-                      idx + 1, e.orderName, e.csvName, e.itemName, e.code || e.sku || "",
-                      e.quantity ?? 0,
-                      e.pallets != null && Number(e.pallets) > 0 ? parseFloat(String(e.pallets)).toFixed(2) : "",
-                      e.reason === "not_in_order" ? "Not in order" : "Unknown product",
-                      e.scannedByName || "",
-                      e.scannedAt ? format(new Date(e.scannedAt.replace(/Z$/, "")), "yyyy-MM-dd h:mm a") : "",
+                      idx + 1,
+                      e.itemName,
+                      e.barcode,
+                      e.totalQuantity,
+                      e.totalPallets != null ? parseFloat(String(e.totalPallets)).toFixed(2) : "",
+                      e.itemsPerPallet ?? "",
+                      e.firstArrived ? format(new Date(e.firstArrived), "yyyy-MM-dd") : "",
+                      e.lastArrived  ? format(new Date(e.lastArrived),  "yyyy-MM-dd") : "",
                     ]),
                   ];
-                  downloadExcel(`extra-items${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}.xlsx`, rows);
+                  downloadExcel(`extra-items${suffix}.xlsx`, rows);
                 }}
               >
                 <FileDown className="h-3.5 w-3.5 mr-1" />Excel
@@ -594,18 +756,21 @@ export default function StockReport() {
                 size="sm" variant="outline" className="h-8 text-xs"
                 disabled={extras.length === 0}
                 onClick={() => {
+                  const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
                   const rows = [
-                    ["#", "Order", "CSV", "Item Name", "Barcode/SKU", "Qty", "Pallets", "Reason", "Scanned By", "Time"],
+                    ["#", "Item Name", "Barcode", "Total Qty", "Total Pallets", "Items/Pallet", "First Arrived", "Last Arrived"],
                     ...extras.map((e, idx) => [
-                      idx + 1, e.orderName, e.csvName, e.itemName, e.code || e.sku || "",
-                      e.quantity ?? 0,
-                      e.pallets != null && Number(e.pallets) > 0 ? parseFloat(String(e.pallets)).toFixed(2) : "",
-                      e.reason === "not_in_order" ? "Not in order" : "Unknown product",
-                      e.scannedByName || "",
-                      e.scannedAt ? format(new Date(e.scannedAt.replace(/Z$/, "")), "yyyy-MM-dd h:mm a") : "",
+                      idx + 1,
+                      e.itemName,
+                      e.barcode,
+                      e.totalQuantity,
+                      e.totalPallets != null ? parseFloat(String(e.totalPallets)).toFixed(2) : "",
+                      e.itemsPerPallet ?? "",
+                      e.firstArrived ? format(new Date(e.firstArrived), "yyyy-MM-dd") : "",
+                      e.lastArrived  ? format(new Date(e.lastArrived),  "yyyy-MM-dd") : "",
                     ]),
                   ];
-                  downloadPdf(`extra-items${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}.pdf`, "Extra Items Report", rows);
+                  downloadPdf(`extra-items${suffix}.pdf`, "Extra Items Report", rows);
                 }}
               >
                 <FileDown className="h-3.5 w-3.5 mr-1" />PDF
@@ -614,70 +779,64 @@ export default function StockReport() {
           </div>
 
           <div className="rounded-md border bg-white overflow-x-auto">
-            <Table className="min-w-[960px] text-xs sm:text-sm">
+            <ActiveFilters
+              filters={extraColumnFilters}
+              labels={{ itemName: "Item", barcode: "Barcode" }}
+              onClear={clearExtraColFilter}
+              onClearAll={clearAllExtraColFilters}
+              chipCls="bg-amber-50 text-amber-700 border-amber-200"
+            />
+            <Table className="min-w-[780px] text-xs sm:text-sm">
               <TableHeader>
                 <TableRow className="bg-amber-600 hover:bg-amber-600">
-                  <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 z-20 bg-amber-600 w-[52px] text-[11px] sm:text-xs">#</TableHead>
-                  <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 sm:left-[52px] z-30 bg-amber-600 min-w-[180px] text-[11px] sm:text-xs shadow-[2px_0_6px_rgba(0,0,0,0.08)]">Item</TableHead>
-                  <TableHead className="text-white font-semibold uppercase tracking-wide">Order</TableHead>
-                  <TableHead className="text-white font-semibold uppercase tracking-wide">Barcode / SKU</TableHead>
-                  <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Qty</TableHead>
+                  <TableHead className="text-white font-semibold uppercase tracking-wide sticky left-0 z-20 bg-amber-600 w-[44px] text-[11px] sm:text-xs">#</TableHead>
+                  <FilterHead label="Item" colKey="itemName" openCol={openExtraFilterCol} filters={extraColumnFilters} onToggle={toggleExtraFilterCol} onChange={handleExtraColFilter} onClear={clearExtraColFilter} className="text-white sticky left-0 sm:left-[44px] z-30 bg-amber-600 min-w-[180px] shadow-[2px_0_6px_rgba(0,0,0,0.08)]" />
+                  <FilterHead label="Barcode" colKey="barcode" openCol={openExtraFilterCol} filters={extraColumnFilters} onToggle={toggleExtraFilterCol} onChange={handleExtraColFilter} onClear={clearExtraColFilter} className="text-white bg-amber-600" />
+                  <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Total Qty</TableHead>
                   <TableHead className="text-white font-semibold uppercase tracking-wide text-right">Pallets</TableHead>
-                  <TableHead className="text-white font-semibold uppercase tracking-wide">Reason</TableHead>
-                  <TableHead className="text-white font-semibold uppercase tracking-wide">
-                    <span className="flex items-center gap-1"><UserCircle className="h-3.5 w-3.5" />Scanned By</span>
-                  </TableHead>
-                  <TableHead className="text-white font-semibold uppercase tracking-wide">Time</TableHead>
+                  <TableHead className="text-white font-semibold uppercase tracking-wide">First Arrived</TableHead>
+                  <TableHead className="text-white font-semibold uppercase tracking-wide">Last Arrived</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {extras.length === 0 ? (
+                {filteredExtras.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="py-12 text-center text-sm text-gray-400">
+                    <TableCell colSpan={7} className="py-12 text-center text-sm text-gray-400">
                       No extra items recorded{selectedDate ? " for this date" : ""}.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  extras.map((extra, idx) => {
+                  filteredExtras.map((extra, idx) => {
                     const rowBg = idx % 2 === 0 ? "bg-white" : "bg-amber-50/40";
                     return (
-                      <TableRow key={extra.id} className={`${rowBg} transition-colors hover:bg-amber-50`}>
-                        <TableCell className={`text-gray-400 text-[11px] sm:text-xs sticky left-0 z-10 ${rowBg} w-[52px] py-2 bg-white`}>
+                      <TableRow key={extra.barcode + idx} className={`${rowBg} transition-colors hover:bg-amber-50`}>
+                        <TableCell className={`text-gray-400 text-[11px] sm:text-xs sticky left-0 z-10 ${rowBg} w-[44px] py-2 bg-white`}>
                           {idx + 1}
                         </TableCell>
-                        <TableCell className={`font-medium text-gray-900 sticky left-0 sm:left-[52px] z-20 ${rowBg} min-w-[180px] max-w-[220px] whitespace-normal break-words py-2 shadow-[2px_0_6px_rgba(0,0,0,0.06)] bg-white`}>
-                          {extra.itemName}
-                        </TableCell>
-                        <TableCell>
-                          <p className="font-medium text-gray-800 text-sm">{extra.orderName}</p>
-                          <p className="text-xs text-gray-400">{extra.csvName}</p>
+                        <TableCell className={`font-medium text-gray-900 sticky left-0 sm:left-[44px] z-20 ${rowBg} min-w-[180px] max-w-[240px] whitespace-normal break-words py-2 shadow-[2px_0_6px_rgba(0,0,0,0.06)] bg-white`}>
+                          {extra.itemName || <span className="text-gray-400 italic">Unknown</span>}
                         </TableCell>
                         <TableCell className="font-mono text-[11px] sm:text-xs text-gray-600 py-2">
-                          {extra.code || extra.sku || <span className="text-gray-300">—</span>}
+                          {extra.barcode || <span className="text-gray-300">—</span>}
                         </TableCell>
-                        <TableCell className="text-right font-bold text-amber-700 py-2">
-                          {(extra.quantity ?? 0).toLocaleString()}
+                        <TableCell className="text-right py-2">
+                          <span className="text-sm sm:text-base font-bold text-amber-700">
+                            {(extra.totalQuantity ?? 0).toLocaleString()}
+                          </span>
                         </TableCell>
                         <TableCell className="text-right font-semibold text-[#001d6e] py-2">
-                          {extra.pallets != null && Number(extra.pallets) > 0
-                            ? parseFloat(String(extra.pallets)).toFixed(2)
+                          {extra.totalPallets != null && Number(extra.totalPallets) > 0
+                            ? parseFloat(String(extra.totalPallets)).toFixed(2)
                             : <span className="text-gray-300 font-normal">—</span>}
                         </TableCell>
-                        <TableCell>
-                          <Badge className={
-                            extra.reason === "not_in_order"
-                              ? "bg-orange-100 text-orange-800 hover:bg-orange-100 text-xs"
-                              : "bg-red-100 text-red-800 hover:bg-red-100 text-xs"
-                          }>
-                            {extra.reason === "not_in_order" ? "Not in order" : "Unknown product"}
-                          </Badge>
+                        <TableCell className="text-xs text-gray-500 whitespace-nowrap py-2">
+                          {extra.firstArrived
+                            ? format(new Date(extra.firstArrived), "MMM d, yyyy")
+                            : "—"}
                         </TableCell>
-                        <TableCell className="text-sm text-gray-700">
-                          {extra.scannedByName || <span className="text-gray-300">—</span>}
-                        </TableCell>
-                        <TableCell className="text-xs text-gray-500 whitespace-nowrap">
-                          {extra.scannedAt
-                            ? format(new Date(extra.scannedAt.replace(/Z$/, "")), "MMM d, h:mm a")
+                        <TableCell className="text-xs text-gray-500 whitespace-nowrap py-2">
+                          {extra.lastArrived
+                            ? format(new Date(extra.lastArrived), "MMM d, yyyy")
                             : "—"}
                         </TableCell>
                       </TableRow>

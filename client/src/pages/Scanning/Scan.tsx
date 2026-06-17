@@ -474,13 +474,15 @@ export default function ScanOrderPage() {
     const plantLower = (activeOrderScanSession?.plant ?? "").toLowerCase();
     let plantPalletSize = match?.itemsPerPallet ?? 1;
     if (invProduct) {
+      let fromInv = 0;
       if (plantLower.includes("valsad") || plantLower.includes("val")) {
-        plantPalletSize = invProduct.valPlt ?? invProduct.itemsPerPallet ?? plantPalletSize;
+        fromInv = Number(invProduct.valPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
       } else if (plantLower.includes("indore") || plantLower.includes("ind")) {
-        plantPalletSize = invProduct.indPlt ?? invProduct.itemsPerPallet ?? plantPalletSize;
+        fromInv = Number(invProduct.indPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
       } else {
-        plantPalletSize = invProduct.itemsPerPallet ?? plantPalletSize;
+        fromInv = Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
       }
+      if (fromInv > 0) plantPalletSize = fromInv;
     }
 
     setOsQty(Math.max(1, plantPalletSize || 1)); // pre-fill with 1 pallet worth of boxes
@@ -1461,18 +1463,18 @@ export default function ScanOrderPage() {
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="bg-gray-50">
-                        <TableHead className="w-[45%] min-w-[220px]">Item</TableHead>
-                        <TableHead className="text-right w-[15%]"><span className="block leading-tight">Scan/Exp.</span></TableHead>
-                        <TableHead className="text-right w-[12%]">Pallets</TableHead>
-                        <TableHead className="w-[14%]">Status</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {sortedSessionItems.slice((scanItemPage - 1) * SCAN_PAGE_SIZE, scanItemPage * SCAN_PAGE_SIZE).map((item) => {
+                  <div className="overflow-x-auto overflow-y-auto max-h-[520px] border rounded-md">
+                  <table className="w-full text-sm border-collapse">
+                    <thead className="sticky top-0 z-10 bg-white">
+                      <tr className="border-b border-gray-200">
+                        <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 border-r border-gray-100 w-[45%] min-w-[220px]">Item</th>
+                        <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500 border-r border-gray-100 w-[18%]">Scanned / Exp.</th>
+                        <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500 border-r border-gray-100 w-[14%]">Pallets</th>
+                        <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 w-[14%]">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {sortedSessionItems.slice((scanItemPage - 1) * SCAN_PAGE_SIZE, scanItemPage * SCAN_PAGE_SIZE).map((item, idx) => {
                         const done = item.scannedQty >= item.expectedQty;
                         const over = item.scannedQty > item.expectedQty;
                         const product = item.productId
@@ -1484,38 +1486,35 @@ export default function ScanOrderPage() {
                           : null;
                         const code = bestCode(item);
                         return (
-                          <TableRow key={item.id} className={done ? "bg-emerald-50/40" : ""}>
-                            <TableCell className="py-3">
-                              <p className="font-medium text-sm text-gray-900 leading-snug">{item.itemName}</p>
-                              {code && <p className="font-mono text-xs text-gray-400 mt-0.5">{code}</p>}
-                            </TableCell>
-                            <TableCell className="text-right font-medium tabular-nums">
-                              <span className={item.scannedQty > 0 ? (over ? "text-amber-600" : "text-emerald-700") : "text-gray-700"}>
+                          <tr key={item.id} className={idx % 2 === 1 ? "bg-gray-50/60" : "bg-white"}>
+                            <td className="px-3 py-2.5 border-r border-gray-100">
+                              <p className="font-medium text-gray-900 leading-snug">{item.itemName}</p>
+                              {code && <p className="font-mono text-[11px] text-gray-400 mt-0.5">{code}</p>}
+                            </td>
+                            <td className="px-3 py-2.5 text-right tabular-nums border-r border-gray-100">
+                              <span className={over ? "text-red-600 font-semibold" : done ? "text-gray-900 font-semibold" : "text-gray-700"}>
                                 {item.scannedQty}
                               </span>
-                              <span className="text-gray-400">/{item.expectedQty}</span>
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {palletsScanned !== null
-                                ? <span className="font-semibold text-[#001d6e] tabular-nums">{palletsScanned}</span>
-                                : <span className="text-gray-300 text-xs">—</span>}
-                            </TableCell>
-                            <TableCell>
-                              <Badge className={
-                                done
-                                  ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-100"
-                                  : over
-                                  ? "bg-amber-100 text-amber-800 hover:bg-amber-100"
-                                  : "bg-blue-50 text-blue-700 hover:bg-blue-50"
-                              }>
+                              <span className="text-gray-400 font-normal">/{item.expectedQty}</span>
+                            </td>
+                            <td className="px-3 py-2.5 text-right tabular-nums text-gray-700 border-r border-gray-100">
+                              {palletsScanned !== null ? palletsScanned : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <span className={`inline-flex items-center gap-1 text-[11px] font-medium ${
+                                done ? "text-gray-500" : over ? "text-red-600" : "text-gray-400"
+                              }`}>
+                                <span className={`h-1.5 w-1.5 rounded-full ${
+                                  done ? "bg-gray-400" : over ? "bg-red-500" : "bg-gray-300"
+                                }`} />
                                 {done ? "Done" : over ? "Over" : "Pending"}
-                              </Badge>
-                            </TableCell>
-                          </TableRow>
+                              </span>
+                            </td>
+                          </tr>
                         );
                       })}
-                    </TableBody>
-                  </Table>
+                    </tbody>
+                  </table>
                   </div>
 
                   {sortedSessionItems.length > SCAN_PAGE_SIZE && (
@@ -1823,17 +1822,17 @@ export default function ScanOrderPage() {
                       <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                     </div>
                   ) : (
-                    <div className="overflow-x-auto">
+                    <div className="overflow-x-auto overflow-y-auto max-h-[560px]">
                       <table className="w-full text-sm">
-                        <thead>
+                        <thead className="sticky top-0 z-10">
                           <tr className="border-b bg-slate-50">
-                            <th className="w-8 px-3 py-2" />
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Item</th>
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Barcode</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600">Exp</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600">Done</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-amber-600">Extra</th>
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Status</th>
+                            <th className="w-8 px-3 py-2 bg-slate-50" />
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Item</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Barcode</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Exp</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Done</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-amber-600 bg-slate-50">Extra</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Status</th>
                           </tr>
                         </thead>
                         <tbody>

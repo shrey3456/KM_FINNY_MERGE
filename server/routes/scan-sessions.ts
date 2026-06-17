@@ -550,21 +550,105 @@ router.get('/reports/stock-sheet', async (_req: Request, res: Response) => {
 });
 
 // Extra orders report: all extras across all sessions (old scan_session_extras + new order_scan_events)
+// ?grouped=true  → one row per barcode, SUM quantities across all CSVs (default for UI)
+// ?grouped=false → one row per scan event (detailed / backwards-compat mode)
+// ?date=YYYY-MM-DD → filter scan events to that date before grouping/listing
 router.get('/reports/extras', async (_req: Request, res: Response) => {
   try {
     const req = _req;
-    const limit = Math.max(1, Math.min(100, parseInt(String(req.query.limit ?? '10'), 10) || 10));
-    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+    const limit  = Math.max(1, Math.min(200, parseInt(String(req.query.limit  ?? '50'), 10) || 50));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'),  10) || 0);
+    const grouped = req.query.grouped !== 'false'; // default true
     const dateParam = typeof req.query.date === 'string' && req.query.date.trim()
       ? req.query.date.trim()
       : null;
 
+    if (grouped) {
+      // ── Grouped mode: one row per barcode, quantities summed across all CSVs ──
+      // Date filter applies to individual scan events before grouping, so filtering
+      // to "yesterday" shows only the boxes that arrived on that specific day.
+      const dateParams: any[] = [];
+      let pIdx = 1;
+      const oldDateWhere = dateParam ? `WHERE DATE(se.scanned_at AT TIME ZONE 'Asia/Kolkata') = $${pIdx}` : '';
+      const newDateAnd   = dateParam ? `AND   DATE(ose.scanned_at AT TIME ZONE 'Asia/Kolkata') = $${pIdx}` : '';
+      if (dateParam) { dateParams.push(dateParam); pIdx++; }
+
+      const limitIdx  = pIdx++;
+      const offsetIdx = pIdx++;
+      dateParams.push(limit, offset);
+
+      const sql = `
+        WITH old_e AS (
+          SELECT
+            LOWER(COALESCE(se.code, ''))                           AS norm_bc,
+            COALESCE(se.code, '')                                  AS barcode,
+            COALESCE(p.name, se.item_name, se.code)                AS item_name,
+            COALESCE(se.quantity, 0)                               AS qty,
+            se.scanned_at,
+            COALESCE(p.items_per_pallet, 0)                        AS ipp
+          FROM scan_session_extras se
+          LEFT JOIN products p
+            ON p.id = se.product_id
+            OR (se.product_id IS NULL AND LOWER(p.barcode) = LOWER(se.code))
+          ${oldDateWhere}
+        ),
+        new_e AS (
+          SELECT
+            LOWER(COALESCE(ose.barcode, ''))                        AS norm_bc,
+            COALESCE(ose.barcode, '')                               AS barcode,
+            COALESCE(p.name, ose.item_name, ose.barcode)            AS item_name,
+            COALESCE(ose.total_qty, 0)                              AS qty,
+            ose.scanned_at,
+            COALESCE(ose.items_per_pallet, p.items_per_pallet, 0)   AS ipp
+          FROM order_scan_events ose
+          LEFT JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
+          WHERE ose.is_extra = true
+          ${newDateAnd}
+        ),
+        combined AS (
+          SELECT * FROM old_e
+          UNION ALL
+          SELECT * FROM new_e
+        ),
+        grouped AS (
+          SELECT
+            norm_bc,
+            MAX(barcode)                                            AS barcode,
+            MAX(item_name)                                          AS "itemName",
+            SUM(qty)                                                AS "totalQuantity",
+            MAX(ipp)                                                AS "itemsPerPallet",
+            CASE WHEN MAX(ipp) > 0
+              THEN ROUND(SUM(qty)::numeric / MAX(ipp), 2)
+              ELSE NULL
+            END                                                     AS "totalPallets",
+            MIN(scanned_at)                                         AS "firstArrived",
+            MAX(scanned_at)                                         AS "lastArrived"
+          FROM combined
+          GROUP BY norm_bc
+          ORDER BY SUM(qty) DESC, MAX(item_name)
+        )
+        SELECT
+          g.*,
+          COUNT(*) OVER()                                           AS _total_count,
+          SUM(g."totalQuantity") OVER()                             AS _total_qty
+        FROM grouped g
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      `;
+
+      const result = await pool.query(sql, dateParams);
+      const rows = result.rows;
+      const total         = rows.length > 0 ? Number(rows[0]._total_count) : 0;
+      const totalQuantity = rows.length > 0 ? Number(rows[0]._total_qty)   : 0;
+      const items = rows.map(({ _total_count, _total_qty, ...r }) => r);
+
+      return res.json({ items, total, totalQuantity, limit, offset, grouped: true });
+    }
+
+    // ── Detailed mode (grouped=false): one row per scan event ────────────────
     const dateParams: string[] = dateParam ? [dateParam] : [];
     const oldWhere   = dateParam ? `WHERE DATE(se.scanned_at) = $1` : '';
     const osDateAnd  = dateParam ? `AND DATE(ose.scanned_at) = $1` : '';
 
-    // Fetch old extras (scan_session_extras)
-    // Join products by product_id first; fall back to barcode match so product_id=null rows still get pallets
     const oldRows = await pool.query(
       `SELECT
          se.id,
@@ -592,8 +676,6 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
       dateParams,
     );
 
-    // Fetch extras from new order-scan system (order_scan_events where is_extra = true)
-    // Priority: stored pallets → stored items_per_pallet → product lookup by barcode
     const osRows = await pool.query(
       `SELECT
          ose.id,
@@ -625,15 +707,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
       dateParams,
     );
 
-    type ExtraRow = {
-      id: number; sessionId: number; orderName: string; csvName: string;
-      code: string; itemName: string; sku: string | null; quantity: number;
-      reason: string; scannedByName: string | null; scannedAt: string | null;
-      pallets: number | null;
-    };
-
-    // Merge both sources and sort by scannedAt DESC
-    const merged: ExtraRow[] = [...oldRows.rows, ...osRows.rows].sort((a, b) => {
+    const merged = [...oldRows.rows, ...osRows.rows].sort((a, b) => {
       const ta = a.scannedAt ? new Date(a.scannedAt).getTime() : 0;
       const tb = b.scannedAt ? new Date(b.scannedAt).getTime() : 0;
       return tb - ta;
@@ -643,7 +717,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
     const totalQuantity = merged.reduce((s, e) => s + (Number(e.quantity) || 0), 0);
     const items = merged.slice(offset, offset + limit);
 
-    return res.json({ items, total, totalQuantity, limit, offset });
+    return res.json({ items, total, totalQuantity, limit, offset, grouped: false });
   } catch (error) {
     console.error('Error generating extras report:', error);
     return res.status(500).json({ error: 'Failed to generate extras report' });
@@ -831,7 +905,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
         ois.id                                                                  AS "sessionId",
         ois.csv_file_name                                                       AS "sessionOrderName",
         ois.scan_status                                                         AS "sessionStatus",
-        ois.created_at                                                          AS "sessionCreatedAt",
+        COALESCE(osi.last_scanned_at, ois.created_at)                           AS "sessionCreatedAt",
         p.id                                                                    AS "productId",
         p.in_stock                                                              AS "inStock",
         p.hsn_code                                                              AS "hsnCode",
@@ -880,6 +954,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
       totalScanned: number;
       totalPallets: number | null; // sum of stored numPallets
       orders: Array<{ name: string; status: string }>;
+      lastArrived: string | null;
     }>();
 
     let srNo = 1;
@@ -901,6 +976,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
           totalScanned:   0,
           totalPallets:   null,
           orders:         [],
+          lastArrived:    null,
         });
       }
       const entry = skuMap.get(key)!;
@@ -912,6 +988,12 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
       }
       if (row.sessionOrderName && !entry.orders.find((o) => o.name === row.sessionOrderName)) {
         entry.orders.push({ name: row.sessionOrderName, status: row.sessionStatus ?? 'scanning' });
+      }
+      if (row.sessionCreatedAt) {
+        const rowDate = row.sessionCreatedAt instanceof Date ? row.sessionCreatedAt : new Date(row.sessionCreatedAt);
+        if (!entry.lastArrived || rowDate > new Date(entry.lastArrived)) {
+          entry.lastArrived = rowDate.toISOString();
+        }
       }
     }
 

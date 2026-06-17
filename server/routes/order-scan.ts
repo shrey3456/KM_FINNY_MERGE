@@ -524,7 +524,36 @@ router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response)
     );
     const scanItem = itemResult.rows[0] ?? null;
 
-    const itemsPerPallet = Number(scanItem?.items_per_pallet ?? 0);
+    // For items not in the CSV, look up name AND plant-specific pallet size from inventory.
+    // Must fetch val_plt/ind_plt too — getPalletSize picks the right one for the session's plant.
+    // Fallback: parse *NNN from the product name (e.g. "16GM*192 ..." → 192) just like the frontend
+    // extractPalletSize does, for products where the DB columns are still 0.
+    let resolvedItemName: string | null = scanItem?.item_name ?? null;
+    let resolvedIpp = Number(scanItem?.items_per_pallet ?? 0);
+    if (!scanItem) {
+      const prodResult = await client.query(
+        `SELECT name, items_per_pallet, pallets, val_plt, ind_plt
+         FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
+        [barcode],
+      );
+      if (prodResult.rows[0]) {
+        const p = prodResult.rows[0];
+        resolvedItemName = p.name ?? null;
+        resolvedIpp = getPalletSize(
+          { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt },
+          sessResult.rows[0]?.plant ?? '',
+        );
+        // Fall back to generic pallets column (used by old scan system and product catalog)
+        if (resolvedIpp === 0) resolvedIpp = Number(p.pallets ?? 0);
+        // Last resort: parse *NNN from name only if pallets column is also 0
+        if (resolvedIpp === 0 && p.name) {
+          const m = String(p.name).match(/\*(\d{1,5})/);
+          if (m) { const n = parseInt(m[1], 10); if (n > 1) resolvedIpp = n; }
+        }
+      }
+    }
+
+    const itemsPerPallet = resolvedIpp;
     const totalQty = Math.round(pallets * Math.max(1, itemsPerPallet)) + looseQty;
     const userCode = (req.user as any)?.userCode ?? null;
     const userName  = (req.user as any)?.name ?? null;
@@ -540,7 +569,7 @@ router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response)
           items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        RETURNING *`,
-      [sessionId, scanItem?.id ?? null, barcode, scanItem?.item_name ?? null,
+      [sessionId, scanItem?.id ?? null, barcode, resolvedItemName,
        pallets, looseQty, totalQty, itemsPerPallet, isExtraActual,
        stv ?? null, userCode, userName],
     );
