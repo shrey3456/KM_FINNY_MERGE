@@ -259,7 +259,6 @@ function Router() {
         <ProtectedRoute path="/plant-settings" component={PlantSettings} requireAdmin={true} />
         <ProtectedRoute path="/order-management" component={OrderManagement} requireAdmin={true} />
         <ProtectedRoute path="/order-import" component={OrderImport} requireAdmin={true} />
-        <Route path="/order-scan" component={OrderScan} />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />
         <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />

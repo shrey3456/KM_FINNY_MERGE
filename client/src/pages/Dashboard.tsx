@@ -138,7 +138,7 @@ const Home = () => {
               <p className="text-[11px] text-amber-600">{scanNotif.session.plant} · {scanNotif.session.rowCount} rows</p>
             </div>
             <a
-              href="/order-scan"
+              href="/scan"
               className="shrink-0 rounded-lg bg-[#001d6e] px-3 py-2 text-xs font-semibold text-white shadow hover:bg-[#00154b] transition-colors"
             >
               Scan Now

@@ -21,10 +21,10 @@ router.get('/order-import/sessions', async (req, res) => {
     const page     = Math.max(1, parseInt(String(req.query.page     ?? '1')));
     const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? '10'))));
 
-    // Single date filter using IST timezone so UTC-stored timestamps are compared correctly.
-    // (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date = '2025-06-16'
+    // DB stores timestamps in local server time (IST) without timezone info.
+    // Compare the date portion directly — no timezone conversion needed.
     const dateCondition = req.query.date
-      ? sql`(${orderImportSessions.createdAt} AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date = ${String(req.query.date)}::date`
+      ? sql`(${orderImportSessions.createdAt})::date = ${String(req.query.date)}::date`
       : null;
 
     const conditions = [
