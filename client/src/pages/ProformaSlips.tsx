@@ -427,9 +427,14 @@ console.log(currentUserRole);
   // Create new proforma slip mutation
   const createProformaSlipMutation = useMutation({
     mutationFn: async (data: ProformaSlipFormValues) => {
-      return apiRequest('POST', '/api/proforma-slips', data);
+      const res = await apiRequest('POST', '/api/proforma-slips', data);
+      return res.json() as Promise<ProformaSlip>;
     },
-    onSuccess: () => {
+    onSuccess: (newSlip) => {
+      queryClient.setQueriesData({ queryKey: ['/api/proforma-slips'] }, (oldData: any) => {
+        if (!Array.isArray(oldData)) return oldData;
+        return [newSlip, ...oldData];
+      });
       queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
       toast({
         title: "Success",
@@ -445,13 +450,18 @@ console.log(currentUserRole);
       });
     },
   });
-  
+
   // Update proforma slip mutation
   const updateProformaSlipMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number, data: Partial<ProformaSlipFormValues> }) => {
-      return apiRequest('PUT', `/api/proforma-slips/${id}`, data);
+      const res = await apiRequest('PUT', `/api/proforma-slips/${id}`, data);
+      return res.json() as Promise<ProformaSlip>;
     },
-    onSuccess: () => {
+    onSuccess: (updatedSlip) => {
+      queryClient.setQueriesData({ queryKey: ['/api/proforma-slips'] }, (oldData: any) => {
+        if (!Array.isArray(oldData)) return oldData;
+        return oldData.map((slip: ProformaSlip) => slip.id === updatedSlip.id ? updatedSlip : slip);
+      });
       queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
       toast({
         title: "Success",
