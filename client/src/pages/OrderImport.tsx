@@ -136,6 +136,7 @@ type ScanSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
   scanStatus: string; importedByName: string | null; createdAt: string | null;
   scanActivatedByName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null;
+  scanActivatedByCode:string | null;
 };
 
 // DB stores timestamps in IST (server local time). The pg driver reads them as UTC
@@ -278,38 +279,20 @@ export default function OrderImport() {
 
   // ── Mutations ──────────────────────────────────────────────────────────────
   const importMutation = useMutation({
-    mutationFn: async (payload: {
-      plant: string;
-      csvFileName: string;
-      items: object[];
-    }) => (await apiRequest("POST", "/api/order-import/sessions", payload)).json(),
+    mutationFn: async (payload: { plant: string; csvFileName: string; items: object[] }) =>
+      (await apiRequest("POST", "/api/order-import/sessions", payload)).json(),
     onSuccess: (data) => {
       setShowMappingDialog(false);
       setCsvData(null);
       setSelectedFile(null);
       setLastImport({ rowCount: data.rowCount });
       setCurrentPage(1);
-      // Clear filters so the new session is always visible
       setFilterDate("");
       setFilterPlant("");
-      // Auto-open history so user sees the new import immediately
       setShowHistory(true);
-      // Inject new session into import cache immediately so UI updates without waiting for refetch
-      const newSession = { ...data.session, importedByName: user?.name ?? null };
-      qc.setQueriesData<SessionsResponse>(
-        { queryKey: ["/api/order-import/sessions"], exact: false },
-        (old) => {
-          if (!old || !('sessions' in old)) return old;
-          return { ...old, sessions: [newSession, ...old.sessions], total: old.total + 1 };
-        }
-      );
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
-      toast({
-        title: "Import complete",
-        description: `${data.rowCount} rows imported.`,
-        className: "bg-green-50 border-green-200 text-green-900",
-      });
+      toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
       toast({ title: "Import failed", description: err.message, variant: "destructive" }),
@@ -337,30 +320,8 @@ export default function OrderImport() {
       setDeleteTarget(null);
       if (expandedId === id) setExpandedId(null);
       if (scanExpandedId === id) setScanExpandedId(null);
-
-      // Remove from import history cache (only if already populated)
-      qc.setQueriesData<SessionsResponse>(
-        { queryKey: ["/api/order-import/sessions"], exact: false },
-        (old) => {
-          if (!old || !('sessions' in old)) return old;
-          return { ...old, sessions: old.sessions.filter((s) => s.id !== id), total: Math.max(0, old.total - 1) };
-        }
-      );
-      // Remove from scan sessions list cache (only if already populated)
-      qc.setQueriesData<ScanSession[]>(
-        { queryKey: ["/api/order-scan/sessions"], exact: false },
-        (old) => (Array.isArray(old) ? old.filter((s) => s.id !== id) : old),
-      );
-      // Clear active only if it's exactly the session we deleted (never touch if undefined)
-      qc.setQueryData<ScanSession | null | undefined>(["/api/order-scan/active"],
-        (old) => {
-          if (old === undefined) return undefined; // not yet loaded — leave it alone
-          return old !== null && old.id === id ? null : old;
-        },
-      );
-      // Force fresh fetch from server for all affected queries
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], exact: false });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], exact: false });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
       toast({ title: "Session deleted" });
@@ -372,16 +333,8 @@ export default function OrderImport() {
   const deactivateMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
-    onSuccess: (_, id) => {
+    onSuccess: () => {
       setDeactivateTarget(null);
-      qc.setQueriesData<ScanSession[]>(
-        { queryKey: ["/api/order-scan/sessions"], exact: false },
-        (old) => old?.map(s => s.id === id ? { ...s, scanStatus: "available" } : s) ?? old,
-      );
-      qc.setQueriesData<ScanSession | null>(
-        { queryKey: ["/api/order-scan/active"] },
-        (old) => (old?.id === id ? null : old),
-      );
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
@@ -394,22 +347,12 @@ export default function OrderImport() {
   const completeMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/complete`)).json(),
-    onSuccess: (_, id) => {
+    onSuccess: () => {
       setCompleteTarget(null);
-      qc.setQueriesData<ScanSession[]>(
-        { queryKey: ["/api/order-scan/sessions"], exact: false },
-        (old) => old?.map(s =>
-          s.id === id ? { ...s, scanStatus: "completed", scanCompletedAt: new Date().toISOString() } : s
-        ) ?? old,
-      );
-      qc.setQueriesData<ScanSession | null>(
-        { queryKey: ["/api/order-scan/active"] },
-        (old) => (old?.id === id ? null : old),
-      );
+      setShowCompleted(true);
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
-      setShowCompleted(true);
       toast({ title: "Session completed", className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
@@ -423,18 +366,6 @@ export default function OrderImport() {
       setShowMappingDialog(false);
       setCsvData(null);
       setEditTargetSession(null);
-      qc.setQueriesData<SessionsResponse>(
-        { queryKey: ["/api/order-import/sessions"], exact: false },
-        (old) => {
-          if (!old || !('sessions' in old)) return old;
-          return {
-            ...old,
-            sessions: old.sessions.map(s =>
-              s.id === vars.id ? { ...s, csvFileName: vars.csvFileName, rowCount: data.rowCount } : s
-            ),
-          };
-        }
-      );
       qc.invalidateQueries({ queryKey: ["/api/order-import/items", vars.id] });
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
       toast({ title: "Import updated", description: `${data.rowCount} rows replaced.`, className: "bg-green-50 border-green-200 text-green-900" });
