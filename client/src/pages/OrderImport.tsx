@@ -257,25 +257,11 @@ export default function OrderImport() {
       setSelectedFile(null);
       setLastImport({ rowCount: data.rowCount });
       setCurrentPage(1);
+      // Clear date filter so the new session is always visible regardless of timezone
       setFilterDate("");
+      // Auto-open history so user sees the new import immediately
       setShowHistory(true);
-
-      // Immediately inject the new session into the cache so it appears without
-      // waiting for a network refetch — same pattern as the delete mutation.
-      const newSession = { ...data.session, importedByName: user?.name ?? null };
-      qc.setQueriesData<SessionsResponse>(
-        { queryKey: ["/api/order-import/sessions"], exact: false },
-        (old) => {
-          if (!old) return old;
-          return {
-            ...old,
-            sessions: [newSession, ...old.sessions],
-            total: old.total + 1,
-          };
-        }
-      );
-
-      // Invalidate in background to sync accurate server state
+      // Invalidate both tables so they reflect the new import immediately
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       toast({
