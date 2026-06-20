@@ -257,18 +257,14 @@ export default function OrderImport() {
     queryFn: async () => (await apiRequest("GET", "/api/plants")).json(),
   });
 
-  // Sessions for the "CSV Sessions" card — filtered by plant + date
+  // Single query for all scan sessions — no server-side filters, all filtering done client-side.
+  // This avoids the "all plants shows nothing" bug (empty plant param causing wrong query key)
+  // and makes plant/date/status filters instant without any extra network requests.
   const scanSessionsQuery = useQuery<ScanSession[]>({
-    queryKey: ["/api/order-scan/sessions", scanPlant, scanDate],
-    queryFn: async () => {
-      const params = new URLSearchParams();
-      if (scanPlant) params.set("plant", scanPlant);
-      if (scanDate)  params.set("date",  scanDate);
-      const qs = params.toString();
-      return (await apiRequest("GET", `/api/order-scan/sessions${qs ? `?${qs}` : ""}`)).json();
-    },
+    queryKey: ["/api/order-scan/sessions"],
+    queryFn: async () => (await apiRequest("GET", "/api/order-scan/sessions")).json(),
     enabled: isImportRole,
-    refetchInterval: 20000,
+    refetchInterval: 15000,
   });
 
   // Active session — uses /active endpoint which has NO date filter whatsoever,
@@ -278,32 +274,6 @@ export default function OrderImport() {
     queryFn: async () => (await apiRequest("GET", "/api/order-scan/active")).json(),
     enabled: isImportRole,
     refetchInterval: 15000,
-  });
-
-  // Currently Active card — separate query with own plant/date filters
-  const activeSessListQuery = useQuery<ScanSession[]>({
-    queryKey: ["/api/order-scan/sessions", "active", activePlant, activeDate],
-    queryFn: async () => {
-      const params = new URLSearchParams({ status: "active" });
-      if (activePlant) params.set("plant", activePlant);
-      if (activeDate)  params.set("date",  activeDate);
-      return (await apiRequest("GET", `/api/order-scan/sessions?${params}`)).json();
-    },
-    enabled: isImportRole,
-    refetchInterval: 15000,
-  });
-
-  // Completed Sessions card — separate query with own plant/date filters
-  const completedSessionsQuery = useQuery<ScanSession[]>({
-    queryKey: ["/api/order-scan/sessions", "completed", completedPlant, completedDate],
-    queryFn: async () => {
-      const params = new URLSearchParams({ status: "completed" });
-      if (completedPlant) params.set("plant", completedPlant);
-      if (completedDate)  params.set("date",  completedDate);
-      return (await apiRequest("GET", `/api/order-scan/sessions?${params}`)).json();
-    },
-    enabled: isImportRole && showCompleted,
-    refetchInterval: 30000,
   });
 
   // ── Mutations ──────────────────────────────────────────────────────────────
@@ -440,7 +410,6 @@ export default function OrderImport() {
       qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
       setShowCompleted(true);
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions", "completed"] });
       toast({ title: "Session completed", className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
@@ -651,14 +620,26 @@ export default function OrderImport() {
 
   const plantOptions = (plantsQuery.data ?? []).filter((p) => p.name && p.name.trim() !== "");
 
-  // /active returns a single session or null — wrap in array for uniform rendering
-  // Currently Active card: from dedicated query with its own plant/date filters
-  const activeScanSessions = activeSessListQuery.data ?? [];
-  // CSV Sessions: only "available" sessions (not active, not completed)
-  const availableScanSessions = (scanSessionsQuery.data ?? []).filter(s => s.scanStatus === "available");
-  // Completed Sessions: from dedicated query with own filters
-  const completedScanSessions = completedSessionsQuery.data ?? [];
-  // Keep activeId for any legacy cache operations
+  const _allScanSessions = scanSessionsQuery.data ?? [];
+
+  // Client-side filters — empty string means "all". Status filter ensures a session
+  // removed via completeMutation disappears from Currently Active immediately (cache
+  // patch sets scanStatus → "completed" before the background refetch arrives).
+  const availableScanSessions = _allScanSessions.filter(s =>
+    s.scanStatus === "available" &&
+    (!scanPlant    || (s.plant ?? "").toLowerCase() === scanPlant.toLowerCase()) &&
+    (!scanDate     || (s.createdAt ?? "").slice(0, 10) === scanDate)
+  );
+  const activeScanSessions = _allScanSessions.filter(s =>
+    s.scanStatus === "active" &&
+    (!activePlant  || (s.plant ?? "").toLowerCase() === activePlant.toLowerCase()) &&
+    (!activeDate   || (s.createdAt ?? "").slice(0, 10) === activeDate)
+  );
+  const completedScanSessions = _allScanSessions.filter(s =>
+    s.scanStatus === "completed" &&
+    (!completedPlant || (s.plant ?? "").toLowerCase() === completedPlant.toLowerCase()) &&
+    (!completedDate  || (s.createdAt ?? "").slice(0, 10) === completedDate)
+  );
   const activeId = activeSessionQuery.data?.id ?? null;
 
   return (
@@ -1259,13 +1240,13 @@ export default function OrderImport() {
                   </Button>
                 )}
                 <Button size="sm" variant="outline" className="h-8 w-8 p-0"
-                  onClick={() => activeSessListQuery.refetch()} disabled={activeSessListQuery.isFetching}>
-                  <RefreshCw className={`h-3.5 w-3.5 ${activeSessListQuery.isFetching ? "animate-spin" : ""}`} />
+                  onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
+                  <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
               </div>
             </CardHeader>
             <CardContent className="p-0">
-              {activeSessListQuery.isFetching && activeScanSessions.length === 0 ? (
+              {scanSessionsQuery.isFetching && activeScanSessions.length === 0 ? (
                 <div className="flex justify-center py-10">
                   <Loader2 className="h-6 w-6 animate-spin text-amber-500" />
                 </div>
@@ -1399,14 +1380,14 @@ export default function OrderImport() {
                 </Button>
               )}
               <Button size="sm" variant="outline" className="h-8 w-8 p-0"
-                onClick={() => completedSessionsQuery.refetch()} disabled={completedSessionsQuery.isFetching}>
-                <RefreshCw className={`h-3.5 w-3.5 ${completedSessionsQuery.isFetching ? "animate-spin" : ""}`} />
+                onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
+                <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
               </Button>
             </div>
           </CardHeader>
           {showCompleted && (
             <CardContent className="p-0">
-              {completedSessionsQuery.isFetching && completedScanSessions.length === 0 ? (
+              {scanSessionsQuery.isFetching && completedScanSessions.length === 0 ? (
                 <div className="flex justify-center py-10">
                   <Loader2 className="h-6 w-6 animate-spin text-green-600" />
                 </div>
