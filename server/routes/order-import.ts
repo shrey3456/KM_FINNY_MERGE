@@ -27,9 +27,14 @@ router.get('/order-import/sessions', async (req, res) => {
       ? sql`(${orderImportSessions.createdAt})::date = ${String(req.query.date)}::date`
       : null;
 
+    const plantCondition = req.query.plant
+      ? sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`
+      : null;
+
     const conditions = [
       eq(orderImportSessions.isDeleted, false),
       dateCondition,
+      plantCondition,
     ].filter(Boolean);
 
     const where = and(...(conditions as any[]));
@@ -48,6 +53,7 @@ router.get('/order-import/sessions', async (req, res) => {
         importedByCode: orderImportSessions.importedByCode,
         importedByName: users.name,
         createdAt:      orderImportSessions.createdAt,
+        scanStatus:     orderImportSessions.scanStatus,
       })
       .from(orderImportSessions)
       .leftJoin(users, eq(orderImportSessions.importedByCode, users.userCode))
@@ -120,15 +126,69 @@ router.get('/order-import/sessions/:id/items', async (req: Request, res: Respons
   }
 });
 
+// PUT /api/order-import/sessions/:id  — replace all items (re-import with new CSV / mapping)
+router.put('/order-import/sessions/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+    const { csvFileName, items } = req.body as {
+      csvFileName: string;
+      items: Array<{
+        barcode?: string;
+        itemName?: string;
+        sapCode?: string;
+        quantity?: number;
+        expectedPallets?: number;
+      }>;
+    };
+
+    if (!csvFileName || !Array.isArray(items) || items.length === 0)
+      return res.status(400).json({ message: 'csvFileName and items are required' });
+
+    const [session] = await db
+      .select()
+      .from(orderImportSessions)
+      .where(and(eq(orderImportSessions.id, id), eq(orderImportSessions.isDeleted, false)));
+
+    if (!session) return res.status(404).json({ message: 'Session not found' });
+
+    await db.delete(orderImportItems).where(eq(orderImportItems.sessionId, id));
+
+    const rows = items.map((item) => ({
+      sessionId: id,
+      plant: session.plant,
+      barcode: item.barcode || null,
+      itemName: item.itemName || null,
+      sapCode: item.sapCode || null,
+      quantity: item.quantity ?? 0,
+      expectedPallets: item.expectedPallets ?? null,
+    }));
+
+    await db.insert(orderImportItems).values(rows);
+
+    const [updated] = await db
+      .update(orderImportSessions)
+      .set({ csvFileName, rowCount: rows.length })
+      .where(eq(orderImportSessions.id, id))
+      .returning();
+
+    res.json({ success: true, session: updated, rowCount: rows.length });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Update failed' });
+  }
+});
+
 // DELETE /api/order-import/sessions/:id
 // Soft-delete: marks the session as deleted so it disappears from the import list
 // but all related scan_items and scan_events are preserved for history and reports.
 router.delete('/order-import/sessions/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
+    // Also reset scanStatus so the session no longer appears as active on the scan page.
     await db
       .update(orderImportSessions)
-      .set({ isDeleted: true, deletedAt: new Date() })
+      .set({ isDeleted: true, deletedAt: new Date(), scanStatus: 'available' })
       .where(eq(orderImportSessions.id, id));
     res.json({ success: true });
   } catch (err) {

@@ -222,7 +222,7 @@ export default function ProformaSlips() {
   const currentUserRole = String(currentUserInfo?.role || '').toLowerCase();
   
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
-console.log(currentUserRole);
+  console.log(currentUserRole);
   const userDept = String(currentUserInfo?.department || '').toLowerCase().trim();
   const userDesig = String(currentUserInfo?.designation || '').toLowerCase().trim();
   
@@ -427,14 +427,9 @@ console.log(currentUserRole);
   // Create new proforma slip mutation
   const createProformaSlipMutation = useMutation({
     mutationFn: async (data: ProformaSlipFormValues) => {
-      const res = await apiRequest('POST', '/api/proforma-slips', data);
-      return res.json() as Promise<ProformaSlip>;
+      return apiRequest('POST', '/api/proforma-slips', data);
     },
-    onSuccess: (newSlip) => {
-      queryClient.setQueriesData({ queryKey: ['/api/proforma-slips'] }, (oldData: any) => {
-        if (!Array.isArray(oldData)) return oldData;
-        return [newSlip, ...oldData];
-      });
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
       toast({
         title: "Success",
@@ -450,18 +445,13 @@ console.log(currentUserRole);
       });
     },
   });
-
+  
   // Update proforma slip mutation
   const updateProformaSlipMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number, data: Partial<ProformaSlipFormValues> }) => {
-      const res = await apiRequest('PUT', `/api/proforma-slips/${id}`, data);
-      return res.json() as Promise<ProformaSlip>;
+      return apiRequest('PUT', `/api/proforma-slips/${id}`, data);
     },
-    onSuccess: (updatedSlip) => {
-      queryClient.setQueriesData({ queryKey: ['/api/proforma-slips'] }, (oldData: any) => {
-        if (!Array.isArray(oldData)) return oldData;
-        return oldData.map((slip: ProformaSlip) => slip.id === updatedSlip.id ? updatedSlip : slip);
-      });
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
       toast({
         title: "Success",
