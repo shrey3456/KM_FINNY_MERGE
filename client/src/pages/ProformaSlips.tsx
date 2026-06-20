@@ -222,7 +222,7 @@ export default function ProformaSlips() {
   const currentUserRole = String(currentUserInfo?.role || '').toLowerCase();
   
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
-console.log(currentUserRole);
+  console.log(currentUserRole);
   const userDept = String(currentUserInfo?.department || '').toLowerCase().trim();
   const userDesig = String(currentUserInfo?.designation || '').toLowerCase().trim();
   

@@ -12,9 +12,11 @@ import {
   History,
   Loader2,
   PackageCheck,
+  Pencil,
   RefreshCw,
   ScanLine,
   Search,
+  StopCircle,
   Trash2,
   Upload,
   X,
@@ -132,7 +134,7 @@ function autoMatch(headers: string[]): Mapping {
 
 type ScanSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
-  scanStatus: string; importedByName: string | null;
+  scanStatus: string; importedByName: string | null; createdAt: string | null;
   scanActivatedByName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null;
 };
 
@@ -184,6 +186,12 @@ export default function OrderImport() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [itemSearch, setItemSearch] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [deactivateTarget, setDeactivateTarget] = useState<number | null>(null);
+  const [completeTarget, setCompleteTarget] = useState<number | null>(null);
+  const [editTargetSession, setEditTargetSession] = useState<{ id: number; plant: string; csvFileName: string } | null>(null);
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [editFile, setEditFile] = useState<File | null>(null);
+  const editFileRef = useRef<HTMLInputElement>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
@@ -191,14 +199,26 @@ export default function OrderImport() {
   const [pageSize, setPageSize] = useState(10);
   const [currentPage, setCurrentPage] = useState(1);
   const [filterDate, setFilterDate] = useState("");
+  const [filterPlant, setFilterPlant] = useState("");
 
-  // Load CSV for Scan — plant and date filters
+  // Load CSV for Scan — plant and date filters (default empty = server last-48h window)
   const [scanPlant, setScanPlant] = useState("");
   const [scanDate, setScanDate] = useState(todayStr);
+  const [scanExpandedId, setScanExpandedId] = useState<number | null>(null);
+  const [scanItemSearch, setScanItemSearch] = useState("");
+
+  // Currently Active card — own plant/date filters
+  const [activePlant, setActivePlant] = useState("");
+  const [activeDate, setActiveDate] = useState("");
+
+  // Completed Sessions card — own plant/date filters, collapsed by default
+  const [showCompleted, setShowCompleted] = useState(false);
+  const [completedPlant, setCompletedPlant] = useState("");
+  const [completedDate, setCompletedDate] = useState("");
 
   // ── Queries ────────────────────────────────────────────────────────────────
   type SessionsResponse = {
-    sessions: (OrderImportSession & { importedByName: string | null })[];
+    sessions: (OrderImportSession & { importedByName: string | null; scanStatus: string })[];
     total: number;
     page: number;
     pageSize: number;
@@ -206,22 +226,30 @@ export default function OrderImport() {
   };
 
   const sessionsQuery = useQuery<SessionsResponse>({
-    queryKey: ["/api/order-import/sessions", currentPage, pageSize, filterDate],
+    queryKey: ["/api/order-import/sessions", currentPage, pageSize, filterDate, filterPlant],
     queryFn: async () => {
       const params = new URLSearchParams({
         page: String(currentPage),
         pageSize: String(pageSize),
       });
-      if (filterDate) params.set("date", filterDate);
+      if (filterDate)  params.set("date",  filterDate);
+      if (filterPlant) params.set("plant", filterPlant);
       return (await apiRequest("GET", `/api/order-import/sessions?${params}`)).json();
     },
   });
 
   const itemsQuery = useQuery<OrderImportItem[]>({
-    queryKey: ["/api/order-import/sessions", expandedId, "items"],
+    queryKey: ["/api/order-import/items", expandedId],
     queryFn: async () =>
       (await apiRequest("GET", `/api/order-import/sessions/${expandedId}/items`)).json(),
     enabled: expandedId !== null,
+  });
+
+  const scanItemsQuery = useQuery<OrderImportItem[]>({
+    queryKey: ["/api/order-import/items", scanExpandedId, "scan"],
+    queryFn: async () =>
+      (await apiRequest("GET", `/api/order-import/sessions/${scanExpandedId}/items`)).json(),
+    enabled: scanExpandedId !== null,
   });
 
   const plantsQuery = useQuery<{ name: string }[]>({
@@ -229,8 +257,7 @@ export default function OrderImport() {
     queryFn: async () => (await apiRequest("GET", "/api/plants")).json(),
   });
 
-  // Sessions for the "Load for Scan" panel (billing/admin/super-admin only)
-  // Filtered by selected plant and date
+  // Sessions for the "CSV Sessions" card — filtered by plant + date
   const scanSessionsQuery = useQuery<ScanSession[]>({
     queryKey: ["/api/order-scan/sessions", scanPlant, scanDate],
     queryFn: async () => {
@@ -242,6 +269,41 @@ export default function OrderImport() {
     },
     enabled: isImportRole,
     refetchInterval: 20000,
+  });
+
+  // Active session — uses /active endpoint which has NO date filter whatsoever,
+  // so it always finds whichever session is currently running regardless of when it was loaded.
+  const activeSessionQuery = useQuery<ScanSession | null>({
+    queryKey: ["/api/order-scan/active"],
+    queryFn: async () => (await apiRequest("GET", "/api/order-scan/active")).json(),
+    enabled: isImportRole,
+    refetchInterval: 15000,
+  });
+
+  // Currently Active card — separate query with own plant/date filters
+  const activeSessListQuery = useQuery<ScanSession[]>({
+    queryKey: ["/api/order-scan/sessions", "active", activePlant, activeDate],
+    queryFn: async () => {
+      const params = new URLSearchParams({ status: "active" });
+      if (activePlant) params.set("plant", activePlant);
+      if (activeDate)  params.set("date",  activeDate);
+      return (await apiRequest("GET", `/api/order-scan/sessions?${params}`)).json();
+    },
+    enabled: isImportRole,
+    refetchInterval: 15000,
+  });
+
+  // Completed Sessions card — separate query with own plant/date filters
+  const completedSessionsQuery = useQuery<ScanSession[]>({
+    queryKey: ["/api/order-scan/sessions", "completed", completedPlant, completedDate],
+    queryFn: async () => {
+      const params = new URLSearchParams({ status: "completed" });
+      if (completedPlant) params.set("plant", completedPlant);
+      if (completedDate)  params.set("date",  completedDate);
+      return (await apiRequest("GET", `/api/order-scan/sessions?${params}`)).json();
+    },
+    enabled: isImportRole && showCompleted,
+    refetchInterval: 30000,
   });
 
   // ── Mutations ──────────────────────────────────────────────────────────────
@@ -257,11 +319,20 @@ export default function OrderImport() {
       setSelectedFile(null);
       setLastImport({ rowCount: data.rowCount });
       setCurrentPage(1);
-      // Clear date filter so the new session is always visible regardless of timezone
+      // Clear filters so the new session is always visible
       setFilterDate("");
+      setFilterPlant("");
       // Auto-open history so user sees the new import immediately
       setShowHistory(true);
-      // Invalidate both tables so they reflect the new import immediately
+      // Inject new session into import cache immediately so UI updates without waiting for refetch
+      const newSession = { ...data.session, importedByName: user?.name ?? null };
+      qc.setQueriesData<SessionsResponse>(
+        { queryKey: ["/api/order-import/sessions"], exact: false },
+        (old) => {
+          if (!old || !('sessions' in old)) return old;
+          return { ...old, sessions: [newSession, ...old.sessions], total: old.total + 1 };
+        }
+      );
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       toast({
@@ -278,12 +349,11 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
     onSuccess: () => {
-      // Refresh all queries that depend on session state so every view updates
-      // immediately — the scanner's /scan page, the monitor, and the import list.
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
-      navigate("/order-scan");
+      navigate("/scan");
     },
     onError: (err: any) =>
       toast({ title: "Cannot load for scan", description: err.message, variant: "destructive" }),
@@ -296,20 +366,112 @@ export default function OrderImport() {
     onSuccess: (_, id) => {
       setDeleteTarget(null);
       if (expandedId === id) setExpandedId(null);
+      if (scanExpandedId === id) setScanExpandedId(null);
 
-      // Remove immediately from both caches so the UI updates without waiting for refetch
+      // Remove from import history cache (only if already populated)
+      qc.setQueriesData<SessionsResponse>(
+        { queryKey: ["/api/order-import/sessions"], exact: false },
+        (old) => {
+          if (!old || !('sessions' in old)) return old;
+          return { ...old, sessions: old.sessions.filter((s) => s.id !== id), total: Math.max(0, old.total - 1) };
+        }
+      );
+      // Remove from scan sessions list cache (only if already populated)
       qc.setQueriesData<ScanSession[]>(
         { queryKey: ["/api/order-scan/sessions"], exact: false },
-        (old) => old?.filter((s) => s.id !== id) ?? old,
+        (old) => (Array.isArray(old) ? old.filter((s) => s.id !== id) : old),
       );
-
-      // Then invalidate to sync fresh data from the server
+      // Clear active only if it's exactly the session we deleted (never touch if undefined)
+      qc.setQueryData<ScanSession | null | undefined>(["/api/order-scan/active"],
+        (old) => {
+          if (old === undefined) return undefined; // not yet loaded — leave it alone
+          return old !== null && old.id === id ? null : old;
+        },
+      );
+      // Force fresh fetch from server for all affected queries
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], exact: false });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], exact: false });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
       toast({ title: "Session deleted" });
     },
     onError: (err: any) =>
       toast({ title: "Delete failed", description: err.message, variant: "destructive" }),
+  });
+
+  const deactivateMutation = useMutation({
+    mutationFn: async (id: number) =>
+      (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
+    onSuccess: (_, id) => {
+      setDeactivateTarget(null);
+      qc.setQueriesData<ScanSession[]>(
+        { queryKey: ["/api/order-scan/sessions"], exact: false },
+        (old) => old?.map(s => s.id === id ? { ...s, scanStatus: "available" } : s) ?? old,
+      );
+      qc.setQueriesData<ScanSession | null>(
+        { queryKey: ["/api/order-scan/active"] },
+        (old) => (old?.id === id ? null : old),
+      );
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+      toast({ title: "Session deactivated", description: "Lock released. Another session can now be loaded." });
+    },
+    onError: (err: any) =>
+      toast({ title: "Deactivate failed", description: err.message, variant: "destructive" }),
+  });
+
+  const completeMutation = useMutation({
+    mutationFn: async (id: number) =>
+      (await apiRequest("POST", `/api/order-scan/sessions/${id}/complete`)).json(),
+    onSuccess: (_, id) => {
+      setCompleteTarget(null);
+      qc.setQueriesData<ScanSession[]>(
+        { queryKey: ["/api/order-scan/sessions"], exact: false },
+        (old) => old?.map(s =>
+          s.id === id ? { ...s, scanStatus: "completed", scanCompletedAt: new Date().toISOString() } : s
+        ) ?? old,
+      );
+      qc.setQueriesData<ScanSession | null>(
+        { queryKey: ["/api/order-scan/active"] },
+        (old) => (old?.id === id ? null : old),
+      );
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+      setShowCompleted(true);
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions", "completed"] });
+      toast({ title: "Session completed", className: "bg-green-50 border-green-200 text-green-900" });
+    },
+    onError: (err: any) =>
+      toast({ title: "Complete failed", description: err.message, variant: "destructive" }),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: async (payload: { id: number; csvFileName: string; items: object[] }) =>
+      (await apiRequest("PUT", `/api/order-import/sessions/${payload.id}`, payload)).json(),
+    onSuccess: (data, vars) => {
+      setShowMappingDialog(false);
+      setCsvData(null);
+      setEditTargetSession(null);
+      qc.setQueriesData<SessionsResponse>(
+        { queryKey: ["/api/order-import/sessions"], exact: false },
+        (old) => {
+          if (!old || !('sessions' in old)) return old;
+          return {
+            ...old,
+            sessions: old.sessions.map(s =>
+              s.id === vars.id ? { ...s, csvFileName: vars.csvFileName, rowCount: data.rowCount } : s
+            ),
+          };
+        }
+      );
+      qc.invalidateQueries({ queryKey: ["/api/order-import/items", vars.id] });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+      toast({ title: "Import updated", description: `${data.rowCount} rows replaced.`, className: "bg-green-50 border-green-200 text-green-900" });
+    },
+    onError: (err: any) =>
+      toast({ title: "Update failed", description: err.message, variant: "destructive" }),
   });
 
   // ── Handlers ───────────────────────────────────────────────────────────────
@@ -406,7 +568,64 @@ export default function OrderImport() {
         date:            orderDate || null,
       };
     });
-    importMutation.mutate({ plant, csvFileName: csvData.name, items });
+    if (editTargetSession) {
+      updateMutation.mutate({ id: editTargetSession.id, csvFileName: csvData.name, items });
+    } else {
+      importMutation.mutate({ plant, csvFileName: csvData.name, items });
+    }
+  }
+
+  function parseAndReplace(file: File) {
+    if (!editTargetSession) return;
+    Papa.parse<string[]>(file, {
+      header: false,
+      skipEmptyLines: true,
+      delimiter: "",
+      encoding: "UTF-8",
+      complete: (result) => {
+        const rawRows = result.data as string[][];
+        if (rawRows.length === 0) {
+          toast({ title: "Empty file", description: "The CSV has no rows.", variant: "destructive" });
+          return;
+        }
+        let headerRowIdx = 0;
+        let maxCols = 0;
+        for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+          const nonEmpty = rawRows[i].filter((c) => c.trim() !== "").length;
+          if (nonEmpty > maxCols) { maxCols = nonEmpty; headerRowIdx = i; }
+        }
+        const headers = rawRows[headerRowIdx].map((h) => cleanHeader(h)).filter((h) => h !== "");
+        if (headers.length === 0) {
+          toast({ title: "No columns found", description: "Could not detect column headers in the file.", variant: "destructive" });
+          return;
+        }
+        const dataRows = rawRows.slice(headerRowIdx + 1).map((row) => {
+          const obj: Record<string, string> = {};
+          headers.forEach((h, i) => { obj[h] = row[i] ?? ""; });
+          return obj;
+        });
+        const autoMapping = autoMatch(headers);
+        const get = (row: Record<string, string>, key: TargetKey) => {
+          const col = autoMapping[key];
+          return col && col !== SKIP ? (row[col] ?? "") : "";
+        };
+        const items = dataRows.map((row) => ({
+          barcode:         get(row, "barcode") || null,
+          itemName:        get(row, "itemName") || null,
+          sapCode:         get(row, "sapCode") || null,
+          quantity:        parseInt(get(row, "quantity")) || 0,
+          expectedPallets: parseFloat(get(row, "expectedPallets")) || null,
+        }));
+        if (items.length === 0) {
+          toast({ title: "No data rows found", description: "The CSV contained no data rows.", variant: "destructive" });
+          return;
+        }
+        setShowEditDialog(false);
+        setEditFile(null);
+        if (editFileRef.current) editFileRef.current.value = "";
+        updateMutation.mutate({ id: editTargetSession!.id, csvFileName: file.name, items });
+      },
+    });
   }
 
   function clearForm() {
@@ -432,9 +651,19 @@ export default function OrderImport() {
 
   const plantOptions = (plantsQuery.data ?? []).filter((p) => p.name && p.name.trim() !== "");
 
+  // /active returns a single session or null — wrap in array for uniform rendering
+  // Currently Active card: from dedicated query with its own plant/date filters
+  const activeScanSessions = activeSessListQuery.data ?? [];
+  // CSV Sessions: only "available" sessions (not active, not completed)
+  const availableScanSessions = (scanSessionsQuery.data ?? []).filter(s => s.scanStatus === "available");
+  // Completed Sessions: from dedicated query with own filters
+  const completedScanSessions = completedSessionsQuery.data ?? [];
+  // Keep activeId for any legacy cache operations
+  const activeId = activeSessionQuery.data?.id ?? null;
+
   return (
     <main className="min-h-screen bg-gray-50 p-3 sm:p-5 lg:p-8">
-      <div className="mx-auto max-w-3xl space-y-4">
+      <div className="mx-auto max-w-6xl space-y-4">
 
         {/* ── Header ── */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -474,122 +703,66 @@ export default function OrderImport() {
           </div>
         </div>
 
-        {/* ── Upload Card ── */}
+        {/* ── Upload Card (compact) ── */}
         <Card className="rounded-md">
-          <CardHeader className="pb-4">
-            <CardTitle className="text-base">Upload CSV File</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Plant + Date row */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="grid gap-1.5">
-                <Label htmlFor="oi-plant" className="text-sm">Plant</Label>
+          <CardContent className="p-4">
+            <div className="flex flex-wrap items-end gap-3">
+              {/* Plant */}
+              <div className="grid gap-1 min-w-[130px] flex-1">
+                <Label className="text-xs text-gray-500">Plant</Label>
                 {plantOptions.length > 0 ? (
                   <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
-                    <SelectTrigger id="oi-plant" className="h-10 w-full">
-                      <SelectValue placeholder="Select plant…" />
-                    </SelectTrigger>
+                    <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="_none_">— Select plant —</SelectItem>
-                      {plantOptions.map((p) => (
-                        <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
-                      ))}
+                      <SelectItem value="_none_">— Select —</SelectItem>
+                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 ) : (
-                  <Input
-                    id="oi-plant"
-                    className="h-10"
-                    value={plant}
-                    onChange={(e) => setPlant(e.target.value)}
-                    placeholder="e.g. Valsad"
-                  />
+                  <Input className="h-9 text-sm" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
                 )}
               </div>
-              <div className="grid gap-1.5">
-                <Label htmlFor="oi-date" className="text-sm">Order Date</Label>
-                <Input
-                  id="oi-date"
-                  type="date"
-                  className="h-10"
-                  value={orderDate}
-                  onChange={(e) => setOrderDate(e.target.value)}
-                />
+              {/* Date */}
+              <div className="grid gap-1">
+                <Label className="text-xs text-gray-500">Order Date</Label>
+                <Input type="date" className="h-9 text-sm w-[150px]" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+              </div>
+              {/* File */}
+              <div className="grid gap-1 flex-[2] min-w-[180px]">
+                <Label className="text-xs text-gray-500">
+                  CSV File {selectedFile && <span className="text-green-600 font-medium">· {selectedFile.name}</span>}
+                </Label>
+                <Input ref={fileRef} type="file" accept=".csv" className="h-9 text-sm"
+                  onChange={handleFileChange} disabled={importMutation.isPending} />
+              </div>
+              {/* Actions */}
+              <div className="flex gap-2 pb-0.5">
+                <Button variant="outline" className="h-9" onClick={clearForm}
+                  disabled={!selectedFile || importMutation.isPending}>
+                  <X className="h-4 w-4" />
+                </Button>
+                <Button className="h-9 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
+                  disabled={!selectedFile || !plant.trim() || importMutation.isPending}>
+                  {importMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                  Map &amp; Import
+                </Button>
               </div>
             </div>
-
-            {/* File input */}
-            <div className="grid gap-1.5">
-              <Label htmlFor="oi-file" className="text-sm">CSV File</Label>
-              <Input
-                ref={fileRef}
-                id="oi-file"
-                type="file"
-                accept=".csv"
-                className="h-10"
-                onChange={handleFileChange}
-                disabled={importMutation.isPending}
-              />
-              {selectedFile && (
-                <p className="text-xs text-gray-500">
-                  {selectedFile.name} ({Math.max(1, Math.round(selectedFile.size / 1024))} KB)
-                </p>
-              )}
-            </div>
-
-            {/* Success */}
-            {lastImport && (
-              <Alert className="border-green-200 bg-green-50 text-green-900">
-                <CheckCircle className="h-4 w-4 text-green-700" />
-                <AlertDescription>
-                  Successfully imported <strong>{lastImport.rowCount}</strong> rows.
-                </AlertDescription>
-              </Alert>
-            )}
-
-            {/* Error */}
-            {importMutation.isError && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{(importMutation.error as Error).message}</AlertDescription>
-              </Alert>
-            )}
-
-            {/* Actions */}
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <Button
-                variant="outline"
-                className="h-10"
-                onClick={clearForm}
-                disabled={!selectedFile || importMutation.isPending}
-              >
-                Clear
-              </Button>
-              <Button
-                className="h-10 bg-[#001d6e] hover:bg-[#00154b] text-white"
-                onClick={handleImportClick}
-                disabled={!selectedFile || !plant.trim() || importMutation.isPending}
-              >
-                {importMutation.isPending ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <Upload className="mr-2 h-4 w-4" />
+            {/* Feedback row */}
+            {(lastImport || importMutation.isError) && (
+              <div className="mt-3">
+                {lastImport && (
+                  <p className="text-xs text-green-700 flex items-center gap-1">
+                    <CheckCircle className="h-3.5 w-3.5" /> Imported <strong>{lastImport.rowCount}</strong> rows successfully.
+                  </p>
                 )}
-                Map &amp; Import
-              </Button>
-            </div>
-
-            {/* Fixed schema info */}
-            <div className="rounded-md border border-dashed bg-gray-50 px-3 py-2.5">
-              <p className="mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">Target columns</p>
-              <div className="flex flex-wrap gap-1.5">
-                {TARGET_FIELDS.map((f) => (
-                  <span key={f.key} className="rounded bg-[#001d6e]/10 px-2 py-0.5 text-xs font-medium text-[#001d6e]">
-                    {f.label}
-                  </span>
-                ))}
+                {importMutation.isError && (
+                  <p className="text-xs text-red-600 flex items-center gap-1">
+                    <AlertCircle className="h-3.5 w-3.5" /> {(importMutation.error as Error).message}
+                  </p>
+                )}
               </div>
-            </div>
+            )}
           </CardContent>
         </Card>
 
@@ -620,9 +793,24 @@ export default function OrderImport() {
                 </div>
               </div>
 
-              {/* Date filter */}
+              {/* Plant + Date filters */}
               <div className="flex flex-wrap items-center gap-2">
-                <Label className="text-xs text-gray-500 whitespace-nowrap">Date</Label>
+                {plantOptions.length > 0 ? (
+                  <Select value={filterPlant || "_all_"} onValueChange={(v) => { setFilterPlant(v === "_all_" ? "" : v); setCurrentPage(1); }}>
+                    <SelectTrigger className="h-8 w-[130px] text-xs">
+                      <SelectValue placeholder="All plants" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_all_">All plants</SelectItem>
+                      {plantOptions.map((p) => (
+                        <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input value={filterPlant} onChange={(e) => { setFilterPlant(e.target.value); setCurrentPage(1); }}
+                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
+                )}
                 <Input
                   type="date"
                   value={filterDate}
@@ -694,20 +882,36 @@ export default function OrderImport() {
                                 <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5">
                                   {session.rowCount}
                                 </Badge>
-                                {(session as any).scanStatus !== "completed" && (
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    title="Load for scanning"
-                                    className="h-8 w-8 p-0 text-gray-400 hover:text-[#001d6e]"
-                                    disabled={loadForScanMutation.isPending}
-                                    onClick={(e) => { e.stopPropagation(); loadForScanMutation.mutate(session.id); }}
-                                  >
-                                    {loadForScanMutation.isPending
-                                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                      : <ScanLine className="h-3.5 w-3.5" />}
-                                  </Button>
+                                {(session as any).scanStatus === "active" && (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                    Loaded
+                                  </span>
                                 )}
+                                {(session as any).scanStatus === "completed" && (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-700 whitespace-nowrap">
+                                    <CheckCircle2 className="h-3 w-3" />
+                                    Done
+                                  </span>
+                                )}
+                                {(session as any).scanStatus === "available" && (
+                                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 whitespace-nowrap">
+                                    Ready
+                                  </span>
+                                )}
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  title="Re-import with new CSV"
+                                  className="h-8 w-8 p-0 text-gray-400 hover:text-blue-600"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditTargetSession({ id: session.id, plant: session.plant, csvFileName: session.csvFileName });
+                                    setShowEditDialog(true);
+                                  }}
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </Button>
                                 <Button
                                   size="sm"
                                   variant="ghost"
@@ -824,23 +1028,26 @@ export default function OrderImport() {
           </Card>
         )}
 
-        {/* ── Load CSV for Scan ── */}
+        {/* ── Scan section: side-by-side cards ── */}
         {isImportRole && (
-          <Card className="rounded-md">
+        <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 items-start">
+
+        {/* ── Card: All CSV Sessions (available to load) ── */}
+        <Card className="rounded-md">
             <CardHeader className="pb-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <div className="flex h-8 w-8 items-center justify-center rounded bg-[#001d6e]/10 shrink-0">
-                    <PackageCheck className="h-4 w-4 text-[#001d6e]" />
+                    <ScanLine className="h-4 w-4 text-[#001d6e]" />
                   </div>
                   <div>
-                    <CardTitle className="text-base">Load CSV for Scan</CardTitle>
-                    <p className="text-xs text-gray-500 mt-0.5">Load a session so dispatch staff can scan against it</p>
+                    <CardTitle className="text-base">CSV Sessions</CardTitle>
+                    <p className="text-xs text-gray-500 mt-0.5">Load a CSV session for dispatch scanning</p>
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   {plantOptions.length > 0 ? (
-                    <Select value={scanPlant || "_all_"} onValueChange={(v) => setScanPlant(v === "_all_" ? "" : v)}>
+                    <Select value={scanPlant || "_all_"} onValueChange={(v) => { setScanPlant(v === "_all_" ? "" : v); setScanExpandedId(null); }}>
                       <SelectTrigger className="h-8 w-[130px] text-xs">
                         <SelectValue placeholder="All plants" />
                       </SelectTrigger>
@@ -852,37 +1059,36 @@ export default function OrderImport() {
                       </SelectContent>
                     </Select>
                   ) : (
-                    <Input value={scanPlant} onChange={(e) => setScanPlant(e.target.value)}
+                    <Input value={scanPlant} onChange={(e) => { setScanPlant(e.target.value); setScanExpandedId(null); }}
                       placeholder="Plant…" className="h-8 w-[110px] text-xs" />
                   )}
-                  <Input type="date" value={scanDate} onChange={(e) => setScanDate(e.target.value)}
+                  <Input type="date" value={scanDate} onChange={(e) => { setScanDate(e.target.value); setScanExpandedId(null); }}
                     className="h-8 w-[140px] text-xs" />
                   {scanDate && (
                     <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
-                      onClick={() => setScanDate("")}>
+                      onClick={() => { setScanDate(""); setScanExpandedId(null); }}>
                       <X className="h-3.5 w-3.5" />
                     </Button>
                   )}
                   {scanDate !== todayStr && (
                     <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
-                      onClick={() => setScanDate(todayStr)}>
+                      onClick={() => { setScanDate(todayStr); setScanExpandedId(null); }}>
                       Today
                     </Button>
                   )}
-                  <Button size="sm" variant="outline" onClick={() => scanSessionsQuery.refetch()}
-                    disabled={scanSessionsQuery.isFetching}>
-                    <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
-                    Refresh
+                  <Button size="sm" variant="outline" className="h-8 w-8 p-0"
+                    onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
+                    <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                   </Button>
                 </div>
               </div>
             </CardHeader>
-            <CardContent className="pt-0">
-              {scanSessionsQuery.isLoading ? (
+            <CardContent className="p-0">
+              {scanSessionsQuery.isFetching && availableScanSessions.length === 0 ? (
                 <div className="flex justify-center py-10">
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
-              ) : (scanSessionsQuery.data ?? []).length === 0 ? (
+              ) : availableScanSessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-10 text-gray-400">
                   <ScanLine className="h-8 w-8 mb-2 opacity-30" />
                   <p className="text-sm text-center">
@@ -890,65 +1096,106 @@ export default function OrderImport() {
                   </p>
                 </div>
               ) : (
-                <div className="divide-y rounded-md border overflow-hidden">
-                  {(scanSessionsQuery.data ?? []).map((s) => {
-                    const isActive    = s.scanStatus === "active";
-                    const isCompleted = s.scanStatus === "completed";
-                    const canLoad     = !isCompleted;
+                <div className="divide-y">
+                  {availableScanSessions.map((s) => {
+                    const isExpanded  = scanExpandedId === s.id;
+                    const scanAllItems = isExpanded ? (scanItemsQuery.data ?? []) : [];
+                    const scanFiltered = scanItemSearch
+                      ? scanAllItems.filter((i) => [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(scanItemSearch.toLowerCase())))
+                      : scanAllItems;
                     return (
-                      <div key={s.id}
-                        className={`px-4 py-3 ${isActive ? "bg-amber-50/40" : isCompleted ? "bg-green-50/30 opacity-75" : "bg-white hover:bg-gray-50"}`}>
-                        <div className="flex items-start gap-3">
-                          <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${
-                            isActive ? "bg-amber-400 animate-pulse" : isCompleted ? "bg-green-400" : "bg-gray-300"
-                          }`} />
-                          <div className="flex-1 min-w-0">
-                            <p className="truncate text-sm font-medium text-gray-900">{s.csvFileName}</p>
-                            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                              <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
-                              <span className="text-xs text-gray-400">{s.rowCount} rows</span>
-                              {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
-                              {isActive && s.scanActivatedByName && (
-                                <span className="text-xs text-amber-700 font-medium">· Scanning: {s.scanActivatedByName}</span>
-                              )}
-                              {isCompleted && s.scanCompletedAt && (
-                                <span className="text-xs text-green-700 font-medium">· Done {fmtIST(s.scanCompletedAt)}</span>
-                              )}
+                      <div key={s.id}>
+                        {/* Session row — click to expand */}
+                        <div
+                          className="cursor-pointer px-4 py-3 hover:bg-gray-50 active:bg-gray-100"
+                          onClick={() => { setScanExpandedId(isExpanded ? null : s.id); setScanItemSearch(""); }}
+                        >
+                          <div className="flex items-start gap-2">
+                            <span className="mt-0.5 shrink-0 text-gray-400">
+                              {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <p className="truncate text-sm font-medium text-gray-900">{s.csvFileName}</p>
+                              <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
+                                <span className="text-xs text-gray-400">{fmtIST(s.createdAt)}</span>
+                                {s.importedByName && (
+                                  <span className="text-xs text-gray-400">· {s.importedByName}</span>
+                                )}
+                              </div>
                             </div>
-                            {/* Mobile action row */}
-                            <div className="mt-2 flex flex-wrap items-center gap-2">
-                              {isCompleted ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">
-                                  <CheckCircle2 className="h-3 w-3" /> Done
-                                </span>
-                              ) : isActive ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700">
-                                  <ScanLine className="h-3 w-3" /> Active
-                                </span>
-                              ) : (
-                                <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-500">Available</span>
-                              )}
-                              {canLoad && (
-                                <Button
-                                  size="sm"
-                                  className={`h-8 text-xs ${isActive ? "bg-amber-600 hover:bg-amber-700 text-white" : "bg-[#001d6e] hover:bg-[#00154b] text-white"}`}
-                                  disabled={loadForScanMutation.isPending}
-                                  onClick={() => loadForScanMutation.mutate(s.id)}
-                                >
-                                  {loadForScanMutation.isPending
-                                    ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                                    : <ScanLine className="mr-1.5 h-3.5 w-3.5" />}
-                                  {isActive ? "View Scan" : "Load for Scan"}
-                                </Button>
-                              )}
+                            <div className="flex shrink-0 items-center gap-1 ml-1">
+                              <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5">
+                                {s.rowCount}
+                              </Badge>
+                              <Button size="sm" variant="ghost"
+                                className="h-8 w-8 p-0 text-gray-400 hover:text-[#001d6e]"
+                                title="Load for scanning"
+                                disabled={loadForScanMutation.isPending}
+                                onClick={(e) => { e.stopPropagation(); loadForScanMutation.mutate(s.id); }}>
+                                {loadForScanMutation.isPending
+                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  : <ScanLine className="h-3.5 w-3.5" />}
+                              </Button>
                               <Button size="sm" variant="ghost"
                                 className="h-8 w-8 p-0 text-gray-400 hover:text-red-600"
-                                onClick={() => setDeleteTarget(s.id)}>
+                                onClick={(e) => { e.stopPropagation(); setDeleteTarget(s.id); }}>
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
                             </div>
                           </div>
                         </div>
+
+                        {/* Expanded items */}
+                        {isExpanded && (
+                          <div className="border-t bg-gray-50/60 px-4 py-3">
+                            <div className="mb-3 flex items-center gap-2">
+                              <div className="relative flex-1">
+                                <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                                <Input value={scanItemSearch} onChange={(e) => setScanItemSearch(e.target.value)}
+                                  placeholder="Search rows…" className="pl-8 h-9 text-sm" />
+                              </div>
+                              {scanItemSearch && (
+                                <Button size="sm" variant="ghost" className="h-9 w-9 p-0"
+                                  onClick={() => setScanItemSearch("")}>
+                                  <X className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
+                              <span className="text-xs text-gray-500 whitespace-nowrap">
+                                {scanFiltered.length}/{scanAllItems.length}
+                              </span>
+                            </div>
+                            {scanItemsQuery.isLoading ? (
+                              <div className="flex justify-center py-6">
+                                <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+                              </div>
+                            ) : (
+                              <div className="overflow-x-auto rounded-md border">
+                                <table className="w-max min-w-full border-collapse text-xs">
+                                  <thead>
+                                    <tr>
+                                      {["#", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets"].map((h) => (
+                                        <th key={h} className="sticky top-0 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-2 text-left font-semibold text-[#001d6e]">{h}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {scanFiltered.map((item, idx) => (
+                                      <tr key={item.id} className={`border-b ${idx % 2 === 1 ? "bg-gray-50" : "bg-white"} hover:bg-blue-50/30`}>
+                                        <td className="border-r px-3 py-1.5 text-gray-400">{idx + 1}</td>
+                                        <td className="border-r px-3 py-1.5">{item.barcode || "—"}</td>
+                                        <td className="max-w-[160px] truncate border-r px-3 py-1.5" title={item.itemName ?? ""}>{item.itemName || "—"}</td>
+                                        <td className="border-r px-3 py-1.5">{item.sapCode || "—"}</td>
+                                        <td className="border-r px-3 py-1.5 text-right">{item.quantity ?? 0}</td>
+                                        <td className="px-3 py-1.5 text-right">{item.expectedPallets ?? "—"}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -956,8 +1203,260 @@ export default function OrderImport() {
               )}
             </CardContent>
           </Card>
-        )}
-      </div>{/* end max-w-3xl */}
+
+        {/* ── Card: Currently Active Session ── */}
+        <Card className={`rounded-md border-amber-200 ${activeScanSessions.length > 0 ? "shadow-amber-100 shadow-md" : ""}`}>
+            <CardHeader className="pb-3 space-y-3">
+              <div className="flex items-center gap-2">
+                <div className={`flex h-8 w-8 items-center justify-center rounded shrink-0 ${
+                  activeScanSessions.length > 0 ? "bg-amber-100" : "bg-gray-100"
+                }`}>
+                  <PackageCheck className={`h-4 w-4 ${activeScanSessions.length > 0 ? "text-amber-600" : "text-gray-400"}`} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    Currently Active
+                    {activeScanSessions.length > 0 && (
+                      <span className="inline-flex items-center gap-1">
+                        <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+                        <span className="text-xs font-normal text-amber-600">{activeScanSessions.length} running</span>
+                      </span>
+                    )}
+                  </CardTitle>
+                  <p className="text-xs text-gray-500 mt-0.5">Active scan sessions being worked on by dispatch</p>
+                </div>
+              </div>
+              {/* Filters for Currently Active */}
+              <div className="flex flex-wrap items-center gap-2">
+                {plantOptions.length > 0 ? (
+                  <Select value={activePlant || "_all_"} onValueChange={(v) => setActivePlant(v === "_all_" ? "" : v)}>
+                    <SelectTrigger className="h-8 w-[120px] text-xs">
+                      <SelectValue placeholder="All plants" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_all_">All plants</SelectItem>
+                      {plantOptions.map((p) => (
+                        <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input value={activePlant} onChange={(e) => setActivePlant(e.target.value)}
+                    placeholder="Plant…" className="h-8 w-[100px] text-xs" />
+                )}
+                <Input type="date" value={activeDate} onChange={(e) => setActiveDate(e.target.value)}
+                  className="h-8 w-[135px] text-xs" />
+                {activeDate && (
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                    onClick={() => setActiveDate("")}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                {activeDate !== todayStr && (
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                    onClick={() => setActiveDate(todayStr)}>
+                    Today
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0"
+                  onClick={() => activeSessListQuery.refetch()} disabled={activeSessListQuery.isFetching}>
+                  <RefreshCw className={`h-3.5 w-3.5 ${activeSessListQuery.isFetching ? "animate-spin" : ""}`} />
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              {activeSessListQuery.isFetching && activeScanSessions.length === 0 ? (
+                <div className="flex justify-center py-10">
+                  <Loader2 className="h-6 w-6 animate-spin text-amber-500" />
+                </div>
+              ) : activeScanSessions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 text-gray-400">
+                  <PackageCheck className="h-8 w-8 mb-2 opacity-20" />
+                  <p className="text-sm">No active session{activePlant ? ` for ${activePlant}` : ""}</p>
+                  <p className="text-xs mt-0.5 text-gray-400">Load a CSV session above to start scanning</p>
+                </div>
+              ) : (
+                <div className="divide-y">
+                  {activeScanSessions.map((s) => (
+                    <div key={s.id} className="px-4 py-4 bg-amber-50/30">
+                      <div className="flex items-start gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-amber-200 bg-amber-100">
+                          <ScanLine className="h-5 w-5 text-amber-600" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="truncate text-sm font-semibold text-gray-900">{s.csvFileName}</p>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 uppercase">{s.plant}</span>
+                            <span className="text-xs text-gray-400">{s.rowCount} rows</span>
+                            {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
+                          </div>
+                          {s.scanActivatedByName && (
+                            <p className="mt-1 text-xs text-amber-700 font-medium">
+                              Scanning: {s.scanActivatedByName}
+                              {s.scanActivatedAt && <span className="font-normal text-gray-400"> · since {fmtIST(s.scanActivatedAt)}</span>}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 flex-col items-end gap-1.5">
+                          <Button size="sm"
+                            className="h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white"
+                            onClick={() => navigate("/scan")}>
+                            <ScanLine className="mr-1.5 h-3.5 w-3.5" />
+                            View Scan
+                          </Button>
+                          <div className="flex items-center gap-1">
+                            <Button size="sm" variant="outline"
+                              className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50"
+                              disabled={deactivateMutation.isPending}
+                              title="Release lock (keep data)"
+                              onClick={() => setDeactivateTarget(s.id)}>
+                              <StopCircle className="mr-1 h-3 w-3" />
+                              Deactivate
+                            </Button>
+                            <Button size="sm" variant="outline"
+                              className="h-7 px-2 text-xs text-green-700 border-green-200 hover:bg-green-50"
+                              disabled={completeMutation.isPending}
+                              title="Mark as done"
+                              onClick={() => setCompleteTarget(s.id)}>
+                              <CheckCircle2 className="mr-1 h-3 w-3" />
+                              Complete
+                            </Button>
+                            <Button size="sm" variant="ghost"
+                              className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                              onClick={() => setDeleteTarget(s.id)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+        </div>
+        )}{/* end isImportRole grid */}
+
+        {/* ── Completed Sessions card ── */}
+        {isImportRole && (
+        <Card className="rounded-md border-green-200">
+          <CardHeader className="pb-3 space-y-3">
+            {/* Title row — click to toggle */}
+            <div className="flex items-center justify-between gap-3 cursor-pointer select-none"
+              onClick={() => setShowCompleted(!showCompleted)}>
+              <div className="flex items-center gap-2">
+                <div className="flex h-8 w-8 items-center justify-center rounded bg-green-100 shrink-0">
+                  <CheckCircle2 className="h-4 w-4 text-green-600" />
+                </div>
+                <div>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    Completed Sessions
+                    {completedScanSessions.length > 0 && (
+                      <Badge className="bg-green-100 text-green-700 hover:bg-green-100 text-xs px-1.5">
+                        {completedScanSessions.length}
+                      </Badge>
+                    )}
+                  </CardTitle>
+                  <p className="text-xs text-gray-500 mt-0.5">Sessions that have been fully scanned</p>
+                </div>
+              </div>
+              <span className="text-gray-400 shrink-0">
+                {showCompleted ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </span>
+            </div>
+            {/* Filters — always visible */}
+            <div className="flex flex-wrap items-center gap-2">
+              {plantOptions.length > 0 ? (
+                <Select value={completedPlant || "_all_"} onValueChange={(v) => setCompletedPlant(v === "_all_" ? "" : v)}>
+                  <SelectTrigger className="h-8 w-[130px] text-xs">
+                    <SelectValue placeholder="All plants" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="_all_">All plants</SelectItem>
+                    {plantOptions.map((p) => (
+                      <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input value={completedPlant} onChange={(e) => setCompletedPlant(e.target.value)}
+                  placeholder="Plant…" className="h-8 w-[110px] text-xs" />
+              )}
+              <Input type="date" value={completedDate} onChange={(e) => setCompletedDate(e.target.value)}
+                className="h-8 w-[140px] text-xs" />
+              {completedDate && (
+                <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                  onClick={() => setCompletedDate("")}>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {completedDate !== todayStr && (
+                <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                  onClick={() => setCompletedDate(todayStr)}>
+                  Today
+                </Button>
+              )}
+              <Button size="sm" variant="outline" className="h-8 w-8 p-0"
+                onClick={() => completedSessionsQuery.refetch()} disabled={completedSessionsQuery.isFetching}>
+                <RefreshCw className={`h-3.5 w-3.5 ${completedSessionsQuery.isFetching ? "animate-spin" : ""}`} />
+              </Button>
+            </div>
+          </CardHeader>
+          {showCompleted && (
+            <CardContent className="p-0">
+              {completedSessionsQuery.isFetching && completedScanSessions.length === 0 ? (
+                <div className="flex justify-center py-10">
+                  <Loader2 className="h-6 w-6 animate-spin text-green-600" />
+                </div>
+              ) : completedScanSessions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 text-gray-400">
+                  <CheckCircle2 className="h-8 w-8 mb-2 opacity-20" />
+                  <p className="text-sm text-center">
+                    No completed sessions{completedPlant ? ` for ${completedPlant}` : ""}
+                    {completedDate ? ` on ${completedDate === todayStr ? "today" : completedDate}` : " in the last 48 hours"}.
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y">
+                  {completedScanSessions.map((s) => (
+                    <div key={s.id} className="px-4 py-3 hover:bg-gray-50">
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="truncate text-sm font-medium text-gray-900">{s.csvFileName}</p>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                            <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700 uppercase">{s.plant}</span>
+                            <span className="text-xs text-gray-400">{fmtIST(s.createdAt)}</span>
+                            {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
+                            {s.scanCompletedAt && (
+                              <span className="text-xs text-green-700 font-medium">· Done {fmtIST(s.scanCompletedAt)}</span>
+                            )}
+                            {s.scanActivatedByName && (
+                              <span className="text-xs text-gray-400">· Scanned by {s.scanActivatedByName}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1 ml-1">
+                          <Badge className="bg-green-100 text-green-700 hover:bg-green-100 text-xs px-1.5">
+                            {s.rowCount}
+                          </Badge>
+                          <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
+                            <CheckCircle2 className="h-3 w-3" />
+                            Done
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          )}
+        </Card>
+        )}{/* end isImportRole */}
+
+      </div>{/* end max-w-6xl */}
 
       {/* ── Column mapping dialog ── */}
       <Dialog
@@ -966,11 +1465,16 @@ export default function OrderImport() {
       >
         <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
           <DialogHeader>
-            <DialogTitle>Map CSV Columns</DialogTitle>
+            <DialogTitle>{editTargetSession ? "Re-map & Replace" : "Map CSV Columns"}</DialogTitle>
             <DialogDescription>
               {csvData
                 ? `"${csvData.name}" — ${csvData.rows.length} rows detected. Match each target field to a CSV column.`
                 : "Map columns."}
+              {editTargetSession && (
+                <span className="block mt-1 text-amber-600 font-medium">
+                  Replacing: {editTargetSession.csvFileName} (Plant: {editTargetSession.plant})
+                </span>
+              )}
             </DialogDescription>
           </DialogHeader>
 
@@ -1076,18 +1580,20 @@ export default function OrderImport() {
           <DialogFooter className="mt-2 gap-2">
             <Button
               variant="outline"
-              onClick={() => setShowMappingDialog(false)}
-              disabled={importMutation.isPending}
+              onClick={() => { setShowMappingDialog(false); setEditTargetSession(null); }}
+              disabled={importMutation.isPending || updateMutation.isPending}
             >
               Cancel
             </Button>
             <Button
               onClick={handleConfirmImport}
-              disabled={importMutation.isPending || !csvData}
+              disabled={importMutation.isPending || updateMutation.isPending || !csvData}
               className="bg-[#001d6e] hover:bg-[#00154b] text-white"
             >
-              {importMutation.isPending ? (
-                <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>
+              {(importMutation.isPending || updateMutation.isPending) ? (
+                <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />{editTargetSession ? "Replacing…" : "Importing…"}</>
+              ) : editTargetSession ? (
+                <><Pencil className="mr-1.5 h-4 w-4" />Replace {csvData?.rows.length ?? 0} rows</>
               ) : (
                 <><Upload className="mr-1.5 h-4 w-4" />Import {csvData?.rows.length ?? 0} rows</>
               )}
@@ -1095,6 +1601,100 @@ export default function OrderImport() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ── Edit / Re-import dialog ── */}
+      <Dialog
+        open={showEditDialog}
+        onOpenChange={(open) => { if (!open) { setShowEditDialog(false); setEditTargetSession(null); setEditFile(null); } }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Re-import CSV</DialogTitle>
+            <DialogDescription>
+              Upload a new CSV to replace all rows in <strong>{editTargetSession?.csvFileName}</strong>.
+              Plant: <strong>{editTargetSession?.plant}</strong>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="grid gap-1.5">
+              <Label>New CSV File</Label>
+              <Input
+                ref={editFileRef}
+                type="file"
+                accept=".csv"
+                className="h-10"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) setEditFile(f); }}
+              />
+              {editFile && <p className="text-xs text-gray-500">{editFile.name} ({Math.max(1, Math.round(editFile.size / 1024))} KB)</p>}
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setShowEditDialog(false); setEditTargetSession(null); setEditFile(null); }}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!editFile || updateMutation.isPending}
+              className="bg-[#001d6e] hover:bg-[#00154b] text-white"
+              onClick={() => { if (editFile) parseAndReplace(editFile); }}
+            >
+              {updateMutation.isPending
+                ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                : <Upload className="mr-1.5 h-4 w-4" />}
+              Replace Data
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Deactivate confirmation ── */}
+      <AlertDialog
+        open={deactivateTarget !== null}
+        onOpenChange={(open) => { if (!open) setDeactivateTarget(null); }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Deactivate this session?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This releases the active lock so another session can be loaded. Scan progress is preserved — you can re-activate this session later.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-amber-600 text-white hover:bg-amber-700"
+              onClick={() => deactivateTarget !== null && deactivateMutation.mutate(deactivateTarget)}
+              disabled={deactivateMutation.isPending}
+            >
+              {deactivateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Deactivate"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ── Complete confirmation ── */}
+      <AlertDialog
+        open={completeTarget !== null}
+        onOpenChange={(open) => { if (!open) setCompleteTarget(null); }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Mark session as completed?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This marks the scan session as done. It will no longer be available for scanning.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-green-600 text-white hover:bg-green-700"
+              onClick={() => completeTarget !== null && completeMutation.mutate(completeTarget)}
+              disabled={completeMutation.isPending}
+            >
+              {completeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Complete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* ── Delete confirmation ── */}
       <AlertDialog

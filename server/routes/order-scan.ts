@@ -182,7 +182,10 @@ router.get('/order-scan/notification', async (req: Request, res: Response) => {
     const plantFilter = getPlantFilter(req.user);
     const importedBy  = alias(users, 'imported_by');
 
-    const conditions: any[] = [eq(orderImportSessions.scanStatus, 'active')];
+    const conditions: any[] = [
+      eq(orderImportSessions.scanStatus, 'active'),
+      eq(orderImportSessions.isDeleted, false),
+    ];
     if (plantFilter) conditions.push(plantEq(plantFilter));
 
     const [session] = await db
@@ -220,7 +223,10 @@ router.get('/order-scan/active', async (req: Request, res: Response) => {
     const importedBy  = alias(users, 'imported_by');
     const activatedBy = alias(users, 'activated_by');
 
-    const conditions: any[] = [eq(orderImportSessions.scanStatus, 'active')];
+    const conditions: any[] = [
+      eq(orderImportSessions.scanStatus, 'active'),
+      eq(orderImportSessions.isDeleted, false),
+    ];
     if (plantFilter) conditions.push(plantEq(plantFilter));
 
     const [session] = await db
@@ -285,11 +291,13 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
     const queryPlant = req.query.plant ? String(req.query.plant).trim() : null;
     const plantFilter = userPlantFilter ?? (queryPlant || null);
 
-    // Date filter using IST timezone so UTC-stored timestamps compare correctly.
-    // No date param → fall back to last 48 hours (avoids midnight boundary edge cases).
+    // Date filter: compare the stored timestamp's date directly (server local time),
+    // consistent with how order-import.ts filters. No timezone conversion needed.
     const dateCondition = req.query.date
-      ? sql`(${orderImportSessions.createdAt} AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date = ${String(req.query.date)}::date`
+      ? sql`${orderImportSessions.createdAt}::date = ${String(req.query.date)}::date`
       : gte(orderImportSessions.createdAt, new Date(Date.now() - 48 * 60 * 60 * 1000));
+
+    const statusFilter = req.query.status ? String(req.query.status).trim() : null;
 
     const importedBy  = alias(users, 'imported_by');
     const activatedBy = alias(users, 'activated_by');
@@ -317,6 +325,7 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
           eq(orderImportSessions.isDeleted, false),
           dateCondition,
           ...(plantFilter ? [plantEq(plantFilter)] : []),
+          ...(statusFilter ? [eq(orderImportSessions.scanStatus, statusFilter)] : []),
         ),
       )
       .orderBy(desc(orderImportSessions.createdAt));
@@ -354,11 +363,12 @@ router.post('/order-scan/sessions/:id/activate', async (req: Request, res: Respo
       return res.status(409).json({ message: 'Session already completed' });
     }
 
-    // Check for a conflicting active session on the same plant
+    // Check for a conflicting active session on the same plant (exclude deleted sessions)
     const plantFilter = getPlantFilter(req.user);
     const conflictResult = await client.query(
       `SELECT id, csv_file_name FROM order_import_sessions
-       WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active' AND id != $2`,
+       WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active'
+         AND is_deleted = false AND id != $2`,
       [plantFilter ?? session.plant, id],
     );
     if (conflictResult.rows[0]) {
