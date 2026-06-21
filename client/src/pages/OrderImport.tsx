@@ -290,6 +290,26 @@ export default function OrderImport() {
       setFilterDate("");
       setFilterPlant("");
       setShowHistory(true);
+      // Immediately prepend the new session to the cache so it appears instantly
+      if (data.session) {
+        const newSession: ScanSession = {
+          id:                  data.session.id,
+          plant:               data.session.plant,
+          csvFileName:         data.session.csvFileName,
+          rowCount:            data.rowCount,
+          scanStatus:          data.session.scanStatus ?? "available",
+          importedByName:      (user as any)?.name ?? null,
+          createdAt:           data.session.createdAt ?? new Date().toISOString(),
+          scanActivatedByName: null,
+          scanActivatedAt:     null,
+          scanCompletedAt:     null,
+          scanActivatedByCode: null,
+        };
+        qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
+          old ? [newSession, ...old] : [newSession],
+        );
+      }
+      // Background refetch to stay in sync
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
@@ -301,7 +321,12 @@ export default function OrderImport() {
   const loadForScanMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
+      // Immediately mark as scanning in cache so other users see it right away
+      qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
+        old ? old.map((s) => s.id === id ? { ...s, scanStatus: "scanning" } : s) : old,
+      );
+      // Background refetch
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
