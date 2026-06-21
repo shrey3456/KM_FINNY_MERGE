@@ -278,6 +278,20 @@ export default function OrderImport() {
   });
 
   // ── Mutations ──────────────────────────────────────────────────────────────
+  // Helper: immediately patch the paginated import-sessions cache
+  type ImportSessionRow = OrderImportSession & { importedByName: string | null; scanStatus: string };
+  const patchImportSessions = (updater: (rows: ImportSessionRow[]) => ImportSessionRow[]) => {
+    // Patch every cached page variant so any currently visible page updates instantly
+    qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] })
+      .forEach(([key, data]) => {
+        if (!data) return;
+        qc.setQueryData<SessionsResponse>(key, {
+          ...data,
+          sessions: updater(data.sessions),
+        });
+      });
+  };
+
   const importMutation = useMutation({
     mutationFn: async (payload: { plant: string; csvFileName: string; items: object[] }) =>
       (await apiRequest("POST", "/api/order-import/sessions", payload)).json(),
@@ -290,9 +304,17 @@ export default function OrderImport() {
       setFilterDate("");
       setFilterPlant("");
       setShowHistory(true);
-      // Immediately prepend the new session to the cache so it appears instantly
+      // Immediately prepend to both caches so the new row appears without waiting for refetch
       if (data.session) {
-        const newSession: ScanSession = {
+        const newImportRow: ImportSessionRow = {
+          ...data.session,
+          rowCount:        data.rowCount,
+          scanStatus:      data.session.scanStatus ?? "available",
+          importedByName:  (user as any)?.name ?? null,
+        };
+        patchImportSessions((rows) => [newImportRow, ...rows]);
+
+        const newScanSession: ScanSession = {
           id:                  data.session.id,
           plant:               data.session.plant,
           csvFileName:         data.session.csvFileName,
@@ -306,7 +328,7 @@ export default function OrderImport() {
           scanActivatedByCode: null,
         };
         qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
-          old ? [newSession, ...old] : [newSession],
+          old ? [newScanSession, ...old] : [newScanSession],
         );
       }
       // Background refetch to stay in sync
@@ -322,7 +344,8 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
     onSuccess: (_, id) => {
-      // Immediately mark as scanning in cache so other users see it right away
+      // Immediately update status in both caches
+      patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "scanning" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "scanning" } : s) : old,
       );
@@ -345,7 +368,8 @@ export default function OrderImport() {
       setDeleteTarget(null);
       if (expandedId === id) setExpandedId(null);
       if (scanExpandedId === id) setScanExpandedId(null);
-      // Immediately remove from both caches so UI updates without waiting for refetch
+      // Immediately remove from all caches
+      patchImportSessions((rows) => rows.filter((s) => s.id !== id));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.filter((s) => s.id !== id) : old,
       );
@@ -367,7 +391,8 @@ export default function OrderImport() {
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
     onSuccess: (_, id) => {
       setDeactivateTarget(null);
-      // Immediately update scanStatus in cache so UI reflects change without waiting for refetch
+      // Immediately update status in all caches
+      patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s) : old,
       );
@@ -386,9 +411,16 @@ export default function OrderImport() {
   const completeMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/complete`)).json(),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
       setCompleteTarget(null);
       setShowCompleted(true);
+      // Immediately update status in all caches
+      patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "completed" } : s));
+      qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
+        old ? old.map((s) => s.id === id ? { ...s, scanStatus: "completed" } : s) : old,
+      );
+      const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
