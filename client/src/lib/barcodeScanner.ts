@@ -22,19 +22,19 @@ export class BarcodeScanner {
   constructor(options: ScannerOptions) {
     const hints = new Map();
     const formats = options.formats || [
+      BarcodeFormat.CODE_128,  // most common warehouse/product barcode
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.CODE_93,
       BarcodeFormat.EAN_13,
       BarcodeFormat.EAN_8,
       BarcodeFormat.UPC_A,
       BarcodeFormat.UPC_E,
-      BarcodeFormat.CODE_128,
-      BarcodeFormat.CODE_39,
-      BarcodeFormat.CODE_93,
-      BarcodeFormat.QR_CODE,
-      BarcodeFormat.DATA_MATRIX
+      BarcodeFormat.ITF,       // interleaved 2-of-5, common in logistics
+      BarcodeFormat.CODABAR,
     ];
-    
     hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
-    this.reader = new BrowserMultiFormatReader(hints);
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    this.reader = new BrowserMultiFormatReader(hints, 150);
     this.onDetected = options.onDetected;
     this.onError = options.onError;
     this.constraints = options.constraints;

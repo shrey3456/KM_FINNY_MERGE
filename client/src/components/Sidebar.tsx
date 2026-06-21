@@ -15,7 +15,7 @@ import {
   FileText,
   Clipboard,
   Package,
-  PieChart,
+  History as HistoryIcon,
   UserRound,
   Activity,
   Receipt,
@@ -30,6 +30,7 @@ import {
   FileUp,
   PackageCheck,
   ChevronsLeft,
+  LayoutList,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -152,16 +153,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           //disabled: !userPermissions.canManageUsers
         },
         {
-          label: "Stock Sheets",
-          icon: (
-            <FileBarChart
-              className="h-5 w-5 mr-3 text-[#001d6e]"
-              style={{ fill: "#22c55e" }}
-            />
-          ),
-          path: "/stock-sheets",
-        },
-        {
           label: "Print Operations",
           icon: (
             <PrinterCheck
@@ -226,8 +217,13 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/scan-stock-report",
         },
         {
-          label: "Reports",
-          icon: <PieChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          label: "Overall Stock",
+          icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/overall-stock",
+        },
+        {
+          label: "Scan History",
+          icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/reports",
         },
       ],

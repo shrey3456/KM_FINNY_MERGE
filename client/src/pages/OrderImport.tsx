@@ -320,6 +320,13 @@ export default function OrderImport() {
       setDeleteTarget(null);
       if (expandedId === id) setExpandedId(null);
       if (scanExpandedId === id) setScanExpandedId(null);
+      // Immediately remove from both caches so UI updates without waiting for refetch
+      qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
+        old ? old.filter((s) => s.id !== id) : old,
+      );
+      const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
+      // Background refetch to stay in sync
       qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
@@ -333,8 +340,15 @@ export default function OrderImport() {
   const deactivateMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
       setDeactivateTarget(null);
+      // Immediately update scanStatus in cache so UI reflects change without waiting for refetch
+      qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
+        old ? old.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s) : old,
+      );
+      const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
+      // Background refetch to stay in sync
       qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
       qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });

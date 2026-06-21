@@ -37,6 +37,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import { initializeStatePreservation } from "./utils/statePreservationInit.tsx";
 import { useAuth, AuthProvider } from "@/hooks/use-auth";
 import PlantSettings from "./pages/PlantSettings";
+import OverallStock from "./pages/OverallStock";
 
 // Loading indicator component for Suspense fallback
 const LoadingIndicator = () => (
@@ -242,6 +243,7 @@ function Router() {
         <Route path="/" component={Home} />
         <Route path="/scan" component={ScanOrder} />
         <Route path="/scan-stock-report" component={StockReport} />
+        <Route path="/overall-stock" component={OverallStock} />
         <ProtectedRoute path="/inventory" component={Inventory} requireInventoryAccess={true} />
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} />

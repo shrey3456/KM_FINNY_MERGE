@@ -21,7 +21,7 @@ import {
   Search,
   Square,
   User,
-  X,
+  X,  
   Zap,
 } from "lucide-react";
 import { Result } from "@zxing/library";
@@ -324,6 +324,8 @@ export default function ScanOrderPage() {
   const [osCameraError, setOsCameraError] = useState<string | null>(null);
   const [osPending, setOsPending] = useState<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osPendingRef = useRef<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
+  const [osMultiMatch, setOsMultiMatch] = useState<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
+  const osMultiMatchRef = useRef<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const [osPallets, setOsPallets] = useState(1);
   const [osLooseQty, setOsLooseQty] = useState(0);
   const [osQty, setOsQty] = useState(1); // total boxes — user-editable; pallets auto-calculated
@@ -332,8 +334,11 @@ export default function ScanOrderPage() {
   const [osSearch, setOsSearch] = useState("");
   const [osManualCode, setOsManualCode] = useState("");
   const [osRecentScans, setOsRecentScans] = useState<{ barcode: string; name: string; total: number; isExtra: boolean }[]>([]);
+  // Barcodes we already added optimistically; WS handler skips the echo for these
+  const osRecentScanSentRef = useRef<Set<string>>(new Set());
   const [wsConnected, setWsConnected] = useState(false);
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
+  useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
   useEffect(() => {
     lastSelectedStvRef.current = "";
     setOsSelectedStv("");
@@ -394,6 +399,7 @@ export default function ScanOrderPage() {
         );
 
         // Update recent scans feed immediately — don't wait for WS round-trip
+        osRecentScanSentRef.current.add(payload.barcode);
         setOsRecentScans((prev) => [
           {
             barcode: payload.barcode,
@@ -404,9 +410,14 @@ export default function ScanOrderPage() {
           ...prev.slice(0, 4),
         ]);
       } else if (payload.isExtra) {
-        // Extra item — update feed instantly too
+        // Extra item — prefer inventory/CSV name over raw barcode
+        const extraName =
+          previousPending?.matchedItem?.itemName ??
+          previousPending?.inventoryProduct?.name ??
+          payload.barcode;
+        osRecentScanSentRef.current.add(payload.barcode);
         setOsRecentScans((prev) => [
-          { barcode: payload.barcode, name: payload.barcode, total: payload.pallets, isExtra: true },
+          { barcode: payload.barcode, name: extraName, total: payload.pallets, isExtra: true },
           ...prev.slice(0, 4),
         ]);
       }
@@ -461,18 +472,9 @@ export default function ScanOrderPage() {
     setOsCameraReady(false);
   };
 
-  const handleOsBarcode = (barcode: string) => {
-    if (osPendingRef.current) return;
-    const normBarcode = normalize(barcode);
-    const match = osItemsRef.current.find((i) => normalize(i.barcode ?? "") === normBarcode) ?? null;
-
-    // Look up inventory product for name / SAP code / plant-specific pallet size
-    const invProduct = productLookup.get(normalize(barcode)) ?? null;
-
-    // valPlt / indPlt = items per pallet for that plant (the "size", NOT number of pallets)
-    // Use it as the multiplier; pallets input always starts at 1
+  const _computePlantPalletSize = (firstMatch: OsScanItem | null, invProduct: Product | null): number => {
     const plantLower = (activeOrderScanSession?.plant ?? "").toLowerCase();
-    let plantPalletSize = match?.itemsPerPallet ?? 1;
+    let size = firstMatch?.itemsPerPallet ?? 1;
     if (invProduct) {
       let fromInv = 0;
       if (plantLower.includes("valsad") || plantLower.includes("val")) {
@@ -482,14 +484,52 @@ export default function ScanOrderPage() {
       } else {
         fromInv = Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
       }
-      if (fromInv > 0) plantPalletSize = fromInv;
+      if (fromInv > 0) size = fromInv;
+    }
+    return Math.max(1, size || 1);
+  };
+
+  const _defaultScanQty = (match: OsScanItem | null, plantPalletSize: number): number => {
+    if (!match) return plantPalletSize;
+    const remaining = Math.max(0, (match.expectedQty ?? 0) - (match.totalScannedQty ?? 0));
+    // Pre-fill with remaining when it's less than a full pallet (covers both "CSV qty < pallet size"
+    // and "last partial pallet" cases). Fall back to full pallet if item is already complete.
+    return remaining > 0 && remaining < plantPalletSize ? remaining : plantPalletSize;
+  };
+
+  const handleOsBarcode = (barcode: string) => {
+    if (osPendingRef.current || osMultiMatchRef.current) return;
+    const normBarcode = normalize(barcode);
+    const matches = osItemsRef.current.filter((i) => normalize(i.barcode ?? "") === normBarcode);
+    const invProduct = productLookup.get(normalize(barcode)) ?? null;
+    const plantPalletSize = _computePlantPalletSize(matches[0] ?? null, invProduct);
+
+    if (matches.length > 1) {
+      setOsMultiMatch({ barcode, matches, inventoryProduct: invProduct, plantPalletSize });
+      return;
     }
 
-    setOsQty(Math.max(1, plantPalletSize || 1)); // pre-fill with 1 pallet worth of boxes
+    const match = matches[0] ?? null;
+    const defaultQty = _defaultScanQty(match, plantPalletSize);
+    setOsQty(defaultQty);
     setOsPallets(1);
     setOsLooseQty(0);
     setOsSelectedStv(lastSelectedStvRef.current);
-    setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize: Math.max(1, plantPalletSize || 1) });
+    setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize });
+  };
+
+  const handleOsMultiMatchSelect = (item: OsScanItem) => {
+    if (!osMultiMatch) return;
+    const barcode = osMultiMatch.barcode;
+    const invProduct = osMultiMatch.inventoryProduct;
+    const plantPalletSize = _computePlantPalletSize(item, invProduct);
+    const defaultQty = _defaultScanQty(item, plantPalletSize);
+    setOsMultiMatch(null);
+    setOsQty(defaultQty);
+    setOsPallets(1);
+    setOsLooseQty(0);
+    setOsSelectedStv(lastSelectedStvRef.current);
+    setOsPending({ barcode, matchedItem: item, inventoryProduct: invProduct, plantPalletSize });
   };
 
   const handleOsConfirmScan = () => {
@@ -525,7 +565,7 @@ export default function ScanOrderPage() {
       const scanner = new BarcodeScanner({
         onDetected: (result: Result) => {
           const code = result.getText();
-          if (code && !osPendingRef.current) handleOsBarcode(code);
+          if (code && !osPendingRef.current && !osMultiMatchRef.current) handleOsBarcode(code);
         },
         onError: (err: Error) => {
           if (!cancelled) { setOsCameraError(err.message); setOsScanMode("manual"); }
@@ -633,17 +673,20 @@ export default function ScanOrderPage() {
             );
           }
 
-          // Append to recent scans list
+          // Append to recent scans list — skip if we already added it optimistically
           if (data.event) {
-            setOsRecentScans((prev) => [
-              {
-                barcode: data.event.barcode,
-                name:    data.event.itemName ?? data.event.barcode,
-                total:   data.event.totalQty,
-                isExtra: data.event.isExtra,
-              },
-              ...prev.slice(0, 4),
-            ]);
+            const wasOptimistic = osRecentScanSentRef.current.delete(data.event.barcode);
+            if (!wasOptimistic) {
+              setOsRecentScans((prev) => [
+                {
+                  barcode: data.event.barcode,
+                  name:    data.event.itemName ?? data.event.barcode,
+                  total:   data.event.totalQty,
+                  isExtra: data.event.isExtra,
+                },
+                ...prev.slice(0, 4),
+              ]);
+            }
           }
         } catch { /* ignore malformed frames */ }
       };
@@ -951,7 +994,7 @@ export default function ScanOrderPage() {
     const code = rawCode.trim();
     if (!code || !activeSession || isPostingScan || pendingScan !== null) return;
     const now = Date.now();
-    if (lastScanRef.current.code === code && now - lastScanRef.current.at < 1200) return;
+    if (lastScanRef.current.code === code && now - lastScanRef.current.at < 600) return;
     lastScanRef.current = { code, at: now };
     setIsPostingScan(true);
     try {
@@ -1775,12 +1818,6 @@ export default function ScanOrderPage() {
                 <Progress value={osPct} className="w-28 h-2" />
                 <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
               </div>
-              <Button
-                size="sm" variant="outline"
-                onClick={() => { setOsSearch(""); stopOsCamera(); setOsScanMode("manual"); setView("map"); }}
-              >
-                New Scan Order
-              </Button>
             </div>
           </div>
 
@@ -1831,6 +1868,8 @@ export default function ScanOrderPage() {
                             <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Barcode</th>
                             <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Exp</th>
                             <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Done</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-purple-700 bg-slate-50">Pallets</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-[#001d6e] bg-slate-50">Remain</th>
                             <th className="px-3 py-2 text-right text-xs font-semibold text-amber-600 bg-slate-50">Extra</th>
                             <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Status</th>
                           </tr>
@@ -1856,6 +1895,19 @@ export default function ScanOrderPage() {
                               <td className="px-3 py-2.5 text-xs text-right">{item.expectedQty}</td>
                               <td className="px-3 py-2.5 text-xs text-right font-semibold">
                                 {Math.min(item.totalScannedQty ?? 0, item.expectedQty ?? 0)}
+                              </td>
+                              <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                {(item.scannedPallets ?? 0) > 0
+                                  ? <span className="text-purple-700">{item.scannedPallets}</span>
+                                  : <span className="text-gray-300">—</span>}
+                              </td>
+                              <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                {(() => {
+                                  const rem = Math.max(0, (item.expectedQty ?? 0) - (item.totalScannedQty ?? 0));
+                                  return rem > 0
+                                    ? <span className="text-[#001d6e]">{rem}</span>
+                                    : <span className="text-gray-300">—</span>;
+                                })()}
                               </td>
                               <td className="px-3 py-2.5 text-xs text-right font-semibold">
                                 {(item.totalScannedQty ?? 0) > (item.expectedQty ?? 0)
@@ -1991,6 +2043,58 @@ export default function ScanOrderPage() {
             </div>
           </div>
         </div>
+
+        {/* Multi-match selection dialog */}
+        <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) setOsMultiMatch(null); }}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
+                <AlertTriangle className="h-5 w-5 text-amber-500" />
+                Multiple Items Found
+              </DialogTitle>
+              <DialogDescription className="text-left pt-1">
+                Barcode{" "}
+                <span className="font-mono font-semibold text-gray-700">{osMultiMatch?.barcode}</span>{" "}
+                matches {osMultiMatch?.matches.length} items. Tap the item you are scanning.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2 py-1 max-h-72 overflow-y-auto pr-1">
+              {osMultiMatch?.matches.map((item) => {
+                const isComplete = (item.totalScannedQty ?? 0) >= (item.expectedQty ?? 1);
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => handleOsMultiMatchSelect(item)}
+                    className={`w-full rounded-lg border-2 px-4 py-3 text-left transition-colors hover:border-[#001d6e] hover:bg-[#001d6e]/5 ${
+                      isComplete ? "border-amber-300 bg-amber-50" : "border-gray-200 bg-white"
+                    }`}
+                  >
+                    <p className="font-semibold text-gray-900 text-sm leading-tight">
+                      {item.itemName ?? <span className="italic text-gray-400">Unknown</span>}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1">
+                      <span className="text-[11px] text-gray-400">
+                        Expected: <span className="font-medium text-gray-600">{item.expectedQty}</span>
+                      </span>
+                      <span className="text-[11px] text-gray-400">
+                        Scanned:{" "}
+                        <span className={`font-medium ${isComplete ? "text-amber-600" : "text-emerald-600"}`}>
+                          {item.totalScannedQty}
+                        </span>
+                      </span>
+                      {isComplete && (
+                        <span className="text-[11px] font-semibold text-amber-600">Complete</span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setOsMultiMatch(null)}>Cancel</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Scan confirmation dialog */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; setOsSelectedStv(""); } }}>
