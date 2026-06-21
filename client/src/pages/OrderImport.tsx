@@ -298,9 +298,36 @@ export default function OrderImport() {
       });
   };
 
+  // Shared helper: cancel all in-flight session GET requests so stale responses
+  // from the polling intervals can never arrive and overwrite a fresh mutation result.
+  // This is the root cause of the production race condition:
+  //   t=0  poll fires (GET in-flight)
+  //   t=1  mutation completes, cache updated optimistically
+  //   t=2  stale GET response arrives → overwrites the optimistic update
+  // cancelQueries in onMutate prevents step 3 from ever happening.
+  const cancelSessionQueries = () =>
+    Promise.all([
+      qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] }),
+      qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] }),
+      qc.cancelQueries({ queryKey: ["/api/order-scan/active"] }),
+      qc.cancelQueries({ queryKey: ["/api/order-scan/notification"] }),
+    ]);
+
+  // Shared helper: after every mutation (success or error) force a fresh refetch
+  // from the server so the UI is always in sync regardless of what happened.
+  const refetchAllSessionQueries = () => {
+    qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+    qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+    qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
+    qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+  };
+
   const importMutation = useMutation({
     mutationFn: async (payload: { plant: string; csvFileName: string; items: object[] }) =>
       (await apiRequest("POST", "/api/order-import/sessions", payload)).json(),
+    onMutate: async () => {
+      await cancelSessionQueries();
+    },
     onSuccess: (data) => {
       setShowMappingDialog(false);
       setCsvData(null);
@@ -316,11 +343,11 @@ export default function OrderImport() {
           importedByName:  (user as any)?.name ?? null,
         };
 
-        // Patch all cached page variants first
+        // Patch every cached page variant immediately
         patchImportSessions((rows) => [newImportRow, ...rows]);
 
-        // Also seed the page-1 / no-filter key directly so the UI is instant
-        // even if the user was browsing a different page before the import.
+        // Seed the page-1 / no-filter cache key so the UI shows the new session
+        // instantly even when the user was browsing a different page.
         const page1Key = ["/api/order-import/sessions", 1, pageSize, "", ""] as const;
         const page1Data = qc.getQueryData<SessionsResponse>(page1Key);
         if (page1Data) {
@@ -350,124 +377,149 @@ export default function OrderImport() {
         );
       }
 
-      // Reset pagination AFTER cache is seeded so the component renders page-1 data immediately
+      // Reset pagination after cache is seeded so the component renders page-1 data immediately
       setCurrentPage(1);
       setFilterDate("");
       setFilterPlant("");
 
-      // Force immediate network sync for all related queries (active + inactive)
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
       toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
       toast({ title: "Import failed", description: err.message, variant: "destructive" }),
+    onSettled: () => refetchAllSessionQueries(),
   });
 
   const loadForScanMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
+    onMutate: async () => {
+      await cancelSessionQueries();
+    },
     onSuccess: (_, id) => {
-      // Immediately update status in both caches
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "scanning" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "scanning" } : s) : old,
       );
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"], refetchType: "all" });
       navigate("/scan");
     },
     onError: (err: any) =>
       toast({ title: "Cannot load for scan", description: err.message, variant: "destructive" }),
+    onSettled: () => refetchAllSessionQueries(),
   });
 
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/order-import/sessions/${id}`);
     },
+    onMutate: async () => {
+      await cancelSessionQueries();
+      // Save snapshots for rollback on error
+      const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
+      const previousImportPages = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
+      const previousActive = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      return { previousScanSessions, previousImportPages, previousActive };
+    },
     onSuccess: (_, id) => {
       setDeleteTarget(null);
       if (expandedId === id) setExpandedId(null);
       if (scanExpandedId === id) setScanExpandedId(null);
-      // Immediately remove from all caches
       patchImportSessions((rows) => rows.filter((s) => s.id !== id));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.filter((s) => s.id !== id) : old,
       );
       const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
-      // Force immediate network sync — refetchType:'all' ensures even inactive queries
-      // (e.g. the Scan page notification when user is here on Import page) are marked
-      // stale so they refetch the moment the user navigates to that page.
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"], refetchType: "all" });
       toast({ title: "Session deleted" });
     },
-    onError: (err: any) =>
-      toast({ title: "Delete failed", description: err.message, variant: "destructive" }),
+    onError: (err: any, _, context) => {
+      // Restore previous state on failure so the session reappears
+      if (context) {
+        if (context.previousScanSessions !== undefined)
+          qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], context.previousScanSessions);
+        context.previousImportPages.forEach(([key, data]) => {
+          if (data) qc.setQueryData<SessionsResponse>(key, data);
+        });
+        if (context.previousActive !== undefined)
+          qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], context.previousActive);
+      }
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+    onSettled: () => refetchAllSessionQueries(),
   });
 
   const deactivateMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
+    onMutate: async () => {
+      await cancelSessionQueries();
+      const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
+      const previousImportPages = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
+      const previousActive = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      return { previousScanSessions, previousImportPages, previousActive };
+    },
     onSuccess: (_, id) => {
       setDeactivateTarget(null);
-      // Immediately update status in all caches
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s) : old,
       );
       const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"], refetchType: "all" });
       toast({ title: "Session deactivated", description: "Lock released. Another session can now be loaded." });
     },
-    onError: (err: any) =>
-      toast({ title: "Deactivate failed", description: err.message, variant: "destructive" }),
+    onError: (err: any, _, context) => {
+      if (context) {
+        if (context.previousScanSessions !== undefined)
+          qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], context.previousScanSessions);
+        context.previousImportPages.forEach(([key, data]) => {
+          if (data) qc.setQueryData<SessionsResponse>(key, data);
+        });
+        if (context.previousActive !== undefined)
+          qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], context.previousActive);
+      }
+      toast({ title: "Deactivate failed", description: err.message, variant: "destructive" });
+    },
+    onSettled: () => refetchAllSessionQueries(),
   });
 
   const completeMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/complete`)).json(),
+    onMutate: async () => {
+      await cancelSessionQueries();
+    },
     onSuccess: (_, id) => {
       setCompleteTarget(null);
       setShowCompleted(true);
-      // Immediately update status in all caches
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "completed" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "completed" } : s) : old,
       );
       const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"], refetchType: "all" });
       toast({ title: "Session completed", className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
       toast({ title: "Complete failed", description: err.message, variant: "destructive" }),
+    onSettled: () => refetchAllSessionQueries(),
   });
 
   const updateMutation = useMutation({
     mutationFn: async (payload: { id: number; csvFileName: string; items: object[] }) =>
       (await apiRequest("PUT", `/api/order-import/sessions/${payload.id}`, payload)).json(),
+    onMutate: async () => {
+      await cancelSessionQueries();
+    },
     onSuccess: (data, vars) => {
       setShowMappingDialog(false);
       setCsvData(null);
       setEditTargetSession(null);
-      qc.invalidateQueries({ queryKey: ["/api/order-import/items", vars.id], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/items", vars.id] });
       toast({ title: "Import updated", description: `${data.rowCount} rows replaced.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
       toast({ title: "Update failed", description: err.message, variant: "destructive" }),
+    onSettled: () => refetchAllSessionQueries(),
   });
 
   if (!isImportRole) {
