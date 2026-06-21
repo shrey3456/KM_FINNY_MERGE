@@ -308,11 +308,15 @@ export default function ScanOrderPage() {
   });
   const sessions: SessionSummary[] = sessionsRaw;
 
-  // Poll for admin-loaded order-import session (from /order-scan flow)
+  // Poll for admin-loaded order-import session (from /order-scan flow).
+  // 5s interval + refetchOnMount:'always' so changes made on the Import page
+  // are visible here within 5 seconds without a manual page refresh.
   const { data: orderScanNotif } = useQuery<{ active: boolean; session: any }>({
     queryKey: ["/api/order-scan/notification"],
     queryFn: () => apiRequest("GET", "/api/order-scan/notification").then((r) => r.json()),
-    refetchInterval: 20000,
+    staleTime: 0,
+    refetchInterval: 5000,
+    refetchOnMount: "always",
   });
   const activeOrderScanSession = orderScanNotif?.active ? orderScanNotif.session : null;
 

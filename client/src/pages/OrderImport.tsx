@@ -265,7 +265,9 @@ export default function OrderImport() {
     queryKey: ["/api/order-scan/sessions"],
     queryFn: async () => (await apiRequest("GET", "/api/order-scan/sessions")).json(),
     enabled: isImportRole,
-    refetchInterval: 15000,
+    staleTime: 0,
+    refetchInterval: 5000,
+    refetchOnMount: true,
   });
 
   // Active session — uses /active endpoint which has NO date filter whatsoever,
@@ -274,7 +276,9 @@ export default function OrderImport() {
     queryKey: ["/api/order-scan/active"],
     queryFn: async () => (await apiRequest("GET", "/api/order-scan/active")).json(),
     enabled: isImportRole,
-    refetchInterval: 15000,
+    staleTime: 0,
+    refetchInterval: 5000,
+    refetchOnMount: true,
   });
 
   // ── Mutations ──────────────────────────────────────────────────────────────
@@ -300,11 +304,8 @@ export default function OrderImport() {
       setCsvData(null);
       setSelectedFile(null);
       setLastImport({ rowCount: data.rowCount });
-      setCurrentPage(1);
-      setFilterDate("");
-      setFilterPlant("");
       setShowHistory(true);
-      // Immediately prepend to both caches so the new row appears without waiting for refetch
+
       if (data.session) {
         const newImportRow: ImportSessionRow = {
           ...data.session,
@@ -312,7 +313,22 @@ export default function OrderImport() {
           scanStatus:      data.session.scanStatus ?? "available",
           importedByName:  (user as any)?.name ?? null,
         };
+
+        // Patch all cached page variants first
         patchImportSessions((rows) => [newImportRow, ...rows]);
+
+        // Also seed the page-1 / no-filter key directly so the UI is instant
+        // even if the user was browsing a different page before the import.
+        const page1Key = ["/api/order-import/sessions", 1, pageSize, "", ""] as const;
+        const page1Data = qc.getQueryData<SessionsResponse>(page1Key);
+        if (page1Data) {
+          qc.setQueryData<SessionsResponse>(page1Key, {
+            ...page1Data,
+            sessions: [newImportRow, ...page1Data.sessions].slice(0, pageSize),
+            total: page1Data.total + 1,
+            totalPages: Math.max(1, Math.ceil((page1Data.total + 1) / pageSize)),
+          });
+        }
 
         const newScanSession: ScanSession = {
           id:                  data.session.id,
@@ -331,9 +347,15 @@ export default function OrderImport() {
           old ? [newScanSession, ...old] : [newScanSession],
         );
       }
-      // Background refetch to stay in sync
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+
+      // Reset pagination AFTER cache is seeded so the component renders page-1 data immediately
+      setCurrentPage(1);
+      setFilterDate("");
+      setFilterPlant("");
+
+      // Force immediate network sync for all related queries (active + inactive)
+      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
       toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
@@ -349,11 +371,10 @@ export default function OrderImport() {
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "scanning" } : s) : old,
       );
-      // Background refetch
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"], refetchType: "all" });
       navigate("/scan");
     },
     onError: (err: any) =>
@@ -375,11 +396,13 @@ export default function OrderImport() {
       );
       const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
-      // Background refetch to stay in sync
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+      // Force immediate network sync — refetchType:'all' ensures even inactive queries
+      // (e.g. the Scan page notification when user is here on Import page) are marked
+      // stale so they refetch the moment the user navigates to that page.
+      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"], refetchType: "all" });
       toast({ title: "Session deleted" });
     },
     onError: (err: any) =>
@@ -398,10 +421,9 @@ export default function OrderImport() {
       );
       const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
-      // Background refetch to stay in sync
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"], refetchType: "all" });
       toast({ title: "Session deactivated", description: "Lock released. Another session can now be loaded." });
     },
     onError: (err: any) =>
@@ -421,9 +443,9 @@ export default function OrderImport() {
       );
       const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
-      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/active"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"], refetchType: "all" });
       toast({ title: "Session completed", className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
@@ -437,8 +459,9 @@ export default function OrderImport() {
       setShowMappingDialog(false);
       setCsvData(null);
       setEditTargetSession(null);
-      qc.invalidateQueries({ queryKey: ["/api/order-import/items", vars.id] });
-      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/items", vars.id], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"], refetchType: "all" });
       toast({ title: "Import updated", description: `${data.rowCount} rows replaced.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
