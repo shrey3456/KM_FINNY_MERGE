@@ -94,7 +94,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
     }
   };
   const userPermissions = getCurrentUserPermissions();
-
   // Notification badge: poll for active scan session for non-admin users
   const ADMIN_ROLES = ['admin', 'super-admin'];
   const userRole = ((currentUser as any)?.role ?? '').toLowerCase().trim();
@@ -212,7 +211,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           label: "Overall Stock",
           icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/overall-stock",
-          permission: "canAccessOverallStock",
+          permission: "canAccessOverallStockReport",
         },
         {
           label: "Scan History",

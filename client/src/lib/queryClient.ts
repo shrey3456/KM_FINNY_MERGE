@@ -28,11 +28,12 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
   isFormData?: boolean,
-  parseJson: boolean = false
+  parseJson: boolean = false,
+  signal?: AbortSignal
 ): Promise<Response | any> {
   let headers: Record<string, string> = {};
   let body: FormData | string | undefined;
-  
+
   if (data) {
     if (isFormData || data instanceof FormData) {
       // FormData will set its own Content-Type
@@ -42,12 +43,13 @@ export async function apiRequest(
       body = JSON.stringify(data);
     }
   }
-  
+
   const res = await fetch(url, {
     method,
     headers,
     body,
     credentials: "include",
+    signal,
   });
 
   if (res.status === 401) {
