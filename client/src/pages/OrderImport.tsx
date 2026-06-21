@@ -233,14 +233,14 @@ export default function OrderImport() {
 
   const sessionsQuery = useQuery<SessionsResponse>({
     queryKey: ["/api/order-import/sessions", currentPage, pageSize, filterDate, filterPlant],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams({
         page: String(currentPage),
         pageSize: String(pageSize),
       });
       if (filterDate)  params.set("date",  filterDate);
       if (filterPlant) params.set("plant", filterPlant);
-      return (await apiRequest("GET", `/api/order-import/sessions?${params}`)).json();
+      return (await apiRequest("GET", `/api/order-import/sessions?${params}`, undefined, undefined, false, signal)).json();
     },
     staleTime: 0,
     refetchInterval: 5000,
@@ -268,7 +268,8 @@ export default function OrderImport() {
 
   const scanSessionsQuery = useQuery<ScanSession[]>({
     queryKey: ["/api/order-scan/sessions"],
-    queryFn: async () => (await apiRequest("GET", "/api/order-scan/sessions")).json(),
+    queryFn: async ({ signal }) =>
+      (await apiRequest("GET", "/api/order-scan/sessions", undefined, undefined, false, signal)).json(),
     enabled: isImportRole,
     staleTime: 0,
     refetchInterval: 5000,
@@ -279,7 +280,8 @@ export default function OrderImport() {
   // so it always finds whichever session is currently running regardless of when it was loaded.
   const activeSessionQuery = useQuery<ScanSession | null>({
     queryKey: ["/api/order-scan/active"],
-    queryFn: async () => (await apiRequest("GET", "/api/order-scan/active")).json(),
+    queryFn: async ({ signal }) =>
+      (await apiRequest("GET", "/api/order-scan/active", undefined, undefined, false, signal)).json(),
     enabled: isImportRole,
     staleTime: 0,
     refetchInterval: 5000,
@@ -397,18 +399,32 @@ export default function OrderImport() {
   const loadForScanMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
-    onMutate: async () => {
+    onMutate: async (id) => {
       await cancelSessionQueries();
-    },
-    onSuccess: (_, id) => {
-      patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "scanning" } : s));
+      const prevScanSessions  = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
+      const prevImportPages   = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
+      const prevActive        = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      const activatingSession = (prevScanSessions ?? []).find((s) => s.id === id);
+      // Optimistic: mark session active immediately so it appears in Currently Active without waiting for server
+      patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "active" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
-        old ? old.map((s) => s.id === id ? { ...s, scanStatus: "scanning" } : s) : old,
+        old ? old.map((s) => s.id === id ? { ...s, scanStatus: "active" } : s) : old,
       );
-      navigate("/scan");
+      if (activatingSession) {
+        qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], { ...activatingSession, scanStatus: "active" });
+      }
+      return { prevScanSessions, prevImportPages, prevActive };
     },
-    onError: (err: any) =>
-      toast({ title: "Cannot load for scan", description: err.message, variant: "destructive" }),
+    onError: (err: any, _id, ctx) => {
+      if (ctx) {
+        if (ctx.prevScanSessions !== undefined)
+          qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], ctx.prevScanSessions);
+        ctx.prevImportPages.forEach(([key, data]) => { if (data) qc.setQueryData<SessionsResponse>(key, data); });
+        if (ctx.prevActive !== undefined)
+          qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], ctx.prevActive);
+      }
+      toast({ title: "Cannot load for scan", description: err.message, variant: "destructive" });
+    },
     onSettled: () => refetchAllSessionQueries(),
   });
 
@@ -416,28 +432,24 @@ export default function OrderImport() {
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/order-import/sessions/${id}`);
     },
-    onMutate: async () => {
+    onMutate: async (id) => {
       await cancelSessionQueries();
-      // Save snapshots for rollback on error
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
-      const previousImportPages = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
-      const previousActive = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
-      return { previousScanSessions, previousImportPages, previousActive };
-    },
-    onSuccess: (_, id) => {
+      const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
+      const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      // Optimistic: remove session from cache immediately before server responds
       setDeleteTarget(null);
-      if (expandedId === id) setExpandedId(null);
+      if (expandedId === id)     setExpandedId(null);
       if (scanExpandedId === id) setScanExpandedId(null);
       patchImportSessions((rows) => rows.filter((s) => s.id !== id));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.filter((s) => s.id !== id) : old,
       );
-      const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
-      if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
+      if (previousActive?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
       toast({ title: "Session deleted" });
+      return { previousScanSessions, previousImportPages, previousActive };
     },
     onError: (err: any, _, context) => {
-      // Restore previous state on failure so the session reappears
       if (context) {
         if (context.previousScanSessions !== undefined)
           qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], context.previousScanSessions);
@@ -455,22 +467,20 @@ export default function OrderImport() {
   const deactivateMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
-    onMutate: async () => {
+    onMutate: async (id) => {
       await cancelSessionQueries();
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
-      const previousImportPages = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
-      const previousActive = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
-      return { previousScanSessions, previousImportPages, previousActive };
-    },
-    onSuccess: (_, id) => {
+      const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
+      const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      // Optimistic: revert status to available immediately
       setDeactivateTarget(null);
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s) : old,
       );
-      const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
-      if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
+      if (previousActive?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
       toast({ title: "Session deactivated", description: "Lock released. Another session can now be loaded." });
+      return { previousScanSessions, previousImportPages, previousActive };
     },
     onError: (err: any, _, context) => {
       if (context) {
@@ -490,22 +500,34 @@ export default function OrderImport() {
   const completeMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/complete`)).json(),
-    onMutate: async () => {
+    onMutate: async (id) => {
       await cancelSessionQueries();
-    },
-    onSuccess: (_, id) => {
+      const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
+      const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
+      const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      // Optimistic: mark completed immediately
       setCompleteTarget(null);
       setShowCompleted(true);
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "completed" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "completed" } : s) : old,
       );
-      const active = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
-      if (active?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
+      if (previousActive?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
       toast({ title: "Session completed", className: "bg-green-50 border-green-200 text-green-900" });
+      return { previousScanSessions, previousImportPages, previousActive };
     },
-    onError: (err: any) =>
-      toast({ title: "Complete failed", description: err.message, variant: "destructive" }),
+    onError: (err: any, _, context) => {
+      if (context) {
+        if (context.previousScanSessions !== undefined)
+          qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], context.previousScanSessions);
+        context.previousImportPages.forEach(([key, data]) => {
+          if (data) qc.setQueryData<SessionsResponse>(key, data);
+        });
+        if (context.previousActive !== undefined)
+          qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], context.previousActive);
+      }
+      toast({ title: "Complete failed", description: err.message, variant: "destructive" });
+    },
     onSettled: () => refetchAllSessionQueries(),
   });
 

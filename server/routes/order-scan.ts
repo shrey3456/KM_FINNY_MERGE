@@ -383,12 +383,14 @@ router.post('/order-scan/sessions/:id/activate', async (req: Request, res: Respo
 
     const userCode = (req.user as any)?.userCode ?? null;
 
-    // Mark session active (inside the same transaction)
+    // Mark session active (inside the same transaction).
+    // Use JS new Date() instead of SQL NOW() so node-postgres sends local IST time,
+    // matching how Drizzle's defaultNow() stores createdAt (also local-time based).
     await client.query(
       `UPDATE order_import_sessions
-       SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = NOW()
-       WHERE id = $2`,
-      [userCode, id],
+       SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = $2
+       WHERE id = $3`,
+      [userCode, new Date(), id],
     );
 
     // Pre-populate orderScanItems only if none exist yet.
@@ -472,6 +474,7 @@ router.post('/order-scan/sessions/:id/complete', async (req: Request, res: Respo
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    // Use new Date() so node-postgres sends IST local time, matching how createdAt is stored.
     await db.update(orderImportSessions)
       .set({ scanStatus: 'completed', scanCompletedAt: new Date() })
       .where(eq(orderImportSessions.id, id));
