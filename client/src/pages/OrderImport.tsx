@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
+import { getCurrentUserPermissions } from "../lib/permissions";
 import {
   AlertCircle,
   CheckCircle,
@@ -164,7 +165,11 @@ export default function OrderImport() {
   const [, navigate] = useLocation();
   const { user } = useAuth();
   const role = ((user as any)?.role ?? "").toLowerCase();
-  const isImportRole = ["admin", "super-admin", "billing"].includes(role);
+  const department = ((user as any)?.department ?? "").toLowerCase();
+  const userPermissions = getCurrentUserPermissions();
+  const isImportRole = ["admin", "super-admin"].includes(role)
+    || department === "billing"
+    || userPermissions.canAccessOrderManagement;
 
   // Form state
   const [plant, setPlant] = useState("");
@@ -258,9 +263,6 @@ export default function OrderImport() {
     queryFn: async () => (await apiRequest("GET", "/api/plants")).json(),
   });
 
-  // Single query for all scan sessions — no server-side filters, all filtering done client-side.
-  // This avoids the "all plants shows nothing" bug (empty plant param causing wrong query key)
-  // and makes plant/date/status filters instant without any extra network requests.
   const scanSessionsQuery = useQuery<ScanSession[]>({
     queryKey: ["/api/order-scan/sessions"],
     queryFn: async () => (await apiRequest("GET", "/api/order-scan/sessions")).json(),
@@ -467,6 +469,20 @@ export default function OrderImport() {
     onError: (err: any) =>
       toast({ title: "Update failed", description: err.message, variant: "destructive" }),
   });
+
+  if (!isImportRole) {
+    return (
+      <main className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
+        <div className="text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 mx-auto mb-4">
+            <FileUp className="h-6 w-6 text-red-500" />
+          </div>
+          <h2 className="text-lg font-semibold text-gray-900">Access Denied</h2>
+          <p className="mt-1 text-sm text-gray-500">You don't have permission to access Order Import.</p>
+        </div>
+      </main>
+    );
+  }
 
   // ── Handlers ───────────────────────────────────────────────────────────────
   function parseAndOpen(file: File) {

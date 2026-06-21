@@ -1,5 +1,3 @@
-// Role-based permissions system
-
 export enum UserRole {
   READ = "read",
   READ_WRITE = "read/write",
@@ -15,106 +13,17 @@ export interface Permissions {
   canManageUsers: boolean;
   canClearData: boolean;
   canManageSettings: boolean;
-  canAccessInventory: boolean; // Permission to access inventory pages
-  canDeleteOperationalItems: boolean; // Permission to delete scan history, load slips, and proforma slips
-  canEditReadyDespOperations: boolean; // Permission to edit load slips with "READY≈DESP" status
-  canAccessLoadOperations: boolean; // Permission to access Load Operations page
-  canAccessMPOperations: boolean; // Permission to access MP Operations page (legacy)
-  canAccessSalesPage: boolean; // Permission to access Sales page from home screen
-  canAccessExpenseVoucher: boolean; // Permission to access Expense Voucher page
+  canAccessInventory: boolean;
+  canDeleteOperationalItems: boolean;
+  canEditReadyDespOperations: boolean;
+  canAccessLoadOperations: boolean;
+  canAccessMPOperations: boolean;
+  canAccessSalesPage: boolean;
+  canAccessExpenseVoucher: boolean;
+  canAccessOrderManagement: boolean;
+  canAccessOverallStockReport: boolean; // Optional permission for Overall Stock Report
 }
 
-// Define default permissions for different roles
-export function getPermissionsForRole(role?: string): Permissions {
-  switch (role) {
-    case UserRole.SUPER_ADMIN:
-      return {
-        canRead: true,
-        canCreate: true,
-        canUpdate: true,
-        canDelete: true,
-        canManageUsers: true,
-        canClearData: true,
-        canManageSettings: true,
-        canAccessInventory: true,
-        canDeleteOperationalItems: true,
-        canEditReadyDespOperations: true,
-        canAccessLoadOperations: true,
-        canAccessMPOperations: true,
-        canAccessSalesPage: true,
-        canAccessExpenseVoucher: true
-      };
-    case UserRole.ADMIN:
-      return {
-        canRead: true,
-        canCreate: true,
-        canUpdate: true,
-        canDelete: true,
-        canManageUsers: true,
-        canClearData: true,
-        canManageSettings: true,
-        canAccessInventory: true,
-        canDeleteOperationalItems: true,
-        canEditReadyDespOperations: true,
-        canAccessLoadOperations: true,
-        canAccessMPOperations: true,
-        canAccessSalesPage: true,
-        canAccessExpenseVoucher: true
-      };
-    case UserRole.READ_WRITE:
-      return {
-        canRead: true,
-        canCreate: true,
-        canUpdate: true,
-        canDelete: false,
-        canManageUsers: false,
-        canClearData: false,
-        canManageSettings: false,
-        canAccessInventory: false,
-        canDeleteOperationalItems: false,
-        canEditReadyDespOperations: false,
-        canAccessLoadOperations: true,
-        canAccessMPOperations: true,
-        canAccessSalesPage: false,
-        canAccessExpenseVoucher: false
-      };
-    case UserRole.READ:
-      return {
-        canRead: true,
-        canCreate: false,
-        canUpdate: false,
-        canDelete: false,
-        canManageUsers: false,
-        canClearData: false,
-        canManageSettings: false,
-        canAccessInventory: false,
-        canDeleteOperationalItems: false,
-        canEditReadyDespOperations: false,
-        canAccessLoadOperations: true,
-        canAccessMPOperations: true,
-        canAccessSalesPage: false,
-        canAccessExpenseVoucher: false
-      };
-    default:
-      // Default to read-only if role is unknown
-      return {
-        canRead: true,
-        canCreate: false,
-        canUpdate: false,
-        canDelete: false,
-        canManageUsers: false,
-        canClearData: false,
-        canManageSettings: false,
-        canAccessInventory: false,
-        canDeleteOperationalItems: false,
-        canEditReadyDespOperations: false,
-        canAccessLoadOperations: true,
-        canAccessMPOperations: true,
-        canAccessSalesPage: false,
-        canAccessExpenseVoucher: false
-      };
-  }
-}
 
 // Check if user can access inventory based on designation only
 function canUserAccessInventory(user: any): boolean {
@@ -287,6 +196,141 @@ function canUserAccessSalesPage(user: any): boolean {
   return false; // By default, don't show Sales page
 }
 
+function canUserAccessOrderManagement(user: any): boolean {
+  if (!user) return false;
+
+  // Allow access if user is admin or super-admin
+  if (user.role === 'admin' || user.role === 'super-admin') {
+    return true;
+  }
+
+  // Check if user is from Order Management department
+  if (user.department) {
+    const department = user.department.toUpperCase();
+    return department.includes('BILLING');
+  }
+
+  return false;
+}
+
+function canUserAccessOverallStockReport(user: any): boolean {
+  if (!user) return false;
+
+  if (user.role === 'admin' || user.role === 'super-admin') {
+    return true;
+  }
+
+  if (user.department) {
+    const department = user.department.toUpperCase();
+    return department.includes('BILLING') || department.includes('MANAGEMENT') ;
+  }
+
+  return false;
+}
+
+
+// Define default permissions for different roles
+export function getPermissionsForRole(role?: string): Permissions {
+  switch (role) {
+    case UserRole.SUPER_ADMIN:
+      return {
+        canRead: true,
+        canCreate: true,
+        canUpdate: true,
+        canDelete: true,
+        canManageUsers: true,
+        canClearData: true,
+        canManageSettings: true,
+        canAccessInventory: true,
+        canDeleteOperationalItems: true,
+        canEditReadyDespOperations: true,
+        canAccessLoadOperations: true,
+        canAccessMPOperations: true,
+        canAccessSalesPage: true,
+        canAccessExpenseVoucher: true,
+        canAccessOrderManagement: true,
+        canAccessOverallStockReport: true
+      };
+    case UserRole.ADMIN:
+      return {
+        canRead: true,
+        canCreate: true,
+        canUpdate: true,
+        canDelete: true,
+        canManageUsers: true,
+        canClearData: true,
+        canManageSettings: true,
+        canAccessInventory: true,
+        canDeleteOperationalItems: true,
+        canEditReadyDespOperations: true,
+        canAccessLoadOperations: true,
+        canAccessMPOperations: true,
+        canAccessSalesPage: true,
+        canAccessExpenseVoucher: true,  
+        canAccessOrderManagement: true,
+        canAccessOverallStockReport: true
+      };
+    case UserRole.READ_WRITE:
+      return {
+        canRead: true,
+        canCreate: true,
+        canUpdate: true,
+        canDelete: false,
+        canManageUsers: false,
+        canClearData: false,
+        canManageSettings: false,
+        canAccessInventory: false,
+        canDeleteOperationalItems: false,
+        canEditReadyDespOperations: false,
+        canAccessLoadOperations: true,
+        canAccessMPOperations: true,
+        canAccessSalesPage: false,
+        canAccessExpenseVoucher: false,
+        canAccessOrderManagement: false,
+        canAccessOverallStockReport: false
+      };
+    case UserRole.READ:
+      return {
+        canRead: true,
+        canCreate: false,
+        canUpdate: false,
+        canDelete: false,
+        canManageUsers: false,
+        canClearData: false,
+        canManageSettings: false,
+        canAccessInventory: false,
+        canDeleteOperationalItems: false,
+        canEditReadyDespOperations: false,
+        canAccessLoadOperations: true,
+        canAccessMPOperations: true,
+        canAccessSalesPage: false,
+        canAccessExpenseVoucher: false,
+        canAccessOrderManagement: false,
+        canAccessOverallStockReport: false
+      };
+    default:
+      // Default to read-only if role is unknown
+      return {
+        canRead: true,
+        canCreate: false,
+        canUpdate: false,
+        canDelete: false,
+        canManageUsers: false,
+        canClearData: false,
+        canManageSettings: false,
+        canAccessInventory: false,
+        canDeleteOperationalItems: false,
+        canEditReadyDespOperations: false,
+        canAccessLoadOperations: true,
+        canAccessMPOperations: true,
+        canAccessSalesPage: false,
+        canAccessExpenseVoucher: false,
+        canAccessOrderManagement: false,
+        canAccessOverallStockReport: false
+      };
+  }
+}
+
 // Get current user permissions
 export function getCurrentUserPermissions(): Permissions {
   try {
@@ -318,6 +362,9 @@ export function getCurrentUserPermissions(): Permissions {
     // Check if user can access Expense Voucher based on department and role
     const canAccessExpenseVoucher = canUserAccessExpenseVoucher(currentUser);
     
+    const canAccessOrderManagement = canUserAccessOrderManagement(currentUser);
+
+    const canAccessOverallStockReport = canUserAccessOverallStockReport(currentUser);
     return {
       ...basePermissions,
       canAccessInventory,
@@ -326,7 +373,9 @@ export function getCurrentUserPermissions(): Permissions {
       canAccessLoadOperations,
       canAccessMPOperations,
       canAccessSalesPage,
-      canAccessExpenseVoucher
+      canAccessExpenseVoucher,
+      canAccessOrderManagement,
+      canAccessOverallStockReport,
     };
   } catch (error) {
     console.error('Error getting current user permissions:', error);

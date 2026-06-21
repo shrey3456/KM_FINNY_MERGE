@@ -8,6 +8,7 @@ interface ProtectedRouteProps {
   component: React.ComponentType<any>;
   requireInventoryAccess?: boolean;
   requireAdmin?: boolean;
+  requireOrderManagement?: boolean;
 }
 
 /**
@@ -18,12 +19,13 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   component: Component,
   requireInventoryAccess = false,
   requireAdmin = false,
+  requireOrderManagement = false,
 }) => {
   const [, navigate] = useLocation();
-  
+
   // Get current user permissions
   const userPermissions = getCurrentUserPermissions();
-  
+
   return (
     <Route
       path={path}
@@ -32,12 +34,17 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
         if (requireAdmin && !userPermissions.canManageUsers) {
           return <NotFound />;
         }
-        
+
         // Check inventory access
         if (requireInventoryAccess && !userPermissions.canAccessInventory) {
           return <NotFound />;
         }
-        
+
+        // Check order management access (admin + billing department)
+        if (requireOrderManagement && !userPermissions.canAccessOrderManagement) {
+          return <NotFound />;
+        }
+
         // All checks passed, render the component
         return <Component {...props} />;
       }}
