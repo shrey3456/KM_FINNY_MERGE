@@ -99,7 +99,7 @@ export const products = pgTable("products", {
   upSr: text("up_sr"),              // "UP Sr :"
   upHsn: text("up_hsn"),           // "UP HSN :"
   upSap: text("up_sap"),           // "UP SAP :"
-  upRate: text("up_rate"),         // "UP Rate :"
+  upRate: text("up_rate"),         // "UP Rate :"Not as.Not as big.Not as big over.Not as big a. 
   upIgst: text("up_igst"),         // "UP IGST :"
   forUpOrderForm: text("for_up_order_form"), // "For UP Order Form :"
 

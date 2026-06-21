@@ -260,7 +260,7 @@ function Router() {
         <ProtectedRoute path="/settings" component={Settings} requireAdmin={true} />
         <ProtectedRoute path="/plant-settings" component={PlantSettings} requireAdmin={true} />
         <ProtectedRoute path="/order-management" component={OrderManagement} requireAdmin={true} />
-        <ProtectedRoute path="/order-import" component={OrderImport} requireAdmin={true} />
+        <ProtectedRoute path="/order-import" component={OrderImport} requireOrderManagement={true} />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />
         <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />

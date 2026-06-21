@@ -96,13 +96,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
   const userPermissions = getCurrentUserPermissions();
 
   // Notification badge: poll for active scan session for non-admin users
-  const ADMIN_ROLES = ['admin', 'super-admin', 'billing'];
-  const isSuperAdmin = ['admin', 'super-admin'].includes(
-    ((currentUser as any)?.role ?? '').toLowerCase().trim()
-  );
-  const isAdminRole = ADMIN_ROLES.includes(
-    ((currentUser as any)?.role ?? '').toLowerCase().trim()
-  );
+  const ADMIN_ROLES = ['admin', 'super-admin'];
+  const userRole = ((currentUser as any)?.role ?? '').toLowerCase().trim();
+  const userDepartment = ((currentUser as any)?.department ?? '').toLowerCase().trim();
+  const isSuperAdmin = ['admin', 'super-admin'].includes(userRole);
+  const isAdminRole = ADMIN_ROLES.includes(userRole);
   const { data: scanNotif } = useQuery<{ active: boolean; session: any }>({
     queryKey: ['/api/order-scan/notification'],
     queryFn: () => apiRequest('GET', '/api/order-scan/notification').then((r) => r.json()),
@@ -203,13 +201,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           label: "Scan Order",
           icon: <ScanLine className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/scan",
-        },
-        {
-          label: "Order Management",
-          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/order-scan",
           badge: hasScanBadge ? 1 : 0,
-          adminOnly: true,
         },
         {
           label: "Pallet Stock Report",
@@ -220,11 +212,19 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           label: "Overall Stock",
           icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/overall-stock",
+          permission: "canAccessOverallStock",
         },
         {
           label: "Scan History",
           icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/reports",
+        },
+        {
+          label: "Order Import",
+          icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-import",
+          permission: "canAccessOrderManagement",
+          departments: ['billing'],
         },
       ],
     },
@@ -267,11 +267,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/plant-settings",
         },
         {
-          label: "Order Import",
-          icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/order-import",
-        },
-        {
           label: "Activities",
           icon: <Activity className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/activities",
@@ -290,9 +285,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
 
   // Filter categories based on user permissions
   const filteredCategories = menuCategories.filter((category) => {
-    // Hide ADMIN category for non-admin users
-    if (category.title === "ADMIN" && !userPermissions.canManageUsers) {
-      return false;
+    if (category.title === "ADMIN") {
+      // Show ADMIN category if user has canManageUsers OR has role-based access to any item
+      const hasRoleBasedItem = category.items.some(
+        (item) => (item as any).roles?.includes(userRole)
+      );
+      return userPermissions.canManageUsers || hasRoleBasedItem;
     }
     // Hide INVENTORY category for users without inventory access
     if (category.title === "INVENTORY" && !userPermissions.canAccessInventory) {
@@ -324,14 +322,16 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             <ul className="space-y-1">
               {category.items
                 .filter((item) => {
-                  // @ts-ignore
-                  if (item.adminOnly && !isSuperAdmin) return false;
-                  // Check if item requires permission
-                  if (item.permission) {
-                    // @ts-ignore - We know the permission exists
-                    return userPermissions[item.permission] === true;
+                  const it = item as any;
+                  if (it.adminOnly && !isSuperAdmin) return false;
+                  // Role-based access: only show to listed roles
+                  if (it.roles) return it.roles.includes(userRole);
+                  // Permission-based access (with optional department override)
+                  if (it.permission) {
+                    return userPermissions[it.permission as keyof typeof userPermissions] === true
+                      || it.departments?.includes(userDepartment) === true;
                   }
-                  return true; // Show items with no permission requirement
+                  return true;
                 })
                 .map((item) => {
                   // @ts-ignore
