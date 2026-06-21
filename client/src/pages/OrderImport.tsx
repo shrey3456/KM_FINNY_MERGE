@@ -242,6 +242,9 @@ export default function OrderImport() {
       if (filterPlant) params.set("plant", filterPlant);
       return (await apiRequest("GET", `/api/order-import/sessions?${params}`)).json();
     },
+    staleTime: 0,
+    refetchInterval: 5000,
+    refetchOnMount: true,
   });
 
   const itemsQuery = useQuery<OrderImportItem[]>({
@@ -313,13 +316,15 @@ export default function OrderImport() {
       qc.cancelQueries({ queryKey: ["/api/order-scan/notification"] }),
     ]);
 
-  // Shared helper: after every mutation (success or error) force a fresh refetch
-  // from the server so the UI is always in sync regardless of what happened.
+  // Shared helper: after every mutation fire IMMEDIATE network requests for all
+  // session queries. refetchQueries (unlike invalidateQueries) does not wait for
+  // staleTime — it fires the fetch right now, guaranteeing the UI reflects the
+  // latest server state as soon as the response arrives.
   const refetchAllSessionQueries = () => {
-    qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
-    qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
-    qc.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
-    qc.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+    qc.refetchQueries({ queryKey: ["/api/order-import/sessions"], type: "all" });
+    qc.refetchQueries({ queryKey: ["/api/order-scan/sessions"],   type: "all" });
+    qc.refetchQueries({ queryKey: ["/api/order-scan/active"],     type: "all" });
+    qc.refetchQueries({ queryKey: ["/api/order-scan/notification"], type: "all" });
   };
 
   const importMutation = useMutation({
