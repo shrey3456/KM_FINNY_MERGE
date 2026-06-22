@@ -298,19 +298,36 @@ export default function OrderImport() {
   useEffect(() => {
     if (!isImportRole) return;
 
-    const es = new EventSource("/api/order-import/stream");
+    let es: EventSource;
+    let retryMs = 2000;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let mounted = true;
 
-    es.onmessage = () => {
+    const refetchAll = () => {
       qc.refetchQueries({ queryKey: ["/api/order-import/sessions"], type: "all" });
       qc.refetchQueries({ queryKey: ["/api/order-scan/sessions"],   type: "all" });
       qc.refetchQueries({ queryKey: ["/api/order-scan/active"],     type: "all" });
       qc.refetchQueries({ queryKey: ["/api/order-scan/notification"], type: "all" });
     };
 
-    // On SSE error just close — polling takes over automatically
-    es.onerror = () => es.close();
+    const connect = () => {
+      if (!mounted) return;
+      es = new EventSource("/api/order-import/stream");
+      es.onmessage = () => { retryMs = 2000; refetchAll(); };
+      es.onerror = () => {
+        es.close();
+        // Exponential back-off: 2s → 4s → 8s → capped at 30s
+        retryTimer = setTimeout(() => { retryMs = Math.min(retryMs * 2, 30000); connect(); }, retryMs);
+      };
+    };
 
-    return () => es.close();
+    connect();
+
+    return () => {
+      mounted = false;
+      if (retryTimer) clearTimeout(retryTimer);
+      es?.close();
+    };
   }, [isImportRole, qc]);
 
   // ── Mutations ──────────────────────────────────────────────────────────────

@@ -94,7 +94,9 @@ function MonitorView() {
   const sessionsQuery = useQuery<Session[]>({
     queryKey: ["/api/order-scan/sessions"],
     queryFn: () => apiRequest("GET", "/api/order-scan/sessions").then((r) => r.json()),
-    refetchInterval: 15000,
+    staleTime: 0,
+    refetchInterval: 5000,
+    refetchOnMount: true,
   });
 
   const itemsQuery = useQuery<ScanItem[]>({
@@ -384,7 +386,9 @@ function ScanView() {
   const sessionQuery = useQuery<Session | null>({
     queryKey: ["/api/order-scan/active"],
     queryFn: () => apiRequest("GET", "/api/order-scan/active").then((r) => r.json()),
-    refetchInterval: 10000,
+    staleTime: 0,
+    refetchInterval: 5000,
+    refetchOnMount: true,
   });
 
   const session = sessionQuery.data ?? null;
