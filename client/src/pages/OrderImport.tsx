@@ -383,7 +383,7 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
     onMutate: async (id) => {
-      await cancelSessionQueries();
+
       const prevScanSessions  = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const prevImportPages   = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const prevActive        = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
@@ -416,7 +416,7 @@ export default function OrderImport() {
       await apiRequest("DELETE", `/api/order-import/sessions/${id}`);
     },
     onMutate: async (id) => {
-      await cancelSessionQueries();
+
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
@@ -451,7 +451,7 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
     onMutate: async (id) => {
-      await cancelSessionQueries();
+
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
@@ -485,7 +485,7 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/complete`)).json(),
     onMutate: async (id) => {
-      await cancelSessionQueries();
+
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
