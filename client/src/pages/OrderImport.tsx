@@ -383,12 +383,13 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
     onMutate: async (id) => {
-
+      await qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] });
+      await qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] });
+      await qc.cancelQueries({ queryKey: ["/api/order-scan/active"] });
       const prevScanSessions  = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const prevImportPages   = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const prevActive        = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       const activatingSession = (prevScanSessions ?? []).find((s) => s.id === id);
-      // Optimistic: mark session active immediately so it appears in Currently Active without waiting for server
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "active" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "active" } : s) : old,
@@ -397,6 +398,9 @@ export default function OrderImport() {
         qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], { ...activatingSession, scanStatus: "active" });
       }
       return { prevScanSessions, prevImportPages, prevActive };
+    },
+    onSuccess: () => {
+      navigate("/scan");
     },
     onError: (err: any, _id, ctx) => {
       if (ctx) {
@@ -416,7 +420,9 @@ export default function OrderImport() {
       await apiRequest("DELETE", `/api/order-import/sessions/${id}`);
     },
     onMutate: async (id) => {
-
+      await qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] });
+      await qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] });
+      await qc.cancelQueries({ queryKey: ["/api/order-scan/active"] });
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
@@ -451,7 +457,9 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
     onMutate: async (id) => {
-
+      await qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] });
+      await qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] });
+      await qc.cancelQueries({ queryKey: ["/api/order-scan/active"] });
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
@@ -485,7 +493,9 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/complete`)).json(),
     onMutate: async (id) => {
-
+      await qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] });
+      await qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] });
+      await qc.cancelQueries({ queryKey: ["/api/order-scan/active"] });
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
