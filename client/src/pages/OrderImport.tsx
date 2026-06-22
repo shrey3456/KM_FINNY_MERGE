@@ -383,12 +383,16 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/activate`)).json(),
     onMutate: async (id) => {
-      await qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] });
-      await qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] });
-      await qc.cancelQueries({ queryKey: ["/api/order-scan/active"] });
+      await Promise.all([
+        qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/active"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/notification"] }),
+      ]);
       const prevScanSessions  = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const prevImportPages   = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const prevActive        = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
+      const prevNotif         = qc.getQueryData(["/api/order-scan/notification"]);
       const activatingSession = (prevScanSessions ?? []).find((s) => s.id === id);
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "active" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
@@ -396,8 +400,21 @@ export default function OrderImport() {
       );
       if (activatingSession) {
         qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], { ...activatingSession, scanStatus: "active" });
+        // Seed the notification cache immediately so the /scan page sees the active
+        // session as soon as it mounts — no network round-trip needed.
+        qc.setQueryData(["/api/order-scan/notification"], {
+          active: true,
+          session: {
+            id:              activatingSession.id,
+            plant:           activatingSession.plant,
+            csvFileName:     activatingSession.csvFileName,
+            rowCount:        activatingSession.rowCount,
+            importedByName:  activatingSession.importedByName,
+            scanActivatedAt: new Date().toISOString(),
+          },
+        });
       }
-      return { prevScanSessions, prevImportPages, prevActive };
+      return { prevScanSessions, prevImportPages, prevActive, prevNotif };
     },
     onSuccess: () => {
       navigate("/scan");
@@ -409,6 +426,8 @@ export default function OrderImport() {
         ctx.prevImportPages.forEach(([key, data]) => { if (data) qc.setQueryData<SessionsResponse>(key, data); });
         if (ctx.prevActive !== undefined)
           qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], ctx.prevActive);
+        if (ctx.prevNotif !== undefined)
+          qc.setQueryData(["/api/order-scan/notification"], ctx.prevNotif);
       }
       toast({ title: "Cannot load for scan", description: err.message, variant: "destructive" });
     },
@@ -420,13 +439,16 @@ export default function OrderImport() {
       await apiRequest("DELETE", `/api/order-import/sessions/${id}`);
     },
     onMutate: async (id) => {
-      await qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] });
-      await qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] });
-      await qc.cancelQueries({ queryKey: ["/api/order-scan/active"] });
+      await Promise.all([
+        qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/active"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/notification"] }),
+      ]);
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
-      // Optimistic: remove session from cache immediately before server responds
+      const previousNotif        = qc.getQueryData(["/api/order-scan/notification"]);
       setDeleteTarget(null);
       if (expandedId === id)     setExpandedId(null);
       if (scanExpandedId === id) setScanExpandedId(null);
@@ -434,9 +456,12 @@ export default function OrderImport() {
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.filter((s) => s.id !== id) : old,
       );
-      if (previousActive?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
+      if (previousActive?.id === id) {
+        qc.setQueryData(["/api/order-scan/active"], null);
+        qc.setQueryData(["/api/order-scan/notification"], { active: false, session: null });
+      }
       toast({ title: "Session deleted" });
-      return { previousScanSessions, previousImportPages, previousActive };
+      return { previousScanSessions, previousImportPages, previousActive, previousNotif };
     },
     onError: (err: any, _, context) => {
       if (context) {
@@ -447,6 +472,8 @@ export default function OrderImport() {
         });
         if (context.previousActive !== undefined)
           qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], context.previousActive);
+        if (context.previousNotif !== undefined)
+          qc.setQueryData(["/api/order-scan/notification"], context.previousNotif);
       }
       toast({ title: "Delete failed", description: err.message, variant: "destructive" });
     },
@@ -457,22 +484,27 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/deactivate`)).json(),
     onMutate: async (id) => {
-      await qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] });
-      await qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] });
-      await qc.cancelQueries({ queryKey: ["/api/order-scan/active"] });
+      await Promise.all([
+        qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/active"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/notification"] }),
+      ]);
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
-      // Optimistic: revert status to available immediately
+      const previousNotif        = qc.getQueryData(["/api/order-scan/notification"]);
       setDeactivateTarget(null);
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "available" } : s) : old,
       );
-      if (previousActive?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
+      if (previousActive?.id === id) {
+        qc.setQueryData(["/api/order-scan/active"], null);
+        qc.setQueryData(["/api/order-scan/notification"], { active: false, session: null });
+      }
       toast({ title: "Session deactivated", description: "Lock released. Another session can now be loaded." });
-      return { previousScanSessions, previousImportPages, previousActive };
-
+      return { previousScanSessions, previousImportPages, previousActive, previousNotif };
     },
     onError: (err: any, _, context) => {
       if (context) {
@@ -483,6 +515,8 @@ export default function OrderImport() {
         });
         if (context.previousActive !== undefined)
           qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], context.previousActive);
+        if (context.previousNotif !== undefined)
+          qc.setQueryData(["/api/order-scan/notification"], context.previousNotif);
       }
       toast({ title: "Deactivate failed", description: err.message, variant: "destructive" });
     },
@@ -493,22 +527,28 @@ export default function OrderImport() {
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/complete`)).json(),
     onMutate: async (id) => {
-      await qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] });
-      await qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] });
-      await qc.cancelQueries({ queryKey: ["/api/order-scan/active"] });
+      await Promise.all([
+        qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/active"] }),
+        qc.cancelQueries({ queryKey: ["/api/order-scan/notification"] }),
+      ]);
       const previousScanSessions = qc.getQueryData<ScanSession[]>(["/api/order-scan/sessions"]);
       const previousImportPages  = qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] });
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
-      // Optimistic: mark completed immediately
+      const previousNotif        = qc.getQueryData(["/api/order-scan/notification"]);
       setCompleteTarget(null);
       setShowCompleted(true);
       patchImportSessions((rows) => rows.map((s) => s.id === id ? { ...s, scanStatus: "completed" } : s));
       qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
         old ? old.map((s) => s.id === id ? { ...s, scanStatus: "completed" } : s) : old,
       );
-      if (previousActive?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
+      if (previousActive?.id === id) {
+        qc.setQueryData(["/api/order-scan/active"], null);
+        qc.setQueryData(["/api/order-scan/notification"], { active: false, session: null });
+      }
       toast({ title: "Session completed", className: "bg-green-50 border-green-200 text-green-900" });
-      return { previousScanSessions, previousImportPages, previousActive };
+      return { previousScanSessions, previousImportPages, previousActive, previousNotif };
     },
     onError: (err: any, _, context) => {
       if (context) {
@@ -519,6 +559,8 @@ export default function OrderImport() {
         });
         if (context.previousActive !== undefined)
           qc.setQueryData<ScanSession | null>(["/api/order-scan/active"], context.previousActive);
+        if (context.previousNotif !== undefined)
+          qc.setQueryData(["/api/order-scan/notification"], context.previousNotif);
       }
       toast({ title: "Complete failed", description: err.message, variant: "destructive" });
     },
