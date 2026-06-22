@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
@@ -288,40 +288,45 @@ export default function OrderImport() {
     refetchOnMount: true,
   });
 
+  // ── SSE: real-time sync ────────────────────────────────────────────────────
+  // The server pushes "data: update\n\n" after every session mutation (create /
+  // delete / activate / deactivate / complete).  We immediately fire refetches
+  // so the UI is in sync within one network round-trip — no race conditions,
+  // no dependency on whether polling timers happen to fire at the right moment.
+  // Polling (refetchInterval:5000 on the queries above) remains as a fallback in
+  // case the SSE connection drops (proxy timeout, network blip, etc.).
+  useEffect(() => {
+    if (!isImportRole) return;
+
+    const es = new EventSource("/api/order-import/stream");
+
+    es.onmessage = () => {
+      qc.refetchQueries({ queryKey: ["/api/order-import/sessions"], type: "all" });
+      qc.refetchQueries({ queryKey: ["/api/order-scan/sessions"],   type: "all" });
+      qc.refetchQueries({ queryKey: ["/api/order-scan/active"],     type: "all" });
+      qc.refetchQueries({ queryKey: ["/api/order-scan/notification"], type: "all" });
+    };
+
+    // On SSE error just close — polling takes over automatically
+    es.onerror = () => es.close();
+
+    return () => es.close();
+  }, [isImportRole, qc]);
+
   // ── Mutations ──────────────────────────────────────────────────────────────
-  // Helper: immediately patch the paginated import-sessions cache
   type ImportSessionRow = OrderImportSession & { importedByName: string | null; scanStatus: string };
+
+  // Patch every cached page of the paginated import-sessions list immediately.
   const patchImportSessions = (updater: (rows: ImportSessionRow[]) => ImportSessionRow[]) => {
-    // Patch every cached page variant so any currently visible page updates instantly
     qc.getQueriesData<SessionsResponse>({ queryKey: ["/api/order-import/sessions"] })
       .forEach(([key, data]) => {
         if (!data) return;
-        qc.setQueryData<SessionsResponse>(key, {
-          ...data,
-          sessions: updater(data.sessions),
-        });
+        qc.setQueryData<SessionsResponse>(key, { ...data, sessions: updater(data.sessions) });
       });
   };
 
-  // Shared helper: cancel all in-flight session GET requests so stale responses
-  // from the polling intervals can never arrive and overwrite a fresh mutation result.
-  // This is the root cause of the production race condition:
-  //   t=0  poll fires (GET in-flight)
-  //   t=1  mutation completes, cache updated optimistically
-  //   t=2  stale GET response arrives → overwrites the optimistic update
-  // cancelQueries in onMutate prevents step 3 from ever happening.
-  const cancelSessionQueries = () =>
-    Promise.all([
-      qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] }),
-      qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] }),
-      qc.cancelQueries({ queryKey: ["/api/order-scan/active"] }),
-      qc.cancelQueries({ queryKey: ["/api/order-scan/notification"] }),
-    ]);
-
-  // Shared helper: after every mutation fire IMMEDIATE network requests for all
-  // session queries. refetchQueries (unlike invalidateQueries) does not wait for
-  // staleTime — it fires the fetch right now, guaranteeing the UI reflects the
-  // latest server state as soon as the response arrives.
+  // After every mutation fire immediate refetches. SSE usually beats this, but
+  // onSettled is a guaranteed belt-and-suspenders fallback.
   const refetchAllSessionQueries = () => {
     qc.refetchQueries({ queryKey: ["/api/order-import/sessions"], type: "all" });
     qc.refetchQueries({ queryKey: ["/api/order-scan/sessions"],   type: "all" });
@@ -332,62 +337,40 @@ export default function OrderImport() {
   const importMutation = useMutation({
     mutationFn: async (payload: { plant: string; csvFileName: string; items: object[] }) =>
       (await apiRequest("POST", "/api/order-import/sessions", payload)).json(),
-    onMutate: async () => {
-      await cancelSessionQueries();
-    },
     onSuccess: (data) => {
       setShowMappingDialog(false);
       setCsvData(null);
       setSelectedFile(null);
       setLastImport({ rowCount: data.rowCount });
       setShowHistory(true);
-
-      if (data.session) {
-        const newImportRow: ImportSessionRow = {
-          ...data.session,
-          rowCount:        data.rowCount,
-          scanStatus:      data.session.scanStatus ?? "available",
-          importedByName:  (user as any)?.name ?? null,
-        };
-
-        // Patch every cached page variant immediately
-        patchImportSessions((rows) => [newImportRow, ...rows]);
-
-        // Seed the page-1 / no-filter cache key so the UI shows the new session
-        // instantly even when the user was browsing a different page.
-        const page1Key = ["/api/order-import/sessions", 1, pageSize, "", ""] as const;
-        const page1Data = qc.getQueryData<SessionsResponse>(page1Key);
-        if (page1Data) {
-          qc.setQueryData<SessionsResponse>(page1Key, {
-            ...page1Data,
-            sessions: [newImportRow, ...page1Data.sessions].slice(0, pageSize),
-            total: page1Data.total + 1,
-            totalPages: Math.max(1, Math.ceil((page1Data.total + 1) / pageSize)),
-          });
-        }
-
-        const newScanSession: ScanSession = {
-          id:                  data.session.id,
-          plant:               data.session.plant,
-          csvFileName:         data.session.csvFileName,
-          rowCount:            data.rowCount,
-          scanStatus:          data.session.scanStatus ?? "available",
-          importedByName:      (user as any)?.name ?? null,
-          createdAt:           data.session.createdAt ?? new Date().toISOString(),
-          scanActivatedByName: null,
-          scanActivatedAt:     null,
-          scanCompletedAt:     null,
-          scanActivatedByCode: null,
-        };
-        qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
-          old ? [newScanSession, ...old] : [newScanSession],
-        );
-      }
-
-      // Reset pagination after cache is seeded so the component renders page-1 data immediately
       setCurrentPage(1);
       setFilterDate("");
       setFilterPlant("");
+
+      // Optimistic update: show the new session immediately in both lists
+      // while the SSE-triggered refetch confirms server state in the background.
+      if (data.session) {
+        const newRow: ImportSessionRow = {
+          ...data.session,
+          rowCount:       data.rowCount,
+          scanStatus:     data.session.scanStatus ?? "available",
+          importedByName: (user as any)?.name ?? null,
+        };
+        patchImportSessions((rows) => [newRow, ...rows]);
+
+        // Seed page-1/no-filter key so the list renders instantly even if the
+        // user was on a filtered page before uploading.
+        const p1Key = ["/api/order-import/sessions", 1, pageSize, "", ""] as const;
+        const p1 = qc.getQueryData<SessionsResponse>(p1Key);
+        qc.setQueryData<SessionsResponse>(p1Key, p1
+          ? { ...p1, sessions: [newRow, ...p1.sessions].slice(0, pageSize), total: p1.total + 1, totalPages: Math.max(1, Math.ceil((p1.total + 1) / pageSize)) }
+          : { sessions: [newRow], total: 1, page: 1, pageSize, totalPages: 1 },
+        );
+
+        qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
+          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: data.session.scanStatus ?? "available", importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null }, ...old] : [],
+        );
+      }
 
       toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
@@ -481,6 +464,7 @@ export default function OrderImport() {
       if (previousActive?.id === id) qc.setQueryData(["/api/order-scan/active"], null);
       toast({ title: "Session deactivated", description: "Lock released. Another session can now be loaded." });
       return { previousScanSessions, previousImportPages, previousActive };
+
     },
     onError: (err: any, _, context) => {
       if (context) {
@@ -534,9 +518,6 @@ export default function OrderImport() {
   const updateMutation = useMutation({
     mutationFn: async (payload: { id: number; csvFileName: string; items: object[] }) =>
       (await apiRequest("PUT", `/api/order-import/sessions/${payload.id}`, payload)).json(),
-    onMutate: async () => {
-      await cancelSessionQueries();
-    },
     onSuccess: (data, vars) => {
       setShowMappingDialog(false);
       setCsvData(null);

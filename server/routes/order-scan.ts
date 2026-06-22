@@ -8,6 +8,7 @@ import {
 } from '../../shared/schema';
 import { eq, and, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
+import { broadcastOrderImportUpdate } from './order-import';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
 function plantEq(filter: string) {
@@ -446,6 +447,7 @@ router.post('/order-scan/sessions/:id/activate', async (req: Request, res: Respo
 
     await client.query('COMMIT');
     res.json({ success: true });
+    broadcastOrderImportUpdate();
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ message: err instanceof Error ? err.message : 'Activation failed' });
@@ -464,6 +466,7 @@ router.post('/order-scan/sessions/:id/deactivate', async (req: Request, res: Res
       .set({ scanStatus: 'available' })
       .where(eq(orderImportSessions.id, id));
     res.json({ success: true });
+    broadcastOrderImportUpdate();
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Deactivation failed' });
   }
@@ -479,6 +482,7 @@ router.post('/order-scan/sessions/:id/complete', async (req: Request, res: Respo
       .set({ scanStatus: 'completed', scanCompletedAt: new Date() })
       .where(eq(orderImportSessions.id, id));
     res.json({ success: true });
+    broadcastOrderImportUpdate();
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Complete failed' });
   }

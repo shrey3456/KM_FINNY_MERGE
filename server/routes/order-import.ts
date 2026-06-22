@@ -5,6 +5,23 @@ import { eq, desc, and, sql } from 'drizzle-orm';
 
 const router = Router();
 
+// ── SSE client registry ───────────────────────────────────────────────────────
+// Every connected admin browser holds an open SSE connection here.
+// After any session mutation we call broadcastOrderImportUpdate() and every
+// browser immediately refetches — zero-latency sync without relying on polls.
+const sseClients = new Set<Response>();
+
+export function broadcastOrderImportUpdate(): void {
+  const frame = 'data: update\n\n';
+  sseClients.forEach((res) => {
+    try {
+      res.write(frame);
+    } catch {
+      sseClients.delete(res);
+    }
+  });
+}
+
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
   const role = ((req.user as any)?.role ?? '').toLowerCase();
@@ -15,14 +32,38 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
 
 router.use('/order-import', requireAdmin);
 
+// GET /api/order-import/stream  ── SSE: real-time change notifications
+// Client connects once; server pushes "data: update\n\n" after any mutation.
+// X-Accel-Buffering: no  — disables nginx proxy buffering so events arrive instantly.
+router.get('/order-import/stream', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  // Confirm the stream is open to the client immediately
+  res.write(':connected\n\n');
+
+  sseClients.add(res);
+
+  // Heartbeat every 25 s keeps the connection alive through reverse proxies
+  // that close idle TCP connections (IIS ARR default = 30 s).
+  const heartbeat = setInterval(() => {
+    try { res.write(':ping\n\n'); } catch { clearInterval(heartbeat); }
+  }, 25_000);
+
+  req.on('close', () => {
+    sseClients.delete(res);
+    clearInterval(heartbeat);
+  });
+});
+
 // GET /api/order-import/sessions?page=1&pageSize=10&date=YYYY-MM-DD
 router.get('/order-import/sessions', async (req, res) => {
   try {
     const page     = Math.max(1, parseInt(String(req.query.page     ?? '1')));
     const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? '10'))));
 
-    // DB stores timestamps in local server time (IST) without timezone info.
-    // Compare the date portion directly — no timezone conversion needed.
     const dateCondition = req.query.date
       ? sql`(${orderImportSessions.createdAt})::date = ${String(req.query.date)}::date`
       : null;
@@ -106,6 +147,9 @@ router.post('/order-import/sessions', async (req: Request, res: Response) => {
     await db.insert(orderImportItems).values(rows);
 
     res.status(201).json({ success: true, session, rowCount: rows.length });
+
+    // Push change event AFTER responding so client response is never delayed
+    broadcastOrderImportUpdate();
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Import failed' });
   }
@@ -126,7 +170,7 @@ router.get('/order-import/sessions/:id/items', async (req: Request, res: Respons
   }
 });
 
-// PUT /api/order-import/sessions/:id  — replace all items (re-import with new CSV / mapping)
+// PUT /api/order-import/sessions/:id  — replace all items (re-import with new CSV)
 router.put('/order-import/sessions/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
@@ -174,23 +218,25 @@ router.put('/order-import/sessions/:id', async (req: Request, res: Response) => 
       .returning();
 
     res.json({ success: true, session: updated, rowCount: rows.length });
+
+    broadcastOrderImportUpdate();
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Update failed' });
   }
 });
 
 // DELETE /api/order-import/sessions/:id
-// Soft-delete: marks the session as deleted so it disappears from the import list
-// but all related scan_items and scan_events are preserved for history and reports.
 router.delete('/order-import/sessions/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    // Also reset scanStatus so the session no longer appears as active on the scan page.
     await db
       .update(orderImportSessions)
       .set({ isDeleted: true, deletedAt: new Date(), scanStatus: 'available' })
       .where(eq(orderImportSessions.id, id));
+
     res.json({ success: true });
+
+    broadcastOrderImportUpdate();
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Delete failed' });
   }
