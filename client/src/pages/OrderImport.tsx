@@ -854,10 +854,14 @@ export default function OrderImport() {
           </div>
         </div>
 
-        {/* ── Upload Card (compact) ── */}
+        {/* ── Upload Card ── */}
         <Card className="rounded-md">
-          <CardContent className="p-4">
-            <div className="flex flex-wrap items-end gap-3">
+          <CardContent className="p-4 space-y-3">
+            {/* Mobile: CSV file first (top), then Plant+Date row, then button.
+                Desktop: single horizontal row with all fields side-by-side. */}
+
+            {/* Row 1 (mobile) / all-in-one (desktop) */}
+            <div className="hidden sm:flex flex-wrap items-end gap-3">
               {/* Plant */}
               <div className="grid gap-1 min-w-[130px] flex-1">
                 <Label className="text-xs text-gray-500">Plant</Label>
@@ -899,9 +903,58 @@ export default function OrderImport() {
                 </Button>
               </div>
             </div>
+
+            {/* ── Mobile-only layout ── */}
+            <div className="sm:hidden space-y-3">
+              {/* 1. CSV File at the top — on mobile the browser shows "Choose File / Camera" */}
+              <div className="grid gap-1">
+                <Label className="text-xs text-gray-500 font-medium">
+                  CSV File {selectedFile && <span className="text-green-600 font-medium">· {selectedFile.name}</span>}
+                </Label>
+                <Input ref={fileRef} type="file" accept=".csv"
+                  className="h-11 text-sm file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:font-medium file:bg-[#001d6e]/10 file:text-[#001d6e]"
+                  onChange={handleFileChange} disabled={importMutation.isPending} />
+              </div>
+
+              {/* 2. Plant + Date side-by-side */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-1">
+                  <Label className="text-xs text-gray-500">Plant</Label>
+                  {plantOptions.length > 0 ? (
+                    <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
+                      <SelectTrigger className="h-10 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="_none_">— Select —</SelectItem>
+                        {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input className="h-10 text-sm" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
+                  )}
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-xs text-gray-500">Order Date</Label>
+                  <Input type="date" className="h-10 text-sm w-full" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                </div>
+              </div>
+
+              {/* 3. Action buttons — full width */}
+              <div className="flex gap-2">
+                <Button variant="outline" className="h-10 px-3 shrink-0" onClick={clearForm}
+                  disabled={!selectedFile || importMutation.isPending}>
+                  <X className="h-4 w-4" />
+                </Button>
+                <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
+                  disabled={!selectedFile || !plant.trim() || importMutation.isPending}>
+                  {importMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                  Map &amp; Import
+                </Button>
+              </div>
+            </div>
+
             {/* Feedback row */}
             {(lastImport || importMutation.isError) && (
-              <div className="mt-3">
+              <div className="mt-1">
                 {lastImport && (
                   <p className="text-xs text-green-700 flex items-center gap-1">
                     <CheckCircle className="h-3.5 w-3.5" /> Imported <strong>{lastImport.rowCount}</strong> rows successfully.
@@ -1184,7 +1237,8 @@ export default function OrderImport() {
         <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 items-start">
 
         {/* ── Card: All CSV Sessions (available to load) ── */}
-        <Card className="rounded-md">
+        {/* On mobile: order-2 so Currently Active appears first */}
+        <Card className="rounded-md order-2 lg:order-1">
             <CardHeader className="pb-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
@@ -1356,7 +1410,8 @@ export default function OrderImport() {
           </Card>
 
         {/* ── Card: Currently Active Session ── */}
-        <Card className={`rounded-md border-amber-200 ${activeScanSessions.length > 0 ? "shadow-amber-100 shadow-md" : ""}`}>
+        {/* On mobile: order-1 so it appears above CSV Sessions */}
+        <Card className={`rounded-md border-amber-200 order-1 lg:order-2 ${activeScanSessions.length > 0 ? "shadow-amber-100 shadow-md" : ""}`}>
             <CardHeader className="pb-3 space-y-3">
               <div className="flex items-center gap-2">
                 <div className={`flex h-8 w-8 items-center justify-center rounded shrink-0 ${
@@ -1424,7 +1479,7 @@ export default function OrderImport() {
                 <div className="flex flex-col items-center justify-center py-10 text-gray-400">
                   <PackageCheck className="h-8 w-8 mb-2 opacity-20" />
                   <p className="text-sm">No active session{activePlant ? ` for ${activePlant}` : ""}</p>
-                  <p className="text-xs mt-0.5 text-gray-400">Load a CSV session above to start scanning</p>
+                  <p className="text-xs mt-0.5 text-gray-400">Load a CSV session to start scanning</p>
                 </div>
               ) : (
                 <div className="divide-y">
@@ -1447,8 +1502,37 @@ export default function OrderImport() {
                               {s.scanActivatedAt && <span className="font-normal text-gray-400"> · since {fmtIST(s.scanActivatedAt)}</span>}
                             </p>
                           )}
+                          {/* Mobile action buttons — stacked below info */}
+                          <div className="mt-3 flex flex-wrap gap-2 sm:hidden">
+                            <Button size="sm"
+                              className="h-9 flex-1 text-xs bg-amber-600 hover:bg-amber-700 text-white"
+                              onClick={() => navigate("/scan")}>
+                              <ScanLine className="mr-1.5 h-3.5 w-3.5" />
+                              View Scan
+                            </Button>
+                            <Button size="sm" variant="outline"
+                              className="h-9 flex-1 text-xs text-amber-700 border-amber-200 hover:bg-amber-50"
+                              disabled={deactivateMutation.isPending}
+                              onClick={() => setDeactivateTarget(s.id)}>
+                              <StopCircle className="mr-1 h-3 w-3" />
+                              Deactivate
+                            </Button>
+                            <Button size="sm" variant="outline"
+                              className="h-9 flex-1 text-xs text-green-700 border-green-200 hover:bg-green-50"
+                              disabled={completeMutation.isPending}
+                              onClick={() => setCompleteTarget(s.id)}>
+                              <CheckCircle2 className="mr-1 h-3 w-3" />
+                              Complete
+                            </Button>
+                            <Button size="sm" variant="ghost"
+                              className="h-9 w-9 p-0 text-gray-400 hover:text-red-600"
+                              onClick={() => setDeleteTarget(s.id)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
                         </div>
-                        <div className="flex shrink-0 flex-col items-end gap-1.5">
+                        {/* Desktop action buttons — inline on the right */}
+                        <div className="hidden sm:flex shrink-0 flex-col items-end gap-1.5">
                           <Button size="sm"
                             className="h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white"
                             onClick={() => navigate("/scan")}>

@@ -476,6 +476,10 @@ export default function ScanOrderPage() {
     setOsCameraReady(false);
   };
 
+  const resetOsConfirmation = () => {
+    osScannerRef.current?.resetConfirmation();
+  };
+
   const _computePlantPalletSize = (firstMatch: OsScanItem | null, invProduct: Product | null): number => {
     const plantLower = (activeOrderScanSession?.plant ?? "").toLowerCase();
     let size = firstMatch?.itemsPerPallet ?? 1;
@@ -1800,257 +1804,463 @@ export default function ScanOrderPage() {
       : false;
 
     return (
-      <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
-        <div className="mx-auto max-w-7xl space-y-4">
+      <div className="flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6">
 
-          {/* Header row */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400">
-                <Zap className="h-4 w-4 text-white" />
+        {/* ══════════════════════════════════════════════════
+            MOBILE LAYOUT  (hidden on sm+)
+            - Sticky header strip with session info + progress
+            - Sticky scanner (Camera toggle + feed / manual)
+            - Natural-scroll items list below
+        ════════════════════════════════════════════════════ */}
+        <div className="flex flex-col sm:hidden h-full overflow-y-auto">
+
+          {/* ── Sticky header + scanner ── */}
+          <div className="sticky top-0 z-20 bg-white shadow-sm">
+
+            {/* Session info row */}
+            <div className="flex items-center gap-3 px-4 pt-3 pb-2">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-400">
+                <Zap className="h-3.5 w-3.5 text-white" />
               </div>
-              <div className="min-w-0">
-                <p className="text-sm font-bold text-gray-900 leading-tight truncate max-w-xs sm:max-w-sm">{activeOrderScanSession.csvFileName}</p>
-                <p className="text-xs text-gray-500 truncate">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-bold text-gray-900 truncate leading-tight">{activeOrderScanSession.csvFileName}</p>
+                <p className="text-[11px] text-gray-500 truncate">
                   {activeOrderScanSession.plant}
-                  {activeOrderScanSession.importedByName && ` · loaded by ${activeOrderScanSession.importedByName}`}
+                  {activeOrderScanSession.importedByName && ` · ${activeOrderScanSession.importedByName}`}
                 </p>
               </div>
-            </div>
-            <div className="flex items-center gap-3 shrink-0">
-              <div className="hidden sm:flex items-center gap-2">
-                <Progress value={osPct} className="w-28 h-2" />
-                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
+              <div className="shrink-0 text-right">
+                <p className="text-sm font-bold text-[#001d6e]">{osDoneCount}/{osTotalCount}</p>
+                <p className="text-[11px] text-gray-400">{osPct}%</p>
               </div>
             </div>
-          </div>
 
-          {/* Mobile progress */}
-          <div className="sm:hidden flex items-center gap-2">
-            <Progress value={osPct} className="flex-1 h-1.5" />
-            <span className="text-xs text-gray-500 shrink-0">{osPct}% · {osDoneCount}/{osTotalCount}</span>
-          </div>
+            {/* Full-width progress bar */}
+            <Progress value={osPct} className="h-1.5 rounded-none" />
 
-          {/* Two-column layout */}
-          <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
+            {/* Scanner section */}
+            <div className="px-4 pt-3 pb-4 space-y-3 bg-gray-50 border-t border-gray-100">
 
-            {/* Items table */}
-            <div className="order-2 lg:order-1">
-              <Card className="rounded-xl shadow-sm">
-                <CardHeader className="pb-2 pt-4 px-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <CardTitle className="text-base">CSV Items</CardTitle>
-                    <span className="text-xs text-gray-400">{osDoneCount} / {osTotalCount} done</span>
-                  </div>
-                  <div className="relative">
-                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                    <Input
-                      value={osSearch}
-                      onChange={(e) => setOsSearch(e.target.value)}
-                      placeholder="Search by name or barcode…"
-                      className="pl-8 h-8 text-sm"
-                    />
-                    {osSearch && (
-                      <button className="absolute right-2 top-2" onClick={() => setOsSearch("")}>
-                        <X className="h-4 w-4 text-gray-400" />
-                      </button>
-                    )}
-                  </div>
-                </CardHeader>
-                <CardContent className="p-0">
-                  {osItemsQuery.isLoading ? (
-                    <div className="flex justify-center py-10">
-                      <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto overflow-y-auto max-h-[560px]">
-                      <table className="w-full text-sm">
-                        <thead className="sticky top-0 z-10">
-                          <tr className="border-b bg-slate-50">
-                            <th className="w-8 px-3 py-2 bg-slate-50" />
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Item</th>
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Barcode</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Exp</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Done</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-purple-700 bg-slate-50">Pallets</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-[#001d6e] bg-slate-50">Remain</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-amber-600 bg-slate-50">Extra</th>
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {osFiltered.map((item) => (
-                            <tr
-                              key={item.id}
-                              className={`border-b transition-colors ${
-                                item.status === "complete" ? "bg-green-50/40" :
-                                item.status === "partial" ? "bg-amber-50/30" : ""
-                              }`}
-                            >
-                              <td className="px-3 py-2.5">
-                                {item.status === "complete"
-                                  ? <CheckCircle2 className="h-4 w-4 text-green-500" />
-                                  : item.status === "partial"
-                                  ? <ScanLine className="h-4 w-4 text-amber-500" />
-                                  : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
-                              </td>
-                              <td className="max-w-[200px] truncate px-3 py-2.5 text-xs font-medium">{item.itemName ?? "—"}</td>
-                              <td className="px-3 py-2.5 font-mono text-xs text-gray-400">{item.barcode ?? "—"}</td>
-                              <td className="px-3 py-2.5 text-xs text-right">{item.expectedQty}</td>
-                              <td className="px-3 py-2.5 text-xs text-right font-semibold">
-                                {Math.min(item.totalScannedQty ?? 0, item.expectedQty ?? 0)}
-                              </td>
-                              <td className="px-3 py-2.5 text-xs text-right font-semibold">
-                                {(item.scannedPallets ?? 0) > 0
-                                  ? <span className="text-purple-700">{item.scannedPallets}</span>
-                                  : <span className="text-gray-300">—</span>}
-                              </td>
-                              <td className="px-3 py-2.5 text-xs text-right font-semibold">
-                                {(() => {
-                                  const rem = Math.max(0, (item.expectedQty ?? 0) - (item.totalScannedQty ?? 0));
-                                  return rem > 0
-                                    ? <span className="text-[#001d6e]">{rem}</span>
-                                    : <span className="text-gray-300">—</span>;
-                                })()}
-                              </td>
-                              <td className="px-3 py-2.5 text-xs text-right font-semibold">
-                                {(item.totalScannedQty ?? 0) > (item.expectedQty ?? 0)
-                                  ? <span className="text-amber-600">+{(item.totalScannedQty ?? 0) - (item.expectedQty ?? 0)}</span>
-                                  : <span className="text-gray-300">—</span>}
-                              </td>
-                              <td className="px-3 py-2.5">
-                                {item.status === "complete"
-                                  ? <Badge className="bg-green-100 text-green-800 text-[11px] border-0 px-1.5 hover:bg-green-100">Done</Badge>
-                                  : item.status === "partial"
-                                  ? <Badge className="bg-amber-100 text-amber-800 text-[11px] border-0 px-1.5 hover:bg-amber-100">Partial</Badge>
-                                  : <Badge variant="outline" className="text-gray-400 text-[11px] px-1.5">Pending</Badge>}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      {osFiltered.length === 0 && !osItemsQuery.isLoading && (
-                        <p className="py-10 text-center text-sm text-gray-400">
-                          {osItems.length === 0 ? "Loading items…" : "No items match the search."}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* Scanner panel */}
-            <div className="order-1 lg:order-2 space-y-3">
-              {/* Mode toggle */}
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant={osScanMode === "camera" ? "default" : "outline"}
-                  className={`flex-1 ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+              {/* Camera / Manual tabs */}
+              <div className="flex rounded-xl overflow-hidden border border-gray-200 bg-white">
+                <button
                   onClick={() => setOsScanMode("camera")}
+                  className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-semibold transition-colors ${
+                    osScanMode === "camera" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"
+                  }`}
                 >
-                  <Camera className="mr-2 h-4 w-4" /> Camera
-                </Button>
-                <Button
-                  size="sm"
-                  variant={osScanMode === "manual" ? "default" : "outline"}
-                  className={`flex-1 ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                  <Camera className="h-4 w-4" /> Camera
+                </button>
+                <div className="w-px bg-gray-200" />
+                <button
                   onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}
+                  className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-semibold transition-colors ${
+                    osScanMode === "manual" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"
+                  }`}
                 >
-                  <Keyboard className="mr-2 h-4 w-4" /> Manual
-                </Button>
+                  <Keyboard className="h-4 w-4" /> Manual
+                </button>
               </div>
 
               {/* Camera feed */}
               {osScanMode === "camera" && (
-                <Card className="rounded-xl overflow-hidden shadow-sm">
-                  <div className="relative bg-black aspect-video">
-                    <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline />
-                    {!osCameraReady && !osCameraError && (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
-                        <Loader2 className="h-8 w-8 animate-spin" />
-                        <p className="text-sm">Starting camera…</p>
-                      </div>
-                    )}
-                    {osCameraReady && (
-                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                        <div className="h-16 w-48 rounded border-2 border-white/70" />
-                      </div>
-                    )}
-                  </div>
+                <div className="rounded-xl overflow-hidden bg-black relative" style={{ aspectRatio: "4/3" }}>
+                  <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline />
+                  {!osCameraReady && !osCameraError && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
+                      <Loader2 className="h-8 w-8 animate-spin" />
+                      <p className="text-sm">Starting camera…</p>
+                    </div>
+                  )}
+                  {osCameraReady && (
+                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                      <div className="h-20 w-56 rounded border-2 border-white/80" />
+                    </div>
+                  )}
                   {osCameraError && (
-                    <div className="flex items-center gap-2 bg-red-50 p-3 text-xs text-red-700">
+                    <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/80 px-3 py-2 text-xs text-white">
                       <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                       {osCameraError}
                     </div>
                   )}
-                </Card>
+                </div>
               )}
 
-              {/* Manual input */}
+              {/* Manual barcode input */}
               {osScanMode === "manual" && (
-                <Card className="rounded-xl shadow-sm">
-                  <CardContent className="p-4 space-y-2">
-                    <Label className="text-sm font-medium">Enter barcode</Label>
-                    <div className="flex gap-2">
-                      <Input
-                        value={osManualCode}
-                        onChange={(e) => setOsManualCode(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && osManualCode.trim()) {
-                            handleOsBarcode(osManualCode.trim());
-                            setOsManualCode("");
-                          }
-                        }}
-                        placeholder="Scan or type barcode…"
-                        disabled={!!osPending}
-                        className="font-mono text-sm"
-                        autoFocus
-                      />
-                      <Button
-                        size="sm"
-                        disabled={!osManualCode.trim() || !!osPending}
-                        onClick={() => {
-                          if (osManualCode.trim()) {
-                            handleOsBarcode(osManualCode.trim());
-                            setOsManualCode("");
-                          }
-                        }}
-                        className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0"
-                      >
-                        <ScanLine className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
+                <div className="flex gap-2">
+                  <Input
+                    value={osManualCode}
+                    onChange={(e) => setOsManualCode(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && osManualCode.trim()) {
+                        handleOsBarcode(osManualCode.trim());
+                        setOsManualCode("");
+                      }
+                    }}
+                    placeholder="Scan or type barcode…"
+                    disabled={!!osPending}
+                    className="font-mono text-base h-12 flex-1 min-w-0"
+                    autoFocus
+                  />
+                  <Button
+                    disabled={!osManualCode.trim() || !!osPending}
+                    onClick={() => {
+                      if (osManualCode.trim()) {
+                        handleOsBarcode(osManualCode.trim());
+                        setOsManualCode("");
+                      }
+                    }}
+                    className="bg-[#001d6e] hover:bg-[#00154b] text-white h-12 w-12 shrink-0 p-0"
+                  >
+                    <ScanLine className="h-5 w-5" />
+                  </Button>
+                </div>
               )}
+            </div>
+          </div>
 
-              {/* Recent scans */}
-              {osRecentScans.length > 0 && (
-                <Card className="rounded-xl shadow-sm">
-                  <CardHeader className="pb-2 pt-3 px-4">
-                    <CardTitle className="text-xs font-semibold uppercase tracking-wide text-gray-500">Recent Scans</CardTitle>
-                  </CardHeader>
-                  <CardContent className="px-4 pb-3 space-y-1.5">
-                    {osRecentScans.map((s, i) => (
-                      <div key={i} className={`flex items-center justify-between rounded px-2 py-1.5 text-xs ${s.isExtra ? "bg-orange-50" : "bg-green-50"}`}>
-                        <p className="truncate font-medium max-w-[170px]">{s.name}</p>
-                        <span className={`font-mono shrink-0 ml-2 ${s.isExtra ? "text-orange-700" : "text-green-700"}`}>
-                          {s.isExtra ? "EXTRA" : `qty: ${s.total}`}
+          {/* ── Scrollable content below sticky scanner ── */}
+          <div className="flex-1 px-3 py-3 space-y-3 overflow-y-auto">
+
+            {/* Recent scans */}
+            {osRecentScans.length > 0 && (
+              <div className="bg-white rounded-xl border overflow-hidden">
+                <p className="px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400 border-b">Recent Scans</p>
+                <div className="px-3 py-2 space-y-1.5">
+                  {osRecentScans.map((s, i) => (
+                    <div key={i} className={`flex items-center justify-between rounded-lg px-3 py-2 text-xs ${s.isExtra ? "bg-orange-50" : "bg-green-50"}`}>
+                      <p className="truncate font-medium flex-1 min-w-0">{s.name}</p>
+                      <span className={`font-mono shrink-0 ml-3 font-semibold ${s.isExtra ? "text-orange-700" : "text-green-700"}`}>
+                        {s.isExtra ? "EXTRA" : `qty: ${s.total}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Items list */}
+            <div className="bg-white rounded-xl border overflow-hidden">
+              {/* List header */}
+              <div className="flex items-center justify-between px-4 py-2.5 border-b bg-slate-50">
+                <p className="text-xs font-semibold text-gray-700">CSV Items</p>
+                <span className="text-xs text-gray-400">{osDoneCount}/{osTotalCount} done</span>
+              </div>
+
+              {/* Search */}
+              <div className="px-3 py-2.5 border-b">
+                <div className="relative">
+                  <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                  <Input
+                    value={osSearch}
+                    onChange={(e) => setOsSearch(e.target.value)}
+                    placeholder="Search items…"
+                    className="pl-8 h-9 text-sm"
+                  />
+                  {osSearch && (
+                    <button className="absolute right-2.5 top-2.5" onClick={() => setOsSearch("")}>
+                      <X className="h-4 w-4 text-gray-400" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Rows */}
+              {osItemsQuery.isLoading ? (
+                <div className="flex justify-center py-10">
+                  <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
+                </div>
+              ) : (
+                <div className="divide-y">
+                  {osFiltered.map((item) => {
+                    const scanned  = Math.min(item.totalScannedQty ?? 0, item.expectedQty ?? 0);
+                    const remaining = Math.max(0, (item.expectedQty ?? 0) - (item.totalScannedQty ?? 0));
+                    const extra    = Math.max(0, (item.totalScannedQty ?? 0) - (item.expectedQty ?? 0));
+                    return (
+                      <div key={item.id} className={`flex items-center gap-3 px-4 py-3 ${
+                        item.status === "complete" ? "bg-green-50/60" :
+                        item.status === "partial"  ? "bg-amber-50/50" : ""
+                      }`}>
+                        <span className="shrink-0">
+                          {item.status === "complete"
+                            ? <CheckCircle2 className="h-5 w-5 text-green-500" />
+                            : item.status === "partial"
+                            ? <ScanLine className="h-5 w-5 text-amber-500" />
+                            : <span className="inline-block h-5 w-5 rounded-full border-2 border-gray-300" />}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 leading-snug">{item.itemName ?? "—"}</p>
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
+                            <span className="text-xs text-gray-500">
+                              <span className="font-bold text-gray-800">{scanned}</span>/{item.expectedQty}
+                            </span>
+                            {remaining > 0 && (
+                              <span className="text-xs font-semibold text-[#001d6e]">{remaining} left</span>
+                            )}
+                            {extra > 0 && (
+                              <span className="text-xs font-semibold text-amber-600">+{extra} extra</span>
+                            )}
+                            {(item.scannedPallets ?? 0) > 0 && (
+                              <span className="text-xs text-purple-600">{item.scannedPallets} plt</span>
+                            )}
+                          </div>
+                        </div>
+                        <span className="shrink-0">
+                          {item.status === "complete"
+                            ? <span className="rounded-full bg-green-100 px-2 py-0.5 text-[11px] font-semibold text-green-700">Done</span>
+                            : item.status === "partial"
+                            ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">Partial</span>
+                            : <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-500">Pending</span>}
                         </span>
                       </div>
-                    ))}
-                  </CardContent>
-                </Card>
+                    );
+                  })}
+                  {osFiltered.length === 0 && (
+                    <p className="py-10 text-center text-sm text-gray-400">
+                      {osItems.length === 0 ? "Loading items…" : "No items match."}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           </div>
         </div>
 
+        {/* ══════════════════════════════════════════════════
+            DESKTOP LAYOUT  (hidden on mobile)
+        ════════════════════════════════════════════════════ */}
+        <div className="hidden sm:block">
+          <div className="mx-auto max-w-7xl space-y-4">
+
+            {/* Header row */}
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400">
+                  <Zap className="h-4 w-4 text-white" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-gray-900 leading-tight truncate max-w-xs lg:max-w-sm">{activeOrderScanSession.csvFileName}</p>
+                  <p className="text-xs text-gray-500 truncate">
+                    {activeOrderScanSession.plant}
+                    {activeOrderScanSession.importedByName && ` · loaded by ${activeOrderScanSession.importedByName}`}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <Progress value={osPct} className="w-28 h-2" />
+                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
+              </div>
+            </div>
+
+            {/* Two-column layout */}
+            <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
+
+              {/* Items table */}
+              <div className="order-2 lg:order-1">
+                <Card className="rounded-xl shadow-sm">
+                  <CardHeader className="pb-2 pt-4 px-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <CardTitle className="text-base">CSV Items</CardTitle>
+                      <span className="text-xs text-gray-400">{osDoneCount} / {osTotalCount} done</span>
+                    </div>
+                    <div className="relative">
+                      <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                      <Input
+                        value={osSearch}
+                        onChange={(e) => setOsSearch(e.target.value)}
+                        placeholder="Search by name or barcode…"
+                        className="pl-8 h-8 text-sm"
+                      />
+                      {osSearch && (
+                        <button className="absolute right-2 top-2" onClick={() => setOsSearch("")}>
+                          <X className="h-4 w-4 text-gray-400" />
+                        </button>
+                      )}
+                    </div>
+                  </CardHeader>
+                  <CardContent className="p-0">
+                    {osItemsQuery.isLoading ? (
+                      <div className="flex justify-center py-10">
+                        <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto overflow-y-auto max-h-[560px]">
+                        <table className="w-full text-sm">
+                          <thead className="sticky top-0 z-10">
+                            <tr className="border-b bg-slate-50">
+                              <th className="w-8 px-3 py-2 bg-slate-50" />
+                              <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Item</th>
+                              <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Barcode</th>
+                              <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Exp</th>
+                              <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Done</th>
+                              <th className="px-3 py-2 text-right text-xs font-semibold text-purple-700 bg-slate-50">Pallets</th>
+                              <th className="px-3 py-2 text-right text-xs font-semibold text-[#001d6e] bg-slate-50">Remain</th>
+                              <th className="px-3 py-2 text-right text-xs font-semibold text-amber-600 bg-slate-50">Extra</th>
+                              <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {osFiltered.map((item) => (
+                              <tr key={item.id} className={`border-b transition-colors ${
+                                item.status === "complete" ? "bg-green-50/40" :
+                                item.status === "partial" ? "bg-amber-50/30" : ""
+                              }`}>
+                                <td className="px-3 py-2.5">
+                                  {item.status === "complete"
+                                    ? <CheckCircle2 className="h-4 w-4 text-green-500" />
+                                    : item.status === "partial"
+                                    ? <ScanLine className="h-4 w-4 text-amber-500" />
+                                    : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                                </td>
+                                <td className="max-w-[200px] truncate px-3 py-2.5 text-xs font-medium">{item.itemName ?? "—"}</td>
+                                <td className="px-3 py-2.5 font-mono text-xs text-gray-400">{item.barcode ?? "—"}</td>
+                                <td className="px-3 py-2.5 text-xs text-right">{item.expectedQty}</td>
+                                <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                  {Math.min(item.totalScannedQty ?? 0, item.expectedQty ?? 0)}
+                                </td>
+                                <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                  {(item.scannedPallets ?? 0) > 0
+                                    ? <span className="text-purple-700">{item.scannedPallets}</span>
+                                    : <span className="text-gray-300">—</span>}
+                                </td>
+                                <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                  {(() => {
+                                    const rem = Math.max(0, (item.expectedQty ?? 0) - (item.totalScannedQty ?? 0));
+                                    return rem > 0
+                                      ? <span className="text-[#001d6e]">{rem}</span>
+                                      : <span className="text-gray-300">—</span>;
+                                  })()}
+                                </td>
+                                <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                  {(item.totalScannedQty ?? 0) > (item.expectedQty ?? 0)
+                                    ? <span className="text-amber-600">+{(item.totalScannedQty ?? 0) - (item.expectedQty ?? 0)}</span>
+                                    : <span className="text-gray-300">—</span>}
+                                </td>
+                                <td className="px-3 py-2.5">
+                                  {item.status === "complete"
+                                    ? <Badge className="bg-green-100 text-green-800 text-[11px] border-0 px-1.5 hover:bg-green-100">Done</Badge>
+                                    : item.status === "partial"
+                                    ? <Badge className="bg-amber-100 text-amber-800 text-[11px] border-0 px-1.5 hover:bg-amber-100">Partial</Badge>
+                                    : <Badge variant="outline" className="text-gray-400 text-[11px] px-1.5">Pending</Badge>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {osFiltered.length === 0 && !osItemsQuery.isLoading && (
+                          <p className="py-10 text-center text-sm text-gray-400">
+                            {osItems.length === 0 ? "Loading items…" : "No items match the search."}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Scanner panel */}
+              <div className="order-1 lg:order-2 space-y-3">
+                <div className="flex gap-2">
+                  <Button size="sm"
+                    variant={osScanMode === "camera" ? "default" : "outline"}
+                    className={`flex-1 ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    onClick={() => setOsScanMode("camera")}>
+                    <Camera className="mr-2 h-4 w-4" /> Camera
+                  </Button>
+                  <Button size="sm"
+                    variant={osScanMode === "manual" ? "default" : "outline"}
+                    className={`flex-1 ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}>
+                    <Keyboard className="mr-2 h-4 w-4" /> Manual
+                  </Button>
+                </div>
+
+                {osScanMode === "camera" && (
+                  <Card className="rounded-xl overflow-hidden shadow-sm">
+                    <div className="relative bg-black aspect-video">
+                      <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline />
+                      {!osCameraReady && !osCameraError && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
+                          <Loader2 className="h-8 w-8 animate-spin" />
+                          <p className="text-sm">Starting camera…</p>
+                        </div>
+                      )}
+                      {osCameraReady && (
+                        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                          <div className="h-16 w-48 rounded border-2 border-white/70" />
+                        </div>
+                      )}
+                    </div>
+                    {osCameraError && (
+                      <div className="flex items-center gap-2 bg-red-50 p-3 text-xs text-red-700">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                        {osCameraError}
+                      </div>
+                    )}
+                  </Card>
+                )}
+
+                {osScanMode === "manual" && (
+                  <Card className="rounded-xl shadow-sm">
+                    <CardContent className="p-4 space-y-2">
+                      <Label className="text-sm font-medium">Enter barcode</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          value={osManualCode}
+                          onChange={(e) => setOsManualCode(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && osManualCode.trim()) {
+                              handleOsBarcode(osManualCode.trim());
+                              setOsManualCode("");
+                            }
+                          }}
+                          placeholder="Scan or type barcode…"
+                          disabled={!!osPending}
+                          className="font-mono text-sm"
+                          autoFocus
+                        />
+                        <Button size="sm"
+                          disabled={!osManualCode.trim() || !!osPending}
+                          onClick={() => {
+                            if (osManualCode.trim()) {
+                              handleOsBarcode(osManualCode.trim());
+                              setOsManualCode("");
+                            }
+                          }}
+                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0">
+                          <ScanLine className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {osRecentScans.length > 0 && (
+                  <Card className="rounded-xl shadow-sm">
+                    <CardHeader className="pb-2 pt-3 px-4">
+                      <CardTitle className="text-xs font-semibold uppercase tracking-wide text-gray-500">Recent Scans</CardTitle>
+                    </CardHeader>
+                    <CardContent className="px-4 pb-3 space-y-1.5">
+                      {osRecentScans.map((s, i) => (
+                        <div key={i} className={`flex items-center justify-between rounded px-2 py-1.5 text-xs ${s.isExtra ? "bg-orange-50" : "bg-green-50"}`}>
+                          <p className="truncate font-medium max-w-[170px]">{s.name}</p>
+                          <span className={`font-mono shrink-0 ml-2 ${s.isExtra ? "text-orange-700" : "text-green-700"}`}>
+                            {s.isExtra ? "EXTRA" : `qty: ${s.total}`}
+                          </span>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Multi-match selection dialog */}
-        <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) setOsMultiMatch(null); }}>
-          <DialogContent className="max-w-sm">
+        <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) { setOsMultiMatch(null); resetOsConfirmation(); } }}>
+          <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
                 <AlertTriangle className="h-5 w-5 text-amber-500" />
@@ -2095,14 +2305,14 @@ export default function ScanOrderPage() {
               })}
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setOsMultiMatch(null)}>Cancel</Button>
+              <Button variant="outline" onClick={() => { setOsMultiMatch(null); resetOsConfirmation(); }}>Cancel</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
 
         {/* Scan confirmation dialog */}
-        <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; setOsSelectedStv(""); } }}>
-          <DialogContent className="max-w-sm">
+        <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; setOsSelectedStv(""); resetOsConfirmation(); } }}>
+          <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
             <DialogHeader>
               <DialogTitle className={`flex items-center gap-2 ${
                 !osPending?.matchedItem ? "text-red-700"
@@ -2215,7 +2425,7 @@ export default function ScanOrderPage() {
             </div>
 
             <DialogFooter className="gap-2">
-              <Button variant="outline" onClick={() => { setOsPending(null); osPendingRef.current = null; }}>
+              <Button variant="outline" onClick={() => { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); }}>
                 Cancel
               </Button>
               <Button

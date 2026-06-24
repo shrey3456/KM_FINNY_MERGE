@@ -892,50 +892,98 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
     };
     const rows: StockRow[] = rawRows.rows;
 
-    // Also include scans from the new order-scan system (order_scan_items / order_import_sessions)
-    const osDateFilter = dateParam ? `AND DATE(ois.created_at) = $1` : '';
-    const osRawRows = await pool.query(`
-      SELECT
-        COALESCE(osi.barcode, '')                                                AS sku,
-        osi.barcode,
-        COALESCE(p.name, osi.item_name)                                         AS "itemName",
-        NULL::text                                                               AS "itemNo",
-        COALESCE(p.sap_code, osi.sap_code)                                      AS "sapCode",
-        osi.total_scanned_qty                                                   AS "scannedQty",
-        ois.id                                                                  AS "sessionId",
-        ois.csv_file_name                                                       AS "sessionOrderName",
-        ois.scan_status                                                         AS "sessionStatus",
-        COALESCE(osi.last_scanned_at, ois.created_at)                           AS "sessionCreatedAt",
-        p.id                                                                    AS "productId",
-        p.in_stock                                                              AS "inStock",
-        p.hsn_code                                                              AS "hsnCode",
-        p.category,
-        COALESCE(
-          NULLIF(osi.items_per_pallet, 0),
-          NULLIF(p.items_per_pallet, 0),
-          NULLIF(p.pallets, 0)
-        )                                                                       AS "itemsPerPallet",
-        p.volume_in_cu_ft                                                       AS "volumeInCuFt",
-        p.sap_code                                                              AS "productSapCode",
-        p.item_no                                                               AS "productItemNo",
-        p.name                                                                  AS "productName",
-        CASE
-          WHEN COALESCE(osi.items_per_pallet, 0) > 0
-            THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / osi.items_per_pallet, 2)
-          WHEN COALESCE(p.items_per_pallet, 0) > 0
-            THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / p.items_per_pallet, 2)
-          WHEN COALESCE(p.pallets, 0) > 0
-            THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / p.pallets, 2)
-          ELSE NULL
-        END                                                                     AS "storedNumPallets"
-      FROM  order_scan_items osi
-      JOIN  order_import_sessions ois ON ois.id = osi.session_id
-      LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(osi.barcode)
-                            OR (osi.sap_code IS NOT NULL AND LOWER(p.sap_code) = LOWER(osi.sap_code))
-      WHERE osi.total_scanned_qty > 0
-        ${osDateFilter}
-      ORDER BY osi.item_name ASC
-    `, queryParams);
+    // Also include scans from the new order-scan system.
+    // When a date filter is active, sum individual scan events for that date so the
+    // quantity shown reflects what actually arrived on that day (not the all-time total).
+    // When no date filter, use the pre-aggregated order_scan_items totals.
+    let osRawRows: { rows: StockRow[] };
+    if (dateParam) {
+      // order_scan_events has: barcode, item_name, pallets, total_qty, items_per_pallet,
+      // is_extra, scanned_at, session_id — no sap_code column on that table.
+      osRawRows = await pool.query(`
+        SELECT
+          COALESCE(ose.barcode, '')                                                AS sku,
+          ose.barcode,
+          COALESCE(MAX(p.name), MAX(ose.item_name), ose.barcode)                  AS "itemName",
+          NULL::text                                                               AS "itemNo",
+          MAX(p.sap_code)                                                          AS "sapCode",
+          SUM(ose.total_qty)                                                       AS "scannedQty",
+          ose.session_id                                                           AS "sessionId",
+          MAX(ois.csv_file_name)                                                   AS "sessionOrderName",
+          MAX(ois.scan_status)                                                     AS "sessionStatus",
+          MAX(ose.scanned_at)                                                      AS "sessionCreatedAt",
+          MAX(p.id)                                                                AS "productId",
+          MAX(p.in_stock)                                                          AS "inStock",
+          MAX(p.hsn_code)                                                          AS "hsnCode",
+          MAX(p.category)                                                          AS category,
+          MAX(COALESCE(
+            NULLIF(ose.items_per_pallet, 0),
+            NULLIF(p.items_per_pallet, 0),
+            NULLIF(p.pallets, 0)
+          ))                                                                       AS "itemsPerPallet",
+          MAX(p.volume_in_cu_ft)                                                   AS "volumeInCuFt",
+          MAX(p.sap_code)                                                          AS "productSapCode",
+          MAX(p.item_no)                                                           AS "productItemNo",
+          MAX(p.name)                                                              AS "productName",
+          CASE
+            WHEN MAX(COALESCE(NULLIF(ose.items_per_pallet, 0), NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0))) > 0
+              THEN ROUND(
+                SUM(ose.total_qty)::NUMERIC /
+                MAX(COALESCE(NULLIF(ose.items_per_pallet, 0), NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0))),
+                2
+              )
+            ELSE NULL
+          END                                                                      AS "storedNumPallets"
+        FROM  order_scan_events ose
+        JOIN  order_import_sessions ois ON ois.id = ose.session_id
+        LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
+        WHERE DATE(ose.scanned_at AT TIME ZONE 'Asia/Kolkata') = $1
+        GROUP BY ose.barcode, ose.session_id
+        ORDER BY MAX(COALESCE(p.name, ose.item_name)) ASC
+      `, queryParams);
+    } else {
+      osRawRows = await pool.query(`
+        SELECT
+          COALESCE(osi.barcode, '')                                                AS sku,
+          osi.barcode,
+          COALESCE(p.name, osi.item_name)                                         AS "itemName",
+          NULL::text                                                               AS "itemNo",
+          COALESCE(p.sap_code, osi.sap_code)                                      AS "sapCode",
+          osi.total_scanned_qty                                                   AS "scannedQty",
+          ois.id                                                                  AS "sessionId",
+          ois.csv_file_name                                                       AS "sessionOrderName",
+          ois.scan_status                                                         AS "sessionStatus",
+          COALESCE(osi.last_scanned_at, ois.created_at)                           AS "sessionCreatedAt",
+          p.id                                                                    AS "productId",
+          p.in_stock                                                              AS "inStock",
+          p.hsn_code                                                              AS "hsnCode",
+          p.category,
+          COALESCE(
+            NULLIF(osi.items_per_pallet, 0),
+            NULLIF(p.items_per_pallet, 0),
+            NULLIF(p.pallets, 0)
+          )                                                                       AS "itemsPerPallet",
+          p.volume_in_cu_ft                                                       AS "volumeInCuFt",
+          p.sap_code                                                              AS "productSapCode",
+          p.item_no                                                               AS "productItemNo",
+          p.name                                                                  AS "productName",
+          CASE
+            WHEN COALESCE(osi.items_per_pallet, 0) > 0
+              THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / osi.items_per_pallet, 2)
+            WHEN COALESCE(p.items_per_pallet, 0) > 0
+              THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / p.items_per_pallet, 2)
+            WHEN COALESCE(p.pallets, 0) > 0
+              THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / p.pallets, 2)
+            ELSE NULL
+          END                                                                     AS "storedNumPallets"
+        FROM  order_scan_items osi
+        JOIN  order_import_sessions ois ON ois.id = osi.session_id
+        LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(osi.barcode)
+                              OR (osi.sap_code IS NOT NULL AND LOWER(p.sap_code) = LOWER(osi.sap_code))
+        WHERE osi.total_scanned_qty > 0
+        ORDER BY osi.item_name ASC
+      `, []);
+    }
     const allRows: StockRow[] = [...rows, ...osRawRows.rows];
 
     // Group by barcode (fall back to sku), sum scannedQty and storedNumPallets across all sessions
