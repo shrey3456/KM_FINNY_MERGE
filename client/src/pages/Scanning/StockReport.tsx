@@ -558,14 +558,19 @@ export default function StockReport() {
         </div>
 
         {selectedDate && (
-          <p className="text-sm text-[#001d6e] font-medium -mt-2">
-            Showing arrivals for{" "}
-            <span className="underline">
-              {new Date(selectedDate + "T00:00:00").toLocaleDateString(undefined, {
-                day: "2-digit", month: "long", year: "numeric",
-              })}
+          <div className="flex items-center gap-2 -mt-2 flex-wrap">
+            <p className="text-sm text-[#001d6e] font-medium">
+              Showing arrivals for{" "}
+              <span className="underline">
+                {new Date(selectedDate + "T00:00:00").toLocaleDateString(undefined, {
+                  day: "2-digit", month: "long", year: "numeric",
+                })}
+              </span>
+            </p>
+            <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5">
+              Qty = all boxes scanned on this date (regular + extra)
             </span>
-          </p>
+          </div>
         )}
 
         {/* ═══════════════════════════════════════════════════════════════════ */}
@@ -610,7 +615,9 @@ export default function StockReport() {
                 <FilterHead label="HSN Code" colKey="hsnCode" openCol={openFilterCol} filters={columnFilters} onToggle={toggleFilterCol} onChange={handleColFilter} onClear={clearColFilter} className="text-white bg-[#001d6e]" />
                 <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px] sm:text-xs">Volume (FT³)</TableHead>
                 <TableHead className="text-white font-semibold uppercase tracking-wide text-right text-[11px] sm:text-xs">Pallets</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-right text-[11px] sm:text-xs">Stock Qty</TableHead>
+                <TableHead className="text-white font-semibold uppercase tracking-wide text-right text-[11px] sm:text-xs">
+                  {selectedDate ? "Qty (that day)" : "Stock Qty"}
+                </TableHead>
                 <FilterHead label="Date" colKey="lastArrived" type="date" openCol={openFilterCol} filters={columnFilters} onToggle={toggleFilterCol} onChange={handleColFilter} onClear={clearColFilter} className="text-white bg-[#001d6e] min-w-[140px]" />
               </TableRow>
             </TableHeader>

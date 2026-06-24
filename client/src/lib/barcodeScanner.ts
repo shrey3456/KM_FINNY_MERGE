@@ -19,6 +19,13 @@ export class BarcodeScanner {
   private onError: (error: Error) => void;
   private constraints: MediaStreamConstraints | undefined;
 
+  // Confirmation state: same barcode must be read twice within the window
+  private lastCode: string | null = null;
+  private lastCodeCount = 0;
+  private lastCodeAt = 0;
+  private readonly CONFIRM_COUNT = 2;
+  private readonly CONFIRM_WINDOW_MS = 1500;
+
   constructor(options: ScannerOptions) {
     const hints = new Map();
     const formats = options.formats || [
@@ -33,7 +40,7 @@ export class BarcodeScanner {
       BarcodeFormat.CODABAR,
     ];
     hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
-    hints.set(DecodeHintType.TRY_HARDER, true);
+    // TRY_HARDER is intentionally disabled — it causes false positives on faces/backgrounds
     this.reader = new BrowserMultiFormatReader(hints, 150);
     this.onDetected = options.onDetected;
     this.onError = options.onError;
@@ -195,7 +202,24 @@ export class BarcodeScanner {
       // Create a callback function for barcode detection
       const callback = (result: Result | null, error: any) => {
         if (result) {
-          this.onDetected(result);
+          const code = result.getText();
+          // Ignore empty or non-alphanumeric results (faces/backgrounds produce these)
+          if (!code || code.trim().length < 3 || !/[a-zA-Z0-9]/.test(code)) return;
+          const now = Date.now();
+          if (code === this.lastCode && now - this.lastCodeAt < this.CONFIRM_WINDOW_MS) {
+            this.lastCodeCount++;
+            this.lastCodeAt = now;
+            if (this.lastCodeCount >= this.CONFIRM_COUNT) {
+              // Reset so the same barcode can be re-scanned after the dialog closes
+              this.lastCode = null;
+              this.lastCodeCount = 0;
+              this.onDetected(result);
+            }
+          } else {
+            this.lastCode = code;
+            this.lastCodeCount = 1;
+            this.lastCodeAt = now;
+          }
         }
         if (error && !(error instanceof TypeError)) {
           // TypeError is thrown when there's no barcode in view, we can ignore this
@@ -416,6 +440,16 @@ export class BarcodeScanner {
       console.warn('Unable to enumerate devices to switch camera:', err);
       // If enumeration isn't supported, there's nothing to switch — silently ignore.
     }
+  }
+
+  /**
+   * Reset the confirmation counter — call this after a scan is confirmed/dismissed
+   * so the next barcode starts fresh without needing an extra read.
+   */
+  resetConfirmation(): void {
+    this.lastCode = null;
+    this.lastCodeCount = 0;
+    this.lastCodeAt = 0;
   }
 
   /**
