@@ -337,6 +337,8 @@ export default function ScanOrderPage() {
   const lastSelectedStvRef = useRef("");
   const [osSearch, setOsSearch] = useState("");
   const [osManualCode, setOsManualCode] = useState("");
+  const [osManualFocused, setOsManualFocused] = useState(false);
+  const [osSuggIdx, setOsSuggIdx] = useState(-1);
   const [osRecentScans, setOsRecentScans] = useState<{ barcode: string; name: string; total: number; isExtra: boolean }[]>([]);
   // Barcodes we already added optimistically; WS handler skips the echo for these
   const osRecentScanSentRef = useRef<Set<string>>(new Set());
@@ -361,6 +363,18 @@ export default function ScanOrderPage() {
   });
   const osItemsRef = useRef<OsScanItem[]>([]);
   useEffect(() => { osItemsRef.current = osItemsQuery.data ?? []; }, [osItemsQuery.data]);
+
+  const osSuggestions = useMemo(() => {
+    const q = osManualCode.trim().toLowerCase();
+    if (!q) return [];
+    return (osItemsQuery.data ?? [])
+      .filter((item) =>
+        item.itemName?.toLowerCase().includes(q) ||
+        item.barcode?.toLowerCase().includes(q) ||
+        item.sapCode?.toLowerCase().includes(q)
+      )
+      .slice(0, 8);
+  }, [osManualCode, osItemsQuery.data]);
 
   const osStvsQuery = useQuery<string[]>({
     queryKey: ["/api/order-scan/stvs", activeOrderScanSession?.plant],
@@ -566,7 +580,9 @@ export default function ScanOrderPage() {
   useEffect(() => {
     if (!activeOrderScanSession || osScanMode !== "camera") return;
     let cancelled = false;
-    (async () => {
+    let rafId: number;
+    // Wait one animation frame so the video element is fully painted and visible
+    rafId = requestAnimationFrame(async () => {
       if (!osVideoRef.current || cancelled) return;
       setOsCameraError(null);
       setOsCameraReady(false);
@@ -587,8 +603,8 @@ export default function ScanOrderPage() {
       } catch (err: any) {
         if (!cancelled) { setOsCameraError(err?.message ?? "Camera failed"); setOsScanMode("manual"); }
       }
-    })();
-    return () => { cancelled = true; stopOsCamera(); };
+    });
+    return () => { cancelled = true; cancelAnimationFrame(rafId); stopOsCamera(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrderScanSession?.id, osScanMode]);
 
@@ -1862,54 +1878,92 @@ export default function ScanOrderPage() {
                 </button>
               </div>
 
-              {/* Camera feed */}
-              {osScanMode === "camera" && (
-                <div className="rounded-xl overflow-hidden bg-black relative" style={{ aspectRatio: "4/3" }}>
-                  <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline />
-                  {!osCameraReady && !osCameraError && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
-                      <Loader2 className="h-8 w-8 animate-spin" />
-                      <p className="text-sm">Starting camera…</p>
-                    </div>
-                  )}
-                  {osCameraReady && (
-                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                      <div className="h-20 w-56 rounded border-2 border-white/80" />
-                    </div>
-                  )}
-                  {osCameraError && (
-                    <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/80 px-3 py-2 text-xs text-white">
-                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                      {osCameraError}
-                    </div>
-                  )}
-                </div>
-              )}
+              {/* Camera feed — always in DOM so ref is set before scanner starts */}
+              <div
+                className="rounded-xl overflow-hidden bg-black relative"
+                style={{ aspectRatio: "4/3", display: osScanMode === "camera" ? "block" : "none" }}
+              >
+                <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline webkit-playsinline="true" />
+                {osScanMode === "camera" && !osCameraReady && !osCameraError && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
+                    <Loader2 className="h-8 w-8 animate-spin" />
+                    <p className="text-sm">Starting camera…</p>
+                  </div>
+                )}
+                {osScanMode === "camera" && osCameraReady && (
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                    <div className="h-20 w-56 rounded border-2 border-white/80" />
+                  </div>
+                )}
+                {osScanMode === "camera" && osCameraError && (
+                  <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/80 px-3 py-2 text-xs text-white">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                    {osCameraError}
+                  </div>
+                )}
+              </div>
 
               {/* Manual barcode input */}
               {osScanMode === "manual" && (
-                <div className="flex gap-2">
-                  <Input
-                    value={osManualCode}
-                    onChange={(e) => setOsManualCode(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && osManualCode.trim()) {
-                        handleOsBarcode(osManualCode.trim());
-                        setOsManualCode("");
-                      }
-                    }}
-                    placeholder="Scan or type barcode…"
-                    disabled={!!osPending}
-                    className="font-mono text-base h-12 flex-1 min-w-0"
-                    autoFocus
-                  />
+                <div className="relative flex gap-2">
+                  <div className="relative flex-1 min-w-0">
+                    <Input
+                      value={osManualCode}
+                      onChange={(e) => { setOsManualCode(e.target.value); setOsSuggIdx(-1); }}
+                      onFocus={() => setOsManualFocused(true)}
+                      onBlur={() => setTimeout(() => setOsManualFocused(false), 150)}
+                      onKeyDown={(e) => {
+                        if (osManualFocused && osSuggestions.length > 0) {
+                          if (e.key === "ArrowDown") { e.preventDefault(); setOsSuggIdx((i) => Math.min(i + 1, osSuggestions.length - 1)); return; }
+                          if (e.key === "ArrowUp") { e.preventDefault(); setOsSuggIdx((i) => Math.max(i - 1, -1)); return; }
+                          if (e.key === "Escape") { setOsManualFocused(false); return; }
+                          if (e.key === "Enter" && osSuggIdx >= 0) {
+                            e.preventDefault();
+                            const item = osSuggestions[osSuggIdx];
+                            if (item.barcode) { handleOsBarcode(item.barcode); setOsManualCode(""); setOsSuggIdx(-1); }
+                            return;
+                          }
+                        }
+                        if (e.key === "Enter" && osManualCode.trim() && osSuggIdx < 0) {
+                          handleOsBarcode(osManualCode.trim());
+                          setOsManualCode("");
+                        }
+                      }}
+                      placeholder="Type item name or barcode…"
+                      disabled={!!osPending}
+                      className="font-mono text-base h-12 w-full"
+                      autoFocus
+                    />
+                    {osManualFocused && osSuggestions.length > 0 && (
+                      <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                        {osSuggestions.map((item, idx) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onMouseDown={(e) => { e.preventDefault(); if (item.barcode) { handleOsBarcode(item.barcode); setOsManualCode(""); setOsSuggIdx(-1); } }}
+                            className={`w-full text-left px-3 py-2.5 flex items-center gap-2 text-sm border-b last:border-0 ${idx === osSuggIdx ? "bg-[#001d6e] text-white" : "hover:bg-gray-50"}`}
+                          >
+                            <ScanLine className={`h-3.5 w-3.5 shrink-0 mt-0.5 ${idx === osSuggIdx ? "text-white/70" : "text-gray-400"}`} />
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium leading-snug">{item.itemName || item.barcode}</p>
+                              {item.barcode && item.itemName && (
+                                <p className={`font-mono text-xs mt-0.5 ${idx === osSuggIdx ? "text-white/60" : "text-gray-400"}`}>{item.barcode}</p>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <Button
                     disabled={!osManualCode.trim() || !!osPending}
                     onClick={() => {
-                      if (osManualCode.trim()) {
+                      if (osSuggIdx >= 0 && osSuggestions[osSuggIdx]?.barcode) {
+                        handleOsBarcode(osSuggestions[osSuggIdx].barcode!);
+                      } else if (osManualCode.trim()) {
                         handleOsBarcode(osManualCode.trim());
-                        setOsManualCode("");
                       }
+                      setOsManualCode(""); setOsSuggIdx(-1);
                     }}
                     className="bg-[#001d6e] hover:bg-[#00154b] text-white h-12 w-12 shrink-0 p-0"
                   >
@@ -2176,57 +2230,89 @@ export default function ScanOrderPage() {
                   </Button>
                 </div>
 
-                {osScanMode === "camera" && (
-                  <Card className="rounded-xl overflow-hidden shadow-sm">
-                    <div className="relative bg-black aspect-video">
-                      <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline />
-                      {!osCameraReady && !osCameraError && (
-                        <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
-                          <Loader2 className="h-8 w-8 animate-spin" />
-                          <p className="text-sm">Starting camera…</p>
-                        </div>
-                      )}
-                      {osCameraReady && (
-                        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                          <div className="h-16 w-48 rounded border-2 border-white/70" />
-                        </div>
-                      )}
-                    </div>
-                    {osCameraError && (
-                      <div className="flex items-center gap-2 bg-red-50 p-3 text-xs text-red-700">
-                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                        {osCameraError}
+                {/* Camera card — always in DOM so ref stays set; hidden via display:none when not in camera mode */}
+                <Card className="rounded-xl overflow-hidden shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none" }}>
+                  <div className="relative bg-black aspect-video">
+                    <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline webkit-playsinline="true" />
+                    {osScanMode === "camera" && !osCameraReady && !osCameraError && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
+                        <Loader2 className="h-8 w-8 animate-spin" />
+                        <p className="text-sm">Starting camera…</p>
                       </div>
                     )}
-                  </Card>
-                )}
+                    {osScanMode === "camera" && osCameraReady && (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                        <div className="h-16 w-48 rounded border-2 border-white/70" />
+                      </div>
+                    )}
+                  </div>
+                  {osScanMode === "camera" && osCameraError && (
+                    <div className="flex items-center gap-2 bg-red-50 p-3 text-xs text-red-700">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      {osCameraError}
+                    </div>
+                  )}
+                </Card>
 
                 {osScanMode === "manual" && (
                   <Card className="rounded-xl shadow-sm">
                     <CardContent className="p-4 space-y-2">
-                      <Label className="text-sm font-medium">Enter barcode</Label>
-                      <div className="flex gap-2">
-                        <Input
-                          value={osManualCode}
-                          onChange={(e) => setOsManualCode(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" && osManualCode.trim()) {
-                              handleOsBarcode(osManualCode.trim());
-                              setOsManualCode("");
-                            }
-                          }}
-                          placeholder="Scan or type barcode…"
-                          disabled={!!osPending}
-                          className="font-mono text-sm"
-                          autoFocus
-                        />
+                      <Label className="text-sm font-medium">Enter item name or barcode</Label>
+                      <div className="relative flex gap-2">
+                        <div className="relative flex-1 min-w-0">
+                          <Input
+                            value={osManualCode}
+                            onChange={(e) => { setOsManualCode(e.target.value); setOsSuggIdx(-1); }}
+                            onFocus={() => setOsManualFocused(true)}
+                            onBlur={() => setTimeout(() => setOsManualFocused(false), 150)}
+                            onKeyDown={(e) => {
+                              if (osManualFocused && osSuggestions.length > 0) {
+                                if (e.key === "ArrowDown") { e.preventDefault(); setOsSuggIdx((i) => Math.min(i + 1, osSuggestions.length - 1)); return; }
+                                if (e.key === "ArrowUp") { e.preventDefault(); setOsSuggIdx((i) => Math.max(i - 1, -1)); return; }
+                                if (e.key === "Escape") { setOsManualFocused(false); return; }
+                                if (e.key === "Enter" && osSuggIdx >= 0) {
+                                  e.preventDefault();
+                                  const item = osSuggestions[osSuggIdx];
+                                  if (item.barcode) { handleOsBarcode(item.barcode); setOsManualCode(""); setOsSuggIdx(-1); }
+                                  return;
+                                }
+                              }
+                              if (e.key === "Enter" && osManualCode.trim() && osSuggIdx < 0) {
+                                handleOsBarcode(osManualCode.trim());
+                                setOsManualCode("");
+                              }
+                            }}
+                            placeholder="Type item name or barcode…"
+                            disabled={!!osPending}
+                            className="font-mono text-sm w-full"
+                            autoFocus
+                          />
+                          {osManualFocused && osSuggestions.length > 0 && (
+                            <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                              {osSuggestions.map((item, idx) => (
+                                <button
+                                  key={item.id}
+                                  type="button"
+                                  onMouseDown={(e) => { e.preventDefault(); if (item.barcode) { handleOsBarcode(item.barcode); setOsManualCode(""); setOsSuggIdx(-1); } }}
+                                  className={`w-full text-left px-3 py-2 flex items-center gap-2 text-sm border-b last:border-0 ${idx === osSuggIdx ? "bg-[#001d6e] text-white" : "hover:bg-gray-50"}`}
+                                >
+                                  <ScanLine className={`h-3.5 w-3.5 shrink-0 ${idx === osSuggIdx ? "text-white/70" : "text-gray-400"}`} />
+                                  <span className="flex-1 min-w-0 truncate font-medium">{item.itemName || item.barcode}</span>
+                                  {item.barcode && <span className={`font-mono text-xs shrink-0 ${idx === osSuggIdx ? "text-white/60" : "text-gray-400"}`}>{item.barcode}</span>}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                         <Button size="sm"
                           disabled={!osManualCode.trim() || !!osPending}
                           onClick={() => {
-                            if (osManualCode.trim()) {
+                            if (osSuggIdx >= 0 && osSuggestions[osSuggIdx]?.barcode) {
+                              handleOsBarcode(osSuggestions[osSuggIdx].barcode!);
+                            } else if (osManualCode.trim()) {
                               handleOsBarcode(osManualCode.trim());
-                              setOsManualCode("");
                             }
+                            setOsManualCode(""); setOsSuggIdx(-1);
                           }}
                           className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0">
                           <ScanLine className="h-4 w-4" />

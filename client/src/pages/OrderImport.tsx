@@ -812,55 +812,47 @@ export default function OrderImport() {
   );
   const activeId = activeSessionQuery.data?.id ?? null;
 
-  return (
-    <main className="min-h-screen bg-gray-50 p-3 sm:p-5 lg:p-8">
-      <div className="mx-auto max-w-6xl space-y-4">
+  const [activeTab, setActiveTab] = useState<"available" | "active" | "completed" | "history">("available");
 
-        {/* ── Header ── */}
+  return (
+    <main className="flex-1 overflow-y-auto bg-gray-50">
+      <div className="mx-auto max-w-5xl px-4 py-6 space-y-6">
+
+        {/* ── Page Header ── */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[#001d6e] text-white">
-              <FileUp className="h-5 w-5" />
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#001d6e] text-white">
+              <FileUp className="h-6 w-6" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-gray-950">Order Import</h1>
-              <p className="text-xs text-gray-500">Upload CSV, map columns, and import order rows.</p>
+              <h1 className="text-2xl font-bold text-gray-900">Order Import</h1>
+              <p className="text-sm text-gray-500">Upload a CSV, map columns, and manage scan sessions</p>
             </div>
           </div>
-          <div className="flex gap-2 flex-wrap">
-            <Button
-              variant={showHistory ? "default" : "outline"}
-              size="sm"
-              onClick={() => setShowHistory(!showHistory)}
-              className={showHistory ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}
-            >
-              <History className="mr-2 h-4 w-4" />
-              Import History
-              {totalSessions > 0 && (
-                <Badge className={`ml-1.5 px-1.5 py-0 text-xs ${showHistory ? "bg-white/20 text-white" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
-                  {totalSessions}
-                </Badge>
-              )}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-green-500" />
+              <span className="text-xs font-medium text-green-700">Live</span>
+            </div>
+            <button
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               onClick={() => sessionsQuery.refetch()}
               disabled={sessionsQuery.isFetching}
             >
-              <RefreshCw className={`mr-2 h-4 w-4 ${sessionsQuery.isFetching ? "animate-spin" : ""}`} />
+              <RefreshCw className={`h-4 w-4 ${sessionsQuery.isFetching ? "animate-spin" : ""}`} />
               Refresh
-            </Button>
+            </button>
           </div>
         </div>
 
         {/* ── Upload Card ── */}
-        <Card className="rounded-md">
-          <CardContent className="p-4 space-y-3">
-            {/* Mobile: CSV file first (top), then Plant+Date row, then button.
-                Desktop: single horizontal row with all fields side-by-side. */}
-
-            {/* Row 1 (mobile) / all-in-one (desktop) */}
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="flex items-center gap-2 border-b border-gray-100 px-5 py-4">
+            <Upload className="h-5 w-5 text-[#001d6e]" />
+            <h2 className="text-base font-semibold text-gray-900">Upload CSV</h2>
+          </div>
+          <div className="p-5 space-y-4">
+            {/* Desktop layout */}
             <div className="hidden sm:flex flex-wrap items-end gap-3">
               {/* Plant */}
               <div className="grid gap-1 min-w-[130px] flex-1">
@@ -904,9 +896,8 @@ export default function OrderImport() {
               </div>
             </div>
 
-            {/* ── Mobile-only layout ── */}
+            {/* Mobile layout */}
             <div className="sm:hidden space-y-3">
-              {/* 1. CSV File at the top — on mobile the browser shows "Choose File / Camera" */}
               <div className="grid gap-1">
                 <Label className="text-xs text-gray-500 font-medium">
                   CSV File {selectedFile && <span className="text-green-600 font-medium">· {selectedFile.name}</span>}
@@ -915,8 +906,6 @@ export default function OrderImport() {
                   className="h-11 text-sm file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:font-medium file:bg-[#001d6e]/10 file:text-[#001d6e]"
                   onChange={handleFileChange} disabled={importMutation.isPending} />
               </div>
-
-              {/* 2. Plant + Date side-by-side */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="grid gap-1">
                   <Label className="text-xs text-gray-500">Plant</Label>
@@ -937,8 +926,6 @@ export default function OrderImport() {
                   <Input type="date" className="h-10 text-sm w-full" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 </div>
               </div>
-
-              {/* 3. Action buttons — full width */}
               <div className="flex gap-2">
                 <Button variant="outline" className="h-10 px-3 shrink-0" onClick={clearForm}
                   disabled={!selectedFile || importMutation.isPending}>
@@ -952,371 +939,122 @@ export default function OrderImport() {
               </div>
             </div>
 
-            {/* Feedback row */}
-            {(lastImport || importMutation.isError) && (
-              <div className="mt-1">
-                {lastImport && (
-                  <p className="text-xs text-green-700 flex items-center gap-1">
-                    <CheckCircle className="h-3.5 w-3.5" /> Imported <strong>{lastImport.rowCount}</strong> rows successfully.
-                  </p>
-                )}
-                {importMutation.isError && (
-                  <p className="text-xs text-red-600 flex items-center gap-1">
-                    <AlertCircle className="h-3.5 w-3.5" /> {(importMutation.error as Error).message}
-                  </p>
-                )}
-              </div>
+            {/* Feedback */}
+            {lastImport && (
+              <p className="flex items-center gap-1.5 text-sm text-green-700">
+                <CheckCircle className="h-4 w-4" />
+                Imported <strong>{lastImport.rowCount}</strong> rows successfully.
+              </p>
             )}
-          </CardContent>
-        </Card>
+            {importMutation.isError && (
+              <p className="flex items-center gap-1.5 text-sm text-red-600">
+                <AlertCircle className="h-4 w-4" />
+                {(importMutation.error as Error).message}
+              </p>
+            )}
+          </div>
+        </div>
 
-        {/* ── Import History (toggled) ── */}
-        {showHistory && (
-          <Card className="rounded-md">
-            <CardHeader className="pb-3 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <CardTitle className="text-base">Import History</CardTitle>
-                  <p className="text-xs text-gray-500 mt-0.5">{totalSessions} total sessions</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">Show</span>
-                  <Select
-                    value={String(pageSize)}
-                    onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1); }}
-                  >
-                    <SelectTrigger className="h-8 w-[65px] text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="10">10</SelectItem>
-                      <SelectItem value="25">25</SelectItem>
-                      <SelectItem value="50">50</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
+        {/* ── Session Manager Tabs ── */}
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          {/* Tab pills header */}
+          <div className="border-b border-gray-100 px-5 py-4">
+            <div className="flex gap-1 flex-wrap">
+              {(
+                [
+                  { key: "available", label: "Available", count: availableScanSessions.length },
+                  { key: "active",    label: "Active",    count: activeScanSessions.length },
+                  { key: "completed", label: "Completed", count: completedScanSessions.length },
+                  { key: "history",   label: "History",   count: totalSessions },
+                ] as { key: "available" | "active" | "completed" | "history"; label: string; count: number }[]
+              ).map((tab) => (
+                <button
+                  key={tab.key}
+                  onClick={() => setActiveTab(tab.key)}
+                  className={
+                    activeTab === tab.key
+                      ? "bg-[#001d6e] text-white rounded-full px-4 py-1.5 text-sm font-medium"
+                      : "bg-white border border-gray-200 text-gray-600 rounded-full px-4 py-1.5 text-sm font-medium hover:bg-gray-50"
+                  }
+                >
+                  {tab.label}
+                  {tab.count > 0 && (
+                    <span className={`ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1 text-xs font-semibold ${
+                      activeTab === tab.key ? "bg-white/20 text-white" : "bg-gray-100 text-gray-600"
+                    }`}>
+                      {tab.count}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
 
-              {/* Plant + Date filters */}
-              <div className="flex flex-wrap items-center gap-2">
+          {/* ── Tab: Available ── */}
+          {activeTab === "available" && (
+            <div>
+              {/* Filters */}
+              <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
                 {plantOptions.length > 0 ? (
-                  <Select value={filterPlant || "_all_"} onValueChange={(v) => { setFilterPlant(v === "_all_" ? "" : v); setCurrentPage(1); }}>
+                  <Select value={scanPlant || "_all_"} onValueChange={(v) => { setScanPlant(v === "_all_" ? "" : v); setScanExpandedId(null); }}>
                     <SelectTrigger className="h-8 w-[130px] text-xs">
                       <SelectValue placeholder="All plants" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="_all_">All plants</SelectItem>
-                      {plantOptions.map((p) => (
-                        <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
-                      ))}
+                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 ) : (
-                  <Input value={filterPlant} onChange={(e) => { setFilterPlant(e.target.value); setCurrentPage(1); }}
+                  <Input value={scanPlant} onChange={(e) => { setScanPlant(e.target.value); setScanExpandedId(null); }}
                     placeholder="Plant…" className="h-8 w-[110px] text-xs" />
                 )}
-                <Input
-                  type="date"
-                  value={filterDate}
-                  onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
-                  className="h-8 w-[140px] text-xs"
-                />
-                {filterDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
-                    onClick={() => { setFilterDate(""); setCurrentPage(1); }}>
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-                {filterDate !== todayStr && (
+                <Input type="date" value={scanDate} onChange={(e) => { setScanDate(e.target.value); setScanExpandedId(null); }}
+                  className="h-8 w-[140px] text-xs" />
+                {scanDate !== todayStr && (
                   <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
-                    onClick={() => { setFilterDate(todayStr); setCurrentPage(1); }}>
+                    onClick={() => { setScanDate(todayStr); setScanExpandedId(null); }}>
                     Today
                   </Button>
                 )}
-                {sessionsQuery.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              {sessionsQuery.isLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-                </div>
-              ) : sessions.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                  <FileUp className="h-9 w-9 mb-2 opacity-20" />
-                  <p className="text-sm text-center px-4">
-                    {filterDate ? `No imports found for ${filterDate}.` : "No imports yet."}
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <div className="divide-y">
-                    {sessions.map((session) => {
-                      const importerName = (session as any).importedByName || session.importedByCode || "Unknown";
-                      return (
-                        <div key={session.id}>
-                          {/* Session row */}
-                          <div
-                            className="cursor-pointer px-4 py-3 hover:bg-gray-50 active:bg-gray-100"
-                            onClick={() => {
-                              setExpandedId(expandedId === session.id ? null : session.id);
-                              setItemSearch("");
-                            }}
-                          >
-                            <div className="flex items-start gap-2">
-                              <span className="mt-0.5 shrink-0 text-gray-400">
-                                {expandedId === session.id
-                                  ? <ChevronDown className="h-4 w-4" />
-                                  : <ChevronRight className="h-4 w-4" />}
-                              </span>
-                              <div className="flex-1 min-w-0">
-                                <p className="truncate text-sm font-medium text-gray-900">{session.csvFileName}</p>
-                                <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                                  <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{session.plant}</span>
-                                  <span className="text-xs text-gray-400">{fmtIST(session.createdAt)}</span>
-                                  <span className="inline-flex items-center gap-1 text-xs text-gray-500">
-                                    <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                      <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-                                    </svg>
-                                    {importerName}
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="flex shrink-0 items-center gap-1 ml-1">
-                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5">
-                                  {session.rowCount}
-                                </Badge>
-                                {(session as any).scanStatus === "active" && (
-                                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap">
-                                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                                    Loaded
-                                  </span>
-                                )}
-                                {(session as any).scanStatus === "completed" && (
-                                  <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-700 whitespace-nowrap">
-                                    <CheckCircle2 className="h-3 w-3" />
-                                    Done
-                                  </span>
-                                )}
-                                {(session as any).scanStatus === "available" && (
-                                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 whitespace-nowrap">
-                                    Ready
-                                  </span>
-                                )}
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  title="Re-import with new CSV"
-                                  className="h-8 w-8 p-0 text-gray-400 hover:text-blue-600"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setEditTargetSession({ id: session.id, plant: session.plant, csvFileName: session.csvFileName });
-                                    setShowEditDialog(true);
-                                  }}
-                                >
-                                  <Pencil className="h-3.5 w-3.5" />
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-8 w-8 p-0 text-gray-400 hover:text-red-600"
-                                  onClick={(e) => { e.stopPropagation(); setDeleteTarget(session.id); }}
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </Button>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Expanded items */}
-                          {expandedId === session.id && (
-                            <div className="border-t bg-gray-50/60 px-4 py-3">
-                              <div className="mb-3 flex items-center gap-2">
-                                <div className="relative flex-1">
-                                  <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                                  <Input
-                                    value={itemSearch}
-                                    onChange={(e) => setItemSearch(e.target.value)}
-                                    placeholder="Search rows…"
-                                    className="pl-8 h-9 text-sm"
-                                  />
-                                </div>
-                                {itemSearch && (
-                                  <Button size="sm" variant="ghost" className="h-9 w-9 p-0"
-                                    onClick={() => setItemSearch("")}>
-                                    <X className="h-3.5 w-3.5" />
-                                  </Button>
-                                )}
-                                <span className="text-xs text-gray-500 whitespace-nowrap">
-                                  {filteredItems.length}/{allItems.length}
-                                </span>
-                              </div>
-                              {itemsQuery.isLoading ? (
-                                <div className="flex justify-center py-6">
-                                  <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-                                </div>
-                              ) : (
-                                <div className="overflow-x-auto rounded-md border">
-                                  <table className="w-max min-w-full border-collapse text-xs">
-                                    <thead>
-                                      <tr>
-                                        {["#", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "Date"].map((h) => (
-                                          <th key={h} className="sticky top-0 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-2 text-left font-semibold text-[#001d6e]">
-                                            {h}
-                                          </th>
-                                        ))}
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {filteredItems.map((item, idx) => (
-                                        <tr key={item.id} className={`border-b ${idx % 2 === 1 ? "bg-gray-50" : "bg-white"} hover:bg-blue-50/30`}>
-                                          <td className="border-r px-3 py-1.5 text-gray-400">{idx + 1}</td>
-                                          <td className="border-r px-3 py-1.5">{item.barcode || "—"}</td>
-                                          <td className="max-w-[200px] truncate border-r px-3 py-1.5" title={item.itemName ?? ""}>{item.itemName || "—"}</td>
-                                          <td className="border-r px-3 py-1.5">{item.sapCode || "—"}</td>
-                                          <td className="border-r px-3 py-1.5 text-right">{item.quantity ?? 0}</td>
-                                          <td className="border-r px-3 py-1.5 text-right">{item.expectedPallets ?? "—"}</td>
-                                          <td className="px-3 py-1.5">{(item as any).date || "—"}</td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Pagination */}
-                  {totalPages > 1 && (
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3">
-                      <span className="text-xs text-gray-500">
-                        Page {safePage} of {totalPages} · {totalSessions} sessions
-                      </span>
-                      <div className="flex items-center gap-1">
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs"
-                          disabled={safePage <= 1} onClick={() => setCurrentPage(safePage - 1)}>
-                          ← Prev
-                        </Button>
-                        {Array.from({ length: totalPages }, (_, i) => i + 1)
-                          .filter((p) => p === 1 || p === totalPages || Math.abs(p - safePage) <= 1)
-                          .reduce<(number | "…")[]>((acc, p, i, arr) => {
-                            if (i > 0 && (p as number) - (arr[i - 1] as number) > 1) acc.push("…");
-                            acc.push(p); return acc;
-                          }, [])
-                          .map((p, i) =>
-                            p === "…" ? (
-                              <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
-                            ) : (
-                              <Button key={p} size="sm"
-                                variant={p === safePage ? "default" : "outline"}
-                                className={`h-8 w-8 p-0 text-xs ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
-                                onClick={() => setCurrentPage(p as number)}>
-                                {p}
-                              </Button>
-                            )
-                          )}
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs"
-                          disabled={safePage >= totalPages} onClick={() => setCurrentPage(safePage + 1)}>
-                          Next →
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </CardContent>
-          </Card>
-        )}
-
-        {/* ── Scan section: side-by-side cards ── */}
-        {isImportRole && (
-        <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 items-start">
-
-        {/* ── Card: All CSV Sessions (available to load) ── */}
-        {/* On mobile: order-2 so Currently Active appears first */}
-        <Card className="rounded-md order-2 lg:order-1">
-            <CardHeader className="pb-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded bg-[#001d6e]/10 shrink-0">
-                    <ScanLine className="h-4 w-4 text-[#001d6e]" />
-                  </div>
-                  <div>
-                    <CardTitle className="text-base">CSV Sessions</CardTitle>
-                    <p className="text-xs text-gray-500 mt-0.5">Load a CSV session for dispatch scanning</p>
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {plantOptions.length > 0 ? (
-                    <Select value={scanPlant || "_all_"} onValueChange={(v) => { setScanPlant(v === "_all_" ? "" : v); setScanExpandedId(null); }}>
-                      <SelectTrigger className="h-8 w-[130px] text-xs">
-                        <SelectValue placeholder="All plants" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="_all_">All plants</SelectItem>
-                        {plantOptions.map((p) => (
-                          <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <Input value={scanPlant} onChange={(e) => { setScanPlant(e.target.value); setScanExpandedId(null); }}
-                      placeholder="Plant…" className="h-8 w-[110px] text-xs" />
-                  )}
-                  <Input type="date" value={scanDate} onChange={(e) => { setScanDate(e.target.value); setScanExpandedId(null); }}
-                    className="h-8 w-[140px] text-xs" />
-                  {scanDate && (
-                    <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
-                      onClick={() => { setScanDate(""); setScanExpandedId(null); }}>
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
-                  {scanDate !== todayStr && (
-                    <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
-                      onClick={() => { setScanDate(todayStr); setScanExpandedId(null); }}>
-                      Today
-                    </Button>
-                  )}
-                  <Button size="sm" variant="outline" className="h-8 w-8 p-0"
-                    onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
-                    <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
+                {scanDate && (
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                    onClick={() => { setScanDate(""); setScanExpandedId(null); }}>
+                    <X className="h-3.5 w-3.5" />
                   </Button>
-                </div>
+                )}
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto"
+                  onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
+                  <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
+                </Button>
               </div>
-            </CardHeader>
-            <CardContent className="p-0">
+              {/* Content */}
               {scanSessionsQuery.isFetching && availableScanSessions.length === 0 ? (
-                <div className="flex justify-center py-10">
+                <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
               ) : availableScanSessions.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-10 text-gray-400">
-                  <ScanLine className="h-8 w-8 mb-2 opacity-30" />
-                  <p className="text-sm text-center">
-                    No sessions found{scanPlant ? ` for ${scanPlant}` : ""}{scanDate ? ` on ${scanDate === todayStr ? "today" : scanDate}` : ""}.
-                  </p>
+                <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                  <ScanLine className="h-10 w-10 mb-3 opacity-20" />
+                  <p className="text-sm font-medium">No available sessions</p>
+                  <p className="text-xs mt-1">Upload a CSV above to create one</p>
                 </div>
               ) : (
                 <div className="divide-y">
                   {availableScanSessions.map((s) => {
-                    const isExpanded  = scanExpandedId === s.id;
+                    const isExpanded = scanExpandedId === s.id;
                     const scanAllItems = isExpanded ? (scanItemsQuery.data ?? []) : [];
                     const scanFiltered = scanItemSearch
                       ? scanAllItems.filter((i) => [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(scanItemSearch.toLowerCase())))
                       : scanAllItems;
                     return (
                       <div key={s.id}>
-                        {/* Session row — click to expand */}
                         <div
-                          className="cursor-pointer px-4 py-3 hover:bg-gray-50 active:bg-gray-100"
+                          className="cursor-pointer px-5 py-3 hover:bg-gray-50 active:bg-gray-100"
                           onClick={() => { setScanExpandedId(isExpanded ? null : s.id); setScanItemSearch(""); }}
                         >
-                          <div className="flex items-start gap-2">
-                            <span className="mt-0.5 shrink-0 text-gray-400">
+                          <div className="flex items-center gap-3">
+                            <span className="shrink-0 text-gray-400">
                               {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                             </span>
                             <div className="flex-1 min-w-0">
@@ -1324,36 +1062,32 @@ export default function OrderImport() {
                               <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
                                 <span className="text-xs text-gray-400">{fmtIST(s.createdAt)}</span>
-                                {s.importedByName && (
-                                  <span className="text-xs text-gray-400">· {s.importedByName}</span>
-                                )}
+                                {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
                               </div>
                             </div>
-                            <div className="flex shrink-0 items-center gap-1 ml-1">
-                              <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5">
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              <span className="inline-flex items-center rounded-full bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">
                                 {s.rowCount}
-                              </Badge>
-                              <Button size="sm" variant="ghost"
-                                className="h-8 w-8 p-0 text-gray-400 hover:text-[#001d6e]"
-                                title="Load for scanning"
+                              </span>
+                              <Button size="sm"
+                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white"
                                 disabled={loadForScanMutation.isPending}
                                 onClick={(e) => { e.stopPropagation(); loadForScanMutation.mutate(s.id); }}>
                                 {loadForScanMutation.isPending
-                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                  : <ScanLine className="h-3.5 w-3.5" />}
+                                  ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                                  : <ScanLine className="h-3 w-3 mr-1" />}
+                                Load
                               </Button>
                               <Button size="sm" variant="ghost"
-                                className="h-8 w-8 p-0 text-gray-400 hover:text-red-600"
+                                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
                                 onClick={(e) => { e.stopPropagation(); setDeleteTarget(s.id); }}>
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
                             </div>
                           </div>
                         </div>
-
-                        {/* Expanded items */}
                         {isExpanded && (
-                          <div className="border-t bg-gray-50/60 px-4 py-3">
+                          <div className="border-t bg-gray-50/60 px-5 py-3">
                             <div className="mb-3 flex items-center gap-2">
                               <div className="relative flex-1">
                                 <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
@@ -1406,123 +1140,56 @@ export default function OrderImport() {
                   })}
                 </div>
               )}
-            </CardContent>
-          </Card>
+            </div>
+          )}
 
-        {/* ── Card: Currently Active Session ── */}
-        {/* On mobile: order-1 so it appears above CSV Sessions */}
-        <Card className={`rounded-md border-amber-200 order-1 lg:order-2 ${activeScanSessions.length > 0 ? "shadow-amber-100 shadow-md" : ""}`}>
-            <CardHeader className="pb-3 space-y-3">
-              <div className="flex items-center gap-2">
-                <div className={`flex h-8 w-8 items-center justify-center rounded shrink-0 ${
-                  activeScanSessions.length > 0 ? "bg-amber-100" : "bg-gray-100"
-                }`}>
-                  <PackageCheck className={`h-4 w-4 ${activeScanSessions.length > 0 ? "text-amber-600" : "text-gray-400"}`} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <CardTitle className="text-base flex items-center gap-2">
-                    Currently Active
-                    {activeScanSessions.length > 0 && (
-                      <span className="inline-flex items-center gap-1">
-                        <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-                        <span className="text-xs font-normal text-amber-600">{activeScanSessions.length} running</span>
-                      </span>
-                    )}
-                  </CardTitle>
-                  <p className="text-xs text-gray-500 mt-0.5">Active scan sessions being worked on by dispatch</p>
-                </div>
-              </div>
-              {/* Filters for Currently Active */}
-              <div className="flex flex-wrap items-center gap-2">
-                {plantOptions.length > 0 ? (
-                  <Select value={activePlant || "_all_"} onValueChange={(v) => setActivePlant(v === "_all_" ? "" : v)}>
-                    <SelectTrigger className="h-8 w-[120px] text-xs">
-                      <SelectValue placeholder="All plants" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_all_">All plants</SelectItem>
-                      {plantOptions.map((p) => (
-                        <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input value={activePlant} onChange={(e) => setActivePlant(e.target.value)}
-                    placeholder="Plant…" className="h-8 w-[100px] text-xs" />
-                )}
-                <Input type="date" value={activeDate} onChange={(e) => setActiveDate(e.target.value)}
-                  className="h-8 w-[135px] text-xs" />
-                {activeDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
-                    onClick={() => setActiveDate("")}>
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-                {activeDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
-                    onClick={() => setActiveDate(todayStr)}>
-                    Today
-                  </Button>
-                )}
-                <Button size="sm" variant="outline" className="h-8 w-8 p-0"
-                  onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
-                  <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              {scanSessionsQuery.isFetching && activeScanSessions.length === 0 ? (
-                <div className="flex justify-center py-10">
-                  <Loader2 className="h-6 w-6 animate-spin text-amber-500" />
-                </div>
-              ) : activeScanSessions.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-10 text-gray-400">
-                  <PackageCheck className="h-8 w-8 mb-2 opacity-20" />
-                  <p className="text-sm">No active session{activePlant ? ` for ${activePlant}` : ""}</p>
-                  <p className="text-xs mt-0.5 text-gray-400">Load a CSV session to start scanning</p>
+          {/* ── Tab: Active ── */}
+          {activeTab === "active" && (
+            <div>
+              {activeScanSessions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                  <PackageCheck className="h-10 w-10 mb-3 opacity-20" />
+                  <p className="text-sm font-medium">No active session</p>
+                  <p className="text-xs mt-1">Load a CSV session from Available to start scanning</p>
                 </div>
               ) : (
-                <div className="divide-y">
+                <div className="divide-y divide-amber-100">
                   {activeScanSessions.map((s) => (
-                    <div key={s.id} className="px-4 py-4 bg-amber-50/30">
+                    <div key={s.id} className="bg-amber-50 border border-amber-200 rounded-xl p-4 mx-4 my-3">
                       <div className="flex items-start gap-3">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-amber-200 bg-amber-100">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 border border-amber-200">
                           <ScanLine className="h-5 w-5 text-amber-600" />
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="truncate text-sm font-semibold text-gray-900">{s.csvFileName}</p>
+                          <p className="truncate text-sm font-bold text-gray-900">{s.csvFileName}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 uppercase">{s.plant}</span>
-                            <span className="text-xs text-gray-400">{s.rowCount} rows</span>
-                            {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
+                            <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 uppercase">{s.plant}</span>
+                            <span className="text-xs text-gray-500">{s.rowCount} rows</span>
+                            {s.importedByName && <span className="text-xs text-gray-500">· {s.importedByName}</span>}
                           </div>
                           {s.scanActivatedByName && (
                             <p className="mt-1 text-xs text-amber-700 font-medium">
-                              Scanning: {s.scanActivatedByName}
+                              Scanning by: {s.scanActivatedByName}
                               {s.scanActivatedAt && <span className="font-normal text-gray-400"> · since {fmtIST(s.scanActivatedAt)}</span>}
                             </p>
                           )}
-                          {/* Mobile action buttons — stacked below info */}
+                          {/* Mobile buttons */}
                           <div className="mt-3 flex flex-wrap gap-2 sm:hidden">
-                            <Button size="sm"
-                              className="h-9 flex-1 text-xs bg-amber-600 hover:bg-amber-700 text-white"
+                            <Button size="sm" className="h-9 flex-1 text-xs bg-amber-600 hover:bg-amber-700 text-white"
                               onClick={() => navigate("/scan")}>
-                              <ScanLine className="mr-1.5 h-3.5 w-3.5" />
-                              View Scan
+                              <ScanLine className="mr-1.5 h-3.5 w-3.5" /> View Scan
                             </Button>
                             <Button size="sm" variant="outline"
                               className="h-9 flex-1 text-xs text-amber-700 border-amber-200 hover:bg-amber-50"
                               disabled={deactivateMutation.isPending}
                               onClick={() => setDeactivateTarget(s.id)}>
-                              <StopCircle className="mr-1 h-3 w-3" />
-                              Deactivate
+                              <StopCircle className="mr-1 h-3 w-3" /> Deactivate
                             </Button>
                             <Button size="sm" variant="outline"
                               className="h-9 flex-1 text-xs text-green-700 border-green-200 hover:bg-green-50"
                               disabled={completeMutation.isPending}
                               onClick={() => setCompleteTarget(s.id)}>
-                              <CheckCircle2 className="mr-1 h-3 w-3" />
-                              Complete
+                              <CheckCircle2 className="mr-1 h-3 w-3" /> Complete
                             </Button>
                             <Button size="sm" variant="ghost"
                               className="h-9 w-9 p-0 text-gray-400 hover:text-red-600"
@@ -1531,30 +1198,24 @@ export default function OrderImport() {
                             </Button>
                           </div>
                         </div>
-                        {/* Desktop action buttons — inline on the right */}
+                        {/* Desktop buttons */}
                         <div className="hidden sm:flex shrink-0 flex-col items-end gap-1.5">
-                          <Button size="sm"
-                            className="h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white"
+                          <Button size="sm" className="h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white"
                             onClick={() => navigate("/scan")}>
-                            <ScanLine className="mr-1.5 h-3.5 w-3.5" />
-                            View Scan
+                            <ScanLine className="mr-1.5 h-3.5 w-3.5" /> View Scan
                           </Button>
                           <div className="flex items-center gap-1">
                             <Button size="sm" variant="outline"
                               className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50"
                               disabled={deactivateMutation.isPending}
-                              title="Release lock (keep data)"
                               onClick={() => setDeactivateTarget(s.id)}>
-                              <StopCircle className="mr-1 h-3 w-3" />
-                              Deactivate
+                              <StopCircle className="mr-1 h-3 w-3" /> Deactivate
                             </Button>
                             <Button size="sm" variant="outline"
                               className="h-7 px-2 text-xs text-green-700 border-green-200 hover:bg-green-50"
                               disabled={completeMutation.isPending}
-                              title="Mark as done"
                               onClick={() => setCompleteTarget(s.id)}>
-                              <CheckCircle2 className="mr-1 h-3 w-3" />
-                              Complete
+                              <CheckCircle2 className="mr-1 h-3 w-3" /> Complete
                             </Button>
                             <Button size="sm" variant="ghost"
                               className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
@@ -1568,117 +1229,78 @@ export default function OrderImport() {
                   ))}
                 </div>
               )}
-            </CardContent>
-          </Card>
+            </div>
+          )}
 
-        </div>
-        )}{/* end isImportRole grid */}
-
-        {/* ── Completed Sessions card ── */}
-        {isImportRole && (
-        <Card className="rounded-md border-green-200">
-          <CardHeader className="pb-3 space-y-3">
-            {/* Title row — click to toggle */}
-            <div className="flex items-center justify-between gap-3 cursor-pointer select-none"
-              onClick={() => setShowCompleted(!showCompleted)}>
-              <div className="flex items-center gap-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded bg-green-100 shrink-0">
-                  <CheckCircle2 className="h-4 w-4 text-green-600" />
-                </div>
-                <div>
-                  <CardTitle className="text-base flex items-center gap-2">
-                    Completed Sessions
-                    {completedScanSessions.length > 0 && (
-                      <Badge className="bg-green-100 text-green-700 hover:bg-green-100 text-xs px-1.5">
-                        {completedScanSessions.length}
-                      </Badge>
-                    )}
-                  </CardTitle>
-                  <p className="text-xs text-gray-500 mt-0.5">Sessions that have been fully scanned</p>
-                </div>
+          {/* ── Tab: Completed ── */}
+          {activeTab === "completed" && (
+            <div>
+              {/* Filters */}
+              <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
+                {plantOptions.length > 0 ? (
+                  <Select value={completedPlant || "_all_"} onValueChange={(v) => setCompletedPlant(v === "_all_" ? "" : v)}>
+                    <SelectTrigger className="h-8 w-[130px] text-xs">
+                      <SelectValue placeholder="All plants" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_all_">All plants</SelectItem>
+                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input value={completedPlant} onChange={(e) => setCompletedPlant(e.target.value)}
+                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
+                )}
+                <Input type="date" value={completedDate} onChange={(e) => setCompletedDate(e.target.value)}
+                  className="h-8 w-[140px] text-xs" />
+                {completedDate !== todayStr && (
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                    onClick={() => setCompletedDate(todayStr)}>
+                    Today
+                  </Button>
+                )}
+                {completedDate && (
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                    onClick={() => setCompletedDate("")}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto"
+                  onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
+                  <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
+                </Button>
               </div>
-              <span className="text-gray-400 shrink-0">
-                {showCompleted ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              </span>
-            </div>
-            {/* Filters — always visible */}
-            <div className="flex flex-wrap items-center gap-2">
-              {plantOptions.length > 0 ? (
-                <Select value={completedPlant || "_all_"} onValueChange={(v) => setCompletedPlant(v === "_all_" ? "" : v)}>
-                  <SelectTrigger className="h-8 w-[130px] text-xs">
-                    <SelectValue placeholder="All plants" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="_all_">All plants</SelectItem>
-                    {plantOptions.map((p) => (
-                      <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : (
-                <Input value={completedPlant} onChange={(e) => setCompletedPlant(e.target.value)}
-                  placeholder="Plant…" className="h-8 w-[110px] text-xs" />
-              )}
-              <Input type="date" value={completedDate} onChange={(e) => setCompletedDate(e.target.value)}
-                className="h-8 w-[140px] text-xs" />
-              {completedDate && (
-                <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
-                  onClick={() => setCompletedDate("")}>
-                  <X className="h-3.5 w-3.5" />
-                </Button>
-              )}
-              {completedDate !== todayStr && (
-                <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
-                  onClick={() => setCompletedDate(todayStr)}>
-                  Today
-                </Button>
-              )}
-              <Button size="sm" variant="outline" className="h-8 w-8 p-0"
-                onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
-                <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
-              </Button>
-            </div>
-          </CardHeader>
-          {showCompleted && (
-            <CardContent className="p-0">
+              {/* Content */}
               {scanSessionsQuery.isFetching && completedScanSessions.length === 0 ? (
-                <div className="flex justify-center py-10">
+                <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-green-600" />
                 </div>
               ) : completedScanSessions.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-10 text-gray-400">
-                  <CheckCircle2 className="h-8 w-8 mb-2 opacity-20" />
-                  <p className="text-sm text-center">
-                    No completed sessions{completedPlant ? ` for ${completedPlant}` : ""}
-                    {completedDate ? ` on ${completedDate === todayStr ? "today" : completedDate}` : " in the last 48 hours"}.
-                  </p>
+                <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                  <CheckCircle2 className="h-10 w-10 mb-3 opacity-20" />
+                  <p className="text-sm font-medium">No completed sessions</p>
+                  <p className="text-xs mt-1">Sessions completed in the last 48 hours appear here</p>
                 </div>
               ) : (
                 <div className="divide-y">
                   {completedScanSessions.map((s) => (
-                    <div key={s.id} className="px-4 py-3 hover:bg-gray-50">
-                      <div className="flex items-start gap-2">
+                    <div key={s.id} className="px-5 py-3 hover:bg-gray-50">
+                      <div className="flex items-center gap-3">
                         <div className="flex-1 min-w-0">
                           <p className="truncate text-sm font-medium text-gray-900">{s.csvFileName}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                             <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700 uppercase">{s.plant}</span>
-                            <span className="text-xs text-gray-400">{fmtIST(s.createdAt)}</span>
+                            {s.scanCompletedAt && <span className="text-xs text-green-700 font-medium">Done {fmtIST(s.scanCompletedAt)}</span>}
                             {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
-                            {s.scanCompletedAt && (
-                              <span className="text-xs text-green-700 font-medium">· Done {fmtIST(s.scanCompletedAt)}</span>
-                            )}
-                            {s.scanActivatedByName && (
-                              <span className="text-xs text-gray-400">· Scanned by {s.scanActivatedByName}</span>
-                            )}
+                            {s.scanActivatedByName && <span className="text-xs text-gray-400">· Scanned by {s.scanActivatedByName}</span>}
                           </div>
                         </div>
-                        <div className="flex shrink-0 items-center gap-1 ml-1">
-                          <Badge className="bg-green-100 text-green-700 hover:bg-green-100 text-xs px-1.5">
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
                             {s.rowCount}
-                          </Badge>
+                          </span>
                           <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
-                            <CheckCircle2 className="h-3 w-3" />
-                            Done
+                            <CheckCircle2 className="h-3 w-3" /> Done
                           </span>
                         </div>
                       </div>
@@ -1686,12 +1308,235 @@ export default function OrderImport() {
                   ))}
                 </div>
               )}
-            </CardContent>
+            </div>
           )}
-        </Card>
-        )}{/* end isImportRole */}
 
-      </div>{/* end max-w-6xl */}
+          {/* ── Tab: History ── */}
+          {activeTab === "history" && (
+            <div>
+              {/* Filters */}
+              <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
+                {plantOptions.length > 0 ? (
+                  <Select value={filterPlant || "_all_"} onValueChange={(v) => { setFilterPlant(v === "_all_" ? "" : v); setCurrentPage(1); }}>
+                    <SelectTrigger className="h-8 w-[130px] text-xs">
+                      <SelectValue placeholder="All plants" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_all_">All plants</SelectItem>
+                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input value={filterPlant} onChange={(e) => { setFilterPlant(e.target.value); setCurrentPage(1); }}
+                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
+                )}
+                <Input type="date" value={filterDate} onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
+                  className="h-8 w-[140px] text-xs" />
+                {filterDate !== todayStr && (
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                    onClick={() => { setFilterDate(todayStr); setCurrentPage(1); }}>
+                    Today
+                  </Button>
+                )}
+                {filterDate && (
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                    onClick={() => { setFilterDate(""); setCurrentPage(1); }}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1); }}>
+                  <SelectTrigger className="h-8 w-[65px] text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10">10</SelectItem>
+                    <SelectItem value="25">25</SelectItem>
+                    <SelectItem value="50">50</SelectItem>
+                  </SelectContent>
+                </Select>
+                {sessionsQuery.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
+              </div>
+              {/* Content */}
+              {sessionsQuery.isLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
+                </div>
+              ) : sessions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                  <FileUp className="h-10 w-10 mb-3 opacity-20" />
+                  <p className="text-sm font-medium">
+                    {filterDate ? `No imports found for ${filterDate}.` : "No imports yet."}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="divide-y">
+                    {sessions.map((session) => {
+                      const importerName = (session as any).importedByName || session.importedByCode || "Unknown";
+                      return (
+                        <div key={session.id}>
+                          <div
+                            className="cursor-pointer px-5 py-3 hover:bg-gray-50 active:bg-gray-100"
+                            onClick={() => {
+                              setExpandedId(expandedId === session.id ? null : session.id);
+                              setItemSearch("");
+                            }}
+                          >
+                            <div className="flex items-start gap-2">
+                              <span className="mt-0.5 shrink-0 text-gray-400">
+                                {expandedId === session.id
+                                  ? <ChevronDown className="h-4 w-4" />
+                                  : <ChevronRight className="h-4 w-4" />}
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                <p className="truncate text-sm font-medium text-gray-900">{session.csvFileName}</p>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                  <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{session.plant}</span>
+                                  <span className="text-xs text-gray-400">{fmtIST(session.createdAt)}</span>
+                                  <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+                                    <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                      <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+                                    </svg>
+                                    {importerName}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1 ml-1">
+                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5">
+                                  {session.rowCount}
+                                </Badge>
+                                {(session as any).scanStatus === "active" && (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                    Loaded
+                                  </span>
+                                )}
+                                {(session as any).scanStatus === "completed" && (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-700 whitespace-nowrap">
+                                    <CheckCircle2 className="h-3 w-3" /> Done
+                                  </span>
+                                )}
+                                {(session as any).scanStatus === "available" && (
+                                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 whitespace-nowrap">
+                                    Ready
+                                  </span>
+                                )}
+                                <Button size="sm" variant="ghost" title="Re-import with new CSV"
+                                  className="h-8 w-8 p-0 text-gray-400 hover:text-blue-600"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditTargetSession({ id: session.id, plant: session.plant, csvFileName: session.csvFileName });
+                                    setShowEditDialog(true);
+                                  }}>
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </Button>
+                                <Button size="sm" variant="ghost"
+                                  className="h-8 w-8 p-0 text-gray-400 hover:text-red-600"
+                                  onClick={(e) => { e.stopPropagation(); setDeleteTarget(session.id); }}>
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                          {expandedId === session.id && (
+                            <div className="border-t bg-gray-50/60 px-5 py-3">
+                              <div className="mb-3 flex items-center gap-2">
+                                <div className="relative flex-1">
+                                  <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                                  <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)}
+                                    placeholder="Search rows…" className="pl-8 h-9 text-sm" />
+                                </div>
+                                {itemSearch && (
+                                  <Button size="sm" variant="ghost" className="h-9 w-9 p-0"
+                                    onClick={() => setItemSearch("")}>
+                                    <X className="h-3.5 w-3.5" />
+                                  </Button>
+                                )}
+                                <span className="text-xs text-gray-500 whitespace-nowrap">
+                                  {filteredItems.length}/{allItems.length}
+                                </span>
+                              </div>
+                              {itemsQuery.isLoading ? (
+                                <div className="flex justify-center py-6">
+                                  <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+                                </div>
+                              ) : (
+                                <div className="overflow-x-auto rounded-md border">
+                                  <table className="w-max min-w-full border-collapse text-xs">
+                                    <thead>
+                                      <tr>
+                                        {["#", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "Date"].map((h) => (
+                                          <th key={h} className="sticky top-0 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-2 text-left font-semibold text-[#001d6e]">
+                                            {h}
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {filteredItems.map((item, idx) => (
+                                        <tr key={item.id} className={`border-b ${idx % 2 === 1 ? "bg-gray-50" : "bg-white"} hover:bg-blue-50/30`}>
+                                          <td className="border-r px-3 py-1.5 text-gray-400">{idx + 1}</td>
+                                          <td className="border-r px-3 py-1.5">{item.barcode || "—"}</td>
+                                          <td className="max-w-[200px] truncate border-r px-3 py-1.5" title={item.itemName ?? ""}>{item.itemName || "—"}</td>
+                                          <td className="border-r px-3 py-1.5">{item.sapCode || "—"}</td>
+                                          <td className="border-r px-3 py-1.5 text-right">{item.quantity ?? 0}</td>
+                                          <td className="border-r px-3 py-1.5 text-right">{item.expectedPallets ?? "—"}</td>
+                                          <td className="px-3 py-1.5">{(item as any).date || "—"}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {/* Pagination */}
+                  {totalPages > 1 && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t px-5 py-3">
+                      <span className="text-xs text-gray-500">
+                        Page {safePage} of {totalPages} · {totalSessions} sessions
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs"
+                          disabled={safePage <= 1} onClick={() => setCurrentPage(safePage - 1)}>
+                          ← Prev
+                        </Button>
+                        {Array.from({ length: totalPages }, (_, i) => i + 1)
+                          .filter((p) => p === 1 || p === totalPages || Math.abs(p - safePage) <= 1)
+                          .reduce<(number | "…")[]>((acc, p, i, arr) => {
+                            if (i > 0 && (p as number) - (arr[i - 1] as number) > 1) acc.push("…");
+                            acc.push(p); return acc;
+                          }, [])
+                          .map((p, i) =>
+                            p === "…" ? (
+                              <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
+                            ) : (
+                              <Button key={p} size="sm"
+                                variant={p === safePage ? "default" : "outline"}
+                                className={`h-8 w-8 p-0 text-xs ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
+                                onClick={() => setCurrentPage(p as number)}>
+                                {p}
+                              </Button>
+                            )
+                          )}
+                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs"
+                          disabled={safePage >= totalPages} onClick={() => setCurrentPage(safePage + 1)}>
+                          Next →
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+      </div>{/* end max-w-5xl */}
 
       {/* ── Column mapping dialog ── */}
       <Dialog
@@ -1715,8 +1560,6 @@ export default function OrderImport() {
 
           {csvData && (
             <div className="flex flex-col gap-4 overflow-y-auto flex-1 min-h-0 pr-1">
-
-              {/* Detected columns chip list */}
               <div className="rounded-md border border-blue-100 bg-blue-50 px-4 py-3">
                 <p className="mb-2 text-xs font-semibold text-blue-700">
                   {csvData.headers.length} columns detected in "{csvData.name}"
@@ -1729,8 +1572,6 @@ export default function OrderImport() {
                   ))}
                 </div>
               </div>
-
-              {/* Mapping selectors */}
               <div className="rounded-md border bg-gray-50 p-4">
                 <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   Map each target field → CSV column
@@ -1763,8 +1604,6 @@ export default function OrderImport() {
                   })}
                 </div>
               </div>
-
-              {/* Preview table */}
               <div>
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   Preview — first {Math.min(5, csvData.rows.length)} of {csvData.rows.length} rows
@@ -1794,11 +1633,7 @@ export default function OrderImport() {
                             const col = mapping[f.key];
                             const val = col && col !== SKIP ? (row[col] ?? "") : "";
                             return (
-                              <td
-                                key={f.key}
-                                className={`max-w-[180px] truncate whitespace-nowrap border-r px-3 py-2 ${val ? "" : "text-gray-300"}`}
-                                title={val}
-                              >
+                              <td key={f.key} className={`max-w-[180px] truncate whitespace-nowrap border-r px-3 py-2 ${val ? "" : "text-gray-300"}`} title={val}>
                                 {val || "—"}
                               </td>
                             );
@@ -1813,18 +1648,13 @@ export default function OrderImport() {
           )}
 
           <DialogFooter className="mt-2 gap-2">
-            <Button
-              variant="outline"
-              onClick={() => { setShowMappingDialog(false); setEditTargetSession(null); }}
-              disabled={importMutation.isPending || updateMutation.isPending}
-            >
+            <Button variant="outline" onClick={() => { setShowMappingDialog(false); setEditTargetSession(null); }}
+              disabled={importMutation.isPending || updateMutation.isPending}>
               Cancel
             </Button>
-            <Button
-              onClick={handleConfirmImport}
+            <Button onClick={handleConfirmImport}
               disabled={importMutation.isPending || updateMutation.isPending || !csvData}
-              className="bg-[#001d6e] hover:bg-[#00154b] text-white"
-            >
+              className="bg-[#001d6e] hover:bg-[#00154b] text-white">
               {(importMutation.isPending || updateMutation.isPending) ? (
                 <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />{editTargetSession ? "Replacing…" : "Importing…"}</>
               ) : editTargetSession ? (
@@ -1853,13 +1683,8 @@ export default function OrderImport() {
           <div className="space-y-3">
             <div className="grid gap-1.5">
               <Label>New CSV File</Label>
-              <Input
-                ref={editFileRef}
-                type="file"
-                accept=".csv"
-                className="h-10"
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) setEditFile(f); }}
-              />
+              <Input ref={editFileRef} type="file" accept=".csv" className="h-10"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) setEditFile(f); }} />
               {editFile && <p className="text-xs text-gray-500">{editFile.name} ({Math.max(1, Math.round(editFile.size / 1024))} KB)</p>}
             </div>
           </div>
@@ -1867,11 +1692,9 @@ export default function OrderImport() {
             <Button variant="outline" onClick={() => { setShowEditDialog(false); setEditTargetSession(null); setEditFile(null); }}>
               Cancel
             </Button>
-            <Button
-              disabled={!editFile || updateMutation.isPending}
+            <Button disabled={!editFile || updateMutation.isPending}
               className="bg-[#001d6e] hover:bg-[#00154b] text-white"
-              onClick={() => { if (editFile) parseAndReplace(editFile); }}
-            >
+              onClick={() => { if (editFile) parseAndReplace(editFile); }}>
               {updateMutation.isPending
                 ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                 : <Upload className="mr-1.5 h-4 w-4" />}
@@ -1882,10 +1705,7 @@ export default function OrderImport() {
       </Dialog>
 
       {/* ── Deactivate confirmation ── */}
-      <AlertDialog
-        open={deactivateTarget !== null}
-        onOpenChange={(open) => { if (!open) setDeactivateTarget(null); }}
-      >
+      <AlertDialog open={deactivateTarget !== null} onOpenChange={(open) => { if (!open) setDeactivateTarget(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Deactivate this session?</AlertDialogTitle>
@@ -1895,11 +1715,9 @@ export default function OrderImport() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-amber-600 text-white hover:bg-amber-700"
+            <AlertDialogAction className="bg-amber-600 text-white hover:bg-amber-700"
               onClick={() => deactivateTarget !== null && deactivateMutation.mutate(deactivateTarget)}
-              disabled={deactivateMutation.isPending}
-            >
+              disabled={deactivateMutation.isPending}>
               {deactivateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Deactivate"}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1907,10 +1725,7 @@ export default function OrderImport() {
       </AlertDialog>
 
       {/* ── Complete confirmation ── */}
-      <AlertDialog
-        open={completeTarget !== null}
-        onOpenChange={(open) => { if (!open) setCompleteTarget(null); }}
-      >
+      <AlertDialog open={completeTarget !== null} onOpenChange={(open) => { if (!open) setCompleteTarget(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Mark session as completed?</AlertDialogTitle>
@@ -1920,11 +1735,9 @@ export default function OrderImport() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-green-600 text-white hover:bg-green-700"
+            <AlertDialogAction className="bg-green-600 text-white hover:bg-green-700"
               onClick={() => completeTarget !== null && completeMutation.mutate(completeTarget)}
-              disabled={completeMutation.isPending}
-            >
+              disabled={completeMutation.isPending}>
               {completeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Complete"}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1932,10 +1745,7 @@ export default function OrderImport() {
       </AlertDialog>
 
       {/* ── Delete confirmation ── */}
-      <AlertDialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
-      >
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this import session?</AlertDialogTitle>
@@ -1945,14 +1755,10 @@ export default function OrderImport() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-red-600 text-white hover:bg-red-700"
+            <AlertDialogAction className="bg-red-600 text-white hover:bg-red-700"
               onClick={() => deleteTarget !== null && deleteMutation.mutate(deleteTarget)}
-              disabled={deleteMutation.isPending}
-            >
-              {deleteMutation.isPending
-                ? <Loader2 className="h-4 w-4 animate-spin" />
-                : "Delete"}
+              disabled={deleteMutation.isPending}>
+              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
