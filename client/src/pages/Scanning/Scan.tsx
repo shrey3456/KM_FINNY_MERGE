@@ -599,6 +599,11 @@ export default function ScanOrderPage() {
       try {
         await scanner.initialize();
         if (!cancelled) await scanner.start(osVideoRef.current!);
+        // Belt-and-suspenders: mobile browsers sometimes need an explicit play() after
+        // the stream is attached, especially when the video was inside display:none.
+        if (!cancelled && osVideoRef.current && osVideoRef.current.paused) {
+          await osVideoRef.current.play().catch(() => {});
+        }
         if (!cancelled) setOsCameraReady(true);
       } catch (err: any) {
         if (!cancelled) { setOsCameraError(err?.message ?? "Camera failed"); setOsScanMode("manual"); }
@@ -1880,10 +1885,32 @@ export default function ScanOrderPage() {
 
               {/* Camera feed — always in DOM so ref is set before scanner starts */}
               <div
-                className="rounded-xl overflow-hidden bg-black relative"
-                style={{ aspectRatio: "4/3", display: osScanMode === "camera" ? "block" : "none" }}
+                className="rounded-xl bg-black relative"
+                style={{
+                  display: osScanMode === "camera" ? "block" : "none",
+                  height: "260px",
+                  overflow: "hidden",
+                  // isolation forces a new stacking context so the video GPU layer
+                  // doesn't get clipped black by the border-radius compositing on mobile
+                  isolation: "isolate",
+                }}
               >
-                <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline webkit-playsinline="true" />
+                <video
+                  ref={osVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    // Forces the video onto its own GPU compositing layer.
+                    // Prevents the "black video inside overflow:hidden" bug on Android Chrome.
+                    transform: "translateZ(0)",
+                    WebkitTransform: "translateZ(0)",
+                    display: "block",
+                  }}
+                />
                 {osScanMode === "camera" && !osCameraReady && !osCameraError && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
                     <Loader2 className="h-8 w-8 animate-spin" />
@@ -2231,9 +2258,22 @@ export default function ScanOrderPage() {
                 </div>
 
                 {/* Camera card — always in DOM so ref stays set; hidden via display:none when not in camera mode */}
-                <Card className="rounded-xl overflow-hidden shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none" }}>
-                  <div className="relative bg-black aspect-video">
-                    <video ref={osVideoRef} className="h-full w-full object-cover" autoPlay muted playsInline webkit-playsinline="true" />
+                <Card className="rounded-xl shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
+                  <div className="relative bg-black" style={{ height: "320px" }}>
+                    <video
+                      ref={osVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                        transform: "translateZ(0)",
+                        WebkitTransform: "translateZ(0)",
+                        display: "block",
+                      }}
+                    />
                     {osScanMode === "camera" && !osCameraReady && !osCameraError && (
                       <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
                         <Loader2 className="h-8 w-8 animate-spin" />

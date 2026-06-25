@@ -129,6 +129,15 @@ export class BarcodeScanner {
 
       // decodeFromStream: ZXing attaches the stream to the video, calls play(), and runs the scan loop
       await this.reader.decodeFromStream(stream, videoElement, callback);
+
+      // Explicit play() fallback: on some Android browsers ZXing's internal canplay listener
+      // fires but play() is rejected silently, leaving the video paused (black screen).
+      if (videoElement.paused) {
+        await videoElement.play().catch((e) =>
+          console.warn('[BarcodeScanner] play() retry failed:', e)
+        );
+      }
+
       this.isRunning = true;
       console.log('[BarcodeScanner] Started successfully');
     } catch (err: any) {
