@@ -44,16 +44,20 @@ export async function apiRequest(
     }
   }
 
-  // Defeat HTTP caching on GETs. In production (IIS ARR reverse proxy + mobile
-  // browsers) an identical polling URL is otherwise served from the disk cache,
-  // so live data appears stale until the cache expires. no-store forces a fresh
-  // round-trip every poll and on every WebSocket-triggered refetch.
+  // Defeat HTTP caching on GETs. In production an identical polling URL is
+  // otherwise served from a cache — the browser disk cache AND any upstream
+  // cache (IIS ARR / CDN) that is keyed on URL and ignores request headers.
+  // Request headers alone do not bust a dumb upstream cache, so we ALSO append a
+  // unique timestamp param: a URL the cache has never seen cannot be served
+  // stale. This forces a fresh round-trip on every poll and WS-triggered refetch.
+  let requestUrl = url;
   if (method.toUpperCase() === "GET") {
     headers["Cache-Control"] = "no-cache";
     headers["Pragma"] = "no-cache";
+    requestUrl += (url.includes("?") ? "&" : "?") + "_t=" + Date.now();
   }
 
-  const res = await fetch(url, {
+  const res = await fetch(requestUrl, {
     method,
     headers,
     body,
@@ -103,7 +107,11 @@ export const getQueryFn: <T>(options: {
         url = `${endpoint}?${queryString}`;
       }
     }
-    
+
+    // Unique timestamp defeats any URL-keyed upstream cache (CDN / IIS ARR) that
+    // ignores request Cache-Control headers — see apiRequest for rationale.
+    url += (url.includes("?") ? "&" : "?") + "_t=" + Date.now();
+
     const res = await fetch(url, {
       credentials: "include",
       cache: "no-store",

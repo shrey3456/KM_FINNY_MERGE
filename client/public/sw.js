@@ -1,7 +1,7 @@
 // Service Worker for KM Finny - Enhanced for Android Compatibility
-const CACHE_NAME = 'km-finny-v6'; // Update cache version with every significant change
-const DATA_CACHE_NAME = 'km-finny-data-v6'; // Separate cache for API data
-const APP_SHELL_CACHE_NAME = 'km-finny-shell-v6'; // Cache for application shell
+const CACHE_NAME = 'km-finny-v7'; // Update cache version with every significant change
+const DATA_CACHE_NAME = 'km-finny-data-v7'; // Separate cache for API data
+const APP_SHELL_CACHE_NAME = 'km-finny-shell-v7'; // Cache for application shell
 
 // Core application shell files to cache for offline functionality
 const APP_SHELL_FILES = [
@@ -120,28 +120,31 @@ self.addEventListener('fetch', event => {
     return;
   }
   
-  // Handle API requests with a network-first approach
+  // Handle API requests with a network-first approach.
   if (url.pathname.startsWith('/api/')) {
+    // Polling/refetch URLs carry a unique `_t` cache-buster. Normalise it away so
+    // the offline cache keeps ONE entry per logical endpoint instead of growing
+    // without bound (one entry per poll), and so offline lookups still match.
+    const cacheKeyUrl = new URL(request.url);
+    cacheKeyUrl.searchParams.delete('_t');
+    const cacheKey = cacheKeyUrl.toString();
+
     event.respondWith(
       fetch(request)
         .then(response => {
           if (!response || response.status !== 200) {
             return response;
           }
-          
-          // Cache a copy of successful GET API responses for offline use
+          // Cache a copy of successful GET API responses for offline fallback.
           const responseToCache = response.clone();
           caches.open(DATA_CACHE_NAME)
-            .then(cache => {
-              cache.put(request, responseToCache);
-            })
+            .then(cache => cache.put(cacheKey, responseToCache))
             .catch(err => console.error('[Service Worker] API caching error:', err));
-          
           return response;
         })
         .catch(() => {
-          // When network fails, try to return the cached response
-          return caches.match(request);
+          // Network failed (offline) — fall back to the last-known response.
+          return caches.match(cacheKey);
         })
     );
     return;
