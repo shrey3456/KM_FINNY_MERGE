@@ -288,20 +288,19 @@ export default function OrderImport() {
     refetchOnMount: true,
   });
 
-  // ── SSE: real-time sync ────────────────────────────────────────────────────
-  // The server pushes "data: update\n\n" after every session mutation (create /
-  // delete / activate / deactivate / complete).  We immediately fire refetches
-  // so the UI is in sync within one network round-trip — no race conditions,
-  // no dependency on whether polling timers happen to fire at the right moment.
-  // Polling (refetchInterval:5000 on the queries above) remains as a fallback in
-  // case the SSE connection drops (proxy timeout, network blip, etc.).
+  // ── WebSocket: real-time sync ──────────────────────────────────────────────
+  // Reuses the existing /ws/order-scan WebSocket server with a "join-import"
+  // subscription type so the OrderImport page receives instant push updates
+  // whenever any CSV is uploaded, session status changes, etc.
+  // Polling (refetchInterval:5000) stays as a fallback if the WS drops.
   useEffect(() => {
     if (!isImportRole) return;
 
-    let es: EventSource;
+    let ws: WebSocket | null = null;
     let retryMs = 2000;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let mounted = true;
+    let lastMsgAt = Date.now();
 
     const refetchAll = () => {
       qc.refetchQueries({ queryKey: ["/api/order-import/sessions"], type: "all" });
@@ -310,14 +309,49 @@ export default function OrderImport() {
       qc.refetchQueries({ queryKey: ["/api/order-scan/notification"], type: "all" });
     };
 
+    // Dead-connection detector: if no message (including server pings) for 55s, reconnect
+    const deadTimer = setInterval(() => {
+      if (ws && Date.now() - lastMsgAt > 55_000) {
+        ws.close();
+      }
+    }, 10_000);
+
     const connect = () => {
       if (!mounted) return;
-      es = new EventSource("/api/order-import/stream");
-      es.onmessage = () => { retryMs = 2000; refetchAll(); };
-      es.onerror = () => {
-        es.close();
-        // Exponential back-off: 2s → 4s → 8s → capped at 30s
-        retryTimer = setTimeout(() => { retryMs = Math.min(retryMs * 2, 30000); connect(); }, retryMs);
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${proto}//${window.location.host}/ws/order-scan`);
+
+      ws.onopen = () => {
+        retryMs = 2000;
+        lastMsgAt = Date.now();
+        console.log("[WS:OrderImport] Connected to /ws/order-scan");
+        ws!.send(JSON.stringify({ type: "join-import" }));
+      };
+
+      ws.onmessage = (e) => {
+        lastMsgAt = Date.now();
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === "joined-import") {
+            console.log("[WS:OrderImport] Subscribed to import events ✓");
+          } else if (msg.type === "import-update") {
+            console.log("[WS:OrderImport] Received import-update — refetching queries");
+            refetchAll();
+          }
+          // "ping" is a keepalive — no action needed
+        } catch { /* ignore malformed */ }
+      };
+
+      ws.onerror = () => { /* onclose fires next */ };
+
+      ws.onclose = () => {
+        ws = null;
+        if (!mounted) return;
+        console.log(`[WS:OrderImport] Disconnected — reconnecting in ${retryMs}ms`);
+        retryTimer = setTimeout(() => {
+          retryMs = Math.min(retryMs * 2, 30_000);
+          connect();
+        }, retryMs);
       };
     };
 
@@ -325,8 +359,9 @@ export default function OrderImport() {
 
     return () => {
       mounted = false;
+      clearInterval(deadTimer);
       if (retryTimer) clearTimeout(retryTimer);
-      es?.close();
+      ws?.close();
     };
   }, [isImportRole, qc]);
 
@@ -446,7 +481,16 @@ export default function OrderImport() {
         if (ctx.prevNotif !== undefined)
           qc.setQueryData(["/api/order-scan/notification"], ctx.prevNotif);
       }
-      toast({ title: "Cannot load for scan", description: err.message, variant: "destructive" });
+      // Parse structured 409 conflict response: "409: {message, conflictFileName}"
+      let title = "Cannot load for scan";
+      let description: string = err?.message ?? "Something went wrong";
+      try {
+        const jsonStr = String(err?.message ?? "").replace(/^\d+:\s*/, "");
+        const parsed = JSON.parse(jsonStr);
+        if (parsed.message) description = parsed.message;
+        if (parsed.conflictFileName) description += ` — deactivate "${parsed.conflictFileName}" first.`;
+      } catch { /* use raw message */ }
+      toast({ title, description, variant: "destructive" });
     },
     onSettled: () => refetchAllSessionQueries(),
   });

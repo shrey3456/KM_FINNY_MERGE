@@ -2,25 +2,11 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { db } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
 import { eq, desc, and, sql } from 'drizzle-orm';
+import { addSseClient, removeSseClient, broadcastOrderImportUpdate } from '../lib/importEvents';
+
+export { broadcastOrderImportUpdate };
 
 const router = Router();
-
-// ── SSE client registry ───────────────────────────────────────────────────────
-// Every connected admin browser holds an open SSE connection here.
-// After any session mutation we call broadcastOrderImportUpdate() and every
-// browser immediately refetches — zero-latency sync without relying on polls.
-const sseClients = new Set<Response>();
-
-export function broadcastOrderImportUpdate(): void {
-  const frame = 'data: update\n\n';
-  sseClients.forEach((res) => {
-    try {
-      res.write(frame);
-    } catch {
-      sseClients.delete(res);
-    }
-  });
-}
 
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
@@ -44,7 +30,7 @@ router.get('/order-import/stream', (req: Request, res: Response) => {
   // Confirm the stream is open to the client immediately
   res.write(':connected\n\n');
 
-  sseClients.add(res);
+  addSseClient(res);
 
   // Heartbeat every 25 s keeps the connection alive through reverse proxies
   // that close idle TCP connections (IIS ARR default = 30 s).
@@ -53,7 +39,7 @@ router.get('/order-import/stream', (req: Request, res: Response) => {
   }, 25_000);
 
   req.on('close', () => {
-    sseClients.delete(res);
+    removeSseClient(res);
     clearInterval(heartbeat);
   });
 });

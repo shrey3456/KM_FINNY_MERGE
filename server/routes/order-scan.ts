@@ -8,7 +8,7 @@ import {
 } from '../../shared/schema';
 import { eq, and, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
-import { broadcastOrderImportUpdate } from './order-import';
+import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
 function plantEq(filter: string) {
@@ -87,6 +87,7 @@ export function initOrderScanWs(httpServer: HttpServer) {
     ws.on('pong', () => { ws._isAlive = true; });
 
     let joinedSessionId: number | null = null;
+    let joinedImport = false;
 
     ws.on('message', (raw) => {
       try {
@@ -102,6 +103,14 @@ export function initOrderScanWs(httpServer: HttpServer) {
           const roomSize = wsClients.get(joinedSessionId)!.size;
           console.log(`[WS] Client joined session ${joinedSessionId} — ${roomSize} device(s) connected`);
           ws.send(JSON.stringify({ type: 'joined', sessionId: joinedSessionId }));
+        } else if (msg.type === 'join-import') {
+          // OrderImport page subscribes to global import events
+          if (!joinedImport) {
+            joinedImport = true;
+            addWsAdminClient(ws);
+            console.log('[WS] Admin client joined import channel');
+          }
+          ws.send(JSON.stringify({ type: 'joined-import' }));
         }
       } catch { /* ignore malformed messages */ }
     });
@@ -110,6 +119,10 @@ export function initOrderScanWs(httpServer: HttpServer) {
       if (joinedSessionId !== null) {
         const set = wsClients.get(joinedSessionId);
         if (set) { set.delete(ws); if (set.size === 0) wsClients.delete(joinedSessionId); }
+      }
+      if (joinedImport) {
+        removeWsAdminClient(ws);
+        joinedImport = false;
       }
     };
     ws.on('close', cleanup);
