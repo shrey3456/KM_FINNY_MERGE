@@ -321,7 +321,20 @@ export default function ScanOrderPage() {
   const activeOrderScanSession = orderScanNotif?.active ? orderScanNotif.session : null;
 
   // ── Embedded order-scan state (admin-loaded CSV) ───────────────────────────
-  const osVideoRef = useRef<HTMLVideoElement>(null);
+  // Two video elements exist (mobile sm:hidden block + desktop hidden sm:block block).
+  // They MUST have separate refs — a shared ref would attach to the last-rendered
+  // (desktop) element, so on a phone the camera stream would go to the hidden desktop
+  // video and the visible mobile video would stay black. getActiveVideo() picks whichever
+  // is actually on screen (offsetParent is null for display:none elements).
+  const osVideoMobileRef = useRef<HTMLVideoElement>(null);
+  const osVideoDesktopRef = useRef<HTMLVideoElement>(null);
+  const getActiveVideo = (): HTMLVideoElement | null => {
+    const m = osVideoMobileRef.current;
+    const d = osVideoDesktopRef.current;
+    if (m && m.offsetParent !== null) return m;
+    if (d && d.offsetParent !== null) return d;
+    return m ?? d ?? null;
+  };
   const osScannerRef = useRef<BarcodeScanner | null>(null);
   const [osScanMode, setOsScanMode] = useState<"camera" | "manual">("manual");
   const [osCameraReady, setOsCameraReady] = useState(false);
@@ -583,7 +596,8 @@ export default function ScanOrderPage() {
     let rafId: number;
     // Wait one animation frame so the video element is fully painted and visible
     rafId = requestAnimationFrame(async () => {
-      if (!osVideoRef.current || cancelled) return;
+      const videoEl = getActiveVideo();
+      if (!videoEl || cancelled) return;
       setOsCameraError(null);
       setOsCameraReady(false);
       const scanner = new BarcodeScanner({
@@ -598,11 +612,11 @@ export default function ScanOrderPage() {
       osScannerRef.current = scanner;
       try {
         await scanner.initialize();
-        if (!cancelled) await scanner.start(osVideoRef.current!);
+        if (!cancelled) await scanner.start(videoEl);
         // Belt-and-suspenders: mobile browsers sometimes need an explicit play() after
         // the stream is attached, especially when the video was inside display:none.
-        if (!cancelled && osVideoRef.current && osVideoRef.current.paused) {
-          await osVideoRef.current.play().catch(() => {});
+        if (!cancelled && videoEl.paused) {
+          await videoEl.play().catch(() => {});
         }
         if (!cancelled) setOsCameraReady(true);
       } catch (err: any) {
@@ -1885,50 +1899,104 @@ export default function ScanOrderPage() {
 
               {/* Camera feed — always in DOM so ref is set before scanner starts */}
               <div
-                className="rounded-xl bg-black relative"
+                className="bg-black relative w-full"
                 style={{
                   display: osScanMode === "camera" ? "block" : "none",
-                  height: "260px",
-                  overflow: "hidden",
-                  // isolation forces a new stacking context so the video GPU layer
-                  // doesn't get clipped black by the border-radius compositing on mobile
-                  isolation: "isolate",
+                  /* Responsive height: 65% of viewport width, clamped 260–340px */
+                  height: "clamp(260px, 65vw, 340px)",
+                  borderRadius: "16px",
                 }}
               >
                 <video
-                  ref={osVideoRef}
+                  ref={osVideoMobileRef}
                   autoPlay
                   muted
                   playsInline
+                  // @ts-ignore - webkit attribute for iOS Safari
+                  webkit-playsinline="true"
                   style={{
+                    position: "absolute",
+                    inset: 0,
                     width: "100%",
                     height: "100%",
                     objectFit: "cover",
-                    // Forces the video onto its own GPU compositing layer.
-                    // Prevents the "black video inside overflow:hidden" bug on Android Chrome.
-                    transform: "translateZ(0)",
-                    WebkitTransform: "translateZ(0)",
                     display: "block",
+                    /* border-radius ON the video forces Android Chrome to composite it
+                       as a texture instead of a hole-punched SurfaceView. This is what
+                       fixes the "black camera on mobile" bug — do NOT add transform/
+                       translateZ here, which pushes it back onto the broken surface path. */
+                    borderRadius: "16px",
                   }}
                 />
+
+                {/* Dark vignette edges to draw focus to the scan zone */}
+                <div
+                  className="pointer-events-none absolute inset-0"
+                  style={{
+                    background:
+                      "radial-gradient(ellipse 70% 55% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%)",
+                  }}
+                />
+
+                {/* Loading spinner */}
                 {osScanMode === "camera" && !osCameraReady && !osCameraError && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
-                    <Loader2 className="h-8 w-8 animate-spin" />
-                    <p className="text-sm">Starting camera…</p>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2 z-10">
+                    <Loader2 className="h-9 w-9 animate-spin opacity-90" />
+                    <p className="text-sm font-medium opacity-80">Starting camera…</p>
                   </div>
                 )}
+
+                {/* Corner-bracket scan guide */}
                 {osScanMode === "camera" && osCameraReady && (
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <div className="h-20 w-56 rounded border-2 border-white/80" />
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-10">
+                    {/* scan line pulse */}
+                    <div className="absolute w-48 overflow-hidden" style={{ height: "72px" }}>
+                      <div
+                        className="absolute left-0 right-0 h-0.5 bg-[#3b82f6]/70"
+                        style={{
+                          animation: "scanLine 1.8s ease-in-out infinite",
+                          top: 0,
+                        }}
+                      />
+                    </div>
+                    {/* corner brackets */}
+                    {(["tl","tr","bl","br"] as const).map((pos) => (
+                      <div
+                        key={pos}
+                        className="absolute"
+                        style={{
+                          top:    pos.startsWith("t") ? "calc(50% - 36px)" : undefined,
+                          bottom: pos.startsWith("b") ? "calc(50% - 36px)" : undefined,
+                          left:   pos.endsWith("l")   ? "calc(50% - 96px)" : undefined,
+                          right:  pos.endsWith("r")   ? "calc(50% - 96px)" : undefined,
+                          width: 20, height: 20,
+                          borderColor: "white",
+                          borderStyle: "solid",
+                          borderTopWidth:    pos.startsWith("t") ? 3 : 0,
+                          borderBottomWidth: pos.startsWith("b") ? 3 : 0,
+                          borderLeftWidth:   pos.endsWith("l")   ? 3 : 0,
+                          borderRightWidth:  pos.endsWith("r")   ? 3 : 0,
+                          borderRadius:
+                            pos === "tl" ? "4px 0 0 0" :
+                            pos === "tr" ? "0 4px 0 0" :
+                            pos === "bl" ? "0 0 0 4px" : "0 0 4px 0",
+                        }}
+                      />
+                    ))}
                   </div>
                 )}
+
+                {/* Error banner */}
                 {osScanMode === "camera" && osCameraError && (
-                  <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/80 px-3 py-2 text-xs text-white">
+                  <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/85 px-3 py-2.5 text-xs text-white z-10">
                     <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                     {osCameraError}
                   </div>
                 )}
               </div>
+
+              {/* Scan line keyframe injected once */}
+              <style>{`@keyframes scanLine { 0%,100%{top:0} 50%{top:calc(72px - 2px)} }`}</style>
 
               {/* Manual barcode input */}
               {osScanMode === "manual" && (
@@ -2261,7 +2329,7 @@ export default function ScanOrderPage() {
                 <Card className="rounded-xl shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
                   <div className="relative bg-black" style={{ height: "320px" }}>
                     <video
-                      ref={osVideoRef}
+                      ref={osVideoDesktopRef}
                       autoPlay
                       muted
                       playsInline
