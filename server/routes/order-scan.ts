@@ -17,6 +17,14 @@ function plantEq(filter: string) {
 
 const router = Router();
 
+// Never let a reverse proxy (IIS ARR) or browser cache live scan data — polling
+// and WebSocket-triggered refetches must always reflect current state.
+router.use((_req: Request, res: Response, next: NextFunction) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  next();
+});
+
 // ── WebSocket registry ────────────────────────────────────────────────────────
 // Keeps one Set of open WebSocket connections per session ID.
 // Clients send { type: 'join', sessionId } after connecting to subscribe.

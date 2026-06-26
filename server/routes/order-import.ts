@@ -18,6 +18,14 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
 
 router.use('/order-import', requireAdmin);
 
+// Never let a reverse proxy (IIS ARR) or browser cache live order-import data —
+// polling and WebSocket-triggered refetches must always reflect current state.
+router.use('/order-import', (_req: Request, res: Response, next: NextFunction) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  next();
+});
+
 // GET /api/order-import/stream  ── SSE: real-time change notifications
 // Client connects once; server pushes "data: update\n\n" after any mutation.
 // X-Accel-Buffering: no  — disables nginx proxy buffering so events arrive instantly.

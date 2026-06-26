@@ -222,6 +222,16 @@ export default function OrderImport() {
   const [completedPlant, setCompletedPlant] = useState("");
   const [completedDate, setCompletedDate] = useState("");
 
+  // Live-sync transport status. A successful WS handshake (joined-import) only
+  // proves the upgrade succeeded — it does NOT prove that spontaneous server-push
+  // frames will actually reach us. Some reverse proxies (IIS ARR in production)
+  // keep the socket open but buffer/drop later pushes, so a client can think it
+  // is "connected" yet never receive an import-update. Therefore we keep a brisk
+  // safety-net poll even when connected (8s) instead of trusting push alone; if
+  // the socket truly drops we fall back to fast polling (2.5s).
+  const [wsConnected, setWsConnected] = useState(false);
+  const SYNC_INTERVAL = wsConnected ? 8_000 : 2_500;
+
   // ── Queries ────────────────────────────────────────────────────────────────
   type SessionsResponse = {
     sessions: (OrderImportSession & { importedByName: string | null; scanStatus: string })[];
@@ -243,8 +253,10 @@ export default function OrderImport() {
       return (await apiRequest("GET", `/api/order-import/sessions?${params}`, undefined, undefined, false, signal)).json();
     },
     staleTime: 0,
-    refetchInterval: 5000,
+    refetchInterval: SYNC_INTERVAL,
+    refetchIntervalInBackground: true,
     refetchOnMount: true,
+    refetchOnWindowFocus: true,
   });
 
   const itemsQuery = useQuery<OrderImportItem[]>({
@@ -272,8 +284,10 @@ export default function OrderImport() {
       (await apiRequest("GET", "/api/order-scan/sessions", undefined, undefined, false, signal)).json(),
     enabled: isImportRole,
     staleTime: 0,
-    refetchInterval: 5000,
+    refetchInterval: SYNC_INTERVAL,
+    refetchIntervalInBackground: true,
     refetchOnMount: true,
+    refetchOnWindowFocus: true,
   });
 
   // Active session — uses /active endpoint which has NO date filter whatsoever,
@@ -284,8 +298,10 @@ export default function OrderImport() {
       (await apiRequest("GET", "/api/order-scan/active", undefined, undefined, false, signal)).json(),
     enabled: isImportRole,
     staleTime: 0,
-    refetchInterval: 5000,
+    refetchInterval: SYNC_INTERVAL,
+    refetchIntervalInBackground: true,
     refetchOnMount: true,
+    refetchOnWindowFocus: true,
   });
 
   // ── WebSocket: real-time sync ──────────────────────────────────────────────
@@ -334,6 +350,9 @@ export default function OrderImport() {
           const msg = JSON.parse(e.data);
           if (msg.type === "joined-import") {
             console.log("[WS:OrderImport] Subscribed to import events ✓");
+            // Only now is the push channel confirmed working — slow the polling
+            // fallback down to a safety-net interval.
+            setWsConnected(true);
           } else if (msg.type === "import-update") {
             console.log("[WS:OrderImport] Received import-update — refetching queries");
             refetchAll();
@@ -347,6 +366,8 @@ export default function OrderImport() {
       ws.onclose = () => {
         ws = null;
         if (!mounted) return;
+        // Push channel is down — resume fast polling so users still see updates.
+        setWsConnected(false);
         console.log(`[WS:OrderImport] Disconnected — reconnecting in ${retryMs}ms`);
         retryTimer = setTimeout(() => {
           retryMs = Math.min(retryMs * 2, 30_000);
@@ -874,9 +895,11 @@ export default function OrderImport() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-full bg-green-500" />
-              <span className="text-xs font-medium text-green-700">Live</span>
+            <div className="flex items-center gap-1.5" title={wsConnected ? "Real-time updates active" : "Live updates via polling (WebSocket not connected)"}>
+              <span className={`h-2 w-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-amber-500 animate-pulse"}`} />
+              <span className={`text-xs font-medium ${wsConnected ? "text-green-700" : "text-amber-600"}`}>
+                {wsConnected ? "Live" : "Syncing"}
+              </span>
             </div>
             <button
               className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"

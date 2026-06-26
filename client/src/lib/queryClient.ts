@@ -44,11 +44,21 @@ export async function apiRequest(
     }
   }
 
+  // Defeat HTTP caching on GETs. In production (IIS ARR reverse proxy + mobile
+  // browsers) an identical polling URL is otherwise served from the disk cache,
+  // so live data appears stale until the cache expires. no-store forces a fresh
+  // round-trip every poll and on every WebSocket-triggered refetch.
+  if (method.toUpperCase() === "GET") {
+    headers["Cache-Control"] = "no-cache";
+    headers["Pragma"] = "no-cache";
+  }
+
   const res = await fetch(url, {
     method,
     headers,
     body,
     credentials: "include",
+    cache: "no-store",
     signal,
   });
 
@@ -96,7 +106,8 @@ export const getQueryFn: <T>(options: {
     
     const res = await fetch(url, {
       credentials: "include",
-      headers: {} as Record<string, string>
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" } as Record<string, string>,
     });
 
     if (res.status === 401) {
