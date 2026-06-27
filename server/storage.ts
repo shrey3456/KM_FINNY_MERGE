@@ -2434,7 +2434,7 @@ export class DBStorage implements IStorage {
     const result = await db
       .select()
       .from(products)
-      .orderBy(products.srNo)
+      .orderBy(products.newSr)
       .limit(limit)
       .offset(offset);
     console.log(`Found ${result.length} products`);
@@ -2448,7 +2448,7 @@ export class DBStorage implements IStorage {
       const allProducts = await db
         .select()
         .from(products)
-        .orderBy(products.srNo);
+        .orderBy(products.newSr);
       console.log(`Retrieved ${allProducts.length} products from database`);
       return allProducts;
     } catch (error) {
@@ -2467,7 +2467,6 @@ export class DBStorage implements IStorage {
       conditions.push(or(
         ilike(products.name, q),
         ilike(products.barcode, q),
-        ilike(products.srNo, q),
         ilike(products.newSr, q),
         ilike(products.notionWiseName, q),
         ilike(products.brand, q),
@@ -2483,7 +2482,7 @@ export class DBStorage implements IStorage {
     const where = conditions.length > 0 ? and(...conditions) : undefined;
 
     const [rows, countRows] = await Promise.all([
-      db.select().from(products).where(where).orderBy(products.srNo).limit(pageSize).offset(offset),
+      db.select().from(products).where(where).orderBy(products.newSr).limit(pageSize).offset(offset),
       db.select({ count: sql<number>`count(*)::int` }).from(products).where(where),
     ]);
 
@@ -4292,7 +4291,7 @@ eq(loadingOperations.status, status),
         query = query.where(and(...conditions));
       }
 
-      const results = await query.orderBy(asc(products.srNo));
+      const results = await query.orderBy(asc(products.newSr));
 
       return results.map(product => ({
         id: product.id,
@@ -4323,7 +4322,7 @@ eq(loadingOperations.status, status),
       let productQuery = db.select({
         id: products.id,
         itemName: products.name,
-        srNo: products.srNo,
+        srNo: products.newSr,
         category: products.category,
         inStock: products.inStock,
         purchased: products.purchased,
@@ -4350,7 +4349,7 @@ eq(loadingOperations.status, status),
         productQuery = productQuery.where(and(...productConditions));
       }
 
-      const productResults = await productQuery.orderBy(asc(products.srNo));
+      const productResults = await productQuery.orderBy(asc(products.newSr));
 
       // For each product, calculate sold quantities from proforma slips and purchased quantities from dealer purchase orders
       const resultsWithSales = await Promise.all(
@@ -4360,7 +4359,7 @@ eq(loadingOperations.status, status),
 
           try {
             // Build where conditions for sales query
-            let whereConditions = [eq(proformaSlipItems.srNo, product.srNo)];
+            let whereConditions = [eq(proformaSlipItems.srNo, product.newSr)];
             
             // Apply date filter if provided for sales
             if (date) {
@@ -4379,7 +4378,7 @@ eq(loadingOperations.status, status),
             const salesResult = await salesQuery;
             soldQuantity = salesResult[0]?.quantity || 0;
           } catch (error) {
-            console.error(`Error calculating sold quantity for product ${product.srNo}:`, error);
+            console.error(`Error calculating sold quantity for product ${product.newSr}:`, error);
             soldQuantity = 0;
           }
 
@@ -4414,7 +4413,7 @@ eq(loadingOperations.status, status),
           return {
             id: product.id,
             itemName: product.itemName,
-            srNo: product.srNo,
+            srNo: product.newSr,
             category: product.category,
             inStock,
             purchased: purchasedQuantity,

@@ -1,25 +1,30 @@
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import Papa from "papaparse";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
   AlertTriangle,
   Bell,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   CloudDownload,
   Database,
+  Download,
   Eye,
+  FileDown,
   FileUp,
   Loader2,
   PackagePlus,
   RefreshCw,
   Search,
+  Settings2,
   X,
   Zap,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,6 +35,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -70,7 +82,7 @@ type ProductChange = {
   productId: number;
   productName: string;
   barcode: string;
-  srNo: string | null;
+  newSr: string | null;
   changes: FieldChange[];
 };
 
@@ -106,16 +118,15 @@ type ProductColumn = {
 };
 
 const productColumns: ProductColumn[] = [
-  { key: "newSr",  label: "New Sr.",       colWidth: 65  },
-  { key: "srNo",   label: "Sr. No.",       colWidth: 70  },
-  { key: "barcode",label: "SKU",           colWidth: 105 },
-  { key: "name",   label: "Products Name", stickyLeft: 0, colWidth: 210 },
+  { key: "newSr",          label: "New Sr.",          colWidth: 75  },
+  { key: "name",           label: "Products Name",    stickyLeft: 0, colWidth: 150 },
+  { key: "barcode",        label: "SKU",              colWidth: 105 },
+  { key: "brand",          label: "Brand" },
+  { key: "category",       label: "Category" },
+  { key: "plant",          label: "Plant" },
   { key: "notionWiseName", label: "Notion Wise Name" },
-  { key: "brand", label: "Brand" },
-  { key: "category", label: "Category" },
-  { key: "saleCategory", label: "Sale Category" },
-  { key: "plant", label: "Plant" },
-  { key: "type", label: "Type" },
+  { key: "saleCategory",   label: "Sale Category" },
+  { key: "type",           label: "Type" },
   { key: "productImage", label: "Product Image" },
   { key: "volumeInCuFt", label: "Vol Master" },
   { key: "itemsPerPallet", label: "Packets" },
@@ -167,18 +178,12 @@ function cellValue(product: Product, key: keyof Product) {
   return String(value);
 }
 
-function toneClass(tone?: ProductColumn["tone"]) {
-  if (tone === "gj") return "bg-sky-50";
-  if (tone === "mp") return "bg-emerald-50";
-  if (tone === "up") return "bg-amber-50";
-  return "bg-white";
+function toneClass(_tone?: ProductColumn["tone"], isOdd = false) {
+  return isOdd ? "bg-slate-50" : "bg-white";
 }
 
-function toneHeaderClass(tone?: ProductColumn["tone"]) {
-  if (tone === "gj") return "bg-sky-100 text-sky-800";
-  if (tone === "mp") return "bg-emerald-100 text-emerald-800";
-  if (tone === "up") return "bg-amber-100 text-amber-800";
-  return "bg-slate-100 text-[#001d6e]";
+function toneHeaderClass(_tone?: ProductColumn["tone"]) {
+  return "bg-gray-100 text-gray-800";
 }
 
 export default function NotionInventory() {
@@ -187,6 +192,11 @@ export default function NotionInventory() {
   const [showFullSyncConfirm, setShowFullSyncConfirm] = useState(false);
   const [lastApplyReport, setLastApplyReport] = useState<SyncReport | null>(null);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [filterBrand, setFilterBrand] = useState("");
+  const [filterCategory, setFilterCategory] = useState("");
+  const [filterPlant, setFilterPlant] = useState("");
+  const [visibleGroups, setVisibleGroups] = useState({ gj: true, mp: true, up: true });
 
   // CSV import state
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -354,13 +364,68 @@ export default function NotionInventory() {
 
   const products = productsQuery.data ?? [];
   const linkedCount = products.filter((p) => p.notionPageId).length;
+
+  const uniqueBrands = useMemo(() => [...new Set(products.map(p => p.brand).filter(Boolean) as string[])].sort(), [products]);
+  const uniqueCategories = useMemo(() => [...new Set(products.map(p => p.category).filter(Boolean) as string[])].sort(), [products]);
+  const uniquePlants = useMemo(() => [...new Set(products.map(p => p.plant).filter(Boolean) as string[])].sort(), [products]);
+
+  const visibleColumns = useMemo(() =>
+    productColumns.filter(col => {
+      if (col.tone === "gj") return visibleGroups.gj;
+      if (col.tone === "mp") return visibleGroups.mp;
+      if (col.tone === "up") return visibleGroups.up;
+      return true;
+    }),
+    [visibleGroups]
+  );
+
   const filteredProducts = useMemo(() => {
+    let result = products;
+    if (filterBrand) result = result.filter(p => p.brand === filterBrand);
+    if (filterCategory) result = result.filter(p => p.category === filterCategory);
+    if (filterPlant) result = result.filter(p => p.plant === filterPlant);
     const query = searchTerm.trim().toLowerCase();
-    if (!query) return products;
-    return products.filter((product) =>
-      productColumns.some((col) => cellValue(product, col.key).toLowerCase().includes(query))
+    if (!query) return result;
+    return result.filter((product) =>
+      visibleColumns.some((col) => cellValue(product, col.key).toLowerCase().includes(query))
     );
-  }, [products, searchTerm]);
+  }, [products, searchTerm, filterBrand, filterCategory, filterPlant, visibleColumns]);
+
+  function exportCsv() {
+    const rows = filteredProducts.map((p) =>
+      Object.fromEntries(productColumns.map((col) => [col.label, cellValue(p, col.key)]))
+    );
+    const csv = Papa.unparse(rows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `products-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportPdf() {
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a3" });
+    doc.setFontSize(14);
+    doc.text("Product Master", 40, 32);
+    doc.setFontSize(9);
+    doc.text(`Exported ${new Date().toLocaleString()} · ${filteredProducts.length} products`, 40, 48);
+
+    const head = [productColumns.map((c) => c.label)];
+    const body = filteredProducts.map((p) =>
+      productColumns.map((col) => cellValue(p, col.key))
+    );
+    autoTable(doc, {
+      head,
+      body,
+      startY: 58,
+      styles: { fontSize: 6.5, cellPadding: 2 },
+      headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold" },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+    });
+    doc.save(`products-${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
 
   const isBusy =
     fullSyncMutation.isPending ||
@@ -374,15 +439,18 @@ export default function NotionInventory() {
   const isConfigured = statusQuery.data?.configured ?? false;
 
   return (
-    <div className="container mx-auto px-4 py-6 pb-24">
+    <div className="container mx-auto px-0 sm:px-4 py-6 pb-24">
       <PageHeader
         icon={Database}
         title="Notion Inventory"
         description="Product master synced from Notion into PostgreSQL."
       />
 
+      {/* hidden file input */}
+      <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleCsvFile} />
+
       {/* Stats row */}
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 md:grid-cols-4">
+      <div className="mb-4 grid gap-3 grid-cols-2 md:grid-cols-4">
         <div className="rounded-lg border border-[#001d6e]/10 bg-white p-4 shadow-sm">
           <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Total Products</div>
           <div className="mt-1 text-3xl font-bold text-[#001d6e]">{products.length}</div>
@@ -412,15 +480,13 @@ export default function NotionInventory() {
           <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Notion Config</div>
           <div className="mt-2">
             {isConfigured ? (
-              <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100 px-2 py-1">
-                <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
-                Connected
-              </Badge>
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-800">
+                <CheckCircle2 className="h-3.5 w-3.5" /> Connected
+              </span>
             ) : (
-              <Badge variant="destructive" className="px-2 py-1">
-                <AlertTriangle className="mr-1.5 h-3.5 w-3.5" />
-                Not configured
-              </Badge>
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-red-100 px-2.5 py-1 text-xs font-medium text-red-700">
+                <AlertTriangle className="h-3.5 w-3.5" /> Not configured
+              </span>
             )}
           </div>
           {statusQuery.data?.lastSyncTime ? (
@@ -433,160 +499,351 @@ export default function NotionInventory() {
         </div>
       </div>
 
-      {/* Action bar */}
-      <div className="mb-4 flex flex-col gap-3 rounded-lg border border-[#001d6e]/10 bg-white p-4 shadow-sm lg:flex-row lg:items-center lg:justify-between">
-        <div className="relative w-full lg:max-w-sm">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Search products..."
-            className="pl-9 border-[#001d6e]/20 focus-visible:ring-[#001d6e]/30"
-          />
-        </div>
+      {/* ── Filter / Action bar (reference-style) ── */}
+      <div className="mb-4 rounded-lg border border-gray-200 bg-white shadow-sm">
 
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => productsQuery.refetch()}
-            disabled={productsQuery.isFetching}
-            className="border-[#001d6e]/20 text-[#001d6e] hover:bg-[#001d6e]/5"
-          >
-            <RefreshCw className={`mr-1.5 h-4 w-4 ${productsQuery.isFetching ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => detectMutation.mutate()}
-            disabled={isBusy || !isConfigured}
-            className="border-[#001d6e]/20 text-[#001d6e] hover:bg-[#001d6e]/5"
-          >
-            {detectMutation.isPending
-              ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-              : <CloudDownload className="mr-1.5 h-4 w-4" />}
-            Check Notion
-          </Button>
-          {isPending && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setShowReviewDialog(true)}
-              className="border-amber-400 bg-amber-50 text-amber-700 hover:bg-amber-100 flex items-center gap-1"
-            >
-              <Bell className="h-4 w-4" />
-              Review Changes
-              <Badge className="ml-1 bg-amber-500 text-white px-1.5 py-0 text-xs">
-                {(pendingReport?.created ?? 0) + (pendingReport?.updated ?? 0)}
-              </Badge>
-            </Button>
-          )}
-          <Button
-            size="sm"
-            onClick={() => applyMutation.mutate()}
-            disabled={isBusy || !statusQuery.data?.hasPendingChanges}
-            className="bg-amber-500 text-white hover:bg-amber-600"
-          >
-            {applyMutation.isPending
-              ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-              : <Zap className="mr-1.5 h-4 w-4" />}
-            Apply {statusQuery.data?.pendingCount ? `(${statusQuery.data.pendingCount})` : "Pending"}
-          </Button>
-          {products.length === 0 && (
-            <Button
-              size="sm"
-              onClick={() => setShowFullSyncConfirm(true)}
-              disabled={isBusy || !isConfigured}
-              className="bg-[#001d6e] text-white hover:bg-[#001552]"
-            >
-              {fullSyncMutation.isPending
-                ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                : <Database className="mr-1.5 h-4 w-4" />}
-              First Sync
-            </Button>
-          )}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv"
-            className="hidden"
-            onChange={handleCsvFile}
-          />
+        {/* Top control row */}
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+
+          {/* 1. Import CSV */}
           <Button
             size="sm"
             variant="outline"
             onClick={() => fileInputRef.current?.click()}
             disabled={csvImportMutation.isPending}
-            className="border-emerald-400 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+            className="h-8 border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-xs"
           >
-            {csvImportMutation.isPending
-              ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-              : <FileUp className="mr-1.5 h-4 w-4" />}
+            {csvImportMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <FileUp className="mr-1.5 h-3.5 w-3.5" />}
             Import CSV
           </Button>
+
+          {/* 2. Export dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={filteredProducts.length === 0}
+                className="h-8 border-violet-300 bg-violet-50 text-violet-700 hover:bg-violet-100 text-xs"
+              >
+                <Download className="mr-1.5 h-3.5 w-3.5" />
+                Export <ChevronDown className="ml-1 h-3 w-3" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuItem onClick={exportCsv}>
+                <FileDown className="mr-2 h-4 w-4" /> Export as CSV
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={exportPdf}>
+                <Download className="mr-2 h-4 w-4" /> Export as PDF
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* 3. Sync Notion */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => detectMutation.mutate()}
+            disabled={isBusy || !isConfigured}
+            className="h-8 border-[#001d6e]/30 text-[#001d6e] hover:bg-[#001d6e]/5 text-xs"
+          >
+            {detectMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <CloudDownload className="mr-1.5 h-3.5 w-3.5" />}
+            Sync Notion
+          </Button>
+
+          {/* 4. Review Changes / Apply Pending */}
+          {isPending ? (
+            <Button
+              size="sm"
+              onClick={() => setShowReviewDialog(true)}
+              className="h-8 bg-amber-500 text-white hover:bg-amber-600 text-xs"
+            >
+              <Bell className="mr-1.5 h-3.5 w-3.5" />
+              Review Changes
+              <span className="ml-1.5 rounded-full bg-white/25 px-1.5 py-0.5 text-[10px] font-bold leading-none">
+                {(pendingReport?.created ?? 0) + (pendingReport?.updated ?? 0)}
+              </span>
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => applyMutation.mutate()}
+              disabled={isBusy || !statusQuery.data?.hasPendingChanges}
+              className="h-8 bg-[#001d6e] text-white hover:bg-[#001552] text-xs disabled:opacity-40"
+            >
+              {applyMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Zap className="mr-1.5 h-3.5 w-3.5" />}
+              Apply Pending
+              {statusQuery.data?.pendingCount ? (
+                <span className="ml-1.5 rounded-full bg-white/25 px-1.5 py-0.5 text-[10px] font-bold leading-none">
+                  {statusQuery.data.pendingCount}
+                </span>
+              ) : null}
+            </Button>
+          )}
+
+          {/* First Sync — only when DB is empty */}
+          {products.length === 0 && (
+            <Button
+              size="sm"
+              onClick={() => setShowFullSyncConfirm(true)}
+              disabled={isBusy || !isConfigured}
+              className="h-8 bg-[#001d6e] text-white hover:bg-[#001552] text-xs"
+            >
+              {fullSyncMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Database className="mr-1.5 h-3.5 w-3.5" />}
+              First Sync
+            </Button>
+          )}
+
+          {/* Brand filter */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-gray-500 shrink-0">Brand</span>
+            <select
+              value={filterBrand}
+              onChange={e => setFilterBrand(e.target.value)}
+              className="h-8 rounded border border-gray-200 bg-white px-2 pr-6 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 appearance-none cursor-pointer"
+            >
+              <option value="">Select</option>
+              {uniqueBrands.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </div>
+
+          {/* Category filter */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-gray-500 shrink-0">Category</span>
+            <select
+              value={filterCategory}
+              onChange={e => setFilterCategory(e.target.value)}
+              className="h-8 rounded border border-gray-200 bg-white px-2 pr-6 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 appearance-none cursor-pointer"
+            >
+              <option value="">Select</option>
+              {uniqueCategories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+
+          {/* Plant filter */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-gray-500 shrink-0">Plant</span>
+            <select
+              value={filterPlant}
+              onChange={e => setFilterPlant(e.target.value)}
+              className="h-8 rounded border border-gray-200 bg-white px-2 pr-6 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 appearance-none cursor-pointer"
+            >
+              <option value="">Select</option>
+              {uniquePlants.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+
+          {/* Active filter chips */}
+          {(filterBrand || filterCategory || filterPlant) && (
+            <button
+              onClick={() => { setFilterBrand(""); setFilterCategory(""); setFilterPlant(""); }}
+              className="flex items-center gap-1 rounded-full border border-gray-200 px-2 py-0.5 text-[11px] text-gray-500 hover:bg-gray-50"
+            >
+              <X className="h-3 w-3" /> Clear filters
+            </button>
+          )}
+
+          {/* Pending badge */}
+          {isPending && (
+            <button
+              onClick={() => setShowReviewDialog(true)}
+              className="flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-200 transition-colors"
+            >
+              <Bell className="h-3 w-3" />
+              {(pendingReport?.created ?? 0) + (pendingReport?.updated ?? 0)} pending
+            </button>
+          )}
+
+          {/* Apply result inline */}
+          {lastApplyReport && !isPending && (
+            <span className="flex items-center gap-1.5 text-xs text-emerald-700">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              {lastApplyReport.updated} updated · {lastApplyReport.created} created
+              <button onClick={() => setLastApplyReport(null)} className="ml-0.5 text-gray-400 hover:text-gray-600">
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          )}
+
+          {/* Spacer */}
+          <div className="flex-1" />
+
+          {/* Refresh */}
+          <button
+            onClick={() => productsQuery.refetch()}
+            disabled={productsQuery.isFetching}
+            title="Refresh"
+            className="flex items-center justify-center h-8 w-8 rounded border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40 transition-colors"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${productsQuery.isFetching ? "animate-spin" : ""}`} />
+          </button>
+
+          {/* View Settings toggle */}
+          <button
+            onClick={() => setShowSettings(s => !s)}
+            className={`flex items-center gap-1.5 rounded border px-3 py-1.5 text-xs font-medium transition-colors ${
+              showSettings
+                ? "border-[#001d6e] bg-[#001d6e] text-white"
+                : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+            View Settings
+            {showSettings ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          </button>
         </div>
+
+        {/* ── Settings panel (collapsible) ── */}
+        {showSettings && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-gray-100 border-t border-gray-100 bg-gray-50/60">
+
+            {/* Section 1: Column Groups */}
+            <div className="px-5 py-4">
+              <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Column Groups</div>
+              <div className="flex flex-col gap-2.5">
+                {[
+                  { key: "gj" as const, label: "GJ Columns", color: "text-sky-700" },
+                  { key: "mp" as const, label: "MP Columns", color: "text-emerald-700" },
+                  { key: "up" as const, label: "UP Columns", color: "text-amber-700" },
+                ].map(({ key, label, color }) => (
+                  <label key={key} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={visibleGroups[key]}
+                      onChange={() => setVisibleGroups(v => ({ ...v, [key]: !v[key] }))}
+                      className="h-3.5 w-3.5 rounded border-gray-300 text-[#001d6e] focus:ring-[#001d6e]/30"
+                    />
+                    <span className={`text-xs font-medium ${color}`}>{label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Section 2: Notion Status */}
+            <div className="px-5 py-4">
+              <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Notion Status</div>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block h-2 w-2 rounded-full ${isConfigured ? "bg-emerald-500" : "bg-red-400"}`} />
+                  <span className="text-xs text-gray-700">{isConfigured ? "Connected" : "Not connected"}</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className={`font-bold ${(statusQuery.data?.pendingCount ?? 0) > 0 ? "text-amber-600" : "text-gray-400"}`}>
+                    {statusQuery.data?.pendingCount ?? 0}
+                  </span>
+                  <span className="text-gray-500">pending changes</span>
+                </div>
+                <div className="text-[11px] text-gray-400">
+                  {statusQuery.data?.lastSyncTime
+                    ? `Last sync ${new Date(statusQuery.data.lastSyncTime).toLocaleString()}`
+                    : "Never synced"}
+                </div>
+                <div className="text-[11px] text-gray-400">
+                  {linkedCount} / {products.length} linked
+                </div>
+              </div>
+            </div>
+
+            {/* Section 3: Sync Actions */}
+            <div className="px-5 py-4">
+              <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Sync</div>
+              <div className="flex flex-col gap-1.5">
+                <Button size="sm" variant="outline" onClick={() => detectMutation.mutate()} disabled={isBusy || !isConfigured}
+                  className="justify-start h-7 text-xs border-[#001d6e]/20 text-[#001d6e] hover:bg-[#001d6e]/5">
+                  {detectMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <CloudDownload className="mr-1.5 h-3 w-3" />}
+                  Check Notion
+                </Button>
+                {isPending && (
+                  <Button size="sm" variant="outline" onClick={() => setShowReviewDialog(true)}
+                    className="justify-start h-7 text-xs border-amber-400 bg-amber-50 text-amber-700 hover:bg-amber-100">
+                    <Bell className="mr-1.5 h-3 w-3" />
+                    Review ({(pendingReport?.created ?? 0) + (pendingReport?.updated ?? 0)})
+                  </Button>
+                )}
+                <Button size="sm" onClick={() => applyMutation.mutate()} disabled={isBusy || !statusQuery.data?.hasPendingChanges}
+                  className="justify-start h-7 text-xs bg-amber-500 text-white hover:bg-amber-600">
+                  {applyMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <Zap className="mr-1.5 h-3 w-3" />}
+                  Apply Pending {statusQuery.data?.pendingCount ? `(${statusQuery.data.pendingCount})` : ""}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setShowFullSyncConfirm(true)} disabled={isBusy || !isConfigured}
+                  className="justify-start h-7 text-xs border-[#001d6e]/20 text-[#001d6e] hover:bg-[#001d6e]/5">
+                  {fullSyncMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <Database className="mr-1.5 h-3 w-3" />}
+                  First Sync
+                </Button>
+              </div>
+            </div>
+
+            {/* Section 4: Data + Reset/Save */}
+            <div className="px-5 py-4 flex flex-col">
+              <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Data</div>
+              <div className="flex flex-col gap-1.5 flex-1">
+                <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} disabled={csvImportMutation.isPending}
+                  className="justify-start h-7 text-xs border-emerald-400 bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
+                  {csvImportMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <FileUp className="mr-1.5 h-3 w-3" />}
+                  Import CSV
+                </Button>
+                <Button size="sm" variant="outline" onClick={exportCsv} disabled={filteredProducts.length === 0}
+                  className="justify-start h-7 text-xs border-violet-400 bg-violet-50 text-violet-700 hover:bg-violet-100">
+                  <FileDown className="mr-1.5 h-3 w-3" /> Export CSV
+                </Button>
+                <Button size="sm" variant="outline" onClick={exportPdf} disabled={filteredProducts.length === 0}
+                  className="justify-start h-7 text-xs border-violet-400 bg-violet-50 text-violet-700 hover:bg-violet-100">
+                  <Download className="mr-1.5 h-3 w-3" /> Export PDF
+                </Button>
+              </div>
+              <div className="flex justify-end gap-2 mt-4 pt-3 border-t border-gray-100">
+                <Button
+                  size="sm" variant="outline"
+                  onClick={() => { setFilterBrand(""); setFilterCategory(""); setFilterPlant(""); setVisibleGroups({ gj: true, mp: true, up: true }); }}
+                  className="h-7 text-xs"
+                >
+                  Reset
+                </Button>
+                <Button size="sm" onClick={() => setShowSettings(false)}
+                  className="h-7 text-xs bg-[#001d6e] text-white hover:bg-[#001552]">
+                  Save
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Last apply result banner — shown only after applying (not for pending, handled by action bar button) */}
-      {lastApplyReport && !isPending && (
-        <div className="mb-4 flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 shadow-sm">
-          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="text-sm font-semibold text-emerald-900">Changes Applied</span>
-            <div className="flex flex-wrap gap-1.5">
-              {(lastApplyReport.created ?? 0) > 0 && (
-                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 px-1.5 text-xs">
-                  <PackagePlus className="mr-1 h-3 w-3" />
-                  {lastApplyReport.created} created
-                </Badge>
-              )}
-              {(lastApplyReport.updated ?? 0) > 0 && (
-                <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100 px-1.5 text-xs">
-                  {lastApplyReport.updated} updated
-                </Badge>
-              )}
-            </div>
-            <span className="text-xs text-muted-foreground">
-              {new Date(lastApplyReport.syncTime).toLocaleString()}
-            </span>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setShowReviewDialog(true)}
-              className="h-7 px-3 text-xs border-emerald-300 text-emerald-800 hover:bg-emerald-100"
-            >
-              <Eye className="mr-1.5 h-3.5 w-3.5" />
-              View Report
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setLastApplyReport(null)}
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-              title="Dismiss"
-            >
-              <X className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        </div>
-      )}
+      {/* ── Product table ── */}
+      <div className="rounded-lg border border-gray-200 bg-white shadow-sm -mx-4 sm:mx-0">
 
-      {/* Product table */}
-      <div className="rounded-lg border border-[#001d6e]/10 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-[#001d6e]/10 bg-[#001d6e]/[0.03] px-5 py-3 rounded-t-lg">
-          <div className="text-2xl font-bold text-[#001d6e]">Product Master</div>
+        {/* Product Master header bar */}
+        <div className="flex items-center justify-between px-5 py-4 rounded-t-lg bg-gradient-to-r from-[#0c2461] to-[#1a3a9c] border-b border-[#0a1e50]">
           <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white/15">
+              <Database className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <div className="text-2xl font-bold tracking-tight text-white">Product Master</div>
+              <div className="text-xs text-blue-200/70 leading-none mt-0.5">
+                {(filterBrand || filterCategory || filterPlant || searchTerm)
+                  ? `${filteredProducts.length} of ${products.length} products`
+                  : `${products.length} products`}
+                {filterBrand && <span className="ml-1.5">· {filterBrand}</span>}
+                {filterCategory && <span className="ml-1">· {filterCategory}</span>}
+                {filterPlant && <span className="ml-1">· {filterPlant}</span>}
+              </div>
+            </div>
+          </div>
+          <div className="relative shrink-0">
+            <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-blue-200/50 pointer-events-none" />
+            <input
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              placeholder="Search products…"
+              className="h-7 w-48 rounded-md border border-white/20 bg-white/10 pl-7 pr-6 text-xs text-white placeholder:text-blue-200/50 focus:outline-none focus:ring-1 focus:ring-white/30 focus:bg-white/15"
+            />
             {searchTerm && (
-              <span className="text-xs text-muted-foreground">
-                {filteredProducts.length} of {products.length}
-              </span>
+              <button onClick={() => setSearchTerm("")} className="absolute right-2 top-1.5 text-blue-200/50 hover:text-white">
+                <X className="h-3.5 w-3.5" />
+              </button>
             )}
-            <Badge variant="outline" className="border-[#001d6e]/20 text-[#001d6e] text-xs">
-              {filteredProducts.length} rows
-            </Badge>
           </div>
         </div>
 
@@ -613,33 +870,28 @@ export default function NotionInventory() {
             <div className="mb-5 max-w-xs text-sm text-muted-foreground">
               Run <strong>First Sync</strong> to import your full product master from Notion into the database.
             </div>
-            <Button
-              size="sm"
-              onClick={() => setShowFullSyncConfirm(true)}
-              disabled={isBusy}
-              className="bg-[#001d6e] text-white hover:bg-[#001552]"
-            >
-              {fullSyncMutation.isPending
-                ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                : <Database className="mr-1.5 h-4 w-4" />}
+            <Button size="sm" onClick={() => setShowFullSyncConfirm(true)} disabled={isBusy}
+              className="bg-[#001d6e] text-white hover:bg-[#001552]">
+              {fullSyncMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Database className="mr-1.5 h-4 w-4" />}
               Run First Sync
             </Button>
           </div>
         )}
 
-        {/* Table — only show when there are products */}
+        {/* Table */}
         {(productsQuery.isLoading || products.length > 0) && (
-          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-220px)] min-h-[400px] rounded-b-lg">
-            <table className="w-max min-w-full caption-bottom text-xs border-collapse">
+          <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-260px)] min-h-[400px] rounded-b-lg" style={{ WebkitOverflowScrolling: 'touch' }}>
+            <table className="w-max min-w-full caption-bottom border-collapse text-xs">
               <thead>
                 <tr>
-                  {productColumns.map((col) => {
+                  {visibleColumns.map((col) => {
                     const isNameCol = col.key === "name";
+                    const mw = isNameCol ? "130px" : col.colWidth ? `${Math.round(col.colWidth * 0.72)}px` : "75px";
                     return (
                       <th
                         key={col.key}
-                        style={{ minWidth: col.colWidth ? `${col.colWidth}px` : "110px" }}
-                        className={`sticky top-0 ${isNameCol ? "md:left-0 md:z-20 z-10" : "z-10"} whitespace-nowrap border-r border-b-2 border-b-gray-300 px-2.5 py-2 text-left text-xs font-semibold ${toneHeaderClass(col.tone)}`}
+                        style={{ minWidth: mw, maxWidth: isNameCol ? "160px" : undefined }}
+                        className={`sticky top-0 ${isNameCol ? "left-0 z-20" : "z-10"} whitespace-nowrap border-r border-gray-200 border-b-2 border-b-gray-300 px-2.5 py-3 text-left text-xs font-extrabold tracking-wide uppercase ${toneHeaderClass(col.tone)}`}
                       >
                         {col.label}
                       </th>
@@ -650,14 +902,14 @@ export default function NotionInventory() {
               <tbody>
                 {productsQuery.isLoading ? (
                   <tr>
-                    <td colSpan={productColumns.length} className="h-40 text-center text-muted-foreground">
+                    <td colSpan={visibleColumns.length} className="h-40 text-center text-muted-foreground">
                       <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-[#001d6e]" />
                       <div className="text-sm">Loading product master…</div>
                     </td>
                   </tr>
                 ) : filteredProducts.length === 0 ? (
                   <tr>
-                    <td colSpan={productColumns.length} className="h-32 text-center text-muted-foreground">
+                    <td colSpan={visibleColumns.length} className="h-32 text-center text-muted-foreground">
                       <Search className="mx-auto mb-2 h-5 w-5 opacity-30" />
                       <div className="text-sm">No products match your search.</div>
                     </td>
@@ -666,15 +918,22 @@ export default function NotionInventory() {
                   filteredProducts.map((product, i) => (
                     <tr
                       key={product.id}
-                      className={`border-b hover:bg-[#001d6e]/[0.02] ${i % 2 === 0 ? "" : "bg-gray-50/40"}`}
+                      className={`transition-colors hover:bg-[#001d6e]/[0.04] ${i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                     >
-                      {productColumns.map((col) => {
+                      {visibleColumns.map((col) => {
+                        const isOdd = i % 2 !== 0;
                         const isNameCol = col.key === "name";
+                        const mw = isNameCol ? "130px" : col.colWidth ? `${Math.round(col.colWidth * 0.72)}px` : "75px";
+                        const isEmpty = cellValue(product, col.key) === "-";
                         return (
                           <td
                             key={`${product.id}-${col.key}`}
-                            style={{ minWidth: col.colWidth ? `${col.colWidth}px` : "110px" }}
-                            className={`border-r px-2.5 py-1.5 text-xs ${isNameCol ? "md:sticky md:left-0 md:z-[5] whitespace-normal break-words leading-tight" : "whitespace-nowrap max-w-[180px] truncate"} ${toneClass(col.tone)}`}
+                            style={{ minWidth: mw, maxWidth: isNameCol ? "160px" : "150px" }}
+                            className={`border-r border-b border-gray-200 px-1.5 py-1.5 sm:px-2 sm:py-2 ${
+                              isNameCol
+                                ? `sticky left-0 z-[5] text-xs font-semibold text-[#001d6e] whitespace-normal break-words leading-snug shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${isOdd ? "bg-slate-50" : "bg-white"}`
+                                : `${isEmpty ? "text-gray-300" : "text-gray-700"} whitespace-nowrap truncate`
+                            } ${isNameCol ? "" : toneClass(col.tone, isOdd)}`}
                             title={cellValue(product, col.key)}
                           >
                             {cellValue(product, col.key)}

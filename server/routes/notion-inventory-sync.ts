@@ -85,7 +85,7 @@ router.get('/notion-inventory-sync/history', (_req, res) => {
 
 // ── CSV column header → DB field mapping ─────────────────────────────────────
 const CSV_HEADER_MAP: Record<string, string> = {
-  "New Sr.": "newSr", "Sr. No.": "srNo", "SKU": "barcode", "Products Name": "name",
+  "New Sr.": "newSr", "SKU": "barcode", "Products Name": "name",
   "Notion Wise Name": "notionWiseName", "Brand": "brand", "Category": "category",
   "Sale Category": "saleCategory", "Plant": "plant", "Type": "type",
   "Product Image": "productImage", "Vol Master": "volumeInCuFt", "Packets": "itemsPerPallet",
