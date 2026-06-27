@@ -1033,7 +1033,7 @@ export default function NotionInventory() {
                             {pc.productName}
                           </TableCell>
                           <TableCell className="text-xs text-muted-foreground align-top py-2.5">
-                            {pc.barcode || pc.srNo || "—"}
+                            {pc.barcode || pc.newSr || "—"}
                           </TableCell>
                           <TableCell className="align-top py-2.5">
                             <div className="flex flex-col gap-1">
