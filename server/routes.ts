@@ -4826,7 +4826,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                     ...item,
                     itemName: product.name,
                     sku: product.barcode,
-                    srNo: product.srNo,
+                    srNo: product.newSr,
                     itemsPerPallet: product.itemsPerPallet,
                   };
                 }
@@ -5145,8 +5145,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!itemData.barcode && product.barcode) {
             itemData.barcode = product.barcode;
           }
-          if (!itemData.srNo && product.srNo) {
-            itemData.srNo = product.srNo;
+          if (!itemData.srNo && product.newSr) {
+            itemData.srNo = product.newSr;
           }
           if (!itemData.itemNo && product.itemNo) {
             itemData.itemNo = product.itemNo;
@@ -6447,8 +6447,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 if (product) {
                   return {
                     ...item,
-                    srNo: item.srNo || product.srNo || null,
-                    srNoDisplay: item.srNoDisplay || product.srNo || null,
+                    srNo: item.srNo || product.newSr || null,
+                    srNoDisplay: item.srNoDisplay || product.newSr || null,
                     barcode: item.barcode || product.barcode || null,
                     itemName: item.itemName || product.name || null,
                   };

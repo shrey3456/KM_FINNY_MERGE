@@ -287,7 +287,7 @@ router.post('/proforma-slips/import-api', async (req, res) => {
     const productBySku = new Map();
     
     for (const product of allProducts) {
-      if (product.srNo) productBySrNo.set(product.srNo.toLowerCase(), product);
+      if (product.newSr) productBySrNo.set(product.newSr.toLowerCase(), product);
       if (product.name) productByItemName.set(product.name.toLowerCase(), product);
       if (product.barcode) productBySku.set(product.barcode.toLowerCase(), product);
     }

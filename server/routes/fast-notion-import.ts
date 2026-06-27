@@ -41,7 +41,7 @@ router.post('/fast-notion-import', async (req, res) => {
     // Create product lookup maps
     const productBySrNo = new Map();
     for (const product of allProducts) {
-      if (product.srNo) productBySrNo.set(product.srNo.toLowerCase(), product);
+      if (product.newSr) productBySrNo.set(product.newSr.toLowerCase(), product);
     }
 
     try {
@@ -231,7 +231,7 @@ router.post('/fast-notion-import', async (req, res) => {
                 productId: product.id, // Keep for reference only
                 quantity: itemData.quantity,
                 // Snapshot fields: Store complete product data at import time
-                srNo: product.srNo || '',
+                srNo: product.newSr || '',
                 itemNo: product.itemNo || '',
                 barcode: product.barcode || '',
                 itemName: product.name || '',

@@ -27,7 +27,7 @@ export const FIELD_LABELS: Record<string, string> = {
   forMpOrderForm: 'For MP Order Form',
   upSr: 'UP Sr', upHsn: 'UP HSN', upSap: 'UP SAP', upRate: 'UP Rate', upIgst: 'UP IGST',
   forUpOrderForm: 'For UP Order Form',
-  hsnCode: 'HSN Code', sapCode: 'SAP Code', srNo: 'Sr. No.', newSr: 'New Sr.',
+  hsnCode: 'HSN Code', sapCode: 'SAP Code', newSr: 'New Sr.',
   sellingPrice: 'Selling Price',
 };
 
@@ -42,7 +42,7 @@ export interface ProductChange {
   productId: number;
   productName: string;
   barcode: string;
-  srNo: string | null;
+  newSr: string | null;
   changes: FieldChange[];
 }
 
@@ -183,7 +183,6 @@ function mapNotionPageToFields(page: any) {
     forUpOrderForm:  firstOf(p, 'For UP Order Form :'),
     hsnCode:         gjHsnVal || firstOf(p, 'HSN Code', 'HSN'),
     sapCode:         gjSapVal || firstOf(p, 'SAP Code', 'SAP'),
-    srNo:            firstOf(p, 'New Sr.', 'GJ Sr :', 'MP Sr :', 'UP Sr :'),
     newSr:           firstOf(p, 'New Sr.'),
     sellingPrice:    gjSaleRate || firstOf(p, 'Selling Price', 'Sale Rate'),
   };
@@ -201,7 +200,7 @@ function buildProductData(fields: ReturnType<typeof mapNotionPageToFields>): Rec
   };
   const optional = [
     'notionWiseName', 'brand', 'category', 'saleCategory', 'plant', 'type', 'productImage',
-    'newSr', 'srNo', 'volumeInCuFt', 'itemsPerPallet', 'indPlt', 'valPlt',
+    'newSr', 'volumeInCuFt', 'itemsPerPallet', 'indPlt', 'valPlt',
     'gjSr', 'gjHsn', 'gjSap', 'gjSaleRate', 'gjIgst', 'gjGaPur', 'gjMhPur', 'gjNagarPur', 'forGjOrderForm',
     'mpSr', 'mpHsn', 'mpSap', 'mpJhPur', 'mpMhPur', 'mpMpPurJabalpur', 'mpMpPurKhargone', 'mpWbPur',
     'saleMpJh', 'saleMpMh', 'saleMpMp', 'mpJhIgst', 'mpMhIgst', 'mpMpCgst', 'mpMpSgst', 'mpWbIgst', 'mpWbSale', 'forMpOrderForm',
@@ -234,8 +233,6 @@ async function fetchAllNotionPages(): Promise<any[]> {
 
 async function computeChanges(notionPages: any[], allProducts: any[], triggeredBy = 'system') {
   const byNotionPageId = new Map(allProducts.filter(p => p.notionPageId).map(p => [p.notionPageId!, p]));
-  // Fallback: match products that have no notionPageId yet by barcode
-  // const byBarcode = new Map(allProducts.filter(p => !p.notionPageId && p.barcode).map(p => [p.barcode!, p]));
 
   const changedProducts: ProductChange[] = [];
   const toCreate: ReturnType<typeof buildProductData>[] = [];
@@ -249,10 +246,8 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
       const fields = mapNotionPageToFields(page);
       if (!fields.barcode && !fields.name) { notFound++; continue; }
 
-      // Match by notionPageId first; fall back to barcode for products not yet linked
       const product = byNotionPageId.get(fields.notionPageId);
 
-      // ── Product not in DB → create it (notionPageId is the key; barcode/name can be empty) ──
       if (!product) {
         const data = { ...buildProductData(fields), lastChangedBy: triggeredBy };
         toCreate.push(data);
@@ -260,79 +255,84 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
         continue;
       }
 
-      // ── Product exists → check for field changes ──────────────────────────
       const updates: Record<string, any> = {};
       const fieldChanges: FieldChange[] = [];
 
-      const comparable = (value: unknown) => {
+      const comparable = (value: unknown): string => {
         if (value === null || value === undefined) return '';
         if (typeof value === 'number') return String(value);
-        const text = String(value).trim();
-        const numeric = Number(text);
-        if (text !== '' && Number.isFinite(numeric) && /^-?\d+(\.\d+)?$/.test(text)) {
-          return String(numeric);
-        }
-        return text.replace(/\s+/g, ' ');
+        return String(value).trim().replace(/\s+/g, ' ');
       };
 
-      const check = (key: string, notionVal: string | number | undefined, localVal: any) => {
-        if (notionVal !== undefined && notionVal !== '' && comparable(notionVal) !== comparable(localVal)) {
-          updates[key] = notionVal;
-          fieldChanges.push({ field: key, label: FIELD_LABELS[key] ?? key, oldValue: localVal ?? null, newValue: notionVal });
+      const check = (key: string, notionVal: string | number | null | undefined, localVal: any) => {
+        const notionNorm = (notionVal == null || notionVal === '') ? '' : notionVal;
+        if (comparable(notionNorm) !== comparable(localVal)) {
+          updates[key] = notionNorm === '' ? null : notionVal;
+          const change = { field: key, label: FIELD_LABELS[key] ?? key, oldValue: localVal ?? null, newValue: notionNorm === '' ? null : notionVal };
+          fieldChanges.push(change);
+
+          // Log ₹ symbol changes explicitly
+          const oldStr = String(localVal ?? '');
+          const newStr = String(notionNorm);
+          const oldHasRupee = oldStr.includes('₹');
+          const newHasRupee = newStr.includes('₹');
+          if (oldHasRupee !== newHasRupee) {
+            console.log(`[₹ Symbol Change] ${product.name} | field: ${key} | "${oldStr}" → "${newStr}"`);
+          }
         }
       };
 
-      check('notionPageId',    fields.notionPageId    || undefined, product.notionPageId);
-      check('name',            fields.name            || undefined, product.name);
-      check('notionWiseName',  fields.notionWiseName  || undefined, product.notionWiseName);
-      check('brand',           fields.brand           || undefined, product.brand);
-      check('category',        fields.category        || undefined, product.category);
-      check('saleCategory',    fields.saleCategory    || undefined, product.saleCategory);
-      check('plant',           fields.plant           || undefined, product.plant);
-      check('type',            fields.type            || undefined, product.type);
-      check('productImage',    fields.productImage    || undefined, product.productImage);
-      check('volumeInCuFt',    fields.volumeInCuFt    || undefined, product.volumeInCuFt);
-      check('itemsPerPallet',  fields.itemsPerPallet,               product.itemsPerPallet ?? undefined);
-      check('indPlt',          fields.indPlt,                       product.indPlt ?? undefined);
-      check('valPlt',          fields.valPlt,                       product.valPlt ?? undefined);
-      check('gjSr',            fields.gjSr            || undefined, product.gjSr);
-      check('gjHsn',           fields.gjHsn           || undefined, product.gjHsn);
-      check('gjSap',           fields.gjSap           || undefined, product.gjSap);
-      check('gjSaleRate',      fields.gjSaleRate      || undefined, product.gjSaleRate);
-      check('gjIgst',          fields.gjIgst          || undefined, product.gjIgst);
-      check('gjGaPur',         fields.gjGaPur         || undefined, product.gjGaPur);
-      check('gjMhPur',         fields.gjMhPur         || undefined, product.gjMhPur);
-      check('gjNagarPur',      fields.gjNagarPur      || undefined, product.gjNagarPur);
-      check('forGjOrderForm',  fields.forGjOrderForm  || undefined, product.forGjOrderForm);
-      check('mpSr',            fields.mpSr            || undefined, product.mpSr);
-      check('mpHsn',           fields.mpHsn           || undefined, product.mpHsn);
-      check('mpSap',           fields.mpSap           || undefined, product.mpSap);
-      check('mpJhPur',         fields.mpJhPur         || undefined, product.mpJhPur);
-      check('mpMhPur',         fields.mpMhPur         || undefined, product.mpMhPur);
-      check('mpMpPurJabalpur', fields.mpMpPurJabalpur || undefined, product.mpMpPurJabalpur);
-      check('mpMpPurKhargone', fields.mpMpPurKhargone || undefined, product.mpMpPurKhargone);
-      check('mpWbPur',         fields.mpWbPur         || undefined, product.mpWbPur);
-      check('saleMpJh',        fields.saleMpJh        || undefined, product.saleMpJh);
-      check('saleMpMh',        fields.saleMpMh        || undefined, product.saleMpMh);
-      check('saleMpMp',        fields.saleMpMp        || undefined, product.saleMpMp);
-      check('mpJhIgst',        fields.mpJhIgst        || undefined, product.mpJhIgst);
-      check('mpMhIgst',        fields.mpMhIgst        || undefined, product.mpMhIgst);
-      check('mpMpCgst',        fields.mpMpCgst        || undefined, product.mpMpCgst);
-      check('mpMpSgst',        fields.mpMpSgst        || undefined, product.mpMpSgst);
-      check('mpWbIgst',        fields.mpWbIgst        || undefined, product.mpWbIgst);
-      check('mpWbSale',        fields.mpWbSale        || undefined, product.mpWbSale);
-      check('forMpOrderForm',  fields.forMpOrderForm  || undefined, product.forMpOrderForm);
-      check('upSr',            fields.upSr            || undefined, product.upSr);
-      check('upHsn',           fields.upHsn           || undefined, product.upHsn);
-      check('upSap',           fields.upSap           || undefined, product.upSap);
-      check('upRate',          fields.upRate          || undefined, product.upRate);
-      check('upIgst',          fields.upIgst          || undefined, product.upIgst);
-      check('forUpOrderForm',  fields.forUpOrderForm  || undefined, product.forUpOrderForm);
-      check('hsnCode',         fields.hsnCode         || undefined, product.hsnCode);
-      check('sapCode',         fields.sapCode         || undefined, product.sapCode);
-      check('srNo',            fields.srNo            || undefined, product.srNo);
-      check('newSr',           fields.newSr           || undefined, product.newSr);
-      check('sellingPrice',    fields.sellingPrice    || undefined, product.sellingPrice);
+      check('notionPageId',    fields.notionPageId    || null, product.notionPageId);
+      check('barcode',         fields.barcode         || null, product.barcode);
+      check('name',            fields.name            || null, product.name);
+      check('notionWiseName',  fields.notionWiseName  || null, product.notionWiseName);
+      check('brand',           fields.brand           || null, product.brand);
+      check('category',        fields.category        || null, product.category);
+      check('saleCategory',    fields.saleCategory    || null, product.saleCategory);
+      check('plant',           fields.plant           || null, product.plant);
+      check('type',            fields.type            || null, product.type);
+      check('productImage',    fields.productImage    || null, product.productImage);
+      check('volumeInCuFt',    fields.volumeInCuFt    || null, product.volumeInCuFt);
+      check('itemsPerPallet',  fields.itemsPerPallet  ?? null, product.itemsPerPallet ?? null);
+      check('indPlt',          fields.indPlt          ?? null, product.indPlt ?? null);
+      check('valPlt',          fields.valPlt          ?? null, product.valPlt ?? null);
+      check('gjSr',            fields.gjSr            || null, product.gjSr);
+      check('gjHsn',           fields.gjHsn           || null, product.gjHsn);
+      check('gjSap',           fields.gjSap           || null, product.gjSap);
+      check('gjSaleRate',      fields.gjSaleRate      || null, product.gjSaleRate);
+      check('gjIgst',          fields.gjIgst          || null, product.gjIgst);
+      check('gjGaPur',         fields.gjGaPur         || null, product.gjGaPur);
+      check('gjMhPur',         fields.gjMhPur         || null, product.gjMhPur);
+      check('gjNagarPur',      fields.gjNagarPur      || null, product.gjNagarPur);
+      check('forGjOrderForm',  fields.forGjOrderForm  || null, product.forGjOrderForm);
+      check('mpSr',            fields.mpSr            || null, product.mpSr);
+      check('mpHsn',           fields.mpHsn           || null, product.mpHsn);
+      check('mpSap',           fields.mpSap           || null, product.mpSap);
+      check('mpJhPur',         fields.mpJhPur         || null, product.mpJhPur);
+      check('mpMhPur',         fields.mpMhPur         || null, product.mpMhPur);
+      check('mpMpPurJabalpur', fields.mpMpPurJabalpur || null, product.mpMpPurJabalpur);
+      check('mpMpPurKhargone', fields.mpMpPurKhargone || null, product.mpMpPurKhargone);
+      check('mpWbPur',         fields.mpWbPur         || null, product.mpWbPur);
+      check('saleMpJh',        fields.saleMpJh        || null, product.saleMpJh);
+      check('saleMpMh',        fields.saleMpMh        || null, product.saleMpMh);
+      check('saleMpMp',        fields.saleMpMp        || null, product.saleMpMp);
+      check('mpJhIgst',        fields.mpJhIgst        || null, product.mpJhIgst);
+      check('mpMhIgst',        fields.mpMhIgst        || null, product.mpMhIgst);
+      check('mpMpCgst',        fields.mpMpCgst        || null, product.mpMpCgst);
+      check('mpMpSgst',        fields.mpMpSgst        || null, product.mpMpSgst);
+      check('mpWbIgst',        fields.mpWbIgst        || null, product.mpWbIgst);
+      check('mpWbSale',        fields.mpWbSale        || null, product.mpWbSale);
+      check('forMpOrderForm',  fields.forMpOrderForm  || null, product.forMpOrderForm);
+      check('upSr',            fields.upSr            || null, product.upSr);
+      check('upHsn',           fields.upHsn           || null, product.upHsn);
+      check('upSap',           fields.upSap           || null, product.upSap);
+      check('upRate',          fields.upRate          || null, product.upRate);
+      check('upIgst',          fields.upIgst          || null, product.upIgst);
+      check('forUpOrderForm',  fields.forUpOrderForm  || null, product.forUpOrderForm);
+      check('hsnCode',         fields.hsnCode         || null, product.hsnCode);
+      check('sapCode',         fields.sapCode         || null, product.sapCode);
+      check('newSr',           fields.newSr           || null, product.newSr);
+      check('sellingPrice',    fields.sellingPrice    || null, product.sellingPrice);
 
       if (fieldChanges.length === 0 && product.notionPageId) { skipped++; continue; }
 
@@ -341,7 +341,7 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
       updatesMap.set(product.id, updates);
 
       if (fieldChanges.length > 0) {
-        changedProducts.push({ productId: product.id, productName: product.name, barcode: product.barcode || '', srNo: product.srNo || null, changes: fieldChanges });
+        changedProducts.push({ productId: product.id, productName: product.name, barcode: product.barcode || '', newSr: product.newSr || null, changes: fieldChanges });
       } else {
         skipped++;
       }
@@ -407,26 +407,8 @@ export async function applyPendingChanges(): Promise<SyncReport> {
       try {
         await storage.createProduct(data as any);
         created++;
-      } catch (createErr) {
-        // Insert failed (e.g. barcode conflict from a prior import without a Notion ID).
-        // Fall back to finding the existing row by barcode and patching it instead.
-        // if (data.barcode) {
-        //   try {
-        //     const existing = await storage.getProductByBarcode(data.barcode);
-        //     if (existing) {
-        //       // Don't overwrite stock counters that belong to the existing record.
-        //       const { purchased: _p, sold: _s, inStock: _i, pallets: _pl, ...safeData } = data as any;
-        //       await storage.updateProduct(existing.id, safeData);
-        //       updated++;
-        //     } else {
-        //       errors.push(`Create ${data.barcode}: ${createErr instanceof Error ? createErr.message : String(createErr)}`);
-        //     }
-        //   } catch (fallbackErr) {
-        //     errors.push(`Create ${data.barcode}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
-        //   }
-        // } else {
-        //   errors.push(`Create (no barcode): ${createErr instanceof Error ? createErr.message : String(createErr)}`);
-        // }
+      } catch (_createErr) {
+        // Silently skip barcode conflicts from prior imports without a Notion ID
       }
     }
 
@@ -466,7 +448,7 @@ export async function fullSyncFromNotion(triggeredBy = 'system'): Promise<SyncRe
     for (const page of notionPages) {
       try {
         const fields = mapNotionPageToFields(page);
-        if (!fields.barcode && !fields.name) continue; // skip truly empty Notion rows
+        if (!fields.barcode && !fields.name) continue;
         const data = { ...buildProductData(fields), lastChangedBy: triggeredBy };
         await storage.createProduct(data as any);
         created++;
@@ -513,4 +495,3 @@ export function getSyncStatus() {
 
 export function getSyncHistory(): SyncReport[] { return syncHistory; }
 export function getPendingReport(): SyncReport | null { return pendingReport; }
-

@@ -38,7 +38,6 @@ export const products = pgTable("products", {
   id: serial("id").primaryKey(),
 
   // ── Core identity ─────────────────────────────────────────────────────────
-  srNo: text("sr_no"),              // legacy Sr from original CSV import
   newSr: text("new_sr"),            // "New Sr." column — canonical cross-plant Sr
   itemNo: text("item_no"),          // internal item code
   barcode: text("barcode").notNull(), // SKU / barcode
@@ -123,7 +122,7 @@ export const insertProductSchema = createInsertSchema(products, {
   lastUpdated: z.union([z.date(), z.string()]).optional(),
 }).pick({
   // core
-  srNo: true, newSr: true, itemNo: true, barcode: true, name: true,
+  newSr: true, itemNo: true, barcode: true, name: true,
   notionWiseName: true, brand: true, category: true, saleCategory: true,
   plant: true, type: true, productImage: true, notionPageId: true,
   // volume / pallet
