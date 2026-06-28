@@ -575,6 +575,11 @@ export default function ScanOrderPage() {
       }
       // Always refresh extras list — server determines isExtra; HTTP response uses snake_case is_extra
       queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "extras"] });
+      // Keep Master View / Separate CSVs live for the scanning device too (the WS
+      // echo also does this; React Query dedupes the overlapping refetch).
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/sessions", "scan-page"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/items"] });
     },
 
     onError: (err: any, _payload, context: any) => {
@@ -809,6 +814,15 @@ export default function ScanOrderPage() {
             );
           }
 
+          // Master View / Separate CSVs read scan progress keyed by order_import_item_id,
+          // which the WS payload doesn't carry (and barcodes repeat across CSVs, so we
+          // can't patch by barcode). Invalidate so whichever of those tabs is open
+          // refetches live. Disabled (closed-tab) queries are only marked stale — no
+          // network call — so this is cheap when the user is on the Scan tab.
+          queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/order-import/sessions", "scan-page"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/order-import/items"] });
+
           // Append to recent scans list — skip if we already added it optimistically
           if (data.event) {
             const wasOptimistic = osRecentScanSentRef.current.delete(data.event.barcode);
@@ -884,6 +898,10 @@ export default function ScanOrderPage() {
     enabled: (scanTab === "master-view" || osTab === "master-view") && !!mvDate,
     staleTime: 0,
     refetchOnMount: true,
+    // WS scan events invalidate this query for live updates. Poll as a safety net:
+    // 30s when WS is healthy, 8s when it's down so the open tab still keeps pace.
+    refetchInterval: wsConnected ? 30000 : 8000,
+    refetchIntervalInBackground: false,
   });
 
   const csvSessQuery = useQuery<{ sessions: ImpSession[]; total: number }>({
@@ -897,6 +915,8 @@ export default function ScanOrderPage() {
     enabled: scanTab === "separate-csvs" || osTab === "separate-csvs",
     staleTime: 0,
     refetchOnMount: true,
+    refetchInterval: wsConnected ? 30000 : 8000,
+    refetchIntervalInBackground: false,
   });
 
   // Separate allocation query — always uses csvDate/csvPlant so it matches the sessions list
@@ -904,6 +924,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     queryKey: ["/api/order-import/items", csvExpId, "scan-page"],
     queryFn: () => apiRequest("GET", `/api/order-import/sessions/${csvExpId}/items`).then((r) => r.json()),
     enabled: csvExpId !== null && (scanTab === "separate-csvs" || osTab === "separate-csvs"),
+    staleTime: 0,
+    refetchInterval: wsConnected ? 30000 : 8000,
+    refetchIntervalInBackground: false,
   });
 
   // ── Mutations ────────────────────────────────────────────────────────────
