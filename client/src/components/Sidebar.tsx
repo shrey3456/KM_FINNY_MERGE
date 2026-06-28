@@ -233,7 +233,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "scan-history",
         },
         {
-          label: "Order Import",
+          
+          label: "Order Management",
           icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/order-import",
           permission: "canAccessOrderManagement",

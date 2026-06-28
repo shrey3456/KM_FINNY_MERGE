@@ -5,8 +5,10 @@ import {
   ArrowLeft,
   Camera,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Download,
   FileSpreadsheet,
   History,
   Keyboard,
@@ -174,7 +176,41 @@ type ImportItemsResponse = {
 
 type CsvMode = "pivot" | "flat";
 
+type MvItem = {
+  id: number; barcode: string | null; itemName: string | null;
+  sapCode: string | null; quantity: number | null; expectedPallets: number | null;
+  scannedQty: number | null; scanStatus: string | null;
+};
+type MvFile = {
+  sessionId: number; csvFileName: string; rowCount: number | null;
+  uploadedAt: string | null; uploadedBy: string; plant: string;
+  scanStatus: string | null; items: MvItem[];
+};
+type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
+type ImpSession = {
+  id: number; plant: string; csvFileName: string; rowCount: number;
+  importedByName: string | null; createdAt: string | null; scanStatus: string;
+};
+type ImpItem = {
+  id: number; barcode: string | null; itemName: string | null;
+  sapCode: string | null; quantity: number | null; expectedPallets: number | null;
+  scannedQty: number | null; scanStatus: string | null;
+};
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
+
+function scanLocalISODate(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function scanFmtIST(dt: string | null | undefined): string {
+  if (!dt) return "—";
+  const s = String(dt);
+  const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-IN", { timeZone: "UTC" });
+}
 
 const normalize = (value?: string | number | null) =>
   String(value ?? "").trim().toLowerCase();
@@ -254,6 +290,18 @@ export default function ScanOrderPage() {
 
   const [view, setView] = useState<"dashboard" | "map" | "scan">("dashboard");
   const [activeSession, setActiveSession] = useState<OrderSession | null>(null);
+
+  // ── Master View / Separate CSVs tab state ────────────────────────────────
+  const [scanTab, setScanTab] = useState<"scan" | "master-view" | "separate-csvs">("scan");
+  const [osTab,   setOsTab]   = useState<"scan" | "master-view" | "separate-csvs">("scan");
+  const scanTodayStr = scanLocalISODate();
+  const [mvDate,      setMvDate]      = useState(scanTodayStr);
+  const [mvPlant,     setMvPlant]     = useState("");
+  const [mvSearch,    setMvSearch]    = useState("");
+  const [csvDate,     setCsvDate]     = useState(scanTodayStr);
+  const [csvPlant,    setCsvPlant]    = useState("");
+  const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
+  const [csvSearch,   setCsvSearch]   = useState("");
   const [scanActivities, setScanActivities] = useState<ScanActivity[]>([]);
   // Tracks item IDs in the order they were last scanned (newest first).
   // Used to float recently-scanned rows to the top of the CSV Order Items table.
@@ -808,6 +856,40 @@ export default function ScanOrderPage() {
   useEffect(() => {
     if (importsError) toast({ title: "Failed to load uploaded CSVs", description: (importsError as any).message, variant: "destructive" });
   }, [importsError, toast]);
+
+  // ── Master View / Separate CSVs queries ─────────────────────────────────
+
+  const mvQuery = useQuery<MvResponse>({
+    queryKey: ["/api/order-import/master-view", mvDate, mvPlant],
+    queryFn: () => {
+      const p = new URLSearchParams({ date: mvDate });
+      if (mvPlant) p.set("plant", mvPlant);
+      return apiRequest("GET", `/api/order-import/master-view?${p}`).then((r) => r.json());
+    },
+    enabled: (scanTab === "master-view" || osTab === "master-view") && !!mvDate,
+    staleTime: 0,
+    refetchOnMount: true,
+  });
+
+  const csvSessQuery = useQuery<{ sessions: ImpSession[]; total: number }>({
+    queryKey: ["/api/order-import/sessions", "scan-page", csvDate, csvPlant],
+    queryFn: () => {
+      const p = new URLSearchParams({ page: "1", pageSize: "100" });
+      if (csvDate)  p.set("date",  csvDate);
+      if (csvPlant) p.set("plant", csvPlant);
+      return apiRequest("GET", `/api/order-import/sessions?${p}`).then((r) => r.json());
+    },
+    enabled: scanTab === "separate-csvs" || osTab === "separate-csvs",
+    staleTime: 0,
+    refetchOnMount: true,
+  });
+
+  // Separate allocation query — always uses csvDate/csvPlant so it matches the sessions list
+const csvItemsQuery2 = useQuery<ImpItem[]>({
+    queryKey: ["/api/order-import/items", csvExpId, "scan-page"],
+    queryFn: () => apiRequest("GET", `/api/order-import/sessions/${csvExpId}/items`).then((r) => r.json()),
+    enabled: csvExpId !== null && (scanTab === "separate-csvs" || osTab === "separate-csvs"),
+  });
 
   // ── Mutations ────────────────────────────────────────────────────────────
 
@@ -1534,22 +1616,59 @@ export default function ScanOrderPage() {
     );
   }
 
+  // ── Master View derived data ─────────────────────────────────────────────
+
+  const mvData      = mvQuery.data;
+  const allMvItems  = mvData
+    ? mvData.files.flatMap((f) => f.items.map((item) => ({ ...item, _file: f.csvFileName, _at: f.uploadedAt })))
+    : [];
+  const filtMvItems = mvSearch
+    ? allMvItems.filter((i) =>
+        [i.barcode, i.itemName, i.sapCode, i._file].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
+      )
+    : allMvItems;
+  const csvSessions = csvSessQuery.data?.sessions ?? [];
+  const csvImpItems = csvItemsQuery2.data ?? [];
+  const filtCsvItems = csvSearch
+    ? csvImpItems.filter((i) =>
+        [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(csvSearch.toLowerCase()))
+      )
+    : csvImpItems;
+
+  function downloadMvCsv() {
+    if (!mvData) return;
+    const headers = ["#", "Source File", "Upload Time", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets"];
+    const rows = allMvItems.map((item, idx) => [
+      idx + 1, item._file, item._at ? scanFmtIST(item._at) : "",
+      item.barcode ?? "", item.itemName ?? "", item.sapCode ?? "", item.quantity ?? 0, item.expectedPallets ?? "",
+    ]);
+    const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+    a.download = `master-view-${mvData.date}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   if (view === "scan" && activeSession) {
     const sessionItems = activeSession.items ?? [];
     const sessionExtras = activeSession.extras ?? [];
 
     // Sort so the most recently scanned item is always at the top.
     // Items never scanned stay below in their original CSV order.
-    const sortedSessionItems = recentItemIds.length
-      ? [...sessionItems].sort((a, b) => {
-          const ai = recentItemIds.indexOf(a.id);
-          const bi = recentItemIds.indexOf(b.id);
-          if (ai !== -1 && bi !== -1) return ai - bi; // both scanned: keep relative scan order
-          if (ai !== -1) return -1;                    // a scanned, b not → a goes up
-          if (bi !== -1) return 1;                     // b scanned, a not → b goes up
-          return 0;                                    // neither scanned: keep original order
-        })
-      : sessionItems;
+    // Falls back to scannedQty > 0 when recentItemIds hasn't been populated yet
+    // (e.g. immediately after page refresh).
+    const sortedSessionItems = [...sessionItems].sort((a, b) => {
+      const ai = recentItemIds.indexOf(a.id);
+      const bi = recentItemIds.indexOf(b.id);
+      if (ai !== -1 && bi !== -1) return ai - bi;    // both tracked: keep relative scan order
+      if (ai !== -1) return -1;                       // a tracked, b not → a goes up
+      if (bi !== -1) return 1;                        // b tracked, a not → b goes up
+      // Neither tracked: fall back to scannedQty — any scanned item beats unscanned
+      const aHit = a.scannedQty > 0 ? 1 : 0;
+      const bHit = b.scannedQty > 0 ? 1 : 0;
+      return bHit - aHit;
+    });
     return (
       <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
         <div className="mx-auto max-w-7xl space-y-4">
@@ -1595,6 +1714,24 @@ export default function ScanOrderPage() {
             </div>
           </div>
 
+          {/* ── Tab strip ── */}
+          <div className="flex flex-wrap gap-1.5">
+            {(["scan", "master-view", "separate-csvs"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setScanTab(t)}
+                className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+                  scanTab === t
+                    ? "bg-[#001d6e] text-white"
+                    : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Separate CSVs"}
+              </button>
+            ))}
+          </div>
+
+          {scanTab === "scan" && (
           <div className="grid gap-4 lg:grid-cols-[1fr_420px]">
             <div className="space-y-4 order-last lg:order-first">
               <div className="grid gap-3 sm:grid-cols-3">
@@ -1603,28 +1740,32 @@ export default function ScanOrderPage() {
                 <Card className="rounded-md"><CardContent className="p-4"><p className="text-xs text-gray-500">Extras</p><p className="text-2xl font-semibold text-amber-700">{sessionExtras.reduce((s, e) => s + e.quantity, 0)}</p></CardContent></Card>
               </div>
 
-              <Card className="rounded-md">
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-lg">CSV Order Items</CardTitle>
-                    <span className="text-xs text-gray-400">{sortedSessionItems.length} items</span>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <div className="overflow-x-auto overflow-y-auto max-h-[520px] border rounded-md">
-                  <table className="w-full text-sm border-collapse">
-                    <thead className="sticky top-0 z-10 bg-white">
-                      <tr className="border-b border-gray-200">
-                        <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 border-r border-gray-100 w-[45%] min-w-[220px]">Item</th>
-                        <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500 border-r border-gray-100 w-[18%]">Scanned / Exp.</th>
-                        <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500 border-r border-gray-100 w-[14%]">Pallets</th>
-                        <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 w-[14%]">Status</th>
+              {/* CSV Order Items Table */}
+              <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+                {/* Table header bar */}
+                <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
+                  <h3 className="text-sm font-semibold text-gray-900">CSV Order Items</h3>
+                  <span className="text-xs text-gray-400">{sortedSessionItems.length} items</span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs sm:text-sm border-collapse">
+                    <thead>
+                      <tr className="bg-[#001d6e]">
+                        <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white w-[40px]">#</th>
+                        <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white min-w-[200px]">Item</th>
+                        <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode / SKU</th>
+                        <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Scanned</th>
+                        <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Expected</th>
+                        <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Pallets</th>
+                        <th className="px-3 py-3 text-center text-[11px] font-semibold uppercase tracking-wide text-white">Status</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-gray-100">
+                    <tbody>
                       {sortedSessionItems.slice((scanItemPage - 1) * SCAN_PAGE_SIZE, scanItemPage * SCAN_PAGE_SIZE).map((item, idx) => {
-                        const done = item.scannedQty >= item.expectedQty;
+                        const done = item.scannedQty >= item.expectedQty && item.scannedQty > 0;
                         const over = item.scannedQty > item.expectedQty;
+                        const partial = item.scannedQty > 0 && !done && !over;
                         const product = item.productId
                           ? products.find((p) => p.id === item.productId)
                           : productLookup.get(normalize(item.barcode || item.sku));
@@ -1633,29 +1774,45 @@ export default function ScanOrderPage() {
                           ? parseFloat((item.scannedQty / ipp).toFixed(2))
                           : null;
                         const code = bestCode(item);
+                        const rowBg = over
+                          ? "bg-red-50/40"
+                          : done
+                          ? "bg-emerald-50/40"
+                          : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
                         return (
-                          <tr key={item.id} className={idx % 2 === 1 ? "bg-gray-50/60" : "bg-white"}>
-                            <td className="px-3 py-2.5 border-r border-gray-100">
-                              <p className="font-medium text-gray-900 leading-snug">{item.itemName}</p>
-                              {code && <p className="font-mono text-[11px] text-gray-400 mt-0.5">{code}</p>}
+                          <tr key={item.id} className={`${rowBg} border-b border-gray-100 transition-colors hover:bg-slate-100/60`}>
+                            <td className="px-3 py-3 text-gray-400 text-[11px]">
+                              {(scanItemPage - 1) * SCAN_PAGE_SIZE + idx + 1}
                             </td>
-                            <td className="px-3 py-2.5 text-right tabular-nums border-r border-gray-100">
-                              <span className={over ? "text-red-600 font-semibold" : done ? "text-gray-900 font-semibold" : "text-gray-700"}>
+                            <td className="px-3 py-3">
+                              <p className="font-medium text-gray-900 leading-snug">{item.itemName}</p>
+                            </td>
+                            <td className="px-3 py-3">
+                              {code
+                                ? <span className="font-mono text-[11px] text-gray-500">{code}</span>
+                                : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-3 py-3 text-right tabular-nums font-bold">
+                              <span className={over ? "text-red-600" : done ? "text-emerald-700" : partial ? "text-[#001d6e]" : "text-gray-400"}>
                                 {item.scannedQty}
                               </span>
-                              <span className="text-gray-400 font-normal">/{item.expectedQty}</span>
                             </td>
-                            <td className="px-3 py-2.5 text-right tabular-nums text-gray-700 border-r border-gray-100">
-                              {palletsScanned !== null ? palletsScanned : <span className="text-gray-300">—</span>}
+                            <td className="px-3 py-3 text-right tabular-nums text-gray-600 font-medium">
+                              {item.expectedQty}
                             </td>
-                            <td className="px-3 py-2.5">
-                              <span className={`inline-flex items-center gap-1 text-[11px] font-medium ${
-                                done ? "text-gray-500" : over ? "text-red-600" : "text-gray-400"
+                            <td className="px-3 py-3 text-right tabular-nums text-gray-700">
+                              {palletsScanned !== null
+                                ? <span className="font-semibold text-[#001d6e]">{palletsScanned}</span>
+                                : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-3 py-3 text-center">
+                              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                over    ? "bg-red-100 text-red-700" :
+                                done    ? "bg-emerald-100 text-emerald-700" :
+                                partial ? "bg-blue-100 text-blue-700" :
+                                          "bg-gray-100 text-gray-500"
                               }`}>
-                                <span className={`h-1.5 w-1.5 rounded-full ${
-                                  done ? "bg-gray-400" : over ? "bg-red-500" : "bg-gray-300"
-                                }`} />
-                                {done ? "Done" : over ? "Over" : "Pending"}
+                                {over ? "Over" : done ? "Done" : partial ? "Partial" : "Pending"}
                               </span>
                             </td>
                           </tr>
@@ -1663,37 +1820,29 @@ export default function ScanOrderPage() {
                       })}
                     </tbody>
                   </table>
-                  </div>
+                </div>
 
-                  {sortedSessionItems.length > SCAN_PAGE_SIZE && (
-                    <div className="flex items-center justify-between mt-4 pt-3 border-t">
-                      <span className="text-xs text-gray-500">
-                        Page {scanItemPage} of {Math.ceil(sortedSessionItems.length / SCAN_PAGE_SIZE)} · {sortedSessionItems.length} items
-                      </span>
-                      <div className="flex gap-1">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 w-7 p-0"
-                          disabled={scanItemPage <= 1}
-                          onClick={() => setScanItemPage((p) => Math.max(1, p - 1))}
-                        >
-                          <ChevronLeft className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 w-7 p-0"
-                          disabled={scanItemPage >= Math.ceil(sortedSessionItems.length / SCAN_PAGE_SIZE)}
-                          onClick={() => setScanItemPage((p) => Math.min(Math.ceil(sortedSessionItems.length / SCAN_PAGE_SIZE), p + 1))}
-                        >
-                          <ChevronRight className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
+                {/* Pagination */}
+                {sortedSessionItems.length > SCAN_PAGE_SIZE && (
+                  <div className="flex items-center justify-between px-4 py-2.5 border-t text-xs text-gray-500">
+                    <span>
+                      Showing {(scanItemPage - 1) * SCAN_PAGE_SIZE + 1}–{Math.min(scanItemPage * SCAN_PAGE_SIZE, sortedSessionItems.length)} of {sortedSessionItems.length} items
+                    </span>
+                    <div className="flex gap-1">
+                      <Button variant="outline" size="sm" className="h-7 w-7 p-0"
+                        disabled={scanItemPage <= 1}
+                        onClick={() => setScanItemPage((p) => Math.max(1, p - 1))}>
+                        <ChevronLeft className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button variant="outline" size="sm" className="h-7 w-7 p-0"
+                        disabled={scanItemPage >= Math.ceil(sortedSessionItems.length / SCAN_PAGE_SIZE)}
+                        onClick={() => setScanItemPage((p) => Math.min(Math.ceil(sortedSessionItems.length / SCAN_PAGE_SIZE), p + 1))}>
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
-                  )}
-                </CardContent>
-              </Card>
+                  </div>
+                )}
+              </div>
 
               <div className="grid gap-4 lg:grid-cols-2">
                 {/* Scanned Activity */}
@@ -1766,6 +1915,228 @@ export default function ScanOrderPage() {
               </CardContent>
             </Card>
           </div>
+          )}
+
+          {/* ── Master View Tab ── */}
+          {scanTab === "master-view" && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <input type="date" value={mvDate} onChange={(e) => setMvDate(e.target.value)}
+                  className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                <input type="text" value={mvPlant} onChange={(e) => setMvPlant(e.target.value)} placeholder="Plant (optional)"
+                  className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-36" />
+                <div className="relative flex-1 min-w-48">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+                  <input value={mvSearch} onChange={(e) => setMvSearch(e.target.value)} placeholder="Search items…"
+                    className="w-full rounded-md border border-gray-200 bg-white pl-8 pr-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                  {mvSearch && <button onClick={() => setMvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3.5 w-3.5 text-gray-400 hover:text-gray-600" /></button>}
+                </div>
+                {allMvItems.length > 0 && (
+                  <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
+                    <Download className="h-3.5 w-3.5" /> Export CSV
+                  </button>
+                )}
+              </div>
+
+              {mvQuery.isFetching && (
+                <p className="text-sm text-gray-400 animate-pulse">Loading…</p>
+              )}
+
+              {mvData && (
+                <>
+                  {/* File chips */}
+                  <div className="flex flex-wrap gap-2">
+                    {mvData.files.map((f) => (
+                      <span key={f.sessionId} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600">
+                        <Layers className="h-3 w-3 text-gray-400" />
+                        {f.csvFileName} <span className="text-gray-400">· {f.rowCount ?? f.items.length} rows</span>
+                      </span>
+                    ))}
+                  </div>
+
+                  {/* Merged table */}
+                  <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
+                      <h3 className="text-sm font-semibold text-gray-900">Merged Items</h3>
+                      <span className="text-xs text-gray-400">{filtMvItems.length} of {allMvItems.length}</span>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs sm:text-sm">
+                        <thead>
+                          <tr className="bg-[#001d6e]">
+                            <th className="px-3 py-2 w-8" />
+                            <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
+                            <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
+                            <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Source File</th>
+                            <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
+                            <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
+                            <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
+                            <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filtMvItems.length === 0 ? (
+                            <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
+                          ) : filtMvItems.map((item, idx) => {
+                            const exp  = item.quantity ?? 0;
+                            const done = item.scannedQty ?? 0;
+                            const remain = Math.max(0, exp - done);
+                            const isDone = done >= exp && exp > 0;
+                            const isPartial = done > 0 && !isDone;
+                            const rowBg = isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
+                            return (
+                              <tr key={idx} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
+                                <td className="px-3 py-2 text-center">
+                                  {isDone
+                                    ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
+                                    : isPartial
+                                    ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
+                                    : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                                </td>
+                                <td className="px-3 py-2 font-medium text-gray-900 max-w-[200px]"><span className="block truncate">{item.itemName ?? "—"}</span></td>
+                                <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
+                                <td className="px-3 py-2 text-xs text-gray-400 max-w-[130px] truncate">{item._file}</td>
+                                <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
+                                <td className="px-3 py-2 text-right tabular-nums font-bold">
+                                  <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
+                                </td>
+                                <td className="px-3 py-2 text-right tabular-nums font-bold">
+                                  <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
+                                </td>
+                                <td className="px-3 py-2 text-center">
+                                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                                    {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {!mvQuery.isFetching && !mvData && (
+                <p className="text-sm text-gray-400">Select a date to load master view.</p>
+              )}
+            </div>
+          )}
+
+          {/* ── Separate CSVs Tab ── */}
+          {scanTab === "separate-csvs" && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <input type="date" value={csvDate} onChange={(e) => setCsvDate(e.target.value)}
+                  className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                <input type="text" value={csvPlant} onChange={(e) => setCsvPlant(e.target.value)} placeholder="Plant (optional)"
+                  className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-36" />
+              </div>
+
+              {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}
+
+              {csvSessions.length === 0 && !csvSessQuery.isFetching && (
+                <p className="text-sm text-gray-400">No uploaded files for this date/plant.</p>
+              )}
+
+              <div className="space-y-2">
+                {csvSessions.map((sess) => (
+                  <div key={sess.id} className="rounded-xl border bg-white shadow-sm overflow-hidden">
+                    <button
+                      className="flex w-full items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
+                      onClick={() => {
+                        if (csvExpId === sess.id) { setCsvExpId(null); setCsvSearch(""); }
+                        else { setCsvExpId(sess.id); setCsvSearch(""); }
+                      }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Layers className="h-4 w-4 text-gray-400 shrink-0" />
+                        <div className="text-left min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">{sess.csvFileName}</p>
+                          <p className="text-xs text-gray-400">
+                            {sess.plant && <span className="mr-2">Plant: {sess.plant}</span>}
+                            {sess.rowCount} rows · {sess.importedByName ?? "Unknown"} · {scanFmtIST(sess.createdAt)}
+                          </p>
+                        </div>
+                      </div>
+                      <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
+                    </button>
+
+                    {csvExpId === sess.id && (
+                      <div className="border-t">
+                        <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b">
+                          <div className="relative flex-1 max-w-xs">
+                            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+                            <input value={csvSearch} onChange={(e) => setCsvSearch(e.target.value)} placeholder="Search…"
+                              className="w-full rounded-md border border-gray-200 bg-white pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                            {csvSearch && <button onClick={() => setCsvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3 w-3 text-gray-400" /></button>}
+                          </div>
+                          {csvImpItems.length > 0 && <span className="text-xs text-gray-400">{filtCsvItems.length} of {csvImpItems.length} items</span>}
+                        </div>
+
+                        {csvItemsQuery2.isFetching && <p className="px-4 py-4 text-sm text-gray-400 animate-pulse">Loading items…</p>}
+
+                        {!csvItemsQuery2.isFetching && (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs sm:text-sm">
+                              <thead>
+                                <tr className="bg-[#001d6e]">
+                                  <th className="px-3 py-2 w-8" />
+                                  <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
+                                  <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
+                                  <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
+                                  <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
+                                  <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
+                                  <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {filtCsvItems.length === 0 ? (
+                                  <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No items</td></tr>
+                                ) : filtCsvItems.map((item, idx) => {
+                                  const key  = (item.barcode ?? item.sapCode ?? "").toLowerCase();
+                                  const exp  = item.quantity ?? 0;
+                                  const done = item.scannedQty ?? 0;
+                                  const remain = Math.max(0, exp - done);
+                                  const isDone = done >= exp && exp > 0;
+                                  const isPartial = done > 0 && !isDone;
+                                  const rowBg = isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
+                                  return (
+                                    <tr key={item.id} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
+                                      <td className="px-3 py-2 text-center">
+                                        {isDone ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
+                                          : isPartial ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
+                                          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                                      </td>
+                                      <td className="px-3 py-2 font-medium text-gray-900 max-w-[200px]"><span className="block truncate">{item.itemName ?? "—"}</span></td>
+                                      <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
+                                      <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
+                                      <td className="px-3 py-2 text-right tabular-nums font-bold">
+                                        <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
+                                      </td>
+                                      <td className="px-3 py-2 text-right tabular-nums font-bold">
+                                        <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
+                                      </td>
+                                      <td className="px-3 py-2 text-center">
+                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                                          {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Scan Confirmation Dialog */}
@@ -1896,11 +2267,18 @@ export default function ScanOrderPage() {
   // ── Embedded order-scan view (replaces dashboard when admin CSV is active) ─
   if (activeOrderScanSession) {
     const osItems = osItemsQuery.data ?? [];
-    const osFiltered = osSearch
+    const osFiltered = (osSearch
       ? osItems.filter((i) =>
           [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(osSearch.toLowerCase()))
         )
-      : osItems;
+      : osItems
+    ).slice().sort((a, b) => {
+      const rank = (s: string) => s === "complete" ? 0 : s === "partial" ? 1 : 2;
+      const diff = rank(a.status) - rank(b.status);
+      if (diff !== 0) return diff;
+      // Within same status group keep original order (by id)
+      return a.id - b.id;
+    });
     const osDoneCount = osItems.filter((i) => i.status === "complete").length;
     const osTotalCount = osItems.length;
     const osPct = osTotalCount ? Math.round((osDoneCount / osTotalCount) * 100) : 0;
@@ -2284,24 +2662,44 @@ export default function ScanOrderPage() {
               </div>
             </div>
 
-            {/* Two-column layout */}
+            {/* ── Tab strip ── */}
+            <div className="flex flex-wrap gap-1.5">
+              {(["scan", "master-view", "separate-csvs"] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setOsTab(t)}
+                  className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+                    osTab === t
+                      ? "bg-[#001d6e] text-white"
+                      : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                  }`}
+                >
+                  {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Separate CSVs"}
+                </button>
+              ))}
+            </div>
+
+            {osTab === "scan" && (
             <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
 
               {/* Items table */}
               <div className="order-2 lg:order-1">
-                <Card className="rounded-xl shadow-sm">
-                  <CardHeader className="pb-2 pt-4 px-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <CardTitle className="text-base">CSV Items</CardTitle>
-                      <span className="text-xs text-gray-400">{osDoneCount} / {osTotalCount} done</span>
-                    </div>
+                <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+                  {/* Header bar */}
+                  <div className="flex items-center justify-between px-4 py-3 border-b">
+                    <h3 className="text-sm font-semibold text-gray-900">CSV Items</h3>
+                    <span className="text-xs text-gray-400">{osDoneCount} / {osTotalCount} done</span>
+                  </div>
+
+                  {/* Search */}
+                  <div className="px-4 py-2.5 border-b bg-gray-50/50">
                     <div className="relative">
                       <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                       <Input
                         value={osSearch}
                         onChange={(e) => setOsSearch(e.target.value)}
                         placeholder="Search by name or barcode…"
-                        className="pl-8 h-8 text-sm"
+                        className="pl-8 h-8 text-sm bg-white"
                       />
                       {osSearch && (
                         <button className="absolute right-2 top-2" onClick={() => setOsSearch("")}>
@@ -2309,85 +2707,100 @@ export default function ScanOrderPage() {
                         </button>
                       )}
                     </div>
-                  </CardHeader>
-                  <CardContent className="p-0">
-                    {osItemsQuery.isLoading ? (
-                      <div className="flex justify-center py-10">
-                        <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-                      </div>
-                    ) : (
-                      <div className="overflow-x-auto overflow-y-auto max-h-[560px]">
-                        <table className="w-full text-sm">
-                          <thead className="sticky top-0 z-10">
-                            <tr className="border-b bg-slate-50">
-                              <th className="w-8 px-3 py-2 bg-slate-50" />
-                              <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Item</th>
-                              <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Barcode</th>
-                              <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Exp</th>
-                              <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 bg-slate-50">Done</th>
-                              <th className="px-3 py-2 text-right text-xs font-semibold text-purple-700 bg-slate-50">Pallets</th>
-                              <th className="px-3 py-2 text-right text-xs font-semibold text-[#001d6e] bg-slate-50">Remain</th>
-                              <th className="px-3 py-2 text-right text-xs font-semibold text-amber-600 bg-slate-50">Extra</th>
-                              <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 bg-slate-50">Status</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {osFiltered.map((item) => (
-                              <tr key={item.id} className={`border-b transition-colors ${
-                                item.status === "complete" ? "bg-green-50/40" :
-                                item.status === "partial" ? "bg-amber-50/30" : ""
-                              }`}>
-                                <td className="px-3 py-2.5">
-                                  {item.status === "complete"
-                                    ? <CheckCircle2 className="h-4 w-4 text-green-500" />
-                                    : item.status === "partial"
-                                    ? <ScanLine className="h-4 w-4 text-amber-500" />
+                  </div>
+
+                  {/* Table */}
+                  {osItemsQuery.isLoading ? (
+                    <div className="flex justify-center py-10">
+                      <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto overflow-y-auto max-h-[560px]">
+                      <table className="w-full text-xs border-collapse">
+                        <thead className="sticky top-0 z-10">
+                          <tr className="bg-[#001d6e]">
+                            <th className="px-3 py-3 w-9" />
+                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white min-w-[180px]">Item</th>
+                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode / SKU</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Exp</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Done</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Pallets</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Remain</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Extra</th>
+                            <th className="px-3 py-3 text-center text-[11px] font-semibold uppercase tracking-wide text-white">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {osFiltered.map((item, idx) => {
+                            const rem = Math.max(0, (item.expectedQty ?? 0) - (item.totalScannedQty ?? 0));
+                            const extra = Math.max(0, (item.totalScannedQty ?? 0) - (item.expectedQty ?? 0));
+                            const done = item.status === "complete";
+                            const partial = item.status === "partial";
+                            const rowBg = done
+                              ? "bg-emerald-50/40"
+                              : partial
+                              ? "bg-amber-50/30"
+                              : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
+                            return (
+                              <tr key={item.id} className={`${rowBg} border-b border-gray-100 transition-colors hover:bg-slate-100/60`}>
+                                <td className="px-3 py-3 text-center">
+                                  {done
+                                    ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
+                                    : partial
+                                    ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
                                     : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
                                 </td>
-                                <td className="max-w-[200px] truncate px-3 py-2.5 text-xs font-medium">{item.itemName ?? "—"}</td>
-                                <td className="px-3 py-2.5 font-mono text-xs text-gray-400">{item.barcode ?? "—"}</td>
-                                <td className="px-3 py-2.5 text-xs text-right">{item.expectedQty}</td>
-                                <td className="px-3 py-2.5 text-xs text-right font-semibold">
-                                  {Math.min(item.totalScannedQty ?? 0, item.expectedQty ?? 0)}
+                                <td className="px-3 py-3 font-medium text-gray-900 max-w-[200px]">
+                                  <span className="block truncate">{item.itemName ?? "—"}</span>
                                 </td>
-                                <td className="px-3 py-2.5 text-xs text-right font-semibold">
+                                <td className="px-3 py-3 font-mono text-gray-500">
+                                  {item.barcode ?? <span className="text-gray-300">—</span>}
+                                </td>
+                                <td className="px-3 py-3 text-right text-gray-600 font-medium tabular-nums">
+                                  {item.expectedQty}
+                                </td>
+                                <td className="px-3 py-3 text-right tabular-nums font-bold">
+                                  <span className={done ? "text-emerald-700" : partial ? "text-amber-700" : "text-gray-400"}>
+                                    {Math.min(item.totalScannedQty ?? 0, item.expectedQty ?? 0)}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-3 text-right tabular-nums font-semibold">
                                   {(item.scannedPallets ?? 0) > 0
-                                    ? <span className="text-purple-700">{item.scannedPallets}</span>
+                                    ? <span className="text-[#001d6e]">{item.scannedPallets}</span>
                                     : <span className="text-gray-300">—</span>}
                                 </td>
-                                <td className="px-3 py-2.5 text-xs text-right font-semibold">
-                                  {(() => {
-                                    const rem = Math.max(0, (item.expectedQty ?? 0) - (item.totalScannedQty ?? 0));
-                                    return rem > 0
-                                      ? <span className="text-[#001d6e]">{rem}</span>
-                                      : <span className="text-gray-300">—</span>;
-                                  })()}
-                                </td>
-                                <td className="px-3 py-2.5 text-xs text-right font-semibold">
-                                  {(item.totalScannedQty ?? 0) > (item.expectedQty ?? 0)
-                                    ? <span className="text-amber-600">+{(item.totalScannedQty ?? 0) - (item.expectedQty ?? 0)}</span>
+                                <td className="px-3 py-3 text-right tabular-nums font-bold">
+                                  {rem > 0
+                                    ? <span className="text-[#001d6e]">{rem}</span>
                                     : <span className="text-gray-300">—</span>}
                                 </td>
-                                <td className="px-3 py-2.5">
-                                  {item.status === "complete"
-                                    ? <Badge className="bg-green-100 text-green-800 text-[11px] border-0 px-1.5 hover:bg-green-100">Done</Badge>
-                                    : item.status === "partial"
-                                    ? <Badge className="bg-amber-100 text-amber-800 text-[11px] border-0 px-1.5 hover:bg-amber-100">Partial</Badge>
-                                    : <Badge variant="outline" className="text-gray-400 text-[11px] px-1.5">Pending</Badge>}
+                                <td className="px-3 py-3 text-right tabular-nums font-semibold">
+                                  {extra > 0
+                                    ? <span className="text-amber-600">+{extra}</span>
+                                    : <span className="text-gray-300">—</span>}
+                                </td>
+                                <td className="px-3 py-3 text-center">
+                                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                    done    ? "bg-emerald-100 text-emerald-700" :
+                                    partial ? "bg-amber-100 text-amber-700" :
+                                              "bg-gray-100 text-gray-500"
+                                  }`}>
+                                    {done ? "Done" : partial ? "Partial" : "Pending"}
+                                  </span>
                                 </td>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                        {osFiltered.length === 0 && !osItemsQuery.isLoading && (
-                          <p className="py-10 text-center text-sm text-gray-400">
-                            {osItems.length === 0 ? "Loading items…" : "No items match the search."}
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                      {osFiltered.length === 0 && !osItemsQuery.isLoading && (
+                        <p className="py-10 text-center text-sm text-gray-400">
+                          {osItems.length === 0 ? "Loading items…" : "No items match the search."}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Scanner panel */}
@@ -2533,6 +2946,205 @@ export default function ScanOrderPage() {
                 )}
               </div>
             </div>
+            )}
+
+            {/* ── Master View Tab (desktop) ── */}
+            {osTab === "master-view" && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  <input type="date" value={mvDate} onChange={(e) => setMvDate(e.target.value)}
+                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                  <input type="text" value={mvPlant} onChange={(e) => setMvPlant(e.target.value)} placeholder="Plant (optional)"
+                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-36" />
+                  <div className="relative flex-1 min-w-48">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+                    <input value={mvSearch} onChange={(e) => setMvSearch(e.target.value)} placeholder="Search items…"
+                      className="w-full rounded-md border border-gray-200 bg-white pl-8 pr-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                    {mvSearch && <button onClick={() => setMvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3.5 w-3.5 text-gray-400 hover:text-gray-600" /></button>}
+                  </div>
+                  {allMvItems.length > 0 && (
+                    <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
+                      <Download className="h-3.5 w-3.5" /> Export CSV
+                    </button>
+                  )}
+                </div>
+                {mvQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
+                {mvData && (
+                  <>
+                    <div className="flex flex-wrap gap-2">
+                      {mvData.files.map((f) => (
+                        <span key={f.sessionId} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600">
+                          <Layers className="h-3 w-3 text-gray-400" />
+                          {f.csvFileName} <span className="text-gray-400">· {f.rowCount ?? f.items.length} rows</span>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
+                        <h3 className="text-sm font-semibold text-gray-900">Merged Items</h3>
+                        <span className="text-xs text-gray-400">{filtMvItems.length} of {allMvItems.length}</span>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs sm:text-sm">
+                          <thead>
+                            <tr className="bg-[#001d6e]">
+                              <th className="px-3 py-2 w-8" />
+                              <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
+                              <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
+                              <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Source File</th>
+                              <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
+                              <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
+                              <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
+                              <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filtMvItems.length === 0 ? (
+                              <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
+                            ) : filtMvItems.map((item, idx) => {
+                              const exp  = item.quantity ?? 0;
+                              const done = item.scannedQty ?? 0;
+                              const remain = Math.max(0, exp - done);
+                              const isDone = done >= exp && exp > 0;
+                              const isPartial = done > 0 && !isDone;
+                              const rowBg = isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
+                              return (
+                                <tr key={idx} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
+                                  <td className="px-3 py-2 text-center">
+                                    {isDone
+                                      ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
+                                      : isPartial
+                                      ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
+                                      : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                                  </td>
+                                  <td className="px-3 py-2 font-medium text-gray-900 max-w-[200px]"><span className="block truncate">{item.itemName ?? "—"}</span></td>
+                                  <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
+                                  <td className="px-3 py-2 text-xs text-gray-400 max-w-[130px] truncate">{item._file}</td>
+                                  <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
+                                  <td className="px-3 py-2 text-right tabular-nums font-bold">
+                                    <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
+                                  </td>
+                                  <td className="px-3 py-2 text-right tabular-nums font-bold">
+                                    <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                                      {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+                {!mvQuery.isFetching && !mvData && <p className="text-sm text-gray-400">Select a date to load master view.</p>}
+              </div>
+            )}
+
+            {/* ── Separate CSVs Tab (desktop) ── */}
+            {osTab === "separate-csvs" && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  <input type="date" value={csvDate} onChange={(e) => setCsvDate(e.target.value)}
+                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                  <input type="text" value={csvPlant} onChange={(e) => setCsvPlant(e.target.value)} placeholder="Plant (optional)"
+                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-36" />
+                </div>
+                {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}
+                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No uploaded files for this date/plant.</p>}
+                <div className="space-y-2">
+                  {csvSessions.map((sess) => (
+                    <div key={sess.id} className="rounded-xl border bg-white shadow-sm overflow-hidden">
+                      <button className="flex w-full items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
+                        onClick={() => { if (csvExpId === sess.id) { setCsvExpId(null); setCsvSearch(""); } else { setCsvExpId(sess.id); setCsvSearch(""); } }}>
+                        <div className="flex items-center gap-3 min-w-0">
+                          <Layers className="h-4 w-4 text-gray-400 shrink-0" />
+                          <div className="text-left min-w-0">
+                            <p className="text-sm font-medium text-gray-900 truncate">{sess.csvFileName}</p>
+                            <p className="text-xs text-gray-400">
+                              {sess.plant && <span className="mr-2">Plant: {sess.plant}</span>}
+                              {sess.rowCount} rows · {sess.importedByName ?? "Unknown"} · {scanFmtIST(sess.createdAt)}
+                            </p>
+                          </div>
+                        </div>
+                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
+                      </button>
+                      {csvExpId === sess.id && (
+                        <div className="border-t">
+                          <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b">
+                            <div className="relative flex-1 max-w-xs">
+                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+                              <input value={csvSearch} onChange={(e) => setCsvSearch(e.target.value)} placeholder="Search…"
+                                className="w-full rounded-md border border-gray-200 bg-white pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                              {csvSearch && <button onClick={() => setCsvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3 w-3 text-gray-400" /></button>}
+                            </div>
+                            {csvImpItems.length > 0 && <span className="text-xs text-gray-400">{filtCsvItems.length} of {csvImpItems.length} items</span>}
+                          </div>
+                          {csvItemsQuery2.isFetching && <p className="px-4 py-4 text-sm text-gray-400 animate-pulse">Loading items…</p>}
+                          {!csvItemsQuery2.isFetching && (
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-xs sm:text-sm">
+                                <thead>
+                                  <tr className="bg-[#001d6e]">
+                                    <th className="px-3 py-2 w-8" />
+                                    <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
+                                    <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
+                                    <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
+                                    <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
+                                    <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
+                                    <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {filtCsvItems.length === 0 ? (
+                                    <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No items</td></tr>
+                                  ) : filtCsvItems.map((item, idx) => {
+                                    const exp  = item.quantity ?? 0;
+                                    const done = item.scannedQty ?? 0;
+                                    const remain = Math.max(0, exp - done);
+                                    const isDone = done >= exp && exp > 0;
+                                    const isPartial = done > 0 && !isDone;
+                                    const rowBg = isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
+                                    return (
+                                      <tr key={item.id} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
+                                        <td className="px-3 py-2 text-center">
+                                          {isDone ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
+                                            : isPartial ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
+                                            : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                                        </td>
+                                        <td className="px-3 py-2 font-medium text-gray-900 max-w-[200px]"><span className="block truncate">{item.itemName ?? "—"}</span></td>
+                                        <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
+                                        <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
+                                        <td className="px-3 py-2 text-right tabular-nums font-bold">
+                                          <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
+                                        </td>
+                                        <td className="px-3 py-2 text-right tabular-nums font-bold">
+                                          <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
+                                        </td>
+                                        <td className="px-3 py-2 text-center">
+                                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                                            {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                                          </span>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
           </div>
         </div>
 
@@ -2604,7 +3216,7 @@ export default function ScanOrderPage() {
                     : <><CheckCircle2 className="h-5 w-5" /> Match found</>}
               </DialogTitle>
               <DialogDescription className="text-left pt-1 space-y-0.5">
-                <p className="font-semibold text-gray-900 text-sm">{osPending?.matchedItem?.itemName ?? "Unknown item"}</p>
+                <p className="font-semibold text-gray-900 text-sm">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
                 <p className="font-mono text-xs text-gray-400">{osPending?.barcode}</p>
                 {!osPending?.matchedItem && (
                   <p className="text-xs text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
@@ -2619,13 +3231,8 @@ export default function ScanOrderPage() {
               {/* Inventory + CSV info */}
               {(osPending?.inventoryProduct || osPending?.matchedItem) && (
                 <div className="rounded-md bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-1">
-                  {osPending.inventoryProduct && (
-                    <>
-                      <p className="font-semibold text-gray-800 truncate">{osPending.inventoryProduct.name}</p>
-                      {osPending.inventoryProduct.sapCode && (
-                        <p>SAP: <span className="font-mono font-bold text-gray-700">{osPending.inventoryProduct.sapCode}</span></p>
-                      )}
-                    </>
+                  {osPending.inventoryProduct?.sapCode && (
+                    <p>SAP: <span className="font-mono font-bold text-gray-700">{osPending.inventoryProduct.sapCode}</span></p>
                   )}
                   {osPending.matchedItem && (
                     <div className={`space-y-0.5 ${osPending.inventoryProduct ? "border-t border-gray-200 pt-1" : ""}`}>

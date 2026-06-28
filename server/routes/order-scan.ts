@@ -186,6 +186,87 @@ function getPalletSize(product: any, plant: string): number {
   return Number(product.itemsPerPallet) || 0;
 }
 
+// Marks a session active AND seeds order_scan_items from order_import_items (with
+// product/pallet lookups) if they don't exist yet — all in one locked transaction.
+// Shared by the activate route and the auto-activation paths (upload + completion
+// progression) so every activation produces scannable items. Without the seeding,
+// the scan page reads zero items and shows "Loading items…" forever.
+export async function seedAndActivateSession(id: number, userCode: string | null): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const sessResult = await client.query(
+      'SELECT * FROM order_import_sessions WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    const session = sessResult.rows[0];
+    if (!session) { await client.query('ROLLBACK'); return false; }
+
+    await client.query(
+      `UPDATE order_import_sessions
+       SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = $2
+       WHERE id = $3`,
+      [userCode, new Date(), id],
+    );
+
+    const existingResult = await client.query(
+      'SELECT id FROM order_scan_items WHERE session_id = $1 LIMIT 1',
+      [id],
+    );
+
+    if (existingResult.rows.length === 0) {
+      const importItemsResult = await client.query(
+        'SELECT * FROM order_import_items WHERE session_id = $1',
+        [id],
+      );
+      const importItems = importItemsResult.rows;
+
+      if (importItems.length > 0) {
+        const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
+        const productMap = new Map<string, any>();
+        if (barcodes.length > 0) {
+          const prodResult = await client.query(
+            `SELECT barcode, items_per_pallet, val_plt, ind_plt
+             FROM products WHERE barcode = ANY($1)`,
+            [barcodes],
+          );
+          prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
+        }
+
+        const vals: any[] = [];
+        const placeholders: string[] = [];
+        let pi = 1;
+        for (const item of importItems) {
+          const prod = item.barcode ? productMap.get(item.barcode) : null;
+          const prodObj = prod
+            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet }
+            : null;
+          const palletSize = prodObj ? getPalletSize(prodObj, session.plant) : 0;
+          vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
+          placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
+          pi += 7;
+        }
+
+        await client.query(
+          `INSERT INTO order_scan_items
+             (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+           VALUES ${placeholders.join(',')}`,
+          vals,
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 router.use('/order-scan', requireScanRole);
 
 // ── GET /api/order-scan/sessions/:id/ws-status  (debug) ──────────────────────
@@ -499,10 +580,52 @@ router.post('/order-scan/sessions/:id/complete', async (req: Request, res: Respo
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
     // Use new Date() so node-postgres sends IST local time, matching how createdAt is stored.
-    await db.update(orderImportSessions)
+    const [completed] = await db.update(orderImportSessions)
       .set({ scanStatus: 'completed', scanCompletedAt: new Date() })
-      .where(eq(orderImportSessions.id, id));
-    res.json({ success: true });
+      .where(eq(orderImportSessions.id, id))
+      .returning();
+
+    // ── Auto-progress ─────────────────────────────────────────────────────────
+    // After a CSV finishes, find the next not-yet-scanned CSV for the same plant
+    // (in upload order) and activate it automatically, so scanning continues
+    // without anyone having to pick the next file. Only do this if no other
+    // session is already active for the plant (avoid stealing an active lock).
+    let nextSessionId: number | null = null;
+    if (completed) {
+      const activeForPlant = await db.select({ id: orderImportSessions.id })
+        .from(orderImportSessions)
+        .where(and(
+          sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`,
+          eq(orderImportSessions.scanStatus, 'active'),
+          eq(orderImportSessions.isDeleted, false),
+        ))
+        .limit(1);
+
+      if (activeForPlant.length === 0) {
+        const [next] = await db.select()
+          .from(orderImportSessions)
+          .where(and(
+            sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`,
+            eq(orderImportSessions.scanStatus, 'available'),
+            eq(orderImportSessions.isDeleted, false),
+          ))
+          .orderBy(asc(orderImportSessions.createdAt), asc(orderImportSessions.id))
+          .limit(1);
+
+        if (next) {
+          const userCode = (req.user as any)?.userCode ?? null;
+          await seedAndActivateSession(next.id, userCode);
+          nextSessionId = next.id;
+          console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${id}`);
+        } else {
+          console.log(`[order-scan] no more 'available' sessions for plant ${completed.plant} after completing ${id}`);
+        }
+      } else {
+        console.log(`[order-scan] another session already active for plant ${completed.plant}; skip auto-progress`);
+      }
+    }
+
+    res.json({ success: true, nextSessionId });
     broadcastOrderImportUpdate();
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Complete failed' });

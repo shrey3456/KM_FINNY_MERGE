@@ -581,16 +581,21 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
       const sql = `
         WITH old_e AS (
           SELECT
-            LOWER(COALESCE(se.code, ''))                           AS norm_bc,
-            COALESCE(se.code, '')                                  AS barcode,
-            COALESCE(p.name, se.item_name, se.code)                AS item_name,
-            COALESCE(se.quantity, 0)                               AS qty,
+            LOWER(COALESCE(se.code, ''))                                    AS norm_bc,
+            COALESCE(se.code, '')                                           AS barcode,
+            COALESCE(p.name, p_bc.name, se.item_name, se.code)             AS item_name,
+            COALESCE(se.quantity, 0)                                        AS qty,
             se.scanned_at,
-            COALESCE(p.items_per_pallet, 0)                        AS ipp
+            COALESCE(NULLIF(p.items_per_pallet, 0), NULLIF(p_bc.items_per_pallet, 0), 0) AS ipp,
+            COALESCE(p.sap_code,  p_bc.sap_code)                           AS sap_code,
+            COALESCE(p.hsn_code,  p_bc.hsn_code)                           AS hsn_code,
+            COALESCE(p.category,  p_bc.category)                           AS category,
+            COALESCE(p.brand,     p_bc.brand)                              AS brand
           FROM scan_session_extras se
-          LEFT JOIN products p
-            ON p.id = se.product_id
-            OR (se.product_id IS NULL AND LOWER(p.barcode) = LOWER(se.code))
+          LEFT JOIN products p    ON p.id    = se.product_id
+          LEFT JOIN products p_bc ON p.id IS NULL
+                                  AND p_bc.barcode IS NOT NULL
+                                  AND LOWER(p_bc.barcode) = LOWER(se.code)
           ${oldDateWhere}
         ),
         new_e AS (
@@ -600,8 +605,17 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
             COALESCE(p.name, ose.item_name, ose.barcode)            AS item_name,
             COALESCE(ose.total_qty, 0)                              AS qty,
             ose.scanned_at,
-            COALESCE(ose.items_per_pallet, p.items_per_pallet, 0)   AS ipp
+            COALESCE(ose.items_per_pallet, p.items_per_pallet, 0)   AS ipp,
+            CASE
+              WHEN UPPER(ois.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code)
+              WHEN UPPER(ois.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code)
+              ELSE p.sap_code
+            END                                                     AS sap_code,
+            p.hsn_code                                              AS hsn_code,
+            p.category                                              AS category,
+            p.brand                                                 AS brand
           FROM order_scan_events ose
+          JOIN  order_import_sessions ois ON ois.id = ose.session_id
           LEFT JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
           WHERE ose.is_extra = true
           ${newDateAnd}
@@ -623,7 +637,11 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
               ELSE NULL
             END                                                     AS "totalPallets",
             MIN(scanned_at)                                         AS "firstArrived",
-            MAX(scanned_at)                                         AS "lastArrived"
+            MAX(scanned_at)                                         AS "lastArrived",
+            MAX(sap_code)                                           AS "sapCode",
+            MAX(hsn_code)                                           AS "hsnCode",
+            MAX(category)                                           AS "category",
+            MAX(brand)                                              AS "brand"
           FROM combined
           GROUP BY norm_bc
           ORDER BY SUM(qty) DESC, MAX(item_name)
@@ -865,19 +883,33 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
         ss.status                                                 AS "sessionStatus",
         ss.created_at                                             AS "sessionCreatedAt",
         COALESCE(sci.product_id, ip.pallet_product_id)           AS "productId",
-        p.in_stock                                                AS "inStock",
-        p.hsn_code                                                AS "hsnCode",
-        p.category,
-        COALESCE(NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0)) AS "itemsPerPallet",
-        p.volume_in_cu_ft                                         AS "volumeInCuFt",
-        p.sap_code                                                AS "productSapCode",
-        p.item_no                                                 AS "productItemNo",
-        p.name                                                    AS "productName",
+        COALESCE(p.in_stock,         p_bc.in_stock)              AS "inStock",
+        COALESCE(p.hsn_code,         p_bc.hsn_code)              AS "hsnCode",
+        COALESCE(p.category,         p_bc.category)              AS category,
+        COALESCE(
+          NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0),
+          NULLIF(p_bc.items_per_pallet, 0), NULLIF(p_bc.pallets, 0)
+        )                                                         AS "itemsPerPallet",
+        COALESCE(p.volume_in_cu_ft,  p_bc.volume_in_cu_ft)      AS "volumeInCuFt",
+        COALESCE(p.sap_code,         p_bc.sap_code)              AS "productSapCode",
+        COALESCE(p.item_no,          p_bc.item_no)               AS "productItemNo",
+        COALESCE(p.name,             p_bc.name)                  AS "productName",
+        COALESCE(p.brand,            p_bc.brand)                 AS brand,
+        CASE
+          WHEN UPPER(ss.plant) LIKE '%VAL%'
+            THEN COALESCE(p.gj_sap, p_bc.gj_sap, p.sap_code, p_bc.sap_code, sci.sap_code)
+          WHEN UPPER(ss.plant) LIKE '%IND%'
+            THEN COALESCE(p.mp_sap, p_bc.mp_sap, p.sap_code, p_bc.sap_code, sci.sap_code)
+          ELSE COALESCE(p.sap_code,  p_bc.sap_code, sci.sap_code)
+        END                                                       AS "plantSapCode",
         ip.total_pallets                                          AS "storedNumPallets"
       FROM  scan_session_items sci
       JOIN  scan_sessions ss  ON ss.id  = sci.session_id
       LEFT  JOIN item_pallets ip ON ip.session_item_id = sci.id
-      LEFT  JOIN products p  ON p.id   = COALESCE(sci.product_id, ip.pallet_product_id)
+      LEFT  JOIN products p    ON p.id    = COALESCE(sci.product_id, ip.pallet_product_id)
+      LEFT  JOIN products p_bc ON p.id IS NULL
+                               AND p_bc.barcode IS NOT NULL
+                               AND LOWER(p_bc.barcode) = LOWER(COALESCE(sci.barcode, sci.sku))
       WHERE sci.scanned_qty > 0
         ${dateFilter}
       ORDER BY sci.item_name ASC
@@ -889,7 +921,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
       productId: number | null; inStock: number | null; hsnCode: string | null;
       category: string | null; itemsPerPallet: number | null; volumeInCuFt: string | null;
       productSapCode: string | null; productItemNo: string | null; productName: string | null;
-      storedNumPallets: number | null;
+      brand: string | null; storedNumPallets: number | null;
     };
     const rows: StockRow[] = rawRows.rows;
 
@@ -907,7 +939,11 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
           ose.barcode,
           COALESCE(MAX(p.name), MAX(ose.item_name), ose.barcode)                  AS "itemName",
           NULL::text                                                               AS "itemNo",
-          MAX(p.sap_code)                                                          AS "sapCode",
+          MAX(CASE
+            WHEN UPPER(ois.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code)
+            WHEN UPPER(ois.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code)
+            ELSE p.sap_code
+          END)                                                                     AS "sapCode",
           SUM(ose.total_qty)                                                       AS "scannedQty",
           ose.session_id                                                           AS "sessionId",
           MAX(ois.csv_file_name)                                                   AS "sessionOrderName",
@@ -926,6 +962,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
           MAX(p.sap_code)                                                          AS "productSapCode",
           MAX(p.item_no)                                                           AS "productItemNo",
           MAX(p.name)                                                              AS "productName",
+          MAX(p.brand)                                                             AS brand,
           CASE
             WHEN MAX(COALESCE(NULLIF(ose.items_per_pallet, 0), NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0))) > 0
               THEN ROUND(
@@ -949,7 +986,11 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
           osi.barcode,
           COALESCE(p.name, osi.item_name)                                         AS "itemName",
           NULL::text                                                               AS "itemNo",
-          COALESCE(p.sap_code, osi.sap_code)                                      AS "sapCode",
+          CASE
+            WHEN UPPER(ois.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code, osi.sap_code)
+            WHEN UPPER(ois.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code, osi.sap_code)
+            ELSE COALESCE(p.sap_code, osi.sap_code)
+          END                                                                     AS "sapCode",
           osi.total_scanned_qty                                                   AS "scannedQty",
           ois.id                                                                  AS "sessionId",
           ois.csv_file_name                                                       AS "sessionOrderName",
@@ -968,6 +1009,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
           p.sap_code                                                              AS "productSapCode",
           p.item_no                                                               AS "productItemNo",
           p.name                                                                  AS "productName",
+          p.brand                                                                 AS brand,
           CASE
             WHEN COALESCE(osi.items_per_pallet, 0) > 0
               THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / osi.items_per_pallet, 2)
@@ -997,6 +1039,7 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
       sapCode: string | null;
       hsnCode: string | null;
       category: string | null;
+      brand: string | null;
       itemsPerPallet: number | null;
       volumeInCuFt: string | null;
       inStock: number | null;
@@ -1016,9 +1059,10 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
           barcode:        row.barcode ?? null,
           itemName:       row.productName ?? row.itemName,
           itemNo:         row.itemNo ?? row.productItemNo ?? null,
-          sapCode:        row.sapCode ?? row.productSapCode ?? null,
+          sapCode:        (row as any).plantSapCode ?? row.sapCode ?? row.productSapCode ?? null,
           hsnCode:        row.hsnCode ?? null,
           category:       row.category ?? null,
+          brand:          row.brand ?? null,
           itemsPerPallet: row.itemsPerPallet != null ? Number(row.itemsPerPallet) : null,
           volumeInCuFt:   row.volumeInCuFt ?? null,
           inStock:        row.inStock != null ? Number(row.inStock) : null,
