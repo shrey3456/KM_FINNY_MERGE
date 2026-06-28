@@ -459,6 +459,16 @@ export default function ScanOrderPage() {
   const osItemsRef = useRef<OsScanItem[]>([]);
   useEffect(() => { osItemsRef.current = osItemsQuery.data ?? []; }, [osItemsQuery.data]);
 
+  type OsExtraRow = { barcode: string; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null };
+  const osExtrasQuery = useQuery<OsExtraRow[]>({
+    queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "extras"],
+    queryFn: () =>
+      apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/extras`).then((r) => r.json()),
+    enabled: !!activeOrderScanSession,
+    refetchInterval: wsConnected ? 30000 : 8000,
+    refetchIntervalInBackground: false,
+  });
+
   const osSuggestions = useMemo(() => {
     const q = osManualCode.trim().toLowerCase();
     if (!q) return [];
@@ -563,7 +573,8 @@ export default function ScanOrderPage() {
           )
         );
       }
-      // SSE handles recent-scans feed and other devices — no invalidateQueries needed
+      // Always refresh extras list — server determines isExtra; HTTP response uses snake_case is_extra
+      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "extras"] });
     },
 
     onError: (err: any, _payload, context: any) => {
@@ -811,6 +822,10 @@ export default function ScanOrderPage() {
                 },
                 ...prev.slice(0, 4),
               ]);
+            }
+            // Refresh extras for scans from other devices (this device refreshes via onSuccess)
+            if (data.event.isExtra && !wasOptimistic) {
+              queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", sessionId, "extras"] });
             }
           }
         } catch { /* ignore malformed frames */ }
@@ -2630,6 +2645,31 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
               )}
             </div>
+
+            {/* ── Extra items history (mobile) ── */}
+            {(osExtrasQuery.data ?? []).length > 0 && (
+              <div className="bg-white rounded-xl border overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-2.5 border-b">
+                  <p className="text-xs font-semibold text-gray-900">Extra Items</p>
+                  <span className="text-xs text-gray-400">{(osExtrasQuery.data ?? []).length} item{(osExtrasQuery.data ?? []).length !== 1 ? "s" : ""}</span>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {(osExtrasQuery.data ?? []).map((e, i) => (
+                    <div key={i} className={`flex items-center gap-3 px-4 py-2.5 ${i % 2 === 0 ? "bg-white" : "bg-slate-50"}`}>
+                      <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-medium text-gray-900 truncate">{e.itemName ?? e.barcode}</p>
+                        <p className="text-[11px] text-gray-400 font-mono">{e.barcode}</p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="text-xs font-bold text-amber-600">{e.totalQty} units</p>
+                        <p className="text-[11px] text-gray-400">{e.scanCount} scan{e.scanCount !== 1 ? "s" : ""}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2680,6 +2720,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             </div>
 
             {osTab === "scan" && (
+            <div className="space-y-4">
             <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
 
               {/* Items table */}
@@ -2945,6 +2986,47 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* ── Extra items history (desktop) ── */}
+            {(osExtrasQuery.data ?? []).length > 0 && (
+              <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-3 border-b">
+                  <h3 className="text-sm font-semibold text-gray-900">Extra Items</h3>
+                  <span className="text-xs text-gray-400">{(osExtrasQuery.data ?? []).length} item{(osExtrasQuery.data ?? []).length !== 1 ? "s" : ""}</span>
+                </div>
+                <div className="overflow-x-auto overflow-y-auto max-h-[400px]">
+                  <table className="w-full text-xs border-collapse">
+                    <thead className="sticky top-0 z-10">
+                      <tr className="bg-[#001d6e]">
+                        <th className="px-3 py-3 w-9" />
+                        <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white min-w-[180px]">Item</th>
+                        <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode</th>
+                        <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Total Qty</th>
+                        <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Scans</th>
+                        <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Last Scanned</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(osExtrasQuery.data ?? []).map((e, i) => (
+                        <tr key={i} className={`border-b border-gray-100 transition-colors hover:bg-slate-100/60 ${i % 2 === 0 ? "bg-white" : "bg-slate-50"}`}>
+                          <td className="px-3 py-3 text-center">
+                            <AlertTriangle className="h-4 w-4 text-amber-500 mx-auto" />
+                          </td>
+                          <td className="px-3 py-3 font-medium text-gray-900 max-w-[200px]">
+                            <span className="block truncate">{e.itemName ?? "—"}</span>
+                          </td>
+                          <td className="px-3 py-3 font-mono text-gray-500">{e.barcode || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-3 text-right tabular-nums font-bold text-amber-600">{e.totalQty}</td>
+                          <td className="px-3 py-3 text-right tabular-nums text-gray-500">{e.scanCount}</td>
+                          <td className="px-3 py-3 text-right text-gray-400 tabular-nums">{scanFmtIST(e.lastScannedAt)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
             </div>
             )}
 
