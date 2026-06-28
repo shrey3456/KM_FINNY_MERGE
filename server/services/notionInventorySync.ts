@@ -138,7 +138,7 @@ function mapNotionPageToFields(page: any) {
     barcode:         firstOf(p, 'SKU', 'Barcode', 'barcode'),
     name:            firstOf(p, 'Products Name {DMS}', 'new name', 'Name', 'Product Name'),
     notionWiseName:  firstOf(p, 'Products - Notion Wise'),
-    brand:           firstOf(p, 'Brand', 'brand'),
+    brand:           firstOf(p, 'Brand :', 'Brand:', 'Brand', 'brand :', 'brand:', 'brand', 'BRAND'),
     category:        multiSelectToText(extractMultiSelect(p['Category :'] ?? p['Category'] ?? p['category'] ?? p['Categories'])),
     saleCategory:    firstOf(p, 'Sale Category'),
     plant:           firstOf(p, 'Plant :', 'Plant', 'plant'),

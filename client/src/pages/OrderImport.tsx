@@ -405,6 +405,7 @@ export default function OrderImport() {
     qc.refetchQueries({ queryKey: ["/api/order-scan/sessions"],   type: "all" });
     qc.refetchQueries({ queryKey: ["/api/order-scan/active"],     type: "all" });
     qc.refetchQueries({ queryKey: ["/api/order-scan/notification"], type: "all" });
+    qc.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
   };
 
   const importMutation = useMutation({
