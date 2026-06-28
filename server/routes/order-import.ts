@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { db } from '../db';
-import { orderImportSessions, orderImportItems, orderScanItems, users } from '../../shared/schema';
+import { db, pool } from '../db';
+import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
 import { eq, desc, and, sql } from 'drizzle-orm';
 import { addSseClient, removeSseClient, broadcastOrderImportUpdate } from '../lib/importEvents';
 import { seedAndActivateSession } from './order-scan';
@@ -177,22 +177,25 @@ router.post('/order-import/sessions', async (req: Request, res: Response) => {
 router.get('/order-import/sessions/:id/items', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const items = await db
-      .select({
-        id:              orderImportItems.id,
-        sessionId:       orderImportItems.sessionId,
-        barcode:         orderImportItems.barcode,
-        itemName:        orderImportItems.itemName,
-        sapCode:         orderImportItems.sapCode,
-        quantity:        orderImportItems.quantity,
-        expectedPallets: orderImportItems.expectedPallets,
-        scannedQty:      orderScanItems.totalScannedQty,
-        scanStatus:      orderScanItems.status,
-      })
-      .from(orderImportItems)
-      .leftJoin(orderScanItems, eq(orderScanItems.orderImportItemId, orderImportItems.id))
-      .where(eq(orderImportItems.sessionId, id))
-      .orderBy(orderImportItems.id);
+    const { rows: items } = await pool.query(`
+      SELECT
+        oi.id,
+        oi.session_id   AS "sessionId",
+        oi.barcode,
+        oi.item_name    AS "itemName",
+        oi.sap_code     AS "sapCode",
+        oi.quantity,
+        oi.expected_pallets AS "expectedPallets",
+        (SELECT total_scanned_qty FROM order_scan_items osi
+          WHERE osi.order_import_item_id = oi.id
+          ORDER BY osi.id DESC LIMIT 1)          AS "scannedQty",
+        (SELECT status FROM order_scan_items osi
+          WHERE osi.order_import_item_id = oi.id
+          ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus"
+      FROM order_import_items oi
+      WHERE oi.session_id = $1
+      ORDER BY oi.id
+    `, [id]);
     res.json(items);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch items' });
@@ -312,25 +315,34 @@ router.get('/order-import/master-view', async (req: Request, res: Response) => {
 
     const sessionIds = sessions.map((s) => s.id);
 
-    // Fetch import items + their scan quantities in one query via LEFT JOIN on
-    // order_import_item_id. This gives us accurate scanned totals regardless of
-    // which session is currently active, so the Master View status is always correct.
-    const allItems = await db
-      .select({
-        id:              orderImportItems.id,
-        sessionId:       orderImportItems.sessionId,
-        barcode:         orderImportItems.barcode,
-        itemName:        orderImportItems.itemName,
-        sapCode:         orderImportItems.sapCode,
-        quantity:        orderImportItems.quantity,
-        expectedPallets: orderImportItems.expectedPallets,
-        scannedQty:      orderScanItems.totalScannedQty,
-        scanStatus:      orderScanItems.status,
-      })
-      .from(orderImportItems)
-      .leftJoin(orderScanItems, eq(orderScanItems.orderImportItemId, orderImportItems.id))
-      .where(sql`${orderImportItems.sessionId} = ANY(${sql.raw(`ARRAY[${sessionIds.join(',')}]::int[]`)})`)
-      .orderBy(orderImportItems.sessionId, orderImportItems.id);
+    // Use a correlated subquery for scan totals so we always get exactly one row
+    // per import item — a plain LEFT JOIN on order_import_item_id would produce
+    // duplicate rows when the same item appears in multiple scan sessions (e.g.
+    // after re-activation), breaking the grouped result.
+    const { rows: rawItems } = await pool.query(`
+      SELECT
+        oi.id,
+        oi.session_id   AS "sessionId",
+        oi.barcode,
+        oi.item_name    AS "itemName",
+        oi.sap_code     AS "sapCode",
+        oi.quantity,
+        oi.expected_pallets AS "expectedPallets",
+        (SELECT total_scanned_qty FROM order_scan_items osi
+          WHERE osi.order_import_item_id = oi.id
+          ORDER BY osi.id DESC LIMIT 1)          AS "scannedQty",
+        (SELECT status FROM order_scan_items osi
+          WHERE osi.order_import_item_id = oi.id
+          ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus"
+      FROM order_import_items oi
+      WHERE oi.session_id = ANY($1::int[])
+      ORDER BY oi.session_id, oi.id
+    `, [sessionIds]);
+    const allItems: Array<{
+      id: number; sessionId: number; barcode: string | null; itemName: string | null;
+      sapCode: string | null; quantity: number | null; expectedPallets: number | null;
+      scannedQty: number | null; scanStatus: string | null;
+    }> = rawItems;
 
     // Group items by sessionId
     const itemsBySession = new Map<number, typeof allItems>();

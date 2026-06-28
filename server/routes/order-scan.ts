@@ -794,6 +794,30 @@ router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response)
 });
 
 
+// ── GET /api/order-scan/sessions/:id/extras ──────────────────────────────────
+// All extra scan events for a session (is_extra = true), grouped by barcode.
+router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        COALESCE(ose.barcode, '')            AS barcode,
+        MAX(ose.item_name)                   AS "itemName",
+        SUM(ose.total_qty)                   AS "totalQty",
+        MAX(ose.scanned_at)                  AS "lastScannedAt",
+        MAX(ose.scanned_by_name)             AS "scannedByName"
+      FROM order_scan_events ose
+      WHERE ose.session_id = $1 AND ose.is_extra = true
+      GROUP BY COALESCE(ose.barcode, '')
+      ORDER BY MAX(ose.scanned_at) DESC
+    `, [id]);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch extras' });
+  }
+});
+
 // ── GET /api/order-scan/sessions/:id/events ──────────────────────────────────
 // Last 20 scan events for a session (for the "recent scans" panel)
 router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response) => {
