@@ -188,9 +188,15 @@ router.get('/order-import/sessions/:id/items', async (req: Request, res: Respons
         oi.expected_pallets AS "expectedPallets",
         (SELECT total_scanned_qty FROM order_scan_items osi
           WHERE osi.order_import_item_id = oi.id
+             OR (osi.order_import_item_id IS NULL
+                 AND osi.session_id = oi.session_id
+                 AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
           ORDER BY osi.id DESC LIMIT 1)          AS "scannedQty",
         (SELECT status FROM order_scan_items osi
           WHERE osi.order_import_item_id = oi.id
+             OR (osi.order_import_item_id IS NULL
+                 AND osi.session_id = oi.session_id
+                 AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
           ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus"
       FROM order_import_items oi
       WHERE oi.session_id = $1
@@ -330,9 +336,15 @@ router.get('/order-import/master-view', async (req: Request, res: Response) => {
         oi.expected_pallets AS "expectedPallets",
         (SELECT total_scanned_qty FROM order_scan_items osi
           WHERE osi.order_import_item_id = oi.id
+             OR (osi.order_import_item_id IS NULL
+                 AND osi.session_id = oi.session_id
+                 AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
           ORDER BY osi.id DESC LIMIT 1)          AS "scannedQty",
         (SELECT status FROM order_scan_items osi
           WHERE osi.order_import_item_id = oi.id
+             OR (osi.order_import_item_id IS NULL
+                 AND osi.session_id = oi.session_id
+                 AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
           ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus"
       FROM order_import_items oi
       WHERE oi.session_id = ANY($1::int[])
