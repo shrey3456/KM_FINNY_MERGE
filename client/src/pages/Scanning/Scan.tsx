@@ -821,6 +821,7 @@ export default function ScanOrderPage() {
       localStorage.removeItem(`km_scan_activities_${data.id}`);
       setRecentItemIds([]);
       resetDraft();
+      window.history.pushState({ scanView: "scan" }, "");
       setView("scan");
     },
     onError: () => toast({ title: "Failed to create scan order", variant: "destructive" }),
@@ -983,6 +984,7 @@ export default function ScanOrderPage() {
       setScanActivities([]);
     }
     setRecentItemIds(items.filter((i) => i.scannedQty > 0).map((i) => i.id));
+    window.history.pushState({ scanView: "scan" }, "");
     setView("scan");
   };
 
@@ -1399,6 +1401,23 @@ export default function ScanOrderPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Mobile back button: when user presses device back while in scan view, go to dashboard instead of closing the browser
+  useEffect(() => {
+    const handlePopState = async () => {
+      if (view === "scan" && activeSessionRef.current) {
+        await stopScanner();
+        await syncSession(activeSessionRef.current);
+        refetchSessions();
+        setView("dashboard");
+      } else if (view === "map") {
+        setView("dashboard");
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
   // Online / offline listeners — auto-sync the queue when connectivity is restored
   useEffect(() => {
     const handleOnline = () => {
@@ -1536,14 +1555,23 @@ export default function ScanOrderPage() {
         <div className="mx-auto max-w-7xl space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <Button variant="ghost" className="mb-2 px-0" onClick={async () => {
-                await stopScanner();
-                await syncSession(activeSession);
-                refetchSessions();
-                setView("dashboard");
-              }}>
-                <ArrowLeft className="mr-2 h-4 w-4" />Dashboard
-              </Button>
+              <div className="flex items-center gap-2 mb-2">
+                <Button variant="outline" size="sm" className="h-8 px-3 text-xs border-[#001d6e] text-[#001d6e] hover:bg-[#001d6e] hover:text-white" onClick={async () => {
+                  await stopScanner();
+                  await syncSession(activeSession);
+                  refetchSessions();
+                  setView("dashboard");
+                }}>
+                  <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Scan Dashboard
+                </Button>
+                <Button variant="outline" size="sm" className="h-8 px-3 text-xs text-gray-600 hover:bg-gray-100" onClick={async () => {
+                  await stopScanner();
+                  await syncSession(activeSession);
+                  navigate("/");
+                }}>
+                  Home
+                </Button>
+              </div>
               <h1 className="text-2xl font-semibold text-gray-950">{activeSession.orderName}</h1>
               <p className="text-sm text-gray-600">{activeSession.csvName} — {totals.scanned} of {totals.expected} boxes scanned</p>
             </div>
@@ -1668,35 +1696,48 @@ export default function ScanOrderPage() {
               </Card>
 
               <div className="grid gap-4 lg:grid-cols-2">
-                <Card className="rounded-md">
-                  <CardHeader><CardTitle className="text-lg">Scanned Activity</CardTitle></CardHeader>
-                  <CardContent className="max-h-80 overflow-auto">
-                    {scanActivities.length ? scanActivities.map((a) => (
-                      <div key={a.id} className="flex items-center justify-between border-b py-3 last:border-0">
-                        <div>
-                          <p className="font-medium">{a.itemName}</p>
-                          <p className="text-xs text-gray-500">{a.code} — {new Date(a.scannedAt).toLocaleTimeString()}</p>
+                {/* Scanned Activity */}
+                <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+                  <div className="bg-[#001d6e] px-4 py-2.5">
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-white">Scanned Activity</p>
+                  </div>
+                  <div className="max-h-80 overflow-y-auto divide-y divide-gray-100">
+                    {scanActivities.length ? scanActivities.map((a, idx) => (
+                      <div key={a.id} className={`flex items-center justify-between px-4 py-2.5 ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold text-gray-800 truncate">{a.itemName}</p>
+                          <p className="text-[10px] text-gray-400 mt-0.5 font-mono">{a.code} · {new Date(a.scannedAt).toLocaleTimeString()}</p>
                         </div>
-                        <Badge variant={a.type === "order" ? "default" : "outline"}>{a.type}</Badge>
+                        <span className={`ml-3 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                          a.type === "order" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
+                        }`}>{a.type}</span>
                       </div>
-                    )) : <p className="py-8 text-center text-sm text-gray-500">Scanned items will appear here.</p>}
-                  </CardContent>
-                </Card>
+                    )) : (
+                      <p className="py-10 text-center text-xs text-gray-400">Scanned items will appear here.</p>
+                    )}
+                  </div>
+                </div>
 
-                <Card className="rounded-md">
-                  <CardHeader><CardTitle className="flex items-center text-lg"><AlertTriangle className="mr-2 h-5 w-5 text-amber-600" />Extra Report</CardTitle></CardHeader>
-                  <CardContent className="max-h-80 overflow-auto">
-                    {sessionExtras.length ? sessionExtras.map((extra) => (
-                      <div key={extra.id} className="flex items-center justify-between border-b py-3 last:border-0">
-                        <div>
-                          <p className="font-medium">{extra.itemName}</p>
-                          <p className="text-xs text-gray-500">{extra.sku || extra.code} — {extra.reason === "not_in_order" ? "Not in CSV order" : "Not in inventory"}</p>
+                {/* Extra Report */}
+                <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+                  <div className="bg-[#001d6e] px-4 py-2.5 flex items-center gap-2">
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-300 shrink-0" />
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-white">Extra Report</p>
+                  </div>
+                  <div className="max-h-80 overflow-y-auto divide-y divide-gray-100">
+                    {sessionExtras.length ? sessionExtras.map((extra, idx) => (
+                      <div key={extra.id} className={`flex items-center justify-between px-4 py-2.5 ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold text-gray-800 truncate">{extra.itemName}</p>
+                          <p className="text-[10px] text-gray-400 mt-0.5">{extra.sku || extra.code} · {extra.reason === "not_in_order" ? "Not in CSV" : "Not in inventory"}</p>
                         </div>
-                        <Badge variant="outline">x{extra.quantity}</Badge>
+                        <span className="ml-3 shrink-0 rounded-full bg-amber-100 text-amber-700 px-2 py-0.5 text-[10px] font-bold">×{extra.quantity}</span>
                       </div>
-                    )) : <p className="py-8 text-center text-sm text-gray-500">Extra scanned boxes will be listed separately.</p>}
-                  </CardContent>
-                </Card>
+                    )) : (
+                      <p className="py-10 text-center text-xs text-gray-400">Extra scanned boxes will be listed separately.</p>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -1887,20 +1928,20 @@ export default function ScanOrderPage() {
           <div className="sticky top-0 z-20 bg-white shadow-sm">
 
             {/* Session info row */}
-            <div className="flex items-center gap-3 px-4 pt-3 pb-2">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-400">
-                <Zap className="h-3.5 w-3.5 text-white" />
-              </div>
+            <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5">
+              <Button variant="outline" size="sm" className="h-7 px-2.5 text-[11px] border-[#001d6e] text-[#001d6e] hover:bg-[#001d6e] hover:text-white shrink-0" onClick={() => navigate("/scan")}>
+                <ArrowLeft className="mr-1 h-3 w-3" />Dashboard
+              </Button>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-bold text-gray-900 truncate leading-tight">{activeOrderScanSession.csvFileName}</p>
-                <p className="text-[11px] text-gray-500 truncate">
+                <p className="text-xs font-bold text-gray-900 truncate leading-tight">{activeOrderScanSession.csvFileName}</p>
+                <p className="text-[10px] text-gray-500 truncate">
                   {activeOrderScanSession.plant}
                   {activeOrderScanSession.importedByName && ` · ${activeOrderScanSession.importedByName}`}
                 </p>
               </div>
               <div className="shrink-0 text-right">
-                <p className="text-sm font-bold text-[#001d6e]">{osDoneCount}/{osTotalCount}</p>
-                <p className="text-[11px] text-gray-400">{osPct}%</p>
+                <p className="text-xs font-bold text-[#001d6e]">{osDoneCount}/{osTotalCount}</p>
+                <p className="text-[10px] text-gray-400">{osPct}%</p>
               </div>
             </div>
 
@@ -2104,18 +2145,22 @@ export default function ScanOrderPage() {
           </div>
 
           {/* ── Scrollable content below sticky scanner ── */}
-          <div className="flex-1 px-3 py-3 space-y-3 overflow-y-auto">
+          <div className="flex-1 px-4 py-3 space-y-3 overflow-y-auto">
 
             {/* Recent scans */}
             {osRecentScans.length > 0 && (
-              <div className="bg-white rounded-xl border overflow-hidden">
-                <p className="px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400 border-b">Recent Scans</p>
-                <div className="px-3 py-2 space-y-1.5">
+              <div className="bg-white rounded-xl border overflow-hidden shadow-sm">
+                <div className="bg-[#001d6e] px-4 py-2">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-white">Recent Scans</p>
+                </div>
+                <div className="divide-y divide-gray-100">
                   {osRecentScans.map((s, i) => (
-                    <div key={i} className={`flex items-center justify-between rounded-lg px-3 py-2 text-xs ${s.isExtra ? "bg-orange-50" : "bg-green-50"}`}>
-                      <p className="truncate font-medium flex-1 min-w-0">{s.name}</p>
-                      <span className={`font-mono shrink-0 ml-3 font-semibold ${s.isExtra ? "text-orange-700" : "text-green-700"}`}>
-                        {s.isExtra ? "EXTRA" : `qty: ${s.total}`}
+                    <div key={i} className={`flex items-center justify-between px-4 py-2.5 text-xs ${i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
+                      <p className="truncate font-medium flex-1 min-w-0 text-gray-800">{s.name}</p>
+                      <span className={`font-mono shrink-0 ml-3 font-bold px-2 py-0.5 rounded-full text-[10px] ${
+                        s.isExtra ? "bg-orange-100 text-orange-700" : "bg-emerald-100 text-emerald-700"
+                      }`}>
+                        {s.isExtra ? "EXTRA" : `+${s.total}`}
                       </span>
                     </div>
                   ))}
@@ -2126,9 +2171,9 @@ export default function ScanOrderPage() {
             {/* Items list */}
             <div className="bg-white rounded-xl border overflow-hidden">
               {/* List header */}
-              <div className="flex items-center justify-between px-4 py-2.5 border-b bg-slate-50">
-                <p className="text-xs font-semibold text-gray-700">CSV Items</p>
-                <span className="text-xs text-gray-400">{osDoneCount}/{osTotalCount} done</span>
+              <div className="flex items-center justify-between px-4 py-2.5 border-b bg-[#001d6e]">
+                <p className="text-xs font-semibold text-white">CSV Items</p>
+                <span className="text-xs text-blue-200">{osDoneCount}/{osTotalCount} done</span>
               </div>
 
               {/* Search */}
@@ -2219,6 +2264,9 @@ export default function ScanOrderPage() {
             {/* Header row */}
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
+                <Button variant="outline" size="sm" className="h-8 px-3 text-xs border-[#001d6e] text-[#001d6e] hover:bg-[#001d6e] hover:text-white shrink-0" onClick={() => navigate("/scan")}>
+                  <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Scan Dashboard
+                </Button>
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400">
                   <Zap className="h-4 w-4 text-white" />
                 </div>
@@ -2465,21 +2513,23 @@ export default function ScanOrderPage() {
                 )}
 
                 {osRecentScans.length > 0 && (
-                  <Card className="rounded-xl shadow-sm">
-                    <CardHeader className="pb-2 pt-3 px-4">
-                      <CardTitle className="text-xs font-semibold uppercase tracking-wide text-gray-500">Recent Scans</CardTitle>
-                    </CardHeader>
-                    <CardContent className="px-4 pb-3 space-y-1.5">
+                  <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                    <div className="bg-[#001d6e] px-4 py-2.5">
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-white">Recent Scans</p>
+                    </div>
+                    <div className="divide-y divide-gray-100">
                       {osRecentScans.map((s, i) => (
-                        <div key={i} className={`flex items-center justify-between rounded px-2 py-1.5 text-xs ${s.isExtra ? "bg-orange-50" : "bg-green-50"}`}>
-                          <p className="truncate font-medium max-w-[170px]">{s.name}</p>
-                          <span className={`font-mono shrink-0 ml-2 ${s.isExtra ? "text-orange-700" : "text-green-700"}`}>
-                            {s.isExtra ? "EXTRA" : `qty: ${s.total}`}
+                        <div key={i} className={`flex items-center justify-between px-4 py-2 text-xs ${i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
+                          <p className="truncate font-medium max-w-[170px] text-gray-800">{s.name}</p>
+                          <span className={`font-mono shrink-0 ml-2 font-bold px-2 py-0.5 rounded-full text-[10px] ${
+                            s.isExtra ? "bg-orange-100 text-orange-700" : "bg-emerald-100 text-emerald-700"
+                          }`}>
+                            {s.isExtra ? "EXTRA" : `+${s.total}`}
                           </span>
                         </div>
                       ))}
-                    </CardContent>
-                  </Card>
+                    </div>
+                  </div>
                 )}
               </div>
             </div>
@@ -2731,31 +2781,31 @@ export default function ScanOrderPage() {
         <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
 
         {/* Greeting Header */}
-        <div className="rounded-xl bg-gradient-to-r from-[#001d6e] to-[#1a3a9c] px-7 py-6 shadow-md">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-5">
-              <div className="h-16 w-16 rounded-full bg-white/20 border-2 border-white/40 flex items-center justify-center text-white font-bold text-2xl shrink-0 select-none">
+        <div className="rounded-xl bg-gradient-to-r from-[#001d6e] to-[#1a3a9c] px-4 py-3 shadow-md">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-full bg-white/20 border-2 border-white/40 flex items-center justify-center text-white font-bold text-base shrink-0 select-none">
                 {(currentUser?.name || currentUser?.username || "U").split(" ").map((w: string) => w[0] ?? "").join("").slice(0, 2).toUpperCase()}
               </div>
               <div>
-                <p className="text-blue-200 text-sm font-medium mb-0.5">
+                <p className="text-blue-200 text-xs font-medium">
                   {(() => { const h = new Date().getHours(); return h >= 5 && h < 12 ? "Good Morning" : h >= 12 && h < 17 ? "Good Afternoon" : h >= 17 && h < 21 ? "Good Evening" : "Welcome Back"; })()}!
                 </p>
-                <h1 className="text-3xl font-bold text-white leading-tight">
+                <h1 className="text-lg font-bold text-white leading-tight">
                   {currentUser?.name || currentUser?.username || "User"}
                 </h1>
-                <p className="text-blue-300 text-sm mt-1">
+                <p className="text-blue-300 text-[11px]">
                   {new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={() => navigate("/")} className="h-10 px-5 text-sm border-white/40 bg-white/10 text-white hover:bg-white/20 hover:text-white">
-                <ArrowLeft className="mr-2 h-4 w-4" />Back to Home
+              <Button variant="outline" onClick={() => navigate("/")} className="h-8 px-3 text-xs border-white/40 bg-white/10 text-white hover:bg-white/20 hover:text-white">
+                <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Home
               </Button>
               {canCreateScanOrder && (
-                <Button onClick={() => { resetDraft(); importsQuery.refetch(); setView("map"); }} className="h-10 px-5 text-sm bg-white text-[#001d6e] hover:bg-blue-50 font-semibold">
-                  <Plus className="mr-2 h-4 w-4" />New Scan Order
+                <Button onClick={() => { resetDraft(); importsQuery.refetch(); setView("map"); }} className="h-8 px-3 text-xs bg-white text-[#001d6e] hover:bg-blue-50 font-semibold">
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />New Scan Order
                 </Button>
               )}
             </div>
@@ -2807,100 +2857,105 @@ export default function ScanOrderPage() {
             </div>
 
             {/* Scan History Table */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-              {/* Table header bar */}
-              <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-                <div className="flex items-center gap-2">
-                  <History className="h-5 w-5 text-[#001d6e]" />
-                  <h1 className="text-base font-semibold text-gray-800">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              {/* Navy header bar — title only */}
+              <div className="flex items-center gap-2.5 px-4 sm:px-5 py-3 bg-[#ffff]">
+                <History className="h-4 w-4 text-[#001d6e] shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xl font-bold text-[#001d6e] leading-tight  tracking-wide">
                     {showAllHistory ? "All My Scans" : "Recent Scans"}
-                  </h1>
-                  {!showAllHistory && (
-                    <span className="text-xs text-gray-400 bg-gray-100 rounded-full px-2 py-0.5">Last 10</span>
-                  )}
-                  {showAllHistory && (dispatchHistory?.total ?? 0) > 0 && (
-                    <span className="text-xs text-gray-400 bg-gray-100 rounded-full px-2 py-0.5">{dispatchHistory?.total} total</span>
-                  )}
+                  </p>
+                  <p className="text-[10px] text-[#001d6e]/70 leading-none mt-0.5">
+                    {!showAllHistory ? "Last 10 entries" : `${dispatchHistory?.total ?? 0} total`}
+                  </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  {dispatchHistoryFetching && <Loader2 className="h-4 w-4 animate-spin text-gray-400" />}
-                  {showAllHistory ? (
-                    <Button variant="outline" size="sm" className="h-8 px-3 text-xs border-gray-200" onClick={() => { setShowAllHistory(false); setHistoryPage(0); }}>
-                      <ChevronLeft className="h-3.5 w-3.5 mr-1" />Recent Only
-                    </Button>
-                  ) : (
-                    <Button size="sm" className="h-8 px-3 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={() => { setShowAllHistory(true); setHistoryPage(0); }}>
-                      View All History
-                    </Button>
-                  )}
-                </div>
+                {dispatchHistoryFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-300 shrink-0" />}
               </div>
 
-              {/* Table body */}
+              {/* Empty state */}
               {!dispatchHistoryFetching && (!dispatchHistory?.items?.length) && (
                 <div className="py-14 text-center">
                   <History className="h-8 w-8 text-gray-200 mx-auto mb-2" />
                   <p className="text-sm text-gray-400">No scan history found.</p>
                 </div>
               )}
+
+              {/* Table */}
               {(dispatchHistory?.items?.length ?? 0) > 0 && (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
+                <div className="overflow-x-auto" style={{ WebkitOverflowScrolling: "touch" }}>
+                  <table className="w-full border-collapse text-xs">
                     <thead>
-                      <tr className="bg-gray-50 border-b border-gray-100">
-                        <th className="px-5 py-3.5 text-left text-sm font-semibold text-gray-500 uppercase tracking-wide w-8">#</th>
-                        <th className="px-5 py-3.5 text-left text-sm font-semibold text-gray-500 uppercase tracking-wide">Item Name</th>
-                        <th className="px-5 py-3.5 text-left text-sm font-semibold text-gray-500 uppercase tracking-wide">Barcode</th>
-                        <th className="px-5 py-3.5 text-center text-sm font-semibold text-gray-500 uppercase tracking-wide">Qty</th>
-                        <th className="px-5 py-3.5 text-left text-sm font-semibold text-gray-500 uppercase tracking-wide">Order</th>
-                        <th className="px-5 py-3.5 text-left text-sm font-semibold text-gray-500 uppercase tracking-wide">Scanned At</th>
+                      <tr className="bg-[#001d6e]">
+                        <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c] w-8">#</th>
+                        <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c]">Item Name</th>
+                        <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c]">Barcode</th>
+                        <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c]">Qty</th>
+                        <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c]">Order</th>
+                        <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Scanned At</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-gray-50">
-                      {dispatchHistory!.items.map((ev: any, idx: number) => (
-                        <tr key={ev.id ?? idx} className="hover:bg-blue-50/30 transition-colors">
-                          <td className="px-5 py-4 text-sm text-gray-400 font-mono">
-                            {(showAllHistory ? historyPage * 10 : 0) + idx + 1}
-                          </td>
-                          <td className="px-5 py-3.5">
-                            <p className="text-gray-800 font-medium truncate max-w-[240px] text-sm">{ev.itemName ?? "—"}</p>
-                          </td>
-                          <td className="px-5 py-4 font-mono text-sm text-gray-500">{ev.barcode ?? "—"}</td>
-                          <td className="px-5 py-3.5 text-center">
-                            <span className="inline-flex items-center justify-center min-w-[2rem] rounded-full bg-[#001d6e]/10 text-[#001d6e] text-xs font-bold px-2 py-0.5">
-                              {ev.totalQty ?? ev.quantity ?? 0}
-                            </span>
-                          </td>
-                          <td className="px-5 py-4 text-sm text-gray-500 max-w-[160px] truncate">{ev.orderName ?? "—"}</td>
-                          <td className="px-5 py-4 text-sm text-gray-400 whitespace-nowrap">
-                            {ev.scannedAt ? new Date(ev.scannedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
-                          </td>
-                        </tr>
-                      ))}
+                    <tbody>
+                      {dispatchHistory!.items.map((ev: any, idx: number) => {
+                        const isOdd = idx % 2 !== 0;
+                        return (
+                          <tr key={ev.id ?? idx} className={`border-b border-gray-100 hover:bg-[#001d6e]/[0.03] transition-colors ${isOdd ? "bg-slate-50" : "bg-white"}`}>
+                            <td className="px-3 py-2 text-xs text-gray-400 font-mono border-r border-gray-100">
+                              {(showAllHistory ? historyPage * 10 : 0) + idx + 1}
+                            </td>
+                            <td className="px-3 py-2 border-r border-gray-100">
+                              <p className="text-gray-800 font-medium truncate max-w-[200px] text-xs">{ev.itemName ?? "—"}</p>
+                            </td>
+                            <td className="px-3 py-2 font-mono text-xs text-gray-500 border-r border-gray-100">{ev.barcode ?? "—"}</td>
+                            <td className="px-3 py-2 text-center border-r border-gray-100">
+                              <span className="inline-flex items-center justify-center rounded-full bg-[#001d6e]/10 text-[#001d6e] text-[11px] font-bold px-2 py-0.5">
+                                {ev.totalQty ?? ev.quantity ?? 0}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-xs text-gray-500 max-w-[130px] truncate border-r border-gray-100">{ev.orderName ?? "—"}</td>
+                            <td className="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">
+                              {ev.scannedAt ? new Date(ev.scannedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
               )}
 
-              {/* Pagination footer */}
-              {showAllHistory && (dispatchHistory?.total ?? 0) > 0 && (
-                <div className="flex items-center justify-between border-t border-gray-100 px-5 py-3 bg-gray-50">
-                  <span className="text-xs text-gray-500">
-                    Showing {historyPage * 10 + 1}–{Math.min((historyPage + 1) * 10, dispatchHistory?.total ?? 0)} of {dispatchHistory?.total} scans
-                  </span>
-                  <div className="flex gap-1.5">
-                    <Button size="sm" variant="outline" className="h-7 px-3 text-xs border-gray-200" disabled={historyPage === 0} onClick={() => setHistoryPage((p) => p - 1)}>
-                      <ChevronLeft className="h-3.5 w-3.5 mr-0.5" />Prev
-                    </Button>
-                    <span className="flex items-center px-2 text-xs text-gray-600 font-medium">
-                      {historyPage + 1} / {Math.ceil((dispatchHistory?.total ?? 0) / 10)}
+              {/* Footer — pagination + View All / Recent Only toggle */}
+              <div className="flex items-center justify-between border-t border-gray-100 px-4 sm:px-5 py-2.5 bg-gray-50">
+                {showAllHistory && (dispatchHistory?.total ?? 0) > 0 ? (
+                  <>
+                    <span className="text-xs text-gray-500">
+                      {historyPage * 10 + 1}–{Math.min((historyPage + 1) * 10, dispatchHistory?.total ?? 0)} of {dispatchHistory?.total}
                     </span>
-                    <Button size="sm" variant="outline" className="h-7 px-3 text-xs border-gray-200" disabled={(historyPage + 1) * 10 >= (dispatchHistory?.total ?? 0)} onClick={() => setHistoryPage((p) => p + 1)}>
-                      Next<ChevronRight className="h-3.5 w-3.5 ml-0.5" />
+                    <div className="flex items-center gap-2">
+                      <div className="flex gap-1">
+                        <Button size="sm" variant="outline" className="h-7 w-7 p-0 border-gray-200" disabled={historyPage === 0} onClick={() => setHistoryPage((p) => p - 1)}>
+                          <ChevronLeft className="h-3.5 w-3.5" />
+                        </Button>
+                        <span className="flex items-center px-2 text-xs text-gray-600 font-medium">
+                          {historyPage + 1}/{Math.ceil((dispatchHistory?.total ?? 0) / 10)}
+                        </span>
+                        <Button size="sm" variant="outline" className="h-7 w-7 p-0 border-gray-200" disabled={(historyPage + 1) * 10 >= (dispatchHistory?.total ?? 0)} onClick={() => setHistoryPage((p) => p + 1)}>
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                      <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs border-gray-200 text-gray-600" onClick={() => { setShowAllHistory(false); setHistoryPage(0); }}>
+                        <ChevronLeft className="h-3 w-3 mr-1" />Recent Only
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-xs text-gray-400">{(dispatchHistory?.items?.length ?? 0)} entries shown</span>
+                    <Button size="sm" className="h-7 px-3 text-xs bg-[#001d6e] hover:bg-[#001552] text-white font-semibold" onClick={() => { setShowAllHistory(true); setHistoryPage(0); }}>
+                      View All
                     </Button>
-                  </div>
-                </div>
-              )}
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
@@ -2947,10 +3002,10 @@ export default function ScanOrderPage() {
             {/* Active orders */}
             {activeSessions.length > 0 && (
               <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-                <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-                  <span className="h-2 w-2 rounded-full bg-blue-500 inline-block" />
-                  <h2 className="text-sm font-semibold text-gray-800 uppercase tracking-wide">In Progress</h2>
-                  <span className="text-xs text-gray-400 bg-blue-50 text-blue-700 rounded-full px-2 py-0.5 font-medium">{activeSessions.length}</span>
+                <div className="bg-[#001d6e] px-5 py-3 flex items-center gap-2">
+                  <ScanLine className="h-4 w-4 text-blue-300 shrink-0" />
+                  <h2 className="text-sm font-bold text-white uppercase tracking-wide">In Progress</h2>
+                  <span className="text-[11px] font-semibold bg-white/20 text-white rounded-full px-2 py-0.5">{activeSessions.length}</span>
                 </div>
                 <div className="divide-y divide-gray-50">
                   {activeSessions.map((session) => {
@@ -2980,11 +3035,11 @@ export default function ScanOrderPage() {
 
             {/* Completed orders / History */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-              <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-                <History className="h-4 w-4 text-gray-400" />
-                <h2 className="text-sm font-semibold text-gray-800 uppercase tracking-wide">History</h2>
+              <div className="bg-[#001d6e] px-5 py-3 flex items-center gap-2">
+                <History className="h-4 w-4 text-blue-300 shrink-0" />
+                <h2 className="text-sm font-bold text-white uppercase tracking-wide">History</h2>
                 {completedSessions.length > 0 && (
-                  <span className="text-xs bg-gray-100 text-gray-600 rounded-full px-2 py-0.5 font-medium">{completedSessions.length}</span>
+                  <span className="text-[11px] font-semibold bg-white/20 text-white rounded-full px-2 py-0.5">{completedSessions.length}</span>
                 )}
               </div>
 

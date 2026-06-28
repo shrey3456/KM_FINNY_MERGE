@@ -51,7 +51,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         username: user.username,
         name: user.name,
         role: user.role,
-        department: user.department
+        department: user.department,
+        plants: (user as any).plants ?? '[]',
+        allowedPages: (user as any).allowedPages ?? '[]',
       }));
       
       localStorage.setItem('userCode', user.userCode || '');
