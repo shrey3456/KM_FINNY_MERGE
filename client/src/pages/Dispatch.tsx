@@ -242,19 +242,15 @@ export default function Dispatch() {
     // Convert logo to data URL for print
     let logoDataUrl = '';
     try {
-      console.log('Loading logo for print...');
       const response = await fetch(logoPath);
-      console.log('Logo fetch response:', response.status, response.ok);
       if (!response.ok) {
         throw new Error(`Failed to fetch logo: ${response.status}`);
       }
       const blob = await response.blob();
-      console.log('Logo blob size:', blob.size, 'type:', blob.type);
       logoDataUrl = await new Promise((resolve) => {
         const reader = new FileReader();
         reader.onload = () => {
           const result = reader.result as string;
-          console.log('Logo data URL length:', result.length);
           resolve(result);
         };
         reader.readAsDataURL(blob);
