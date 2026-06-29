@@ -214,6 +214,9 @@ router.post('/dispatch', async (req, res) => {
           case 'select':
             displayValue = prop.select?.name || '';
             break;
+          case 'multi_select':
+            displayValue = (prop.multi_select ?? []).map((o: any) => o.name).filter(Boolean).join(', ');
+            break;
           case 'number':
             displayValue = prop.number?.toString() || '';
             break;

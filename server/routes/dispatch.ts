@@ -98,46 +98,38 @@ router.post('/dispatch', async (req, res) => {
       if (matchingResults.length > 0) {
         const dispatchPage = matchingResults[0] as any;
         const properties = dispatchPage.properties;
-        
-        // Extract comprehensive order information from dispatch database
+
+        // Extract ALL properties from dispatch database
         for (const [key, value] of Object.entries(properties)) {
           const prop = value as any;
-          
-          // Extract all relevant order fields
-          const relevantFields = [
-            'Date', 'Order', 'Party', 'Invoice', 'Amount', 'Address', 
-            'Mobile', 'Vehicle', 'Driver', 'Plant', 'Total'
-          ];
-          
-          const isRelevant = relevantFields.some(field => key.includes(field));
-          
-          if (isRelevant) {
-            switch (prop.type) {
-              case 'title':
-              case 'rich_text':
-                dispatchData.orderInfo[key] = prop[prop.type]?.[0]?.plain_text || '';
-                break;
-              case 'date':
-                const dateValue = prop.date?.start;
-                if (dateValue) {
-                  // Format to DD/MM/YYYY
-                  const date = new Date(dateValue);
-                  dispatchData.orderInfo[key] = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
-                }
-                break;
-              case 'select':
-                dispatchData.orderInfo[key] = prop.select?.name || '';
-                break;
-              case 'formula':
-                dispatchData.orderInfo[key] = prop.formula?.number || prop.formula?.string || '';
-                break;
-              case 'number':
-                dispatchData.orderInfo[key] = prop.number || 0;
-                break;
-              case 'phone_number':
-                dispatchData.orderInfo[key] = prop.phone_number || '';
-                break;
-            }
+
+          switch (prop.type) {
+            case 'title':
+            case 'rich_text':
+              dispatchData.orderInfo[key] = prop[prop.type]?.[0]?.plain_text || '';
+              break;
+            case 'date':
+              const dateValue = prop.date?.start;
+              if (dateValue) {
+                const date = new Date(dateValue);
+                dispatchData.orderInfo[key] = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
+              }
+              break;
+            case 'select':
+              dispatchData.orderInfo[key] = prop.select?.name ?? '';
+              break;
+            case 'multi_select':
+              dispatchData.orderInfo[key] = (prop.multi_select ?? []).map((o: any) => o.name).filter(Boolean).join(', ');
+              break;
+            case 'formula':
+              dispatchData.orderInfo[key] = prop.formula?.number || prop.formula?.string || '';
+              break;
+            case 'number':
+              dispatchData.orderInfo[key] = prop.number || 0;
+              break;
+            case 'phone_number':
+              dispatchData.orderInfo[key] = prop.phone_number || '';
+              break;
           }
           
           // Extract product items from dispatch database (columns with quantities)

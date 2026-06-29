@@ -214,10 +214,7 @@ export default function Dispatch() {
     setSelectedOrder(orderNumber.trim());
   };
   const handlePrint = async () => {
-    console.log('Print button clicked!');
-    console.log('Dispatch data:', dispatchData);
     if (!dispatchData?.data) {
-      console.log('No dispatch data available');
       return;
     }
 
@@ -467,6 +464,13 @@ export default function Dispatch() {
               <div class="order-date">Order Date: ${data.orderInfo?.['Order Date :'] || ''}</div>
               <div style="text-align:right;"><strong>${JSON.parse(localStorage.getItem('currentUser') || '{}').name || JSON.parse(localStorage.getItem('currentUser') || '{}').username || 'Unknown User'}</strong> | ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
             </div>
+
+            ${(function() {
+              const remarkKey = Object.keys(data.orderInfo ?? {}).find(function(k) { return /remark/i.test(k); });
+              const remark = remarkKey ? String((data.orderInfo as any)[remarkKey] ?? '').trim() : '';
+              if (!remark) return '';
+              return '<div style="margin-top:10px;padding:6px 0 0 0;font-size:13px;font-weight:bold;color:red;"><strong>Remark:</strong> ' + remark + '</div>';
+            })()}
           </div>
         </div>
       </body>
@@ -878,10 +882,21 @@ export default function Dispatch() {
                       </div>
                     </div>
                   </div>
-                  
 
-                  
-
+                  {/* Remark — find any property whose name contains remark/note */}
+                  {(() => {
+                    const info = dispatchData.data.orderInfo;
+                    const remarkKey = Object.keys(info).find(k =>
+                      /remark|note/i.test(k)
+                    );
+                    const remark = remarkKey ? String(info[remarkKey] ?? '').trim() : '';
+                    return remark ? (
+                      <div className="bg-red-50 p-4 rounded-lg border border-red-300 mt-6">
+                        <h4 className="font-semibold text-red-700 mb-1 text-sm uppercase tracking-wide">Remark</h4>
+                        <p className="text-base font-semibold text-red-600 whitespace-pre-wrap">{remark}</p>
+                      </div>
+                    ) : null;
+                  })()}
 
                 </div>
               </>
