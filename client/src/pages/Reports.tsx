@@ -6,7 +6,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   History, Search, X, RefreshCw, FileDown,
-  User, UserCircle, Loader2, ScanLine,
+  User, UserCircle, Loader2, ScanLine, Upload,
 } from "lucide-react";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -17,6 +17,11 @@ import { Badge } from "@/components/ui/badge";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import PageHeader from "../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 
@@ -103,12 +108,58 @@ function downloadPdf(filename: string, title: string, rows: Array<Array<string |
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
+const ALL_NOTION_COLUMNS = ["#", "Scanned By", "Code", "Item", "Barcode", "Order", "Plant", "Qty", "Pallets", "STV", "Type", "Time"] as const;
+
 const Reports = () => {
   const [selectedDate,   setSelectedDate]   = useState("");
   const [historyPage,    setHistoryPage]    = useState(1);
   const [historySearch,  setHistorySearch]  = useState("");
   const [historyScanner, setHistoryScanner] = useState("__all__");
   const [historyType,    setHistoryType]    = useState("all");
+
+  // Notion upload state
+  const [notionOpen,      setNotionOpen]      = useState(false);
+  const [notionColumns,   setNotionColumns]   = useState<string[]>([...ALL_NOTION_COLUMNS]);
+  const [notionUploading, setNotionUploading] = useState(false);
+  const [notionResult,    setNotionResult]    = useState<{ uploaded: number; fetched: number; url: string; errors: string[] } | null>(null);
+  const [notionError,     setNotionError]     = useState<string | null>(null);
+  const [envDbId,         setEnvDbId]         = useState<string | null>(null);
+
+  // Load configured DB ID from env on mount
+  useEffect(() => {
+    apiRequest("GET", "/api/scan-sessions/reports/notion-config", undefined, false, true)
+      .then((r: any) => {
+        if (r?.dbId) setEnvDbId(r.dbId);
+      })
+      .catch(() => {});
+  }, []);
+
+  const toggleNotionCol = (col: string) =>
+    setNotionColumns((prev) =>
+      prev.includes(col) ? prev.filter((c) => c !== col) : [...prev, col]
+    );
+
+  const handleNotionUpload = async () => {
+    if (!envDbId) { setNotionError("No Notion database configured in .env"); return; }
+    if (notionColumns.length === 0) { setNotionError("Select at least one column."); return; }
+    setNotionError(null);
+    setNotionResult(null);
+    setNotionUploading(true);
+    try {
+      const r = await apiRequest("POST", "/api/scan-sessions/reports/upload-to-notion", {
+        columns: notionColumns,
+        date:    selectedDate                                   || undefined,
+        search:  historySearch                                  || undefined,
+        scanner: historyScanner !== "__all__" ? historyScanner : undefined,
+        type:    historyType    !== "all"     ? historyType     : undefined,
+      }, false, true);
+      setNotionResult({ uploaded: (r as any).uploaded, fetched: (r as any).fetched, url: (r as any).url, errors: (r as any).errors ?? [] });
+    } catch (e: any) {
+      setNotionError(e?.message ?? "Upload failed.");
+    } finally {
+      setNotionUploading(false);
+    }
+  };
 
   useEffect(() => { setHistoryPage(1); }, [historySearch, historyScanner, historyType, selectedDate]);
 
@@ -132,7 +183,7 @@ const Reports = () => {
         const r = await apiRequest("GET", withCacheBuster(historyUrl), undefined, false, true);
         return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
       },
-      refetchInterval: 15000,
+      refetchInterval: 5000,
     });
 
   const historyItems        = historyData?.items ?? [];
@@ -162,6 +213,7 @@ const Reports = () => {
   ];
 
   return (
+    <>
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
       <div className="max-w-7xl mx-auto space-y-4">
         <PageHeader
@@ -248,6 +300,12 @@ const Reports = () => {
                 <FileDown className="h-3.5 w-3.5 mr-1" />{fmt}
               </Button>
             ))}
+            <Button
+              size="sm" className="h-9 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white"
+              onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
+            >
+              <Upload className="h-3.5 w-3.5 mr-1" />Upload to Notion
+            </Button>
           </div>
         </div>
 
@@ -384,6 +442,111 @@ const Reports = () => {
         </div>
       </div>
     </div>
+
+    {/* ── Upload to Notion Dialog ─────────────────────────────────────── */}
+    <Dialog open={notionOpen} onOpenChange={(o) => { setNotionOpen(o); if (!o) { setNotionResult(null); setNotionError(null); } }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
+            <Upload className="h-4 w-4" /> Upload to Notion
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4 py-1">
+          {!envDbId && (
+            <p className="text-xs text-red-500">No database configured. Set SCAN_HISTORY_NOTION_DB_ID in .env</p>
+          )}
+
+          {/* Column selection */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Columns to upload</Label>
+              <button
+                className="text-[11px] text-[#001d6e] hover:underline"
+                onClick={() => setNotionColumns(notionColumns.length === ALL_NOTION_COLUMNS.length ? [] : [...ALL_NOTION_COLUMNS])}
+              >
+                {notionColumns.length === ALL_NOTION_COLUMNS.length ? "Deselect all" : "Select all"}
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-x-4 gap-y-2 rounded-lg border bg-gray-50 p-3">
+              {ALL_NOTION_COLUMNS.map((col) => (
+                <div key={col} className="flex items-center gap-1.5">
+                  <Checkbox
+                    id={`nc-${col}`}
+                    checked={notionColumns.includes(col)}
+                    onCheckedChange={() => toggleNotionCol(col)}
+                    disabled={col === "#"}
+                  />
+                  <label htmlFor={`nc-${col}`} className="text-xs text-gray-700 cursor-pointer select-none">
+                    {col}
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Active filters note */}
+          {(selectedDate || historySearch || historyScanner !== "__all__" || historyType !== "all") && (
+            <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5">
+              Active filters will be applied — only filtered records will be uploaded (max 2000 rows).
+            </p>
+          )}
+          {!selectedDate && historySearch === "" && historyScanner === "__all__" && historyType === "all" && (
+            <p className="text-[11px] text-gray-500">
+              No filters active — all scan history will be uploaded (max 2000 rows).
+            </p>
+          )}
+
+          {/* Result / Error */}
+          {notionResult && (
+            <div className={`text-sm rounded px-3 py-2 space-y-1.5 border ${notionResult.uploaded === 0 ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'}`}>
+              <p className="font-medium">
+                {notionResult.fetched === 0
+                  ? '⚠ No records found with current filters.'
+                  : `✓ Uploaded ${notionResult.uploaded} of ${notionResult.fetched} rows.`}
+              </p>
+              {notionResult.errors.length > 0 && (
+                <p className="text-xs text-red-600">{notionResult.errors[0]}</p>
+              )}
+              {notionResult.uploaded > 0 && (
+                <a
+                  href={notionResult.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-block text-[#001d6e] underline font-medium text-xs"
+                >
+                  → Open in Notion
+                </a>
+              )}
+            </div>
+          )}
+          {notionError && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
+              {notionError}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => setNotionOpen(false)} disabled={notionUploading}>
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            className="bg-[#001d6e] hover:bg-[#00154b] text-white"
+            onClick={handleNotionUpload}
+            disabled={notionUploading || !envDbId}
+          >
+            {notionUploading ? (
+              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Uploading…</>
+            ) : (
+              <><Upload className="h-3.5 w-3.5 mr-1.5" />Upload</>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 };
 
