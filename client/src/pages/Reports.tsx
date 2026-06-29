@@ -183,7 +183,7 @@ const Reports = () => {
         const r = await apiRequest("GET", withCacheBuster(historyUrl), undefined, false, true);
         return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
       },
-      refetchInterval: 15000,
+      refetchInterval: 5000,
     });
 
   const historyItems        = historyData?.items ?? [];
