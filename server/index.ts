@@ -62,6 +62,10 @@ app.use((req, res, next) => {
 
   // Run migrations
   try {
+    await pool.query(`
+      ALTER TABLE order_scan_events
+      ADD COLUMN IF NOT EXISTS notion_synced_at TIMESTAMP WITH TIME ZONE
+    `);
     console.log('Database migrations completed successfully');
   } catch (error) {
     console.error('Error running migrations:', error);
