@@ -144,6 +144,7 @@ router.post('/expense-voucher', async (req, res) => {
     // Extract database ID from the provided URL: https://www.notion.so/kmfinny/173604c4adf080f7853dc9a41a8a69a9?v=173604c4adf08158ba8a000c964da041&source=copy_link
     const EXPENSE_VOUCHER_DATABASE_ID = process.env.EXPENSE_VOUCHER_DATABASE_ID;
     
+    const AEV_EXPENSE_DATABASE_ID = process.env.AEV_EXPENSE_VOUCHER_DATABASE_ID;
     // Diesel bill database ID from: https://www.notion.so/kmfinny/dfba335ed74d4cd991b5b1a597c90605?v=a1866200419647f898d21f0fb6983a47&source=copy_link
     const DIESEL_BILL_DATABASE_ID = process.env.DIESEL_BILL_DATABASE_ID;
     
@@ -160,6 +161,12 @@ router.post('/expense-voucher', async (req, res) => {
         success: false,
         message: 'EXPENSE_VOUCHER_DATABASE_ID environment variable is not set'
       });
+    }
+    if (!AEV_EXPENSE_DATABASE_ID) {
+    return res.status(500).json({
+        success: false,
+        message: "AEV_EXPENSE_VOUCHER_DATABASE_ID is missing"
+    });
     }
     if (!DIESEL_BILL_DATABASE_ID) {
       return res.status(500).json({
@@ -185,7 +192,16 @@ router.post('/expense-voucher', async (req, res) => {
         message: 'PARTY_DATABASE_ID environment variable is not set'
       });
     }
+
+    const voucherNo = String(orderNumber).trim().toUpperCase();
+
+    const expenseVoucherDatabaseId =
+      voucherNo.includes("AEV")
+        ? AEV_EXPENSE_DATABASE_ID
+        : EXPENSE_VOUCHER_DATABASE_ID;
+
     try {
+
       // Simple query without any filters
       // Fetching records
       
@@ -199,7 +215,7 @@ router.post('/expense-voucher', async (req, res) => {
         console.log(`Trying direct Notion filter for voucher: ${normalizedOrderNumber}`);
         const directMatches = await queryByVoucherNumber(
           notion,
-          EXPENSE_VOUCHER_DATABASE_ID,
+          expenseVoucherDatabaseId,
           String(orderNumber)
         );
         if (directMatches.length > 0) {
@@ -224,7 +240,7 @@ router.post('/expense-voucher', async (req, res) => {
         const MAX_BATCHES = 10; // Fallback scan up to 500 recent records
         while (hasMore && batchCount < MAX_BATCHES && matchingResults.length === 0) {
           const response = await queryNotionWithRetry(notion, {
-            database_id: EXPENSE_VOUCHER_DATABASE_ID,
+            database_id: expenseVoucherDatabaseId,
             page_size: 50,
             start_cursor: cursor,
             sorts: [
@@ -614,7 +630,16 @@ router.post('/expense-voucher', async (req, res) => {
           console.error('📦 Error in order details lookup:', error);
         }
       }
+      console.log("========== ALL EXPENSE VOUCHER PROPERTIES ==========");
 
+        for (const [key, value] of Object.entries(properties)) {
+          console.log("--------------------------------");
+          console.log("Property Name:", key);
+          console.log("Property Type:", (value as any).type);
+          console.dir(value, { depth: null });
+        }
+
+        console.log("==============================================");
       // Fetch driver details if available
       let driverDetails = null;
       const driverName = expenseVoucherData.voucherInfo['Link to Driver'] || expenseVoucherData.voucherInfo['Driver :'] || expenseVoucherData.voucherInfo['Driver - Aadhar Wise Name :'];
@@ -791,6 +816,7 @@ router.post('/expense-voucher', async (req, res) => {
       message: 'Internal server error'
     });
   }
+  
 });
 
 export default router;
