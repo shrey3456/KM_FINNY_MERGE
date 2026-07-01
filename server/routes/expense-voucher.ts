@@ -75,6 +75,289 @@ function extractVoucherNoFromPage(page: any): string {
   return '';
 }
 
+// The AEV expense-voucher database stores some fields under different property
+// names than the regular EV database (which the print template / merge read).
+// Map each canonical key (the print reads) to the AEV alias(es) that hold the
+// same value, so both schemas produce identical output.
+const FIELD_ALIASES: Record<string, string[]> = {
+  "KM's SUM": ["KM's:", "Overall KM's :"],
+  'Toll Tax :': ['Toll:'],
+  'OnRoad Work :': ['On Road Arrangement:'],
+  'For Diesel Bill No. :': ['⛽️ Bill No. :'],
+};
+
+// Build the { propertyName: displayValue } map for a Notion page's properties.
+// Shared so a single voucher and each merge-candidate voucher are parsed identically.
+function buildVoucherInfo(properties: Record<string, any>): Record<string, string> {
+  const info: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(properties)) {
+    const prop = value as any;
+    let displayValue = '';
+
+    switch (prop.type) {
+      case 'title':
+      case 'rich_text':
+        displayValue = prop[prop.type]?.[0]?.plain_text || '';
+        break;
+      case 'date':
+        if (prop.date?.start) {
+          const date = new Date(prop.date.start);
+          displayValue = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
+        }
+        break;
+      case 'select':
+        displayValue = prop.select?.name || '';
+        break;
+      case 'status':
+        displayValue = prop.status?.name || '';
+        break;
+      case 'number':
+        displayValue = prop.number?.toString() || '';
+        break;
+      case 'formula':
+        if (prop.formula?.string) {
+          displayValue = prop.formula.string;
+        } else if (prop.formula?.number) {
+          displayValue = prop.formula.number.toString();
+        }
+        break;
+      case 'rollup':
+        if (prop.rollup?.array && prop.rollup.array.length > 0) {
+          const firstItem = prop.rollup.array[0];
+          if (firstItem?.rich_text?.[0]?.plain_text) {
+            displayValue = firstItem.rich_text[0].plain_text;
+          } else if (firstItem?.title?.[0]?.plain_text) {
+            displayValue = firstItem.title[0].plain_text;
+          } else if (firstItem?.phone_number) {
+            displayValue = firstItem.phone_number;
+          }
+        }
+        break;
+      case 'phone_number':
+        displayValue = prop.phone_number || '';
+        break;
+    }
+
+    if (displayValue) {
+      info[key] = displayValue;
+    }
+  }
+
+  // Fill canonical keys from AEV aliases when the canonical field is absent,
+  // so the print/merge (which read the EV names) work for AEV vouchers too.
+  for (const [canonical, aliases] of Object.entries(FIELD_ALIASES)) {
+    if (info[canonical] !== undefined && info[canonical] !== '') continue;
+    for (const alias of aliases) {
+      if (info[alias] !== undefined && info[alias] !== '') {
+        info[canonical] = info[alias];
+        break;
+      }
+    }
+  }
+
+  return info;
+}
+
+// Merge several vouchers' info maps into one:
+//  - Toll, OnRoad and Amount are summed across every voucher.
+//  - Conveyance Allowance and Deduction are summed ONLY over Approved vouchers;
+//    Final Payment (ECS) = Toll + OnRoad + approved Conveyance - approved Deduction.
+//  - Diesel liters are summed once per UNIQUE diesel bill no. Average = KM / litres.
+//  - Route KM's = sum of Approved vouchers' KM + any "EXTRA KM. <n>" found in remarks.
+//  - Diesel bill nos and Voucher nos are listed (deduped). Party lines are merged.
+// Identity fields (Vehicle, Driver, Date, Location...) come from the first voucher.
+function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, string> {
+  if (infos.length === 0) return {};
+
+  const parseNum = (v: any): number => {
+    if (v === undefined || v === null) return 0;
+    const n = parseFloat(String(v).replace(/[^0-9.-]/g, ''));
+    return isNaN(n) ? 0 : n;
+  };
+
+  const merged: Record<string, string> = { ...infos[0] };
+  if (infos.length === 1) return merged;
+
+  // Sum expense amounts across every voucher
+  const SUM_FIELDS = [
+    'Toll Tax :',
+    'OnRoad Work :',
+    'Amount >'
+  ];
+  for (const field of SUM_FIELDS) {
+    let total = 0;
+    let hasValue = false;
+    for (const info of infos) {
+      if (info[field] !== undefined) {
+        total += parseNum(info[field]);
+        hasValue = true;
+      }
+    }
+    if (hasValue) merged[field] = String(total);
+  }
+
+  // Conveyance Allowance and Deduction are summed ONLY over vouchers whose
+  // Authorisation status is "Approved". Final Payment (ECS Payment) is then
+  // displayed as (approved Conveyance Allowance) - (approved Deduction).
+  const isApproved = (info: Record<string, string>) =>
+    (info['Authorisation :'] || '').trim().toLowerCase() === 'approved';
+  let convTotal = 0;
+  let dedTotal = 0;
+  for (const info of infos) {
+    if (!isApproved(info)) continue;
+    convTotal += parseNum(info['Conveyance Allowance:']);
+    dedTotal += parseNum(info['Deduction :']);
+  }
+  merged['Conveyance Allowance:'] = String(convTotal);
+  merged['Deduction :'] = String(dedTotal);
+  // Final Payment = Toll Tax + On Road Work + (approved) Conveyance Allowance
+  //                 - (approved) Deduction
+  merged['ECS Payment :'] = String(
+    parseNum(merged['Toll Tax :']) +
+      parseNum(merged['OnRoad Work :']) +
+      convTotal -
+      dedTotal
+  );
+
+  // Diesel liters: sum only ONCE per unique diesel bill no
+  const seenBills = new Set<string>();
+  const uniqueBillNos: string[] = [];
+  let totalLtr = 0;
+  let dieselCounted = false;
+  for (const info of infos) {
+    const bill = (info['For Diesel Bill No. :'] || '').trim();
+    const billKey = bill.toUpperCase();
+    if (bill && seenBills.has(billKey)) {
+      // Same bill no already counted -> do NOT sum this voucher's diesel again
+      continue;
+    }
+    if (bill) {
+      seenBills.add(billKey);
+      uniqueBillNos.push(bill);
+    }
+    totalLtr += parseNum(info["Diesel {Ltr's} :"]);
+    dieselCounted = true;
+  }
+  if (dieselCounted) {
+    merged["Diesel {Ltr's} :"] = String(totalLtr);
+  }
+  if (uniqueBillNos.length > 0) {
+    merged['For Diesel Bill No. :'] = uniqueBillNos.join(', ');
+  }
+
+  // Route KM's: sum the KM only from APPROVED vouchers, PLUS any extra KM written
+  // in ANY voucher's remark (approved or not). Remark format is "EXTRA KM. 80".
+  let kmTotal = 0;
+  for (const info of infos) {
+    if (isApproved(info)) {
+      kmTotal += parseNum(info["KM's SUM"]);
+    }
+    const remark = info['Remark :'] || '';
+    for (const m of remark.matchAll(/EXTRA\s*KM\.?\s*(\d+(?:\.\d+)?)/gi)) {
+      kmTotal += parseNum(m[1]);
+    }
+  }
+  merged["KM's SUM"] = String(kmTotal);
+  // Average = Route KM / Diesel litres
+  if (totalLtr > 0) {
+    merged['Average :'] = (kmTotal / totalLtr).toFixed(2);
+  }
+
+  // Merge party / order-date lines from every voucher (dedup identical lines)
+  const partyKey = 'For Party x Ord Date';
+  const seenParty = new Set<string>();
+  const partyLines: string[] = [];
+  for (const info of infos) {
+    const text = info[partyKey];
+    if (!text) continue;
+    for (const line of String(text).split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed && !seenParty.has(trimmed)) {
+        seenParty.add(trimmed);
+        partyLines.push(trimmed);
+      }
+    }
+  }
+  // Sort the party lines by the order date embedded in each line, e.g.
+  // "GANGA ENTERPRISES - KADMA {01/07/26}" -> 01/07/26. Lines without a
+  // parseable date are pushed to the end (keeping their original order).
+  const partyDateValue = (line: string): number => {
+    const m = line.match(/\{?\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s*\}?/);
+    if (!m) return Number.POSITIVE_INFINITY;
+    const day = parseInt(m[1], 10);
+    const month = parseInt(m[2], 10);
+    let year = parseInt(m[3], 10);
+    if (year < 100) year += 2000;
+    return new Date(year, month - 1, day).getTime();
+  };
+  partyLines.sort((a, b) => partyDateValue(a) - partyDateValue(b));
+
+  if (partyLines.length > 0) merged[partyKey] = partyLines.join('\n');
+
+  // Merge remarks from every voucher that has one, tagged with the voucher's
+  // trailing number so it's clear which voucher the remark belongs to.
+  const remarkLines: string[] = [];
+  const seenRemarks = new Set<string>();
+  for (const info of infos) {
+    const remark = (info['Remark :'] || '').trim();
+    if (!remark) continue;
+    const vno = (info['Voucher No. :'] || '').trim();
+    const suffix = vno.lastIndexOf('-') >= 0 ? vno.slice(vno.lastIndexOf('-') + 1) : vno;
+    const line = suffix ? `${suffix}: ${remark}` : remark;
+    if (!seenRemarks.has(line)) {
+      seenRemarks.add(line);
+      remarkLines.push(line);
+    }
+  }
+  if (remarkLines.length > 0) {
+    merged['Remark :'] = remarkLines.join(' | ');
+  } else {
+    delete merged['Remark :'];
+  }
+
+  // List EVERY merged voucher's number in the Voucher No field, but keep it short:
+  // the first number is shown in full, the rest only show the trailing number when
+  // they share the same prefix -> "KM2627-AEV-95798, 95799, 95720".
+  const voucherNos: string[] = [];
+  const seenVoucherNos = new Set<string>();
+  for (const info of infos) {
+    const vno = (info['Voucher No. :'] || '').trim();
+    if (vno && !seenVoucherNos.has(vno.toUpperCase())) {
+      seenVoucherNos.add(vno.toUpperCase());
+      voucherNos.push(vno);
+    }
+  }
+  if (voucherNos.length > 0) {
+    const prefixOf = (v: string) => {
+      const i = v.lastIndexOf('-');
+      return i >= 0 ? v.slice(0, i + 1) : '';
+    };
+    const suffixOf = (v: string) => {
+      const i = v.lastIndexOf('-');
+      return i >= 0 ? v.slice(i + 1) : v;
+    };
+    const firstPrefix = prefixOf(voucherNos[0]);
+    const compact = voucherNos.map((v, idx) =>
+      idx === 0 ? v : prefixOf(v) === firstPrefix ? suffixOf(v) : v
+    );
+    merged['Voucher No. :'] = compact.join(', ');
+  }
+
+  return merged;
+}
+
+// Driver name as stored on a voucher, checked across the known driver fields.
+function getVoucherDriverName(info: Record<string, string>): string {
+  return (
+    info['Driver - Aadhar Wise Name :'] ||
+    info['Driver :'] ||
+    info['Link to Driver :'] ||
+    info['Link to Driver'] ||
+    ''
+  ).trim();
+}
+
 async function queryByVoucherNumber(
   notion: Client,
   databaseId: string,
@@ -118,17 +401,19 @@ async function queryByVoucherNumber(
 // Expense voucher API - Protected
 router.post('/expense-voucher', async (req, res) => {
   try {
-    const { orderNumber } = req.body;
-    
-    if (!orderNumber) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Voucher number is required' 
+    const { orderNumber, driverName } = req.body;
+
+    if (!orderNumber && !driverName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Voucher number or driver name is required'
       });
     }
 
     // Check cache first
-    const cacheKey = `expense_voucher_${orderNumber}`;
+    const cacheKey = driverName
+      ? `expense_voucher_driver_${String(driverName).trim().toUpperCase()}`
+      : `expense_voucher_${orderNumber}`;
     const cached = searchCache.get(cacheKey);
     if (cached && (Date.now() - cached.timestamp) < CACHE_DURATION) {
       // Cache hit
@@ -191,6 +476,106 @@ router.post('/expense-voucher', async (req, res) => {
         success: false,
         message: 'PARTY_DATABASE_ID environment variable is not set'
       });
+    }
+
+    // ===== DRIVER-NAME SEARCH =====
+    // Return ALL of that driver's vouchers merged into one voucher (same output
+    // shape as a voucher-number search, so the client view / print are reused).
+    if (driverName) {
+      const query = String(driverName).trim().toLowerCase();
+      const databases = [EXPENSE_VOUCHER_DATABASE_ID];
+      if (AEV_EXPENSE_DATABASE_ID) databases.push(AEV_EXPENSE_DATABASE_ID);
+
+      const infos: Record<string, string>[] = [];
+      let firstPlant = 'INDORE';
+      let firstStatus = 'Unknown';
+      let gotFirst = false;
+
+      for (const dbId of databases) {
+        try {
+          let cursor: string | undefined = undefined;
+          let hasMore = true;
+          let batches = 0;
+          const MAX_BATCHES = 10; // scan up to ~1000 recent records per database
+
+          while (hasMore && batches < MAX_BATCHES) {
+            const resp = await queryNotionWithRetry(notion, {
+              database_id: dbId,
+              page_size: 100,
+              start_cursor: cursor,
+              sorts: [{ timestamp: 'created_time', direction: 'descending' }]
+            });
+            batches++;
+
+            for (const page of resp.results as any[]) {
+              if (!('properties' in page)) continue;
+              const info = buildVoucherInfo(page.properties);
+              const driver = getVoucherDriverName(info);
+              if (!driver || !driver.toLowerCase().includes(query)) continue;
+
+              if (!gotFirst) {
+                const p = page.properties;
+                firstPlant =
+                  p['Plant']?.select?.name ||
+                  p['Stk Plant :']?.select?.name ||
+                  'INDORE';
+                firstStatus =
+                  p['Finny Status :']?.status?.name ||
+                  p['Finny Status :']?.select?.name ||
+                  'Unknown';
+                gotFirst = true;
+              }
+              infos.push(info);
+            }
+
+            hasMore = resp.has_more;
+            cursor = resp.next_cursor || undefined;
+
+            if (hasMore && batches >= MAX_BATCHES) {
+              console.warn(
+                `⚠️ Driver search hit batch cap (${MAX_BATCHES}) for db ${dbId}; older vouchers for "${query}" were not merged.`
+              );
+            }
+          }
+        } catch (dbError: any) {
+          console.error(
+            `👤 Driver search failed for database ${dbId}:`,
+            dbError?.code || dbError?.status || '',
+            dbError?.message || dbError
+          );
+          // Continue with the remaining databases instead of failing the request.
+        }
+      }
+
+      if (infos.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: `No vouchers found for driver "${driverName}"`
+        });
+      }
+
+      console.log(
+        `🔗 Driver "${driverName}": merging ${infos.length} voucher(s) into one printout`
+      );
+
+      const driverData: any = {
+        orderNumber: String(driverName),
+        plant: firstPlant,
+        status: firstStatus,
+        items: [],
+        voucherInfo: mergeVoucherInfos(infos),
+        mergedVoucherCount: infos.length
+      };
+
+      const driverResult = {
+        success: true,
+        message: `${infos.length} voucher(s) merged for driver ${driverName}`,
+        data: driverData,
+        itemCount: 0
+      };
+
+      searchCache.set(cacheKey, { data: driverResult, timestamp: Date.now() });
+      return res.json(driverResult);
     }
 
     const voucherNo = String(orderNumber).trim().toUpperCase();
@@ -349,56 +734,8 @@ router.post('/expense-voucher', async (req, res) => {
       };
       
       // Extract all property data from expense voucher record
-      for (const [key, value] of Object.entries(properties)) {
-        const prop = value as any;
-        let displayValue = '';
-        
-        switch (prop.type) {
-          case 'title':
-          case 'rich_text':
-            displayValue = prop[prop.type]?.[0]?.plain_text || '';
-            break;
-          case 'date':
-            if (prop.date?.start) {
-              const date = new Date(prop.date.start);
-              displayValue = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
-            }
-            break;
-          case 'select':
-            displayValue = prop.select?.name || '';
-            break;
-          case 'number':
-            displayValue = prop.number?.toString() || '';
-            break;
-          case 'formula':
-            if (prop.formula?.string) {
-              displayValue = prop.formula.string;
-            } else if (prop.formula?.number) {
-              displayValue = prop.formula.number.toString();
-            }
-            break;
-          case 'rollup':
-            if (prop.rollup?.array && prop.rollup.array.length > 0) {
-              const firstItem = prop.rollup.array[0];
-              if (firstItem?.rich_text?.[0]?.plain_text) {
-                displayValue = firstItem.rich_text[0].plain_text;
-              } else if (firstItem?.title?.[0]?.plain_text) {
-                displayValue = firstItem.title[0].plain_text;
-              } else if (firstItem?.phone_number) {
-                displayValue = firstItem.phone_number;
-              }
-            }
-            break;
-          case 'phone_number':
-            displayValue = prop.phone_number || '';
-            break;
-        }
-        
-        if (displayValue) {
-          expenseVoucherData.voucherInfo[key] = displayValue;
-        }
-      }
-      
+      expenseVoucherData.voucherInfo = buildVoucherInfo(properties);
+
 
       // Fetch related diesel bill details if diesel bill number exists
       let dieselBillDetails = null;
@@ -788,7 +1125,74 @@ router.post('/expense-voucher', async (req, res) => {
       if (driverDetails) {
         expenseVoucherData.driverDetails = driverDetails;
       }
-      
+
+      // ===== Merge vouchers with the SAME driver name + SAME voucher date =====
+      // All such vouchers are combined into one printout:
+      //  - Expense amounts (Toll, OnRoad, Conveyance, Deduction, ECS, Amount) are
+      //    summed across every voucher.
+      //  - Diesel liters and Route KM's are summed only ONCE per UNIQUE diesel bill
+      //    no. If two vouchers share the same bill no, the duplicate is NOT re-added.
+      // Runs last so the diesel / order / driver lookups above still use the single
+      // searched voucher's values.
+      try {
+        const baseInfo = expenseVoucherData.voucherInfo as Record<string, string>;
+        const baseDriver = getVoucherDriverName(baseInfo);
+        const baseDate = (baseInfo['Voucher Date :'] || '').trim();
+
+        if (baseDriver && baseDate) {
+          const candidateInfos: Record<string, string>[] = [baseInfo];
+          const seenIds = new Set<string>([firstMatch.id]);
+
+          let mergeCursor: string | undefined = undefined;
+          let mergeHasMore = true;
+          let mergeBatches = 0;
+          const MAX_MERGE_BATCHES = 10; // scan up to ~1000 recent records for siblings
+
+          while (mergeHasMore && mergeBatches < MAX_MERGE_BATCHES) {
+            const mergeResp = await queryNotionWithRetry(notion, {
+              database_id: expenseVoucherDatabaseId,
+              page_size: 100,
+              start_cursor: mergeCursor,
+              sorts: [{ timestamp: 'created_time', direction: 'descending' }]
+            });
+            mergeBatches++;
+
+            for (const page of mergeResp.results as any[]) {
+              if (seenIds.has(page.id)) continue;
+              if (!('properties' in page)) continue;
+              const info = buildVoucherInfo(page.properties);
+              if (
+                getVoucherDriverName(info) === baseDriver &&
+                (info['Voucher Date :'] || '').trim() === baseDate
+              ) {
+                seenIds.add(page.id);
+                candidateInfos.push(info);
+              }
+            }
+
+            mergeHasMore = mergeResp.has_more;
+            mergeCursor = mergeResp.next_cursor || undefined;
+          }
+
+          if (mergeHasMore && mergeBatches >= MAX_MERGE_BATCHES) {
+            console.warn(
+              `⚠️ Merge scan hit batch cap (${MAX_MERGE_BATCHES}); vouchers for driver "${baseDriver}" on ${baseDate} beyond ${MAX_MERGE_BATCHES * 100} records were not merged.`
+            );
+          }
+
+          if (candidateInfos.length > 1) {
+            console.log(
+              `🔗 Merging ${candidateInfos.length} vouchers for driver "${baseDriver}" on ${baseDate}`
+            );
+            expenseVoucherData.voucherInfo = mergeVoucherInfos(candidateInfos);
+            expenseVoucherData.mergedVoucherCount = candidateInfos.length;
+          }
+        }
+      } catch (mergeError) {
+        console.error('🔗 Error merging same driver/date vouchers:', mergeError);
+        // On any merge failure, fall back to the single searched voucher's data.
+      }
+
       const result = {
         success: true,
         message: `Voucher ${orderNumber} found`,

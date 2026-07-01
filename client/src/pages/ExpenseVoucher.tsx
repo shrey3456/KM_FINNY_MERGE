@@ -144,6 +144,8 @@ export default function ExpenseVoucher() {
   // const [voucherPrefix, setVoucherPrefix] = useState("KM2526-EV-");
   const [voucherNumber, setVoucherNumber] = useState("");
   const [selectedOrder, setSelectedOrder] = useState("");
+  // Whether the current search term is a voucher number or a driver name
+  const [searchMode, setSearchMode] = useState<"voucher" | "driver">("voucher");
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchStage, setSearchStage] = useState("");
   const [editableInvoiceAmount, setEditableInvoiceAmount] = useState("");
@@ -228,15 +230,19 @@ export default function ExpenseVoucher() {
     refetch,
     isError,
   } = useQuery<ExpenseVoucherResponse>({
-    queryKey: ["/api/expense-voucher", selectedOrder],
+    queryKey: ["/api/expense-voucher", searchMode, selectedOrder],
     enabled: !!selectedOrder && hasAccess,
     queryFn: async () => {
       if (!selectedOrder) throw new Error("No order selected");
       try {
+        const body =
+          searchMode === "driver"
+            ? { driverName: selectedOrder }
+            : { orderNumber: selectedOrder };
         const response = await apiRequest(
           "POST",
           "/api/expense-voucher",
-          { orderNumber: selectedOrder },
+          body,
           false,
           true
         );
@@ -418,23 +424,42 @@ export default function ExpenseVoucher() {
   };
 
   const handleSearch = async () => {
-    if (!voucherNumber.trim()) {
+    const term = voucherNumber.trim();
+    if (!term) {
       toast({
-        title: "Voucher Number Required",
-        description: "Please enter a voucher number to search",
+        title: "Search Term Required",
+        description: "Please enter a voucher number or driver name to search",
         variant: "destructive",
       });
       return;
     }
 
-    const fullVoucherNumber = `${voucherPrefix}${voucherNumber.trim()}`;
+    // Auto-detect: a term containing letters is treated as a driver name,
+    // a purely numeric term is treated as a voucher number.
+    const isDriverSearch = /[a-zA-Z]/.test(term);
 
-    if (fullVoucherNumber === selectedOrder) {
+    if (isDriverSearch) {
+      // Driver name is searched as-is; the server merges ALL of that driver's
+      // vouchers into one and returns the same shape as a voucher search.
       setSearchProgress(0);
+      if (searchMode === "driver" && selectedOrder === term) {
+        setSearchStage("Refreshing...");
+        refetch();
+      } else {
+        setSearchMode("driver");
+        setSelectedOrder(term);
+      }
+      return;
+    }
+
+    // Voucher-number search
+    const fullVoucherNumber = `${voucherPrefix}${term}`;
+    setSearchProgress(0);
+    if (searchMode === "voucher" && fullVoucherNumber === selectedOrder) {
       setSearchStage("Refreshing...");
       refetch();
     } else {
-      setSearchProgress(0);
+      setSearchMode("voucher");
       setSelectedOrder(fullVoucherNumber);
     }
   };
@@ -475,6 +500,26 @@ export default function ExpenseVoucher() {
     else if (partyTextLength > 600) partyFontPt = 9;
     else if (partyTextLength > 400) partyFontPt = 10;
     else if (partyTextLength > 300) partyFontPt = 11;
+
+    // Voucher No. cell font sized by length so every number fits (the print
+    // runs in a hidden iframe, so runtime measurement can't be used here).
+    const voucherNoLength = (voucherInfo["Voucher No. :"] || "").length;
+    let voucherNoFontPt = 15; // default (single voucher)
+    if (voucherNoLength > 110) voucherNoFontPt = 5;
+    else if (voucherNoLength > 90) voucherNoFontPt = 6;
+    else if (voucherNoLength > 72) voucherNoFontPt = 7;
+    else if (voucherNoLength > 55) voucherNoFontPt = 8;
+    else if (voucherNoLength > 42) voucherNoFontPt = 9.5;
+    else if (voucherNoLength > 30) voucherNoFontPt = 11;
+    else if (voucherNoLength > 20) voucherNoFontPt = 13;
+
+    // Remark can hold several merged vouchers' remarks -> shrink to fit its row.
+    const remarkLength = (voucherInfo["Remark :"] || "").length;
+    let remarkFontPt = 7.5;
+    if (remarkLength > 220) remarkFontPt = 4.5;
+    else if (remarkLength > 160) remarkFontPt = 5;
+    else if (remarkLength > 110) remarkFontPt = 6;
+    else if (remarkLength > 70) remarkFontPt = 6.8;
 
     const voucherDate =
       voucherInfo["Voucher Date :"] ||
@@ -607,7 +652,7 @@ export default function ExpenseVoucher() {
 
             .label-text { font-weight: 800; font-size: 13pt; color: #374151; }
             .value-text { font-size: 18pt; font-weight: 800; }
-            .voucher-number { color: #dc2626 !important; font-size: 15pt; font-weight: 900; }
+            .voucher-number { color: #dc2626 !important; font-size: ${voucherNoFontPt}pt; font-weight: 900; white-space: normal; word-break: break-word; overflow: hidden; line-height: 1.12; }
 
             .driver-vehicle-row { background: #bfdbfe !important; font-size: 11pt; padding: 3px 6px; height: 7mm; }
             .order-details-header { background: #4f2f88ff !important; color: white !important; font-weight: 800; font-size: 12pt; text-align: center; padding: 2px; height: 9mm; }
@@ -625,7 +670,7 @@ export default function ExpenseVoucher() {
             .diesel-header { background: #fbbf24 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 9pt; height: 6mm; }
             .route-kms-header, .avg-header { text-align: center; padding: 3px; font-weight: 800; font-size: 9pt; height: 6mm; }
 
-            .diesel-bills { background: #fef3c7 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 8pt; height: 7mm; }
+            .diesel-bills { background: #fef3c7 !important; font-weight: 800; text-align: center; padding: 3px; font-size: 8pt; height: 7mm; word-break: break-word; overflow: hidden; line-height: 1.1; }
             .route-value, .avg-value { text-align: center; padding: 3px; font-weight: 700, font-size: 11pt; height: 7mm; }
             .diesel-amount { background: #fbbf24 !important; font-weight: 800; text-align: center; padding: 4px; font-size: 13pt; height: 8mm; }
 
@@ -674,7 +719,7 @@ export default function ExpenseVoucher() {
                     <tr>
                       <td class="no-border" style="padding:3px;">
                         <div class="label-text">Vouc. No :</div>
-                        <div class="voucher-number">${voucherInfo["Voucher No. :"] || "N/A"}</div>
+                        <div class="voucher-number" id="voucher-number">${voucherInfo["Voucher No. :"] || "N/A"}</div>
                       </td>
                     </tr>
                   </table>
@@ -727,7 +772,7 @@ export default function ExpenseVoucher() {
               </tr>
 
               <tr>
-                <td colspan="2" class="diesel-bills">${voucherInfo["For Diesel Bill No. :"] || "N/A"
+                <td colspan="2" class="diesel-bills" id="diesel-bills">${voucherInfo["For Diesel Bill No. :"] || "N/A"
                   }</td>
                 <td class="route-value">${voucherInfo["KM's SUM"] || "0"}</td>
                 <td class="avg-value">${(() => {
@@ -828,7 +873,7 @@ export default function ExpenseVoucher() {
                     if (remark && remark !== "N/A" && remark.trim() !== "") {
                       return `
                     <tr class="remark-row">
-                      <td colspan="4">
+                      <td colspan="4" style="font-size: ${remarkFontPt}pt; line-height: 1.1;">
                         <span style="font-weight: bold; color: #7c3aed;">Remark:</span> ${remark}
                       </td>
                     </tr>
@@ -881,6 +926,37 @@ export default function ExpenseVoucher() {
                 setTimeout(checkAndAdjustFontSize, 600);
               } catch (e) {
                 console.error('adjustPartyDetails error:', e);
+              }
+            })();
+
+            // Shrink cells that grow when multiple vouchers are merged (the
+            // voucher-number list and the diesel-bill list) so the fixed voucher
+            // layout is preserved instead of overflowing/clipping.
+            (function adjustMergedCells() {
+              try {
+                function fit(id, startPt, minPt) {
+                  var el = document.getElementById(id);
+                  if (!el) return;
+                  var maxHeight = el.offsetHeight;
+                  var size = startPt;
+                  el.style.fontSize = size + 'pt';
+                  var guard = 0;
+                  while (el.scrollHeight > maxHeight && size > minPt && guard < 200) {
+                    size -= 0.25;
+                    guard++;
+                    el.style.fontSize = size + 'pt';
+                  }
+                }
+                function run() {
+                  // voucher-number is sized by length via inline CSS (works in
+                  // the hidden print iframe); only measure-fit the diesel cell.
+                  fit('diesel-bills', 8, 4);
+                }
+                setTimeout(run, 120);
+                setTimeout(run, 320);
+                setTimeout(run, 620);
+              } catch (e) {
+                console.error('adjustMergedCells error:', e);
               }
             })();
           </script>
@@ -1047,8 +1123,8 @@ export default function ExpenseVoucher() {
       <Card className="mb-6">
         <CardHeader>
           <CardDescription>
-            Enter a voucher number to fetch live data from Notion for expense
-            voucher processing
+            Enter a voucher number, or a driver name to list all of that
+            driver's vouchers. Data is fetched live from Notion.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -1067,7 +1143,7 @@ export default function ExpenseVoucher() {
                 />
                 <Input
                   type="text"
-                  placeholder="Enter voucher number..."
+                  placeholder="Voucher number or driver name..."
                   value={voucherNumber}
                   onChange={(e) => setVoucherNumber(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSearch()}
