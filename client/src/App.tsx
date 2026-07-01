@@ -241,26 +241,26 @@ function Router() {
     <Layout onLogout={handleLogout}>
       <Switch>
         <Route path="/" component={Home} />
-        <Route path="/scan" component={ScanOrder} />
-        <Route path="/scan-stock-report" component={StockReport} />
-        <Route path="/overall-stock" component={OverallStock} />
-        <ProtectedRoute path="/inventory" component={Inventory} requireInventoryAccess={true} />
-        <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} />
-        <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} />
-        <Route path="/load-operations" component={LoadOperations} /> {/* Updated route */}
-        <Route path="/print-operations" component={PrintOperations} /> {/* Print Operations route - simplified */}
-        <Route path="/proforma-slips" component={ProformaSlips} />
-        <Route path="/dispatch" component={Dispatch} />
-        <Route path="/expense-voucher" component={ExpenseVoucher} />
-        <Route path="/toll-voucher" component={TollVoucher} />
+        <ProtectedRoute path="/inventory" component={Inventory} requireInventoryAccess={true} requiredPage="inventory" />
+        <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} requiredPage="notion-inventory" />
+        <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
+        <ProtectedRoute path="/load-operations" component={LoadOperations} requiredPage="load-operations" />
+        <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />
+        <ProtectedRoute path="/proforma-slips" component={ProformaSlips} requiredPage="proforma" />
+        <ProtectedRoute path="/dispatch" component={Dispatch} requiredPage="dispatch" />
+        <ProtectedRoute path="/expense-voucher" component={ExpenseVoucher} requiredPage="expense-voucher" />
+        <ProtectedRoute path="/toll-voucher" component={TollVoucher} requiredPage="toll-voucher" />
         <Route path="/stock-sheets" component={StockSheets} />
-        <Route path="/reports" component={Reports} />
-        <ProtectedRoute path="/users" component={Users} requireAdmin={true} />
-        <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} />
-        <ProtectedRoute path="/settings" component={Settings} requireAdmin={true} />
-        <ProtectedRoute path="/plant-settings" component={PlantSettings} requireAdmin={true} />
-        <ProtectedRoute path="/order-management" component={OrderManagement} requireAdmin={true} />
-        <ProtectedRoute path="/order-import" component={OrderImport} requireOrderManagement={true} />
+        <ProtectedRoute path="/reports" component={Reports} requiredPage="scan-history" />
+        <ProtectedRoute path="/scan-stock-report" component={StockReport} requiredPage="pallet-stock" />
+        <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
+        <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
+        <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
+        <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />
+        <ProtectedRoute path="/settings" component={Settings} requireAdmin={true} requiredPage="settings" />
+        <ProtectedRoute path="/plant-settings" component={PlantSettings} requireAdmin={true} requiredPage="plant-management" />
+        <ProtectedRoute path="/order-management" component={OrderManagement} requireAdmin={true} requiredPage="order-management" />
+        <ProtectedRoute path="/order-import" component={OrderImport} requireOrderManagement={true} requiredPage="order-import" />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />
         <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />

@@ -18,6 +18,8 @@ export const users = pgTable("users", {
   department: text("department"),
   role: text("role").default("user"), // "user" | "admin"
   profileImage: text("profile_image"), // Base64-encoded JPEG
+  plants: text("plants").default("[]"), // JSON array of plant names e.g. ["VALSAD","INDORE"]
+  allowedPages: text("allowed_pages").default("[]"), // JSON array of page keys e.g. ["inventory","dispatch"]
 });
 
 export const insertUserSchema = createInsertSchema(users);

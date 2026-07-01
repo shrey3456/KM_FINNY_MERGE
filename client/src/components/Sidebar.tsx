@@ -108,6 +108,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
   });
   const hasScanBadge = !isAdminRole && scanNotif?.active === true;
 
+  // Parse allowed pages from user object
+  const allowedPages: string[] = (() => {
+    try { return JSON.parse((currentUser as any)?.allowedPages || "[]"); } catch { return []; }
+  })();
+
   // Group menu items by categories as shown in the image
   const menuCategories = [
     {
@@ -147,7 +152,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/load-operations",
-          //disabled: !userPermissions.canManageUsers
+          pageKey: "load-operations",
         },
         {
           label: "Print Operations",
@@ -158,11 +163,13 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/print-operations",
+          pageKey: "print-operations",
         },
         {
           label: "Proforma Slips",
           icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/proforma-slips",
+          pageKey: "proforma",
         },
         {
           label: "Dispatch",
@@ -173,6 +180,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/dispatch",
+          pageKey: "dispatch",
         },
         {
           label: "Expense Voucher",
@@ -184,6 +192,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           ),
           path: "/expense-voucher",
           permission: "canAccessExpenseVoucher",
+          pageKey: "expense-voucher",
         },
         {
           label: "Toll Voucher",
@@ -195,28 +204,33 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           ),
           path: "/toll-voucher",
           permission: "canAccessExpenseVoucher",
+          pageKey: "toll-voucher",
         },
         {
           label: "Scan Order",
           icon: <ScanLine className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/scan",
           badge: hasScanBadge ? 1 : 0,
+          pageKey: "scan-order",
         },
         {
           label: "Pallet Stock Report",
           icon: <FileBarChart className="h-5 w-5 mr-3 text-[#001d6e]" style={{ fill: "#a78bfa" }} />,
           path: "/scan-stock-report",
+          pageKey: "pallet-stock",
         },
         {
           label: "Overall Stock",
           icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/overall-stock",
           permission: "canAccessOverallStockReport",
+          pageKey: "overall-stock",
         },
         {
           label: "Scan History",
           icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/reports",
+          pageKey: "scan-history",
         },
         {
           label: "Order Import",
@@ -224,6 +238,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/order-import",
           permission: "canAccessOrderManagement",
           departments: ['billing'],
+          pageKey: "order-import",
         },
       ],
     },
@@ -234,11 +249,13 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           label: "Inventory",
           icon: <Package className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/inventory",
+          pageKey: "inventory",
         },
         {
           label: "Purchases",
           icon: <ShoppingCart className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/purchases",
+          pageKey: "purchases",
         },
       ],
     },
@@ -249,11 +266,13 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           label: "User Management",
           icon: <Users className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/users",
+          pageKey: "user-management",
         },
         {
           label: "Notion Inventory",
           icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/notion-inventory",
+          pageKey: "notion-inventory",
         },
         {
           label: "Plant Management",
@@ -264,16 +283,19 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/plant-settings",
+          pageKey: "plant-management",
         },
         {
           label: "Activities",
           icon: <Activity className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/activities",
+          pageKey: "activities",
         },
         {
           label: "Settings",
           icon: <Settings className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/settings",
+          pageKey: "settings",
         },
       ],
     },
@@ -329,6 +351,10 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
                   if (it.permission) {
                     return userPermissions[it.permission as keyof typeof userPermissions] === true
                       || it.departments?.includes(userDepartment) === true;
+                  }
+                  // Page-based access control for non-admin users
+                  if (it.pageKey && !isAdminRole) {
+                    return allowedPages.includes(it.pageKey);
                   }
                   return true;
                 })

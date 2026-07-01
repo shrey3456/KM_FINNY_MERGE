@@ -109,7 +109,8 @@ import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
 import orderImportRoutes from "./routes/order-import";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
-import { detectChangesFromNotion, fullSyncFromNotion } from "./services/notionInventorySync";
+import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges } from "./services/notionInventorySync";
+import userRoutes from "./routes/users";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -183,299 +184,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({ status: "ok" });
   });
 
-  // User endpoints
-  apiRouter.get("/users", async (req: Request, res: Response) => {
-    try {
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
-      const offset = req.query.offset
-        ? parseInt(req.query.offset as string)
-        : 0;
-
-      // Get users with pagination directly from storage
-      const users = await storage.listUsers(limit, offset);
-
-      // Remove PINs from the response
-      const usersWithoutPins = users.map((user) => {
-        const { pin, ...userWithoutPin } = user;
-        return userWithoutPin;
-      });
-
-      res.json(usersWithoutPins);
-    } catch (err) {
-      console.error("Error fetching users:", err);
-      res.status(500).json({ message: "Failed to fetch users" });
-    }
-  });
-
-  apiRouter.get("/users/:userCode", async (req: Request, res: Response) => {
-    const user = await storage.getUser(req.params.userCode);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Don't send the PIN
-    const { pin, ...userWithoutPin } = user;
-    res.json(userWithoutPin);
-  });
-
-  apiRouter.post("/users", async (req: Request, res: Response) => {
-    try {
-      const userData = insertUserSchema.parse(req.body);
-
-      // Log the request data for debugging
-      console.log("Creating user with data:", {
-        ...userData,
-        pin: userData.pin ? "[REDACTED]" : undefined,
-      });
-
-      // Create the user
-      const user = await storage.createUser(userData);
-
-      // Don't send the PIN in the response
-      const { pin, ...userWithoutPin } = user;
-      console.log("User created successfully:", userWithoutPin);
-
-      res.status(201).json(userWithoutPin);
-    } catch (err) {
-      console.error("Error creating user:", err);
-
-      if (err instanceof z.ZodError) {
-        return res.status(400).json({
-          message: "Invalid user data",
-          errors: err.format(),
-        });
-      }
-
-      // Check if it's a PIN validation error
-      if (
-        err instanceof Error &&
-        err.message.includes("PIN") &&
-        err.message.includes("already used")
-      ) {
-        return res.status(400).json({
-          message: err.message,
-          type: "pin_duplicate_error",
-        });
-      }
-
-      // Return more detailed error info
-      res.status(500).json({
-        message: "Failed to create user",
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  });
-
-  apiRouter.put("/users/:userCode", async (req: Request, res: Response) => {
-    try {
-      const userCode = req.params.userCode;
-      const user = await storage.getUser(userCode);
-
-      if (!user) {
-        return res.status(404).json({ message: "User not found" });
-      }
-
-      // For updating, we'll use a partial schema that makes all fields optional
-      const userData = insertUserSchema.partial().parse(req.body);
-
-      // Update the user with the new data
-      const updatedUser = await storage.updateUser(userCode, userData);
-
-      if (!updatedUser) {
-        return res.status(404).json({ message: "User could not be updated" });
-      }
-
-      // Don't send the PIN in the response
-      const { pin, ...userWithoutPin } = updatedUser;
-      res.json(userWithoutPin);
-    } catch (err) {
-      if (err instanceof z.ZodError) {
-        return res.status(400).json({
-          message: "Invalid user data",
-          errors: err.format(),
-        });
-      }
-
-      // Check if it's a PIN validation error
-      if (
-        err instanceof Error &&
-        err.message.includes("PIN") &&
-        err.message.includes("already used")
-      ) {
-        return res.status(400).json({
-          message: err.message,
-          type: "pin_duplicate_error",
-        });
-      }
-
-      console.error("Failed to update user:", err);
-      res.status(500).json({
-        message: "Failed to update user",
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  });
-
-  apiRouter.delete("/users/:userCode", async (req: Request, res: Response) => {
-    try {
-      const userCode = req.params.userCode;
-      const user = await storage.getUser(userCode);
-
-      if (!user) {
-        return res.status(404).json({ message: "User not found" });
-      }
-
-      // Delete the user
-      const success = await storage.deleteUser(userCode);
-
-      if (!success) {
-        return res.status(500).json({ message: "Failed to delete user" });
-      }
-
-      res.status(204).send(); // 204 No Content
-    } catch (err) {
-      console.error("Failed to delete user:", err);
-      res.status(500).json({ message: "Failed to delete user" });
-    }
-  });
-
-  // Profile image upload endpoint
-  apiRouter.patch(
-    "/users/:userCode/profile-image",
-    async (req: Request, res: Response) => {
-      try {
-        const userCode = req.params.userCode;
-
-        const user = await storage.getUser(userCode);
-
-        if (!user) {
-          return res.status(404).json({ message: "User not found" });
-        }
-
-        // Validate the request body for profile image upload
-        const profileImageSchema = z.object({
-          imageBase64: z
-            .string()
-            .startsWith("data:image/", {
-              message:
-                "Image must be in base64 format starting with 'data:image/'",
-            })
-            .max(750000, {
-              message: "Image size too large. Maximum 750KB allowed.",
-            })
-            .refine(
-              (data) => {
-                // Check if it's a valid image format (JPEG, PNG, GIF, WebP)
-                const validFormats = [
-                  "data:image/jpeg",
-                  "data:image/jpg",
-                  "data:image/png",
-                  "data:image/gif",
-                  "data:image/webp",
-                ];
-                return validFormats.some((format) =>
-                  data.toLowerCase().startsWith(format),
-                );
-              },
-              {
-                message:
-                  "Unsupported image format. Only JPEG, PNG, GIF, and WebP are allowed.",
-              },
-            ),
-        });
-
-        const { imageBase64 } = profileImageSchema.parse(req.body);
-
-        // Update only the profileImage field
-        const updatedUser = await storage.updateUser(userCode, {
-          profileImage: imageBase64,
-        });
-
-        if (!updatedUser) {
-          return res.status(404).json({ message: "User could not be updated" });
-        }
-
-        // Don't send the PIN in the response
-        const { pin, ...userWithoutPin } = updatedUser;
-        res.json(userWithoutPin);
-      } catch (err) {
-        if (err instanceof z.ZodError) {
-          return res.status(400).json({
-            message: "Invalid image data",
-            errors: err.format(),
-          });
-        }
-
-        console.error("Failed to update user profile image:", err);
-        res.status(500).json({
-          message: "Failed to update profile image",
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    },
-  );
-
-  // Profile image serving endpoint
-  apiRouter.get(
-    "/users/:userCode/profile-image",
-    async (req: Request, res: Response) => {
-      try {
-        const userCode = req.params.userCode;
-        console.log(`[DEBUG] Profile image request for user: ${userCode}`);
-
-        const user = await storage.getUser(userCode);
-
-        if (!user) {
-          console.log(`[DEBUG] User ${userCode} not found`);
-          return res.status(404).json({ message: "User not found" });
-        }
-
-        if (!user.profileImage) {
-          console.log(`[DEBUG] No profile image for user ${userCode}`);
-          return res.status(404).json({ message: "Profile image not found" });
-        }
-
-        console.log(
-          `[DEBUG] Found profile image for user ${userCode}, data length: ${user.profileImage.length}`,
-        );
-
-        // Parse the data URL format: "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
-        const matches = user.profileImage.match(/^data:(.+);base64,(.+)$/);
-
-        if (!matches) {
-          console.log(`[DEBUG] Invalid image format for user ${userCode}`);
-          return res.status(400).json({ message: "Invalid image format" });
-        }
-
-        const [, contentType, base64Data] = matches;
-        console.log(
-          `[DEBUG] Serving image for user ${userCode} with content-type: ${contentType}`,
-        );
-
-        // Convert base64 to buffer
-        const imageBuffer = Buffer.from(base64Data, "base64");
-
-        // Set proper headers
-        res.set({
-          "Content-Type": contentType,
-          "Content-Length": imageBuffer.length.toString(),
-          "Cache-Control": "public, max-age=3600", // Cache for 1 hour
-        });
-
-        // Send the image data
-        res.end(imageBuffer);
-      } catch (err) {
-        console.error(
-          `[ERROR] Failed to serve profile image for user ${req.params.userCode}:`,
-          err,
-        );
-        res.status(500).json({
-          message: "Failed to serve profile image",
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    },
-  );
+  // User routes (moved to dedicated file)
+  apiRouter.use("/", userRoutes);
 
   // Notion inventory paginated + filtered product listing (admin only)
   apiRouter.get("/notion-products", async (req: Request, res: Response) => {
@@ -3589,38 +3299,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     },
   );
-
-  // Login endpoint (PIN-only authentication)
-  apiRouter.post("/login", async (req: Request, res: Response) => {
-    try {
-      const { pin } = req.body;
-
-      if (!pin) {
-        return res.status(400).json({ message: "PIN is required" });
-      }
-
-      // Get all users
-      const allUsers = await storage.listUsers(1000, 0);
-
-      // Find a user with matching PIN
-      const user = allUsers.find((user) => user.pin === pin);
-
-      if (!user) {
-        return res.status(401).json({ message: "Invalid PIN" });
-      }
-
-      // Remove pin from the response
-      const { pin: _, ...userWithoutPin } = user;
-
-      res.json({
-        user: userWithoutPin,
-        message: "Login successful",
-      });
-    } catch (error) {
-      console.error("Login error:", error);
-      res.status(500).json({ message: "An error occurred during login" });
-    }
-  });
 
   // CSV Import for products
   const upload = multer({ storage: multer.memoryStorage() });
@@ -8909,7 +8587,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use("/api", apiRouter);
 
   // Every 24 hours: if DB has no products → full import from Notion;
-  // otherwise detect changes and store as pending for admin review.
+  // otherwise detect changes AND automatically apply them to the database.
   if (process.env.NOTION_INVENTORY_DATABASE_ID) {
     const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
     const runScheduledSync = async () => {
@@ -8919,8 +8597,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.log('[Notion Inventory Sync] DB is empty — running full import from Notion...');
           await fullSyncFromNotion();
         } else {
-          console.log('[Notion Inventory Sync] Running scheduled 24-hour change detection...');
-          await detectChangesFromNotion();
+          console.log('[Notion Inventory Sync] Running scheduled 24-hour detect + apply...');
+          const detectReport = await detectChangesFromNotion();
+          const hasChanges = (detectReport.created ?? 0) + (detectReport.updated ?? 0) > 0;
+          if (hasChanges) {
+            console.log(`[Notion Inventory Sync] ${detectReport.created} new, ${detectReport.updated} changed — applying now...`);
+            await applyPendingChanges();
+            console.log('[Notion Inventory Sync] Auto-apply complete.');
+          } else {
+            console.log('[Notion Inventory Sync] No changes found, nothing to apply.');
+          }
         }
       } catch (err) {
         console.error('[Notion Inventory Sync] Scheduled sync failed:', err);
@@ -8929,7 +8615,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     setInterval(runScheduledSync, SYNC_INTERVAL_MS);
     // Also run once on startup after a short delay to handle empty-DB on first boot
     setTimeout(runScheduledSync, 10000);
-    console.log('[Notion Inventory Sync] 24-hour sync scheduler registered');
+    console.log('[Notion Inventory Sync] 24-hour auto sync+apply scheduler registered');
   }
 
   // Return the HTTP server with WebSocket support

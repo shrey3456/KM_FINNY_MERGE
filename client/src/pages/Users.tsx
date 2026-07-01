@@ -18,9 +18,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X } from 'lucide-react';
+import { Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown } from 'lucide-react';
 import { useState } from 'react';
-import { User, InsertUser } from '@shared/schema';
+import { User } from '@shared/schema';
 import {
   Dialog,
   DialogContent,
@@ -28,7 +28,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogClose
 } from "@/components/ui/dialog";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -50,9 +49,37 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 
+// All controllable pages (non-common pages selectable per user)
+const CONTROLLABLE_PAGES = [
+  { key: "load-operations",  label: "Load Operations" },
+  { key: "print-operations", label: "Print Operations" },
+  { key: "proforma",         label: "Proforma Slips" },
+  { key: "dispatch",         label: "Dispatch" },
+  { key: "expense-voucher",  label: "Expense Voucher" },
+  { key: "toll-voucher",     label: "Toll Voucher" },
+  { key: "scan-order",       label: "Scan Order" },
+  { key: "pallet-stock",     label: "Pallet Stock Report" },
+  { key: "overall-stock",    label: "Overall Stock" },
+  { key: "scan-history",     label: "Scan History" },
+  { key: "order-import",     label: "Order Import" },
+  { key: "inventory",        label: "Inventory" },
+  { key: "purchases",        label: "Purchases" },
+  { key: "notion-inventory", label: "Notion Inventory" },
+  { key: "user-management",  label: "User Management" },
+  { key: "plant-management", label: "Plant Management" },
+  { key: "activities",       label: "Activities" },
+  { key: "settings",         label: "Settings" },
+  { key: "order-management", label: "Order Management" },
+];
 
-// Form schema for user creation/editing
+// Form schema
 const userFormSchema = z.object({
   userCode: z.string().optional(),
   username: z.string().min(3, "Username must be at least 3 characters")
@@ -62,9 +89,90 @@ const userFormSchema = z.object({
   role: z.enum(["admin", "super-admin", "read/write", "read"]).default("read"),
   department: z.string().optional(),
   designation: z.string().optional(),
+  plants: z.array(z.string()).default([]),
+  allowedPages: z.array(z.string()).default([]),
 });
 
 type UserFormValues = z.infer<typeof userFormSchema>;
+
+// Helper: parse JSON array field from user object
+function parseJsonArray(val: string | null | undefined): string[] {
+  try { return JSON.parse(val || "[]"); } catch { return []; }
+}
+
+// Multi-select popover for plants and pages
+function MultiSelectField({
+  label,
+  options,
+  selected,
+  onChange,
+  disabled,
+  disabledNote,
+}: {
+  label: string;
+  options: { key: string; label: string }[];
+  selected: string[];
+  onChange: (val: string[]) => void;
+  disabled?: boolean;
+  disabledNote?: string;
+}) {
+  const toggle = (key: string) => {
+    if (selected.includes(key)) {
+      onChange(selected.filter(k => k !== key));
+    } else {
+      onChange([...selected, key]);
+    }
+  };
+
+  if (disabled) {
+    return (
+      <p className="text-sm text-muted-foreground italic">{disabledNote}</p>
+    );
+  }
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" className="w-full justify-between font-normal h-auto min-h-9 py-1.5">
+          <span className="text-left flex-1 flex flex-wrap gap-1">
+            {selected.length === 0 ? (
+              <span className="text-muted-foreground">Select {label}...</span>
+            ) : (
+              selected.map(k => {
+                const opt = options.find(o => o.key === k);
+                return (
+                  <Badge key={k} variant="secondary" className="text-xs font-normal">
+                    {opt?.label ?? k}
+                  </Badge>
+                );
+              })
+            )}
+          </span>
+          <ChevronsUpDown className="h-4 w-4 ml-2 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72 p-0" style={{ maxHeight: "none" }}>
+        <div className="overflow-y-auto" style={{ maxHeight: "260px" }}>
+          <div className="p-2">
+            {options.map(opt => (
+              <div
+                key={opt.key}
+                className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted cursor-pointer"
+                onClick={() => toggle(opt.key)}
+              >
+                <Checkbox
+                  checked={selected.includes(opt.key)}
+                  onCheckedChange={() => toggle(opt.key)}
+                />
+                <span className="text-sm">{opt.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 const Users = () => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -83,88 +191,77 @@ const Users = () => {
     }
   });
 
+  // Fetch plants for multi-select
+  const { data: plantsList = [] } = useQuery<{ id: number; name: string }[]>({
+    queryKey: ['/api/plants'],
+    queryFn: async () => {
+      const res = await apiRequest('GET', '/api/plants');
+      return res.json();
+    }
+  });
+  const plantOptions = plantsList.map((p: { id: number; name: string }) => ({ key: p.name, label: p.name }));
+
   // Create user mutation
   const createUserMutation = useMutation({
-    mutationFn: (data: UserFormValues) =>
-      apiRequest('POST', '/api/users', data),
+    mutationFn: (data: UserFormValues) => {
+      const payload = {
+        ...data,
+        plants: JSON.stringify(data.plants),
+        allowedPages: JSON.stringify(data.allowedPages),
+      };
+      return apiRequest('POST', '/api/users', payload);
+    },
     onSuccess: () => {
-      toast({
-        title: "Success",
-        description: "User created successfully",
-      });
+      toast({ title: "Success", description: "User created successfully" });
       queryClient.invalidateQueries({ queryKey: ['/api/users'] });
-      
-      // Reset form values
       addUserForm.reset({
-        userCode: "",
-        username: "",
-        pin: "",
-        name: "",
-        role: "read",
-        department: "",
-        designation: ""
+        userCode: "", username: "", pin: "", name: "",
+        role: "read", department: "", designation: "",
+        plants: [], allowedPages: [],
       });
-      
       setIsAddDialogOpen(false);
     },
     onError: (error) => {
-      toast({
-        title: "Error",
-        description: `Failed to create user: ${error.message}`,
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: `Failed to create user: ${error.message}`, variant: "destructive" });
     }
   });
 
   // Update user mutation
   const updateUserMutation = useMutation({
-    mutationFn: ({ userCode, data }: { userCode: string, data: Partial<UserFormValues> }) =>
-      apiRequest('PUT', `/api/users/${userCode}`, data),
+    mutationFn: ({ userCode, data }: { userCode: string; data: Partial<UserFormValues> }) => {
+      const payload = {
+        ...data,
+        plants: JSON.stringify(data.plants ?? []),
+        allowedPages: JSON.stringify(data.allowedPages ?? []),
+      };
+      return apiRequest('PUT', `/api/users/${userCode}`, payload);
+    },
     onSuccess: () => {
-      toast({
-        title: "Success",
-        description: "User updated successfully",
-      });
+      toast({ title: "Success", description: "User updated successfully" });
       queryClient.invalidateQueries({ queryKey: ['/api/users'] });
       setIsEditDialogOpen(false);
     },
     onError: (error) => {
-      toast({
-        title: "Error",
-        description: `Failed to update user: ${error.message}`,
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: `Failed to update user: ${error.message}`, variant: "destructive" });
     }
   });
 
   // Delete user mutation
   const deleteUserMutation = useMutation({
-    mutationFn: (userCode: string) =>
-      apiRequest('DELETE', `/api/users/${userCode}`),
+    mutationFn: (userCode: string) => apiRequest('DELETE', `/api/users/${userCode}`),
     onSuccess: (_, userCode) => {
-      // Update cache immediately to remove the deleted item
       queryClient.setQueriesData({ queryKey: ['/api/users'] }, (oldData: any) => {
         if (!Array.isArray(oldData)) return oldData;
         return oldData.filter((user: User) => user.userCode !== userCode);
       });
-
-      // queryClient.invalidateQueries({ queryKey: ['/api/users'] });
-      toast({
-        title: "Success",
-        description: "User deleted successfully",
-      });
+      toast({ title: "Success", description: "User deleted successfully" });
       setIsDeleteDialogOpen(false);
     },
     onError: (error) => {
-      toast({
-        title: "Error",
-        description: `Failed to delete user: ${error.message}`,
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: `Failed to delete user: ${error.message}`, variant: "destructive" });
     }
   });
 
-  // Filter users based on search term
   const filteredUsers = searchTerm && Array.isArray(users)
     ? users.filter((user: User) =>
         user.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -174,20 +271,15 @@ const Users = () => {
       )
     : Array.isArray(users) ? users : [];
 
-  // User role check
-  const isAdmin = true; // In a real app, this would be derived from the current user's role
+  const isAdmin = true;
 
   // Form for adding a new user
   const addUserForm = useForm<UserFormValues>({
     resolver: zodResolver(userFormSchema),
     defaultValues: {
-      userCode: "",
-      username: "",
-      pin: "",
-      name: "",
-      role: "read",
-      department: "",
-      designation: ""
+      userCode: "", username: "", pin: "", name: "",
+      role: "read", department: "", designation: "",
+      plants: [], allowedPages: [],
     }
   });
 
@@ -195,91 +287,73 @@ const Users = () => {
   const editUserForm = useForm<Partial<UserFormValues>>({
     resolver: zodResolver(userFormSchema.partial()),
     defaultValues: {
-      userCode: "",
-      username: "",
-      name: "",
-      role: "read",
-      department: "",
-      designation: ""
+      userCode: "", username: "", name: "",
+      role: "read", department: "", designation: "",
+      plants: [], allowedPages: [],
     }
   });
 
-  // Handle adding a new user
   const handleAddUser = (data: UserFormValues) => {
     createUserMutation.mutate(data);
   };
-  
-  // Handle dialog close for add user dialog
+
   const handleAddDialogClose = (open: boolean) => {
     if (!open) {
-      // Clear form when dialog is closed
       addUserForm.reset({
-        userCode: "",
-        username: "",
-        pin: "",
-        name: "",
-        role: "read",
-        department: "",
-        designation: ""
+        userCode: "", username: "", pin: "", name: "",
+        role: "read", department: "", designation: "",
+        plants: [], allowedPages: [],
       });
     }
     setIsAddDialogOpen(open);
   };
 
-  // Handle editing an existing user
   const handleEditUser = (data: Partial<UserFormValues>) => {
     if (currentUser && currentUser.userCode) {
-      // Don't send empty PIN
-      if (data.pin === "") {
-        delete data.pin;
-      }
+      if (data.pin === "") delete data.pin;
       updateUserMutation.mutate({ userCode: currentUser.userCode, data });
     }
   };
 
-  // Handle deleting a user
   const handleDeleteUser = () => {
     if (currentUser && currentUser.userCode) {
       deleteUserMutation.mutate(currentUser.userCode);
     }
   };
 
-  // Open edit dialog and set current user
   const openEditDialog = (user: User) => {
     setCurrentUser(user);
     editUserForm.reset({
-      userCode: (user as any).userCode || "",
+      userCode: user.userCode || "",
       username: user.username,
       name: user.name || "",
       role: (user.role as any) || "read",
       department: user.department || "",
-      designation: (user as any).designation || ""
+      designation: user.designation || "",
+      plants: parseJsonArray((user as any).plants),
+      allowedPages: parseJsonArray((user as any).allowedPages),
     });
     setIsEditDialogOpen(true);
   };
 
-  // Open delete dialog and set current user
   const openDeleteDialog = (user: User) => {
     setCurrentUser(user);
     setIsDeleteDialogOpen(true);
   };
 
-  // States for departments
   const [departments, setDepartments] = useState<string[]>([
     "MANAGEMENT", "IT", "BILLING", "SALES", "DISPATCH {VALSAD}", "DISPATCH {INDORE}", "DISPATCH {LUCKNOW}", "ACCOUNTS", "STEER", "M&S"
   ]);
   const [customDepartment, setCustomDepartment] = useState("");
   const [isAddingDepartment, setIsAddingDepartment] = useState(false);
 
-  // States for designations
   const [designations, setDesignations] = useState<string[]>([
-    "DIRECTOR", "MANAGER", "ASST. MANAGER", "HEAD", "ASSISTANT", "STAFF", 
+    "DIRECTOR", "MANAGER", "ASST. MANAGER", "HEAD", "ASSISTANT", "STAFF",
     "HELPER", "SUPERVISOR", "STOREKEEPER", "LOADER", "DRIVER"
   ]);
   const [customDesignation, setCustomDesignation] = useState("");
   const [isAddingDesignation, setIsAddingDesignation] = useState(false);
 
-  // Add a new department
   const addNewDepartment = () => {
     if (customDepartment.trim() !== "" && !departments.includes(customDepartment.trim())) {
       setDepartments([...departments, customDepartment.trim()]);
@@ -287,14 +361,223 @@ const Users = () => {
       setIsAddingDepartment(false);
     }
   };
-  
-  // Add a new designation
+
   const addNewDesignation = () => {
     if (customDesignation.trim() !== "" && !designations.includes(customDesignation.trim())) {
       setDesignations([...designations, customDesignation.trim()]);
       setCustomDesignation("");
       setIsAddingDesignation(false);
     }
+  };
+
+  // Shared form body (used for both add + edit forms)
+  const renderFormBody = (form: any, isEdit = false) => {
+    const watchedRole = form.watch("role");
+    const isAdminRole = watchedRole === "admin" || watchedRole === "super-admin";
+
+    return (
+      <div className="space-y-4 py-2">
+        <FormField control={form.control} name="userCode" render={({ field }) => (
+          <FormItem>
+            <FormLabel>User Code</FormLabel>
+            <FormControl>
+              <Input placeholder="Enter user code" {...field} />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )} />
+
+        <FormField control={form.control} name="username" render={({ field }) => (
+          <FormItem>
+            <FormLabel>Username</FormLabel>
+            <FormControl>
+              <Input placeholder="johndoe" {...field} />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )} />
+
+        <FormField control={form.control} name="pin" render={({ field }) => (
+          <FormItem>
+            <FormLabel>PIN (4 digits)</FormLabel>
+            <FormControl>
+              <Input
+                type="text"
+                placeholder={isEdit ? "Leave blank to keep current PIN" : "1234"}
+                maxLength={4}
+                pattern="[0-9]{4}"
+                inputMode="numeric"
+                {...field}
+                value={field.value || ''}
+              />
+            </FormControl>
+            {isEdit && (
+              <FormDescription>Leave blank to keep the current PIN. Must be exactly 4 digits.</FormDescription>
+            )}
+            {!isEdit && (
+              <FormDescription>4-digit PIN code for authentication</FormDescription>
+            )}
+            <FormMessage />
+          </FormItem>
+        )} />
+
+        <FormField control={form.control} name="name" render={({ field }) => (
+          <FormItem>
+            <FormLabel>Display Name</FormLabel>
+            <FormControl>
+              <Input placeholder="John Doe" {...field} value={field.value || ''} />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )} />
+
+        <div className="grid grid-cols-2 gap-4">
+          <FormField control={form.control} name="role" render={({ field }) => (
+            <FormItem>
+              <FormLabel>Role</FormLabel>
+              <Select onValueChange={field.onChange} value={field.value || undefined}>
+                <FormControl>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select role" />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  <SelectItem value="admin">Admin</SelectItem>
+                  <SelectItem value="super-admin">Super Admin</SelectItem>
+                  <SelectItem value="read/write">Read/Write</SelectItem>
+                  <SelectItem value="read">Read Only</SelectItem>
+                </SelectContent>
+              </Select>
+              <FormMessage />
+            </FormItem>
+          )} />
+
+          <FormField control={form.control} name="department" render={({ field }) => (
+            <FormItem>
+              <FormLabel>Department</FormLabel>
+              {isAddingDepartment ? (
+                <div className="flex gap-2">
+                  <FormControl>
+                    <Input
+                      placeholder="New department name"
+                      value={customDepartment}
+                      onChange={(e) => setCustomDepartment(e.target.value)}
+                      className="flex-1"
+                    />
+                  </FormControl>
+                  <Button type="button" size="icon" onClick={addNewDepartment} disabled={!customDepartment.trim()}>
+                    <Check className="h-4 w-4" />
+                  </Button>
+                  <Button type="button" size="icon" variant="ghost" onClick={() => { setIsAddingDepartment(false); setCustomDepartment(""); }}>
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <Select onValueChange={field.onChange} value={field.value || undefined}>
+                    <FormControl>
+                      <SelectTrigger className="flex-1">
+                        <SelectValue placeholder="Select department" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {departments.map((dept) => (
+                        <SelectItem key={dept} value={dept}>{dept}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button type="button" size="icon" variant="outline" onClick={() => setIsAddingDepartment(true)}>
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+              <FormMessage />
+            </FormItem>
+          )} />
+        </div>
+
+        <FormField control={form.control} name="designation" render={({ field }) => (
+          <FormItem>
+            <FormLabel>Designation</FormLabel>
+            {isAddingDesignation ? (
+              <div className="flex gap-2">
+                <FormControl>
+                  <Input
+                    placeholder="New designation"
+                    value={customDesignation}
+                    onChange={(e) => setCustomDesignation(e.target.value)}
+                    className="flex-1"
+                  />
+                </FormControl>
+                <Button type="button" size="icon" onClick={addNewDesignation} disabled={!customDesignation.trim()}>
+                  <Check className="h-4 w-4" />
+                </Button>
+                <Button type="button" size="icon" variant="ghost" onClick={() => { setIsAddingDesignation(false); setCustomDesignation(""); }}>
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <Select onValueChange={field.onChange} value={field.value || undefined}>
+                  <FormControl>
+                    <SelectTrigger className="flex-1">
+                      <SelectValue placeholder="Select designation" />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    {designations.map((d) => (
+                      <SelectItem key={d} value={d}>{d}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button type="button" size="icon" variant="outline" onClick={() => setIsAddingDesignation(true)}>
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
+            <FormMessage />
+          </FormItem>
+        )} />
+
+        {/* Plants multi-select */}
+        <FormField control={form.control} name="plants" render={({ field }) => (
+          <FormItem>
+            <FormLabel>Plants</FormLabel>
+            <FormControl>
+              <MultiSelectField
+                label="plants"
+                options={plantOptions}
+                selected={field.value ?? []}
+                onChange={field.onChange}
+              />
+            </FormControl>
+            <FormDescription>Select one or more plants this user belongs to.</FormDescription>
+            <FormMessage />
+          </FormItem>
+        )} />
+
+        {/* Allowed Pages multi-select */}
+        <FormField control={form.control} name="allowedPages" render={({ field }) => (
+          <FormItem>
+            <FormLabel>Allowed Pages</FormLabel>
+            <FormControl>
+              <MultiSelectField
+                label="pages"
+                options={CONTROLLABLE_PAGES}
+                selected={field.value ?? []}
+                onChange={field.onChange}
+                disabled={isAdminRole}
+                disabledNote="Admin / Super-Admin have access to all pages automatically."
+              />
+            </FormControl>
+            {!isAdminRole && (
+              <FormDescription>Select which pages this user can access. Home, Messages, Check In/Out and Profile are always accessible.</FormDescription>
+            )}
+            <FormMessage />
+          </FormItem>
+        )} />
+      </div>
+    );
   };
 
   return (
@@ -346,58 +629,64 @@ const Users = () => {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="w-[100px]">User</TableHead>
+                      <TableHead className="w-[60px]">User</TableHead>
                       <TableHead>Name</TableHead>
                       <TableHead>Username</TableHead>
                       <TableHead>Designation</TableHead>
                       <TableHead>Role</TableHead>
+                      <TableHead>Plants</TableHead>
                       <TableHead className="text-right">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredUsers.map((user: User) => (
-                      <TableRow key={user.userCode}>
-                        <TableCell>
-                          <Avatar>
-                            <AvatarFallback className="bg-primary/10 text-primary">
-                              {(user.name || user.username).substring(0, 2).toUpperCase()}
-                            </AvatarFallback>
-                          </Avatar>
-                        </TableCell>
-                        <TableCell className="font-medium">{user.name || "-"}</TableCell>
-                        <TableCell>{user.username}</TableCell>
-                        <TableCell>{user.designation || "-"}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={
-                            user.role === "admin"
-                              ? "bg-blue-50 text-blue-700 border-blue-200"
-                              : "bg-green-50 text-green-700 border-green-200"
-                          }>
-                            {user.role || "User"}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-2">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => openEditDialog(user)}
-                            >
-                              <Edit className="h-4 w-4" />
-                              <span className="sr-only">Edit</span>
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => openDeleteDialog(user)}
-                            >
-                              <Trash className="h-4 w-4" />
-                              <span className="sr-only">Delete</span>
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    {filteredUsers.map((user: User) => {
+                      const userPlants = parseJsonArray((user as any).plants);
+                      return (
+                        <TableRow key={user.userCode}>
+                          <TableCell>
+                            <Avatar>
+                              <AvatarFallback className="bg-primary/10 text-primary">
+                                {(user.name || user.username).substring(0, 2).toUpperCase()}
+                              </AvatarFallback>
+                            </Avatar>
+                          </TableCell>
+                          <TableCell className="font-medium">{user.name || "-"}</TableCell>
+                          <TableCell>{user.username}</TableCell>
+                          <TableCell>{user.designation || "-"}</TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className={
+                              user.role === "admin" || user.role === "super-admin"
+                                ? "bg-blue-50 text-blue-700 border-blue-200"
+                                : "bg-green-50 text-green-700 border-green-200"
+                            }>
+                              {user.role || "User"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1">
+                              {userPlants.length === 0
+                                ? <span className="text-gray-400 text-sm">-</span>
+                                : userPlants.map((p: string) => (
+                                    <Badge key={p} variant="secondary" className="text-xs">{p}</Badge>
+                                  ))
+                              }
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex justify-end gap-2">
+                              <Button variant="ghost" size="icon" onClick={() => openEditDialog(user)}>
+                                <Edit className="h-4 w-4" />
+                                <span className="sr-only">Edit</span>
+                              </Button>
+                              <Button variant="ghost" size="icon" onClick={() => openDeleteDialog(user)}>
+                                <Trash className="h-4 w-4" />
+                                <span className="sr-only">Delete</span>
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
                   </TableBody>
                 </Table>
               )}
@@ -408,7 +697,7 @@ const Users = () => {
 
       {/* Add User Dialog */}
       <Dialog open={isAddDialogOpen} onOpenChange={handleAddDialogClose}>
-        <DialogContent className="sm:max-w-[425px]">
+        <DialogContent className="sm:max-w-[580px] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add New User</DialogTitle>
             <DialogDescription>
@@ -416,245 +705,14 @@ const Users = () => {
             </DialogDescription>
           </DialogHeader>
           <Form {...addUserForm}>
-            <form onSubmit={addUserForm.handleSubmit(handleAddUser)} className="space-y-4 py-2">
-              <FormField
-                control={addUserForm.control}
-                name="userCode"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>User Code</FormLabel>
-                    <FormControl>
-                      <Input placeholder="Enter user code" data-testid="input-user-code" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={addUserForm.control}
-                name="username"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Username</FormLabel>
-                    <FormControl>
-                      <Input placeholder="johndoe" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={addUserForm.control}
-                name="pin"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>PIN (4 digits)</FormLabel>
-                    <FormControl>
-                      <Input type="text" placeholder="1234" maxLength={4} pattern="[0-9]{4}" inputMode="numeric" {...field} />
-                    </FormControl>
-                    <FormDescription>
-                      4-digit PIN code for authentication
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={addUserForm.control}
-                name="name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Display Name</FormLabel>
-                    <FormControl>
-                      <Input placeholder="John Doe" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="grid grid-cols-2 gap-4">
-                <FormField
-                  control={addUserForm.control}
-                  name="role"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Role</FormLabel>
-                      <Select
-                        onValueChange={field.onChange}
-                        defaultValue={field.value}
-                      >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select role" />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          <SelectItem value="admin">Admin</SelectItem>
-                          <SelectItem value="super-admin">Super Admin</SelectItem>
-                          <SelectItem value="read/write">Read/Write</SelectItem>
-                          <SelectItem value="read">Read Only</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={addUserForm.control}
-                  name="department"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Department</FormLabel>
-                      {isAddingDepartment ? (
-                        <div className="flex gap-2">
-                          <FormControl>
-                            <Input 
-                              placeholder="New department name" 
-                              value={customDepartment}
-                              onChange={(e) => setCustomDepartment(e.target.value)}
-                              className="flex-1"
-                            />
-                          </FormControl>
-                          <Button 
-                            type="button" 
-                            size="icon" 
-                            onClick={addNewDepartment}
-                            disabled={!customDepartment.trim()}
-                          >
-                            <Check className="h-4 w-4" />
-                          </Button>
-                          <Button 
-                            type="button" 
-                            size="icon" 
-                            variant="ghost" 
-                            onClick={() => {
-                              setIsAddingDepartment(false);
-                              setCustomDepartment("");
-                            }}
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="flex gap-2">
-                          <Select
-                            onValueChange={field.onChange}
-                            value={field.value || undefined}
-                          >
-                            <FormControl>
-                              <SelectTrigger className="flex-1">
-                                <SelectValue placeholder="Select department" />
-                              </SelectTrigger>
-                            </FormControl>
-                            <SelectContent>
-                              {departments.map((dept) => (
-                                <SelectItem key={dept} value={dept}>
-                                  {dept}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <Button 
-                            type="button" 
-                            size="icon" 
-                            variant="outline" 
-                            onClick={() => setIsAddingDepartment(true)}
-                          >
-                            <Plus className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      )}
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </div>
-              
-              {/* Designation field */}
-              <FormField
-                control={addUserForm.control}
-                name="designation"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Designation</FormLabel>
-                    {isAddingDesignation ? (
-                      <div className="flex gap-2">
-                        <FormControl>
-                          <Input 
-                            placeholder="New designation" 
-                            value={customDesignation}
-                            onChange={(e) => setCustomDesignation(e.target.value)}
-                            className="flex-1"
-                          />
-                        </FormControl>
-                        <Button 
-                          type="button" 
-                          size="icon" 
-                          onClick={addNewDesignation}
-                          disabled={!customDesignation.trim()}
-                        >
-                          <Check className="h-4 w-4" />
-                        </Button>
-                        <Button 
-                          type="button" 
-                          size="icon" 
-                          variant="ghost" 
-                          onClick={() => {
-                            setIsAddingDesignation(false);
-                            setCustomDesignation("");
-                          }}
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="flex gap-2">
-                        <Select
-                          onValueChange={field.onChange}
-                          value={field.value || undefined}
-                        >
-                          <FormControl>
-                            <SelectTrigger className="flex-1">
-                              <SelectValue placeholder="Select designation" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            {designations.map((designation) => (
-                              <SelectItem key={designation} value={designation}>
-                                {designation}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <Button 
-                          type="button" 
-                          size="icon" 
-                          variant="outline" 
-                          onClick={() => setIsAddingDesignation(true)}
-                        >
-                          <Plus className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    )}
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+            <form onSubmit={addUserForm.handleSubmit(handleAddUser)}>
+              {renderFormBody(addUserForm, false)}
               <DialogFooter className="pt-4">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => handleAddDialogClose(false)}
-                >
+                <Button type="button" variant="outline" onClick={() => handleAddDialogClose(false)}>
                   Cancel
                 </Button>
-                <Button
-                  type="submit"
-                  disabled={createUserMutation.isPending}
-                >
-                  {createUserMutation.isPending && (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  )}
+                <Button type="submit" disabled={createUserMutation.isPending}>
+                  {createUserMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Create User
                 </Button>
               </DialogFooter>
@@ -665,7 +723,7 @@ const Users = () => {
 
       {/* Edit User Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-        <DialogContent className="sm:max-w-[425px]">
+        <DialogContent className="sm:max-w-[580px] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit User</DialogTitle>
             <DialogDescription>
@@ -673,254 +731,14 @@ const Users = () => {
             </DialogDescription>
           </DialogHeader>
           <Form {...editUserForm}>
-            <form onSubmit={editUserForm.handleSubmit(handleEditUser)} className="space-y-4 py-2">
-              <FormField
-                control={editUserForm.control}
-                name="userCode"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>User Code</FormLabel>
-                    <FormControl>
-                      <Input placeholder="Enter user code" data-testid="input-user-code-edit" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={editUserForm.control}
-                name="username"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Username</FormLabel>
-                    <FormControl>
-                      <Input placeholder="johndoe" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={editUserForm.control}
-                name="pin"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>PIN (4 digits)</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="text"
-                        placeholder="Leave blank to keep current PIN"
-                        maxLength={4}
-                        pattern="[0-9]{4}"
-                        inputMode="numeric"
-                        {...field}
-                        value={field.value || ''}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      Leave blank to keep the current PIN. Must be exactly 4 digits.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={editUserForm.control}
-                name="name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Display Name</FormLabel>
-                    <FormControl>
-                      <Input placeholder="John Doe" {...field} value={field.value || ''} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="grid grid-cols-2 gap-4">
-                <FormField
-                  control={editUserForm.control}
-                  name="role"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Role</FormLabel>
-                      <Select
-                        onValueChange={field.onChange}
-                        defaultValue={field.value || "user"}
-                        value={field.value || undefined}
-                      >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select role" />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          <SelectItem value="admin">Admin</SelectItem>
-                          <SelectItem value="super-admin">Super Admin</SelectItem>
-                          <SelectItem value="read/write">Read/Write</SelectItem>
-                          <SelectItem value="read">Read Only</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={editUserForm.control}
-                  name="department"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Department</FormLabel>
-                      {isAddingDepartment ? (
-                        <div className="flex gap-2">
-                          <FormControl>
-                            <Input 
-                              placeholder="New department name" 
-                              value={customDepartment}
-                              onChange={(e) => setCustomDepartment(e.target.value)}
-                              className="flex-1"
-                            />
-                          </FormControl>
-                          <Button 
-                            type="button" 
-                            size="icon" 
-                            onClick={addNewDepartment}
-                            disabled={!customDepartment.trim()}
-                          >
-                            <Check className="h-4 w-4" />
-                          </Button>
-                          <Button 
-                            type="button" 
-                            size="icon" 
-                            variant="ghost" 
-                            onClick={() => {
-                              setIsAddingDepartment(false);
-                              setCustomDepartment("");
-                            }}
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="flex gap-2">
-                          <Select
-                            onValueChange={field.onChange}
-                            value={field.value || undefined}
-                          >
-                            <FormControl>
-                              <SelectTrigger className="flex-1">
-                                <SelectValue placeholder="Select department" />
-                              </SelectTrigger>
-                            </FormControl>
-                            <SelectContent>
-                              {departments.map((dept) => (
-                                <SelectItem key={dept} value={dept}>
-                                  {dept}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <Button 
-                            type="button" 
-                            size="icon" 
-                            variant="outline" 
-                            onClick={() => setIsAddingDepartment(true)}
-                          >
-                            <Plus className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      )}
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </div>
-              
-              {/* Designation field */}
-              <FormField
-                control={editUserForm.control}
-                name="designation"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Designation</FormLabel>
-                    {isAddingDesignation ? (
-                      <div className="flex gap-2">
-                        <FormControl>
-                          <Input 
-                            placeholder="New designation" 
-                            value={customDesignation}
-                            onChange={(e) => setCustomDesignation(e.target.value)}
-                            className="flex-1"
-                          />
-                        </FormControl>
-                        <Button 
-                          type="button" 
-                          size="icon" 
-                          onClick={addNewDesignation}
-                          disabled={!customDesignation.trim()}
-                        >
-                          <Check className="h-4 w-4" />
-                        </Button>
-                        <Button 
-                          type="button" 
-                          size="icon" 
-                          variant="ghost" 
-                          onClick={() => {
-                            setIsAddingDesignation(false);
-                            setCustomDesignation("");
-                          }}
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="flex gap-2">
-                        <Select
-                          onValueChange={field.onChange}
-                          value={field.value || undefined}
-                        >
-                          <FormControl>
-                            <SelectTrigger className="flex-1">
-                              <SelectValue placeholder="Select designation" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            {designations.map((designation) => (
-                              <SelectItem key={designation} value={designation}>
-                                {designation}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <Button 
-                          type="button" 
-                          size="icon" 
-                          variant="outline" 
-                          onClick={() => setIsAddingDesignation(true)}
-                        >
-                          <Plus className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    )}
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+            <form onSubmit={editUserForm.handleSubmit(handleEditUser)}>
+              {renderFormBody(editUserForm, true)}
               <DialogFooter className="pt-4">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setIsEditDialogOpen(false)}
-                >
+                <Button type="button" variant="outline" onClick={() => setIsEditDialogOpen(false)}>
                   Cancel
                 </Button>
-                <Button
-                  type="submit"
-                  disabled={updateUserMutation.isPending}
-                >
-                  {updateUserMutation.isPending && (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  )}
+                <Button type="submit" disabled={updateUserMutation.isPending}>
+                  {updateUserMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -954,22 +772,11 @@ const Users = () => {
             )}
           </div>
           <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setIsDeleteDialogOpen(false)}
-            >
+            <Button type="button" variant="outline" onClick={() => setIsDeleteDialogOpen(false)}>
               Cancel
             </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={handleDeleteUser}
-              disabled={deleteUserMutation.isPending}
-            >
-              {deleteUserMutation.isPending && (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              )}
+            <Button type="button" variant="destructive" onClick={handleDeleteUser} disabled={deleteUserMutation.isPending}>
+              {deleteUserMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Delete
             </Button>
           </DialogFooter>
