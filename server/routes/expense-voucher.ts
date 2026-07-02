@@ -159,6 +159,54 @@ function buildVoucherInfo(properties: Record<string, any>): Record<string, strin
   return info;
 }
 
+// Build the Order Details party text from one or more vouchers. Only vouchers
+// whose Authorisation is "Approved" or "Adjusted" contribute. Each party line
+// is prefixed with the voucher number it came from (voucher number BEFORE the
+// party name, no brackets), deduped, and sorted by the embedded order date.
+function buildPartyText(infos: Record<string, string>[]): string | undefined {
+  const partyKey = 'For Party x Ord Date';
+  const isAuthorizedForParty = (info: Record<string, string>) => {
+    const status = (info['Authorisation :'] || '').trim().toLowerCase();
+    return status === 'approved' || status === 'adjusted';
+  };
+
+  const seenParty = new Set<string>();
+  const partyLines: string[] = [];
+  for (const info of infos) {
+    if (!isAuthorizedForParty(info)) continue;
+    const text = info[partyKey];
+    if (!text) continue;
+    const vno = (info['Voucher No. :'] || '').trim();
+    const voucherTag = vno.lastIndexOf('-') >= 0 ? vno.slice(vno.lastIndexOf('-') + 1) : vno;
+    for (const line of String(text).split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      // Voucher number first, then the party name (no brackets).
+      const tagged = voucherTag ? `${voucherTag} ${trimmed}` : trimmed;
+      if (!seenParty.has(tagged)) {
+        seenParty.add(tagged);
+        partyLines.push(tagged);
+      }
+    }
+  }
+
+  // Sort by the order date embedded in each line, e.g.
+  // "GANGA ENTERPRISES - KADMA {01/07/26}" -> 01/07/26. Lines without a
+  // parseable date are pushed to the end.
+  const partyDateValue = (line: string): number => {
+    const m = line.match(/\{?\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s*\}?/);
+    if (!m) return Number.POSITIVE_INFINITY;
+    const day = parseInt(m[1], 10);
+    const month = parseInt(m[2], 10);
+    let year = parseInt(m[3], 10);
+    if (year < 100) year += 2000;
+    return new Date(year, month - 1, day).getTime();
+  };
+  partyLines.sort((a, b) => partyDateValue(a) - partyDateValue(b));
+
+  return partyLines.length > 0 ? partyLines.join('\n') : undefined;
+}
+
 // Merge several vouchers' info maps into one:
 //  - Toll, OnRoad and Amount are summed across every voucher.
 //  - Conveyance Allowance and Deduction are summed ONLY over Approved vouchers;
@@ -177,6 +225,16 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
   };
 
   const merged: Record<string, string> = { ...infos[0] };
+
+  // Order Details party name (voucher number prefixed) is only shown when
+  // Authorisation is "Approved"/"Adjusted" -- applies even to a single voucher.
+  const singleParty = buildPartyText([infos[0]]);
+  if (singleParty) {
+    merged['For Party x Ord Date'] = singleParty;
+  } else {
+    delete merged['For Party x Ord Date'];
+  }
+
   if (infos.length === 1) return merged;
 
   // Sum expense amounts across every voucher
@@ -240,7 +298,8 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
     dieselCounted = true;
   }
   if (dieselCounted) {
-    merged["Diesel {Ltr's} :"] = String(totalLtr);
+    // Round the summed diesel litres to 2 decimal places.
+    merged["Diesel {Ltr's} :"] = (Math.round(totalLtr * 100) / 100).toFixed(2);
   }
   if (uniqueBillNos.length > 0) {
     merged['For Diesel Bill No. :'] = uniqueBillNos.join(', ');
@@ -264,36 +323,14 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
     merged['Average :'] = (kmTotal / totalLtr).toFixed(2);
   }
 
-  // Merge party / order-date lines from every voucher (dedup identical lines)
-  const partyKey = 'For Party x Ord Date';
-  const seenParty = new Set<string>();
-  const partyLines: string[] = [];
-  for (const info of infos) {
-    const text = info[partyKey];
-    if (!text) continue;
-    for (const line of String(text).split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (trimmed && !seenParty.has(trimmed)) {
-        seenParty.add(trimmed);
-        partyLines.push(trimmed);
-      }
-    }
+  // Merge party / order-date lines across every voucher (voucher number
+  // prefixed, authorized-only, deduped, date-sorted).
+  const mergedParty = buildPartyText(infos);
+  if (mergedParty) {
+    merged['For Party x Ord Date'] = mergedParty;
+  } else {
+    delete merged['For Party x Ord Date'];
   }
-  // Sort the party lines by the order date embedded in each line, e.g.
-  // "GANGA ENTERPRISES - KADMA {01/07/26}" -> 01/07/26. Lines without a
-  // parseable date are pushed to the end (keeping their original order).
-  const partyDateValue = (line: string): number => {
-    const m = line.match(/\{?\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s*\}?/);
-    if (!m) return Number.POSITIVE_INFINITY;
-    const day = parseInt(m[1], 10);
-    const month = parseInt(m[2], 10);
-    let year = parseInt(m[3], 10);
-    if (year < 100) year += 2000;
-    return new Date(year, month - 1, day).getTime();
-  };
-  partyLines.sort((a, b) => partyDateValue(a) - partyDateValue(b));
-
-  if (partyLines.length > 0) merged[partyKey] = partyLines.join('\n');
 
   // Merge remarks from every voucher that has one, tagged with the voucher's
   // trailing number so it's clear which voucher the remark belongs to.
@@ -337,6 +374,22 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
       const i = v.lastIndexOf('-');
       return i >= 0 ? v.slice(i + 1) : v;
     };
+    // Show the voucher numbers in sorted order: group by prefix, then by the
+    // numeric trailing number (falling back to string compare when it isn't
+    // numeric) -> "KM2627-AEV-95720, 95798, 95799".
+    const suffixNum = (v: string) => {
+      const n = parseInt(suffixOf(v).replace(/[^0-9]/g, ''), 10);
+      return isNaN(n) ? Number.POSITIVE_INFINITY : n;
+    };
+    voucherNos.sort((a, b) => {
+      const pa = prefixOf(a);
+      const pb = prefixOf(b);
+      if (pa !== pb) return pa.localeCompare(pb);
+      const na = suffixNum(a);
+      const nb = suffixNum(b);
+      if (na !== nb) return na - nb;
+      return suffixOf(a).localeCompare(suffixOf(b));
+    });
     const firstPrefix = prefixOf(voucherNos[0]);
     const compact = voucherNos.map((v, idx) =>
       idx === 0 ? v : prefixOf(v) === firstPrefix ? suffixOf(v) : v
@@ -356,6 +409,56 @@ function getVoucherDriverName(info: Record<string, string>): string {
     info['Link to Driver'] ||
     ''
   ).trim();
+}
+
+function getVoucherVehicleNumber(info: Record<string, string>): string {
+  // The vehicle number is stored under different property names across the
+  // EV / AEV databases, so check every known variant (trailing spaces and
+  // colons matter in Notion). "Vehi x Dri :" holds "VEHICLE x DRIVER" so we
+  // take only the part before the separator.
+  const direct =
+    info['For Vehicle '] ||
+    info['For Vehicle'] ||
+    info['For Vehicle :'] ||
+    info['Vehicle No. :'] ||
+    info['Vehicle No :'] ||
+    info['Vehicle :'] ||
+    info['Vehicle'] ||
+    '';
+  if (direct.trim()) return direct.trim();
+
+  const combined = (info['Vehi x Dri :'] || info['Vehi x Dri'] || '').trim();
+  if (combined) {
+    // "GJ12AB1234 x MAHESHBHAI" -> "GJ12AB1234"
+    return combined.split(/\s*[x×]\s*/i)[0].trim();
+  }
+  return '';
+}
+
+// Splits voucher-info records into groups that share the same vehicle number.
+// A voucher number / driver-name search can turn up trips made with different
+// vehicles (e.g. same driver, same day, two different trucks); those must never
+// be blended into a single merged voucher, so each vehicle gets its own group.
+// Order of first appearance is preserved so the "default" group is predictable.
+function groupInfosByVehicle(
+  infos: Record<string, string>[]
+): { vehicleNumber: string; infos: Record<string, string>[] }[] {
+  const groups: { vehicleNumber: string; infos: Record<string, string>[] }[] = [];
+  const indexByVehicle = new Map<string, number>();
+
+  for (const info of infos) {
+    const vehicle = getVoucherVehicleNumber(info);
+    const key = vehicle.toUpperCase();
+    let idx = indexByVehicle.get(key);
+    if (idx === undefined) {
+      idx = groups.length;
+      indexByVehicle.set(key, idx);
+      groups.push({ vehicleNumber: vehicle, infos: [] });
+    }
+    groups[idx].infos.push(info);
+  }
+
+  return groups;
 }
 
 async function queryByVoucherNumber(
@@ -554,8 +657,30 @@ router.post('/expense-voucher', async (req, res) => {
         });
       }
 
+      // Different vehicles for the same driver are kept as separate vouchers
+      // instead of being blended together; the client shows a dropdown to
+      // switch between them when more than one vehicle is found.
+      // DEBUG: log the vehicle value read from every matched voucher so we can
+      // see why the grouping did / didn't split into multiple vehicles.
       console.log(
-        `🔗 Driver "${driverName}": merging ${infos.length} voucher(s) into one printout`
+        `🚚 Driver "${driverName}" vehicle values:`,
+        infos.map((info) => ({
+          vehicle: getVoucherVehicleNumber(info),
+          voucherNo: info['Voucher No. :'] || ''
+        }))
+      );
+
+      const vehicleGroups = groupInfosByVehicle(infos);
+      const vehicleOptions = vehicleGroups.map((g) => ({
+        vehicleNumber: g.vehicleNumber || 'Unknown',
+        voucherInfo: mergeVoucherInfos(g.infos),
+        mergedVoucherCount: g.infos.length
+      }));
+
+      console.log(
+        vehicleOptions.length > 1
+          ? `🔗 Driver "${driverName}": ${infos.length} voucher(s) found across ${vehicleOptions.length} distinct vehicles: ${vehicleOptions.map((o) => o.vehicleNumber).join(', ')}`
+          : `🔗 Driver "${driverName}": merging ${infos.length} voucher(s) into one printout (single vehicle: ${vehicleOptions[0]?.vehicleNumber})`
       );
 
       const driverData: any = {
@@ -563,9 +688,12 @@ router.post('/expense-voucher', async (req, res) => {
         plant: firstPlant,
         status: firstStatus,
         items: [],
-        voucherInfo: mergeVoucherInfos(infos),
-        mergedVoucherCount: infos.length
+        voucherInfo: vehicleOptions[0].voucherInfo,
+        mergedVoucherCount: vehicleOptions[0].mergedVoucherCount
       };
+      if (vehicleOptions.length > 1) {
+        driverData.vehicleOptions = vehicleOptions;
+      }
 
       const driverResult = {
         success: true,
@@ -1139,6 +1267,15 @@ router.post('/expense-voucher', async (req, res) => {
         const baseDriver = getVoucherDriverName(baseInfo);
         const baseDate = (baseInfo['Voucher Date :'] || '').trim();
 
+        console.log(
+          `🔎 Voucher-number merge check: driver="${baseDriver}", date="${baseDate}", vehicle="${getVoucherVehicleNumber(baseInfo)}"`
+        );
+        if (!baseDriver || !baseDate) {
+          console.warn(
+            `⚠️ Sibling merge skipped (no ${!baseDriver ? 'driver' : ''}${!baseDriver && !baseDate ? ' & ' : ''}${!baseDate ? 'date' : ''}). Available keys: ${Object.keys(baseInfo).join(' | ')}`
+          );
+        }
+
         if (baseDriver && baseDate) {
           const candidateInfos: Record<string, string>[] = [baseInfo];
           const seenIds = new Set<string>([firstMatch.id]);
@@ -1157,12 +1294,13 @@ router.post('/expense-voucher', async (req, res) => {
             });
             mergeBatches++;
 
+            const baseDriverKey = baseDriver.toLowerCase();
             for (const page of mergeResp.results as any[]) {
               if (seenIds.has(page.id)) continue;
               if (!('properties' in page)) continue;
               const info = buildVoucherInfo(page.properties);
               if (
-                getVoucherDriverName(info) === baseDriver &&
+                getVoucherDriverName(info).toLowerCase() === baseDriverKey &&
                 (info['Voucher Date :'] || '').trim() === baseDate
               ) {
                 seenIds.add(page.id);
@@ -1180,12 +1318,44 @@ router.post('/expense-voucher', async (req, res) => {
             );
           }
 
+          console.log(
+            `🚚 Voucher-number siblings (${candidateInfos.length}) vehicle values:`,
+            candidateInfos.map((info) => ({
+              vehicle: getVoucherVehicleNumber(info),
+              voucherNo: info['Voucher No. :'] || ''
+            }))
+          );
+
           if (candidateInfos.length > 1) {
-            console.log(
-              `🔗 Merging ${candidateInfos.length} vouchers for driver "${baseDriver}" on ${baseDate}`
-            );
-            expenseVoucherData.voucherInfo = mergeVoucherInfos(candidateInfos);
-            expenseVoucherData.mergedVoucherCount = candidateInfos.length;
+            // Same driver + same date but different vehicles (e.g. two trucks
+            // dispatched the same day) must stay separate vouchers; default to
+            // the vehicle the user actually searched for and offer the rest
+            // as dropdown options.
+            const vehicleGroups = groupInfosByVehicle(candidateInfos);
+            if (vehicleGroups.length > 1) {
+              const vehicleOptions = vehicleGroups.map((g) => ({
+                vehicleNumber: g.vehicleNumber || 'Unknown',
+                voucherInfo: mergeVoucherInfos(g.infos),
+                mergedVoucherCount: g.infos.length
+              }));
+              const baseVehicle = getVoucherVehicleNumber(baseInfo).toUpperCase();
+              const defaultIdx = Math.max(
+                0,
+                vehicleGroups.findIndex((g) => g.vehicleNumber.toUpperCase() === baseVehicle)
+              );
+              console.log(
+                `🔗 Driver "${baseDriver}" on ${baseDate}: ${vehicleGroups.length} distinct vehicles found; keeping them separate`
+              );
+              expenseVoucherData.voucherInfo = vehicleOptions[defaultIdx].voucherInfo;
+              expenseVoucherData.mergedVoucherCount = vehicleOptions[defaultIdx].mergedVoucherCount;
+              expenseVoucherData.vehicleOptions = vehicleOptions;
+            } else {
+              console.log(
+                `🔗 Merging ${candidateInfos.length} vouchers for driver "${baseDriver}" on ${baseDate}`
+              );
+              expenseVoucherData.voucherInfo = mergeVoucherInfos(candidateInfos);
+              expenseVoucherData.mergedVoucherCount = candidateInfos.length;
+            }
           }
         }
       } catch (mergeError) {

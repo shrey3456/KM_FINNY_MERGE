@@ -43,12 +43,20 @@ interface ExpenseVoucherItem {
   quantity: number;
 }
 
+interface VehicleOption {
+  vehicleNumber: string;
+  voucherInfo: Record<string, string>;
+  mergedVoucherCount: number;
+}
+
 interface ExpenseVoucherData {
   orderNumber: string;
   plant: string;
   status: string;
   items: ExpenseVoucherItem[];
   voucherInfo: Record<string, string>;
+  mergedVoucherCount?: number;
+  vehicleOptions?: VehicleOption[];
 }
 
 interface ExpenseVoucherResponse {
@@ -133,6 +141,15 @@ const fontSizeForPartyCount = (count: number) => {
   return 10;
 };
 
+// Diesel litres formatted to 2 decimal places; passes through non-numeric
+// values (e.g. "N/A") unchanged.
+const formatDieselLtr = (value?: string) => {
+  if (value === undefined || value === null || value === "") return "N/A";
+  const n = parseFloat(String(value).replace(/[^0-9.-]/g, ""));
+  if (isNaN(n)) return value;
+  return n.toFixed(2);
+};
+
 const getPartyTextFromVoucherInfo = (info?: Record<string, string>) => {
   if (!info) return "";
   const entry = Object.entries(info).find(([k]) => /party/i.test(k));
@@ -148,6 +165,9 @@ export default function ExpenseVoucher() {
   const [searchMode, setSearchMode] = useState<"voucher" | "driver">("voucher");
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchStage, setSearchStage] = useState("");
+  // null = not chosen yet; when a search returns multiple vehicles, the
+  // voucher details stay hidden behind a "pick a vehicle" prompt until set.
+  const [selectedVehicleIndex, setSelectedVehicleIndex] = useState<number | null>(0);
   const [editableInvoiceAmount, setEditableInvoiceAmount] = useState("");
   const [isEditingAmount, setIsEditingAmount] = useState(false);
   const [editableVehicleDriver, setEditableVehicleDriver] = useState("");
@@ -260,6 +280,23 @@ export default function ExpenseVoucher() {
       }
     },
   });
+
+  // A search can turn up multiple vehicles (e.g. same driver, different
+  // trucks). Whenever a fresh search result comes in, hide the voucher
+  // details behind a "pick a vehicle" prompt if there's more than one;
+  // otherwise there's nothing to choose, so go straight to the details.
+  useEffect(() => {
+    const options = expenseVoucherData?.data?.vehicleOptions;
+    setSelectedVehicleIndex(options && options.length > 1 ? null : 0);
+  }, [expenseVoucherData]);
+
+  const handleVehicleOptionChange = (index: number) => {
+    const option = expenseVoucherData?.data?.vehicleOptions?.[index];
+    if (!expenseVoucherData?.data || !option) return;
+    expenseVoucherData.data.voucherInfo = option.voucherInfo;
+    expenseVoucherData.data.mergedVoucherCount = option.mergedVoucherCount;
+    setSelectedVehicleIndex(index);
+  };
 
   useEffect(() => {
     if (expenseVoucherLoading || isFetching) {
@@ -491,15 +528,36 @@ export default function ExpenseVoucher() {
     const partyText = getPartyTextFromVoucherInfo(voucherInfo);
 
     const partyCount = countParties(partyText);
-    
-    // CHANGED: Logic based on character length instead of party count
-    const partyTextLength = (voucherInfo["For Party x Ord Date"] || "").length;
-    let partyFontPt = 10; // default large size
 
-    if (partyTextLength > 800) partyFontPt = 7;
-    else if (partyTextLength > 600) partyFontPt = 9;
-    else if (partyTextLength > 400) partyFontPt = 10;
-    else if (partyTextLength > 300) partyFontPt = 11;
+    // Size the party font so the list fits the fixed cell (~47mm) WITHOUT
+    // overflowing or leaving extra empty space, keeping the voucher layout
+    // intact. Scale by BOTH the number of party lines (vertical fit) and the
+    // total text length (horizontal wrap), and take the smaller of the two.
+    const partyRaw = voucherInfo["For Party x Ord Date"] || "";
+    const partyTextLength = partyRaw.length;
+    const partyLineCount = partyRaw
+      .split(/\r?\n/)
+      .filter((l) => l.trim()).length;
+
+    const fontByLines =
+      partyLineCount <= 8 ? 13
+      : partyLineCount <= 11 ? 11
+      : partyLineCount <= 14 ? 10
+      : partyLineCount <= 17 ? 9
+      : partyLineCount <= 20 ? 8
+      : partyLineCount <= 24 ? 7
+      : 6;
+
+    const fontByLength =
+      partyTextLength > 900 ? 6
+      : partyTextLength > 750 ? 7
+      : partyTextLength > 600 ? 8
+      : partyTextLength > 450 ? 9
+      : partyTextLength > 320 ? 10
+      : partyTextLength > 200 ? 11
+      : 13;
+
+    let partyFontPt = Math.min(fontByLines, fontByLength);
 
     // Voucher No. cell font sized by length so every number fits (the print
     // runs in a hidden iframe, so runtime measurement can't be used here).
@@ -785,8 +843,7 @@ export default function ExpenseVoucher() {
               </tr>
 
               <tr>
-                <td colspan="4" class="diesel-amount">${voucherInfo["Diesel {Ltr's} :"] || "N/A"
-                  }</td>
+                <td colspan="4" class="diesel-amount">${formatDieselLtr(voucherInfo["Diesel {Ltr's} :"])}</td>
               </tr>
 
               <tr>
@@ -1200,7 +1257,46 @@ export default function ExpenseVoucher() {
         </CardContent>
       </Card>
 
-      {expenseVoucherData?.data && (
+      {expenseVoucherData?.data &&
+        expenseVoucherData.data.vehicleOptions &&
+        expenseVoucherData.data.vehicleOptions.length > 1 &&
+        selectedVehicleIndex === null && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Truck className="h-5 w-5" />
+                Multiple Vehicles Found
+              </CardTitle>
+              <CardDescription>
+                This search matched vouchers from more than one vehicle. Pick a
+                vehicle to view its voucher details.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                {expenseVoucherData.data.vehicleOptions.map((option, idx) => (
+                  <button
+                    key={option.vehicleNumber + idx}
+                    type="button"
+                    onClick={() => handleVehicleOptionChange(idx)}
+                    className="text-left p-4 rounded-lg border-2 border-orange-200 bg-orange-50 hover:border-orange-500 hover:bg-orange-100 transition-colors"
+                  >
+                    <div className="flex items-center gap-2 text-orange-900 font-semibold text-base">
+                      <Truck className="h-4 w-4" />
+                      {option.vehicleNumber}
+                    </div>
+                    <div className="text-sm text-gray-600 mt-1">
+                      {option.mergedVoucherCount} voucher
+                      {option.mergedVoucherCount === 1 ? "" : "s"}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+      {expenseVoucherData?.data && selectedVehicleIndex !== null && (
         <div className="space-y-6">
           <Card>
             <CardHeader>
@@ -1209,13 +1305,24 @@ export default function ExpenseVoucher() {
                   <Receipt className="h-5 w-5" />
                   Voucher Details
                 </CardTitle>
-                <Button
-                  onClick={handlePrint}
-                  className="bg-orange-600 hover:bg-orange-700"
-                >
-                  <Printer className="w-4 h-4 mr-2" />
-                  Print Expense Voucher
-                </Button>
+                <div className="flex items-center gap-2">
+                  {expenseVoucherData.data.vehicleOptions &&
+                    expenseVoucherData.data.vehicleOptions.length > 1 && (
+                      <Button
+                        variant="outline"
+                        onClick={() => setSelectedVehicleIndex(null)}
+                      >
+                        Change Vehicle
+                      </Button>
+                    )}
+                  <Button
+                    onClick={handlePrint}
+                    className="bg-orange-600 hover:bg-orange-700"
+                  >
+                    <Printer className="w-4 h-4 mr-2" />
+                    Print Expense Voucher
+                  </Button>
+                </div>
               </div>
               <div className="border-t pt-4 mt-4"></div>
             </CardHeader>
@@ -1309,9 +1416,11 @@ export default function ExpenseVoucher() {
                         Diesel (Ltrs):
                       </span>
                       <div className="text-base font-semibold">
-                        {expenseVoucherData.data.voucherInfo?.[
-                          "Diesel {Ltr's} :"
-                        ] || "N/A"}
+                        {formatDieselLtr(
+                          expenseVoucherData.data.voucherInfo?.[
+                            "Diesel {Ltr's} :"
+                          ]
+                        )}
                       </div>
                     </div>
                     <div className="space-y-1">
