@@ -2433,12 +2433,28 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     return (
       <div className="flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6">
 
+        {/* ── Mobile tab strip (Scan / Master View / Separate CSVs) ── */}
+        <div className="sm:hidden flex gap-1.5 overflow-x-auto px-3 py-2 bg-white border-b border-gray-100">
+          {(["scan", "master-view", "separate-csvs"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setOsTab(t)}
+              className={`shrink-0 rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+                osTab === t ? "bg-[#001d6e] text-white" : "border border-gray-200 bg-white text-gray-600"
+              }`}
+            >
+              {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Separate CSVs"}
+            </button>
+          ))}
+        </div>
+
         {/* ══════════════════════════════════════════════════
             MOBILE LAYOUT  (hidden on sm+)
             - Sticky header strip with session info + progress
             - Sticky scanner (Camera toggle + feed / manual)
             - Natural-scroll items list below
         ════════════════════════════════════════════════════ */}
+        {osTab === "scan" && (
         <div className="flex flex-col sm:hidden h-full overflow-y-auto">
 
           {/* ── Sticky header + scanner ── */}
@@ -2796,15 +2812,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             )}
           </div>
         </div>
+        )}
 
         {/* ══════════════════════════════════════════════════
             DESKTOP LAYOUT  (hidden on mobile)
+            On mobile this block is still shown for the Master View /
+            Separate CSVs tabs (their panels are responsive); the header,
+            desktop tab strip and Scan panel stay desktop-only.
         ════════════════════════════════════════════════════ */}
-        <div className="hidden sm:block">
-          <div className="mx-auto max-w-7xl space-y-4">
+        <div className="sm:block">
+          <div className="mx-auto max-w-7xl space-y-4 px-3 sm:px-0">
 
-            {/* Header row */}
-            <div className="flex items-center justify-between gap-3 flex-wrap">
+            {/* Header row (desktop only — mobile has its own sticky header) */}
+            <div className="hidden sm:flex items-center justify-between gap-3 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
                 <Button variant="outline" size="sm" className="h-8 px-3 text-xs border-[#001d6e] text-[#001d6e] hover:bg-[#001d6e] hover:text-white shrink-0" onClick={() => navigate("/scan")}>
                   <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Scan Dashboard
@@ -2826,8 +2846,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               </div>
             </div>
 
-            {/* ── Tab strip ── */}
-            <div className="flex flex-wrap gap-1.5">
+            {/* ── Tab strip (desktop only — mobile strip is at the top) ── */}
+            <div className="hidden sm:flex flex-wrap gap-1.5">
               {(["scan", "master-view", "separate-csvs"] as const).map((t) => (
                 <button
                   key={t}
@@ -2844,7 +2864,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             </div>
 
             {osTab === "scan" && (
-            <div className="space-y-4">
+            <div className="hidden sm:block space-y-4">
             <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
 
               {/* Items table */}
