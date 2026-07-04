@@ -424,10 +424,14 @@ export default function OrderImport() {
       // Optimistic update: show the new session immediately in both lists
       // while the SSE-triggered refetch confirms server state in the background.
       if (data.session) {
+        // Honour the server's `activated` flag: the first CSV uploaded when no
+        // session is active is auto-activated server-side, so mark it active
+        // immediately instead of trusting the (possibly stale) session snapshot.
+        const resolvedStatus = data.activated ? "active" : (data.session.scanStatus ?? "available");
         const newRow: ImportSessionRow = {
           ...data.session,
           rowCount:       data.rowCount,
-          scanStatus:     data.session.scanStatus ?? "available",
+          scanStatus:     resolvedStatus,
           importedByName: (user as any)?.name ?? null,
         };
         patchImportSessions((rows) => [newRow, ...rows]);
@@ -442,7 +446,7 @@ export default function OrderImport() {
         );
 
         qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
-          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: data.session.scanStatus ?? "available", importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null }, ...old] : [],
+          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: resolvedStatus, importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null }, ...old] : [],
         );
       }
 

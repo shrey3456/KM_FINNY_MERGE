@@ -157,9 +157,13 @@ router.post('/order-import/sessions', async (req: Request, res: Response) => {
       .limit(1);
 
     if (activeForPlant.length === 0) {
-      await seedAndActivateSession(session.id, userCode);
-      activated = true;
-      console.log(`[order-import] auto-activated uploaded session ${session.id} (${csvFileName}) — no active session for plant ${plant}`);
+      activated = await seedAndActivateSession(session.id, userCode);
+      // Reflect the new status on the session object we return, otherwise the
+      // client receives the pre-activation snapshot ('available') and — if its
+      // background refetch is served stale by a production reverse-proxy cache —
+      // never shows the CSV as active.
+      if (activated) session.scanStatus = 'active';
+      console.log(`[order-import] auto-activate uploaded session ${session.id} (${csvFileName}) for plant ${plant}: ${activated ? 'activated' : 'FAILED'}`);
     } else {
       console.log(`[order-import] uploaded session ${session.id} left 'available' — plant ${plant} already has an active session`);
     }
