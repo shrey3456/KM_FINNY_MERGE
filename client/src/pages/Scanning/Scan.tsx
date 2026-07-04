@@ -179,7 +179,7 @@ type CsvMode = "pivot" | "flat";
 type MvItem = {
   id: number; barcode: string | null; itemName: string | null;
   sapCode: string | null; quantity: number | null; expectedPallets: number | null;
-  scannedQty: number | null; scanStatus: string | null;
+  scannedQty: number | null; scanStatus: string | null; itemsPerPallet: number | null;
 };
 type MvFile = {
   sessionId: number; csvFileName: string; rowCount: number | null;
@@ -202,6 +202,18 @@ type ImpItem = {
 function scanLocalISODate(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Extracts the calendar date (YYYY-MM-DD, UTC) from a server timestamp so it
+// matches how the master-view endpoint filters (createdAt::date). Using the raw
+// device-local date can be a day off in production when the browser TZ differs
+// from the server, which makes the master view load nothing.
+function scanDateOfIso(dt: string | null | undefined): string {
+  if (!dt) return "";
+  const s = String(dt);
+  const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
+  if (isNaN(d.getTime())) return "";
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
 function scanFmtIST(dt: string | null | undefined): string {
@@ -310,6 +322,7 @@ export default function ScanOrderPage() {
   const [csvPage, setCsvPage] = useState(1);
   const CSV_PAGE_SIZE = 8;
   const [scanItemPage, setScanItemPage] = useState(1);
+  const [mvItemPage,   setMvItemPage]   = useState(1);
   const SCAN_PAGE_SIZE = 10;
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
@@ -1511,6 +1524,18 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     }
   }, [activeSession?.id, view]);
 
+  // When a scanning session loads, point the Master View at that session's own
+  // upload date so it loads the merged CSVs for that date instantly — instead of
+  // defaulting to the device's "today", which can miss the data in production.
+  useEffect(() => {
+    const d = scanDateOfIso(activeSession?.createdAt);
+    if (d) setMvDate(d);
+  }, [activeSession?.id]);
+
+  // Reset Master View pagination whenever the filter/date changes so we never
+  // land on a now-empty page.
+  useEffect(() => { setMvItemPage(1); }, [mvSearch, mvDate, mvPlant]);
+
   // On mount: if the user refreshed while scanning, jump straight back into the session
   useEffect(() => {
     const savedId = localStorage.getItem("km_scan_restore_id");
@@ -1660,11 +1685,57 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   const allMvItems  = mvData
     ? mvData.files.flatMap((f) => f.items.map((item) => ({ ...item, _file: f.csvFileName, _at: f.uploadedAt })))
     : [];
+
+  // Merge items across ALL uploaded CSVs by barcode/SKU so the master view shows a
+  // single combined list. Same product from two files → one row with summed
+  // expected/scanned quantities and every source file recorded.
+  type MergedMvItem = {
+    barcode: string | null;
+    itemName: string | null;
+    sapCode: string | null;
+    quantity: number;          // summed expected
+    scannedQty: number;        // summed scanned
+    expectedPallets: number;   // summed pallets
+    itemsPerPallet: number;    // plant-correct pallet size (same for every row of a product)
+    _files: string[];          // every source CSV this product came from
+  };
+  const mergedMvItems: MergedMvItem[] = (() => {
+    const map = new Map<string, MergedMvItem>();
+    for (const item of allMvItems) {
+      // Merge only on barcode — the same product identity the Scan tab uses. Items
+      // without a barcode stay as their own row (keyed by id) so the Master View
+      // shows the exact same set of rows as the Scan tab: never dropped, never
+      // wrongly folded together via a shared SAP code or name.
+      const key = normalize(item.barcode) || `__id_${item.id}`;
+      const existing = map.get(key);
+      if (existing) {
+        existing.quantity        += item.quantity ?? 0;
+        existing.scannedQty      += item.scannedQty ?? 0;
+        existing.expectedPallets += item.expectedPallets ?? 0;
+        if (!existing.itemsPerPallet && item.itemsPerPallet) existing.itemsPerPallet = item.itemsPerPallet;
+        if (item._file && !existing._files.includes(item._file)) existing._files.push(item._file);
+        if (!existing.itemName && item.itemName) existing.itemName = item.itemName;
+      } else {
+        map.set(key, {
+          barcode:         item.barcode ?? null,
+          itemName:        item.itemName ?? null,
+          sapCode:         item.sapCode ?? null,
+          quantity:        item.quantity ?? 0,
+          scannedQty:      item.scannedQty ?? 0,
+          expectedPallets: item.expectedPallets ?? 0,
+          itemsPerPallet:  item.itemsPerPallet ?? 0,
+          _files:          item._file ? [item._file] : [],
+        });
+      }
+    }
+    return [...map.values()];
+  })();
+
   const filtMvItems = mvSearch
-    ? allMvItems.filter((i) =>
-        [i.barcode, i.itemName, i.sapCode, i._file].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
+    ? mergedMvItems.filter((i) =>
+        [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
       )
-    : allMvItems;
+    : mergedMvItems;
   const csvSessions = csvSessQuery.data?.sessions ?? [];
   const csvImpItems = csvItemsQuery2.data ?? [];
   const filtCsvItems = csvSearch
@@ -1675,10 +1746,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
   function downloadMvCsv() {
     if (!mvData) return;
-    const headers = ["#", "Source File", "Upload Time", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets"];
-    const rows = allMvItems.map((item, idx) => [
-      idx + 1, item._file, item._at ? scanFmtIST(item._at) : "",
-      item.barcode ?? "", item.itemName ?? "", item.sapCode ?? "", item.quantity ?? 0, item.expectedPallets ?? "",
+    const headers = ["#", "Barcode", "Item Name", "SAP Code", "Source Files", "Expected", "Scanned", "Remaining"];
+    const rows = mergedMvItems.map((item, idx) => [
+      idx + 1, item.barcode ?? "", item.itemName ?? "", item.sapCode ?? "", item._files.join(" | "),
+      item.quantity, item.scannedQty, Math.max(0, item.quantity - item.scannedQty),
     ]);
     const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const a = document.createElement("a");
@@ -1982,68 +2053,77 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
               {mvData && (
                 <>
-                  {/* File chips */}
-                  <div className="flex flex-wrap gap-2">
-                    {mvData.files.map((f) => (
-                      <span key={f.sessionId} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600">
-                        <Layers className="h-3 w-3 text-gray-400" />
-                        {f.csvFileName} <span className="text-gray-400">· {f.rowCount ?? f.items.length} rows</span>
-                      </span>
-                    ))}
-                  </div>
-
-                  {/* Merged table */}
+                  {/* Merged table — identical layout to the Scan tab "CSV Order Items" table */}
                   <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+                    {/* Table header bar */}
                     <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
-                      <h3 className="text-sm font-semibold text-gray-900">Merged Items</h3>
-                      <span className="text-xs text-gray-400">{filtMvItems.length} of {allMvItems.length}</span>
+                      <h3 className="text-sm font-semibold text-gray-900">CSV Order Items</h3>
+                      <span className="text-xs text-gray-400">{filtMvItems.length} items</span>
                     </div>
+
                     <div className="overflow-x-auto">
-                      <table className="w-full text-xs sm:text-sm">
+                      <table className="w-full text-xs sm:text-sm border-collapse">
                         <thead>
                           <tr className="bg-[#001d6e]">
-                            <th className="px-3 py-2 w-8" />
-                            <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
-                            <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
-                            <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Source File</th>
-                            <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
-                            <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
-                            <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
-                            <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
+                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white w-[40px]">#</th>
+                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white min-w-[200px]">Item</th>
+                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode / SKU</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Scanned</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Expected</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Pallets</th>
+                            <th className="px-3 py-3 text-center text-[11px] font-semibold uppercase tracking-wide text-white">Status</th>
                           </tr>
                         </thead>
                         <tbody>
                           {filtMvItems.length === 0 ? (
-                            <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
-                          ) : filtMvItems.map((item, idx) => {
-                            const exp  = item.quantity ?? 0;
-                            const done = item.scannedQty ?? 0;
-                            const remain = Math.max(0, exp - done);
-                            const isDone = done >= exp && exp > 0;
-                            const isPartial = done > 0 && !isDone;
-                            const rowBg = isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
+                            <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
+                          ) : filtMvItems.slice((mvItemPage - 1) * SCAN_PAGE_SIZE, mvItemPage * SCAN_PAGE_SIZE).map((item, idx) => {
+                            const exp     = item.quantity;
+                            const done    = item.scannedQty;
+                            const isDone  = done >= exp && done > 0;
+                            const over    = done > exp;
+                            const partial = done > 0 && !isDone && !over;
+                            const code    = item.barcode || item.sapCode || "";
+                            const product = code ? productLookup.get(normalize(code)) : undefined;
+                            const ipp     = item.itemsPerPallet || (product ? (product.pallets || extractPalletSize(product)) : 0);
+                            const palletsScanned = ipp > 0 && done > 0
+                              ? parseFloat((done / ipp).toFixed(2))
+                              : null;
+                            const rowBg = over
+                              ? "bg-red-50/40"
+                              : isDone
+                              ? "bg-emerald-50/40"
+                              : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
                             return (
-                              <tr key={idx} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
-                                <td className="px-3 py-2 text-center">
-                                  {isDone
-                                    ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
-                                    : isPartial
-                                    ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
-                                    : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                              <tr key={idx} className={`${rowBg} border-b border-gray-100 transition-colors hover:bg-slate-100/60`}>
+                                <td className="px-3 py-3 text-gray-400 text-[11px]">{(mvItemPage - 1) * SCAN_PAGE_SIZE + idx + 1}</td>
+                                <td className="px-3 py-3">
+                                  <p className="font-medium text-gray-900 leading-snug">{item.itemName ?? "—"}</p>
                                 </td>
-                                <td className="px-3 py-2 font-medium text-gray-900 max-w-[200px]"><span className="block truncate">{item.itemName ?? "—"}</span></td>
-                                <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
-                                <td className="px-3 py-2 text-xs text-gray-400 max-w-[130px] truncate">{item._file}</td>
-                                <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
-                                <td className="px-3 py-2 text-right tabular-nums font-bold">
-                                  <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
+                                <td className="px-3 py-3">
+                                  {code
+                                    ? <span className="font-mono text-[11px] text-gray-500">{code}</span>
+                                    : <span className="text-gray-300">—</span>}
                                 </td>
-                                <td className="px-3 py-2 text-right tabular-nums font-bold">
-                                  <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
+                                <td className="px-3 py-3 text-right tabular-nums font-bold">
+                                  <span className={over ? "text-red-600" : isDone ? "text-emerald-700" : partial ? "text-[#001d6e]" : "text-gray-400"}>
+                                    {done}
+                                  </span>
                                 </td>
-                                <td className="px-3 py-2 text-center">
-                                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
-                                    {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                                <td className="px-3 py-3 text-right tabular-nums text-gray-600 font-medium">{exp}</td>
+                                <td className="px-3 py-3 text-right tabular-nums text-gray-700">
+                                  {palletsScanned !== null
+                                    ? <span className="font-semibold text-[#001d6e]">{palletsScanned}</span>
+                                    : <span className="text-gray-300">—</span>}
+                                </td>
+                                <td className="px-3 py-3 text-center">
+                                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                    over    ? "bg-red-100 text-red-700" :
+                                    isDone  ? "bg-emerald-100 text-emerald-700" :
+                                    partial ? "bg-blue-100 text-blue-700" :
+                                              "bg-gray-100 text-gray-500"
+                                  }`}>
+                                    {over ? "Over" : isDone ? "Done" : partial ? "Partial" : "Pending"}
                                   </span>
                                 </td>
                               </tr>
@@ -2052,6 +2132,27 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         </tbody>
                       </table>
                     </div>
+
+                    {/* Pagination — same as Scan tab */}
+                    {filtMvItems.length > SCAN_PAGE_SIZE && (
+                      <div className="flex items-center justify-between px-4 py-2.5 border-t text-xs text-gray-500">
+                        <span>
+                          Showing {(mvItemPage - 1) * SCAN_PAGE_SIZE + 1}–{Math.min(mvItemPage * SCAN_PAGE_SIZE, filtMvItems.length)} of {filtMvItems.length} items
+                        </span>
+                        <div className="flex gap-1">
+                          <Button variant="outline" size="sm" className="h-7 w-7 p-0"
+                            disabled={mvItemPage <= 1}
+                            onClick={() => setMvItemPage((p) => Math.max(1, p - 1))}>
+                            <ChevronLeft className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button variant="outline" size="sm" className="h-7 w-7 p-0"
+                            disabled={mvItemPage >= Math.ceil(filtMvItems.length / SCAN_PAGE_SIZE)}
+                            onClick={() => setMvItemPage((p) => Math.min(Math.ceil(filtMvItems.length / SCAN_PAGE_SIZE), p + 1))}>
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </>
               )}
@@ -3076,65 +3177,75 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 {mvQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
                 {mvData && (
                   <>
-                    <div className="flex flex-wrap gap-2">
-                      {mvData.files.map((f) => (
-                        <span key={f.sessionId} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600">
-                          <Layers className="h-3 w-3 text-gray-400" />
-                          {f.csvFileName} <span className="text-gray-400">· {f.rowCount ?? f.items.length} rows</span>
-                        </span>
-                      ))}
-                    </div>
+                    {/* Merged table — identical layout to the Scan tab "CSV Order Items" table */}
                     <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
                       <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
-                        <h3 className="text-sm font-semibold text-gray-900">Merged Items</h3>
-                        <span className="text-xs text-gray-400">{filtMvItems.length} of {allMvItems.length}</span>
+                        <h3 className="text-sm font-semibold text-gray-900">CSV Order Items</h3>
+                        <span className="text-xs text-gray-400">{filtMvItems.length} items</span>
                       </div>
                       <div className="overflow-x-auto">
-                        <table className="w-full text-xs sm:text-sm">
+                        <table className="w-full text-xs sm:text-sm border-collapse">
                           <thead>
                             <tr className="bg-[#001d6e]">
-                              <th className="px-3 py-2 w-8" />
-                              <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
-                              <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
-                              <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Source File</th>
-                              <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
-                              <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
-                              <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
-                              <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
+                              <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white w-[40px]">#</th>
+                              <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white min-w-[200px]">Item</th>
+                              <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode / SKU</th>
+                              <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Scanned</th>
+                              <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Expected</th>
+                              <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Pallets</th>
+                              <th className="px-3 py-3 text-center text-[11px] font-semibold uppercase tracking-wide text-white">Status</th>
                             </tr>
                           </thead>
                           <tbody>
                             {filtMvItems.length === 0 ? (
-                              <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
-                            ) : filtMvItems.map((item, idx) => {
-                              const exp  = item.quantity ?? 0;
-                              const done = item.scannedQty ?? 0;
-                              const remain = Math.max(0, exp - done);
-                              const isDone = done >= exp && exp > 0;
-                              const isPartial = done > 0 && !isDone;
-                              const rowBg = isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
+                              <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
+                            ) : filtMvItems.slice((mvItemPage - 1) * SCAN_PAGE_SIZE, mvItemPage * SCAN_PAGE_SIZE).map((item, idx) => {
+                              const exp     = item.quantity;
+                              const done    = item.scannedQty;
+                              const isDone  = done >= exp && done > 0;
+                              const over    = done > exp;
+                              const partial = done > 0 && !isDone && !over;
+                              const code    = item.barcode || item.sapCode || "";
+                              const product = code ? productLookup.get(normalize(code)) : undefined;
+                              const ipp     = item.itemsPerPallet || (product ? (product.pallets || extractPalletSize(product)) : 0);
+                              const palletsScanned = ipp > 0 && done > 0
+                                ? parseFloat((done / ipp).toFixed(2))
+                                : null;
+                              const rowBg = over
+                                ? "bg-red-50/40"
+                                : isDone
+                                ? "bg-emerald-50/40"
+                                : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
                               return (
-                                <tr key={idx} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
-                                  <td className="px-3 py-2 text-center">
-                                    {isDone
-                                      ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
-                                      : isPartial
-                                      ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
-                                      : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                                <tr key={idx} className={`${rowBg} border-b border-gray-100 transition-colors hover:bg-slate-100/60`}>
+                                  <td className="px-3 py-3 text-gray-400 text-[11px]">{(mvItemPage - 1) * SCAN_PAGE_SIZE + idx + 1}</td>
+                                  <td className="px-3 py-3">
+                                    <p className="font-medium text-gray-900 leading-snug">{item.itemName ?? "—"}</p>
                                   </td>
-                                  <td className="px-3 py-2 font-medium text-gray-900 max-w-[200px]"><span className="block truncate">{item.itemName ?? "—"}</span></td>
-                                  <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
-                                  <td className="px-3 py-2 text-xs text-gray-400 max-w-[130px] truncate">{item._file}</td>
-                                  <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
-                                  <td className="px-3 py-2 text-right tabular-nums font-bold">
-                                    <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
+                                  <td className="px-3 py-3">
+                                    {code
+                                      ? <span className="font-mono text-[11px] text-gray-500">{code}</span>
+                                      : <span className="text-gray-300">—</span>}
                                   </td>
-                                  <td className="px-3 py-2 text-right tabular-nums font-bold">
-                                    <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
+                                  <td className="px-3 py-3 text-right tabular-nums font-bold">
+                                    <span className={over ? "text-red-600" : isDone ? "text-emerald-700" : partial ? "text-[#001d6e]" : "text-gray-400"}>
+                                      {done}
+                                    </span>
                                   </td>
-                                  <td className="px-3 py-2 text-center">
-                                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
-                                      {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                                  <td className="px-3 py-3 text-right tabular-nums text-gray-600 font-medium">{exp}</td>
+                                  <td className="px-3 py-3 text-right tabular-nums text-gray-700">
+                                    {palletsScanned !== null
+                                      ? <span className="font-semibold text-[#001d6e]">{palletsScanned}</span>
+                                      : <span className="text-gray-300">—</span>}
+                                  </td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                      over    ? "bg-red-100 text-red-700" :
+                                      isDone  ? "bg-emerald-100 text-emerald-700" :
+                                      partial ? "bg-blue-100 text-blue-700" :
+                                                "bg-gray-100 text-gray-500"
+                                    }`}>
+                                      {over ? "Over" : isDone ? "Done" : partial ? "Partial" : "Pending"}
                                     </span>
                                   </td>
                                 </tr>
@@ -3143,6 +3254,27 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           </tbody>
                         </table>
                       </div>
+
+                      {/* Pagination — same as Scan tab */}
+                      {filtMvItems.length > SCAN_PAGE_SIZE && (
+                        <div className="flex items-center justify-between px-4 py-2.5 border-t text-xs text-gray-500">
+                          <span>
+                            Showing {(mvItemPage - 1) * SCAN_PAGE_SIZE + 1}–{Math.min(mvItemPage * SCAN_PAGE_SIZE, filtMvItems.length)} of {filtMvItems.length} items
+                          </span>
+                          <div className="flex gap-1">
+                            <Button variant="outline" size="sm" className="h-7 w-7 p-0"
+                              disabled={mvItemPage <= 1}
+                              onClick={() => setMvItemPage((p) => Math.max(1, p - 1))}>
+                              <ChevronLeft className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button variant="outline" size="sm" className="h-7 w-7 p-0"
+                              disabled={mvItemPage >= Math.ceil(filtMvItems.length / SCAN_PAGE_SIZE)}
+                              onClick={() => setMvItemPage((p) => Math.min(Math.ceil(filtMvItems.length / SCAN_PAGE_SIZE), p + 1))}>
+                              <ChevronRight className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </>
                 )}

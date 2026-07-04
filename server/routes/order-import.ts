@@ -345,7 +345,15 @@ router.get('/order-import/master-view', async (req: Request, res: Response) => {
              OR (osi.order_import_item_id IS NULL
                  AND osi.session_id = oi.session_id
                  AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
-          ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus"
+          ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus",
+        -- Plant-correct pallet size recorded on the scan row, so the master view
+        -- computes pallets exactly like the scan tab (avoids parsing "*24" from names).
+        (SELECT items_per_pallet FROM order_scan_items osi
+          WHERE osi.order_import_item_id = oi.id
+             OR (osi.order_import_item_id IS NULL
+                 AND osi.session_id = oi.session_id
+                 AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
+          ORDER BY osi.id DESC LIMIT 1)          AS "itemsPerPallet"
       FROM order_import_items oi
       WHERE oi.session_id = ANY($1::int[])
       ORDER BY oi.session_id, oi.id
@@ -353,7 +361,7 @@ router.get('/order-import/master-view', async (req: Request, res: Response) => {
     const allItems: Array<{
       id: number; sessionId: number; barcode: string | null; itemName: string | null;
       sapCode: string | null; quantity: number | null; expectedPallets: number | null;
-      scannedQty: number | null; scanStatus: string | null;
+      scannedQty: number | null; scanStatus: string | null; itemsPerPallet: number | null;
     }> = rawItems;
 
     // Group items by sessionId
