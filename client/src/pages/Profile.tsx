@@ -370,7 +370,7 @@ const Profile = () => {
       <div className="hidden lg:block bg-white rounded-2xl shadow-sm">
         <div className="p-4">
           <div className="mb-4">
-            <h2 className="text-lg font-semibold text-gray-900">Personal info</h2>
+            <h2 className="text-lg font-semibold text-gray-900">Personall info</h2>
           </div>
           
           <div className="space-y-4">
