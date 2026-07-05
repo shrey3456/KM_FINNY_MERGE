@@ -1,9 +1,10 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { db, pool } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
-import { eq, desc, and, sql } from 'drizzle-orm';
+import { eq, desc, and, sql, inArray, asc } from 'drizzle-orm';
 import { addSseClient, removeSseClient, broadcastOrderImportUpdate } from '../lib/importEvents';
 import { seedAndActivateSession } from './order-scan';
+import { computeGroupReport, resolveGroupId, computePartReport } from '../lib/orderGroupReport';
 
 export { broadcastOrderImportUpdate };
 
@@ -90,6 +91,8 @@ router.get('/order-import/sessions', async (req, res) => {
         importedByName: users.name,
         createdAt:      orderImportSessions.createdAt,
         scanStatus:     orderImportSessions.scanStatus,
+        receivingSessionId: orderImportSessions.receivingSessionId,
+        partIndex:      orderImportSessions.partIndex,
       })
       .from(orderImportSessions)
       .leftJoin(users, eq(orderImportSessions.importedByCode, users.userCode))
@@ -107,7 +110,7 @@ router.get('/order-import/sessions', async (req, res) => {
 // POST /api/order-import/sessions  — create session + bulk-insert items
 router.post('/order-import/sessions', async (req: Request, res: Response) => {
   try {
-    const { plant, csvFileName, items } = req.body as {
+    const { plant, csvFileName, items, receivingSessionId, partIndex } = req.body as {
       plant: string;
       csvFileName: string;
       items: Array<{
@@ -117,6 +120,10 @@ router.post('/order-import/sessions', async (req: Request, res: Response) => {
         quantity?: number;
         expectedPallets?: number;
       }>;
+      // Present only for a FIFO-batch upload: all parts of one multi-CSV upload share the
+      // same receivingSessionId (Part 1's own id), ordered by partIndex.
+      receivingSessionId?: number | null;
+      partIndex?: number | null;
     };
 
     if (!plant || !csvFileName || !Array.isArray(items) || items.length === 0)
@@ -124,10 +131,26 @@ router.post('/order-import/sessions', async (req: Request, res: Response) => {
 
     const userCode = (req.user as any)?.userCode ?? null;
 
-    const [session] = await db
+    let [session] = await db
       .insert(orderImportSessions)
-      .values({ plant, csvFileName, rowCount: items.length, importedByCode: userCode })
+      .values({
+        plant, csvFileName, rowCount: items.length, importedByCode: userCode,
+        receivingSessionId: receivingSessionId ?? null,
+        partIndex: partIndex ?? null,
+      })
       .returning();
+
+    // Part 1 of a new FIFO batch doesn't know its group id until after insert — the
+    // group id IS Part 1's own id. The client passes partIndex:1 with no
+    // receivingSessionId for the first file, then reads back receivingSessionId here
+    // to pass along as the group id for parts 2, 3, ...
+    if (partIndex === 1 && !receivingSessionId) {
+      [session] = await db.update(orderImportSessions)
+        .set({ receivingSessionId: session.id })
+        .where(eq(orderImportSessions.id, session.id))
+        .returning();
+    }
+    const effectiveGroupId = session.receivingSessionId;
 
     const rows = items.map((item) => ({
       sessionId: session.id,
@@ -142,18 +165,27 @@ router.post('/order-import/sessions', async (req: Request, res: Response) => {
     await db.insert(orderImportItems).values(rows);
 
     // ── Auto-activate ──────────────────────────────────────────────────────────
-    // If nothing is currently being scanned for this plant, immediately make this
-    // freshly-uploaded CSV the active scan session so dispatch can start scanning
-    // without anyone manually picking it. If a session is already active, leave it
-    // alone — completion auto-progression will pick this one up later in turn.
+    // If nothing is currently being scanned, immediately make this freshly-uploaded
+    // CSV the active scan session so dispatch can start scanning without anyone
+    // manually picking it. Scoped to the FIFO group when this is a batch part (so
+    // Part 2/3 don't jump ahead of Part 1), otherwise scoped to the whole plant as
+    // before. If something is already active, leave it alone — completion
+    // auto-progression will pick this one up later in turn.
     let activated = false;
+    const activeConditions = effectiveGroupId
+      ? [
+          eq(orderImportSessions.receivingSessionId, effectiveGroupId),
+          eq(orderImportSessions.scanStatus, 'active'),
+          eq(orderImportSessions.isDeleted, false),
+        ]
+      : [
+          sql`LOWER(${orderImportSessions.plant}) = LOWER(${plant})`,
+          eq(orderImportSessions.scanStatus, 'active'),
+          eq(orderImportSessions.isDeleted, false),
+        ];
     const activeForPlant = await db.select({ id: orderImportSessions.id })
       .from(orderImportSessions)
-      .where(and(
-        sql`LOWER(${orderImportSessions.plant}) = LOWER(${plant})`,
-        eq(orderImportSessions.scanStatus, 'active'),
-        eq(orderImportSessions.isDeleted, false),
-      ))
+      .where(and(...activeConditions))
       .limit(1);
 
     if (activeForPlant.length === 0) {
@@ -205,6 +237,100 @@ router.get('/order-import/sessions/:id/items', async (req: Request, res: Respons
     res.json(items);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch items' });
+  }
+});
+
+// GET /api/order-import/sessions/:id/group-report
+// Per-part + consolidated FIFO-adjusted report for the whole batch a part belongs to.
+// :id can be any part in the group. 404 if the part isn't part of a FIFO batch upload.
+router.get('/order-import/sessions/:id/group-report', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+    const groupId = await resolveGroupId(id);
+    if (!groupId) return res.status(404).json({ message: 'This session is not part of a FIFO batch upload' });
+
+    const report = await computeGroupReport(groupId);
+    if (!report) return res.status(404).json({ message: 'Group not found' });
+
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build group report' });
+  }
+});
+
+// GET /api/order-import/sessions/:id/part-report
+// Single-CSV report — downloadable as soon as THAT one part is completed, no need to wait
+// for the whole FIFO group. Includes cross-part adjustments when the CSV is part of a group.
+router.get('/order-import/sessions/:id/part-report', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+    const report = await computePartReport(id);
+    if (!report) return res.status(404).json({ message: 'Session not found' });
+
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build part report' });
+  }
+});
+
+// GET /api/order-import/sessions/:id/scan-activity
+// Full scan history for one CSV/part — every scan event (who, when, qty, extra, STV).
+// ?scope=group returns the whole FIFO group's events, each tagged with its Part # + file.
+router.get('/order-import/sessions/:id/scan-activity', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+    const scope = String(req.query.scope ?? 'part');
+
+    // Resolve which sessions to include + a Part#/file label per session.
+    let sessionIds: number[] = [id];
+    const labelBySession = new Map<number, { partIndex: number | null; csvFileName: string }>();
+
+    if (scope === 'group') {
+      const groupId = await resolveGroupId(id) ?? id; // fall back to the session itself
+      const parts = await db
+        .select({ id: orderImportSessions.id, partIndex: orderImportSessions.partIndex, csvFileName: orderImportSessions.csvFileName })
+        .from(orderImportSessions)
+        .where(and(eq(orderImportSessions.receivingSessionId, groupId), eq(orderImportSessions.isDeleted, false)))
+        .orderBy(asc(orderImportSessions.partIndex), asc(orderImportSessions.id));
+      if (parts.length > 0) {
+        sessionIds = parts.map((p) => p.id);
+        parts.forEach((p) => labelBySession.set(p.id, { partIndex: p.partIndex, csvFileName: p.csvFileName }));
+      }
+    }
+    if (labelBySession.size === 0) {
+      const [self] = await db
+        .select({ id: orderImportSessions.id, partIndex: orderImportSessions.partIndex, csvFileName: orderImportSessions.csvFileName })
+        .from(orderImportSessions)
+        .where(eq(orderImportSessions.id, id));
+      if (self) { sessionIds = [self.id]; labelBySession.set(self.id, { partIndex: self.partIndex, csvFileName: self.csvFileName }); }
+    }
+
+    const { rows: events } = await pool.query(
+      `SELECT session_id AS "sessionId", barcode, item_name AS "itemName",
+              pallets, loose_qty AS "looseQty", total_qty AS "totalQty",
+              is_extra AS "isExtra", stv, scanned_by_code AS "scannedByCode",
+              scanned_by_name AS "scannedByName", scanned_at AS "scannedAt"
+       FROM order_scan_events
+       WHERE session_id = ANY($1::int[])
+       ORDER BY scanned_at ASC, id ASC`,
+      [sessionIds],
+    );
+
+    const withLabels = events.map((e: any) => ({
+      ...e,
+      partIndex: labelBySession.get(e.sessionId)?.partIndex ?? null,
+      csvFileName: labelBySession.get(e.sessionId)?.csvFileName ?? null,
+    }));
+
+    res.json({ scope, totalEvents: withLabels.length, events: withLabels });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch scan activity' });
   }
 });
 
@@ -281,22 +407,33 @@ router.delete('/order-import/sessions/:id', async (req: Request, res: Response) 
 });
 
 // GET /api/order-import/master-view?date=YYYY-MM-DD&plant=X
-// Returns all items from all sessions uploaded on the given date, merged in upload order.
+//   or  /api/order-import/master-view?sessionIds=1,2,3
+// Returns all items from all matching sessions, merged in upload order. sessionIds scopes
+// the view to exactly the given sessions (e.g. one just-uploaded batch) instead of every
+// session for a plant/day — used by OrderImport's batch-upload Master View.
 router.get('/order-import/master-view', async (req: Request, res: Response) => {
   try {
     const dateStr = String(req.query.date ?? '');
-    if (!dateStr) return res.status(400).json({ message: 'date is required (YYYY-MM-DD)' });
+    const sessionIdsParam = String(req.query.sessionIds ?? '').trim();
 
-    const conditions = [
-      eq(orderImportSessions.isDeleted, false),
-      sql`(${orderImportSessions.createdAt})::date = ${dateStr}::date`,
-    ];
-
-    if (req.query.plant) {
-      conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`);
+    let conditions: any[];
+    if (sessionIdsParam) {
+      const ids = sessionIdsParam.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
+      if (ids.length === 0) return res.status(400).json({ message: 'sessionIds must be a comma-separated list of numbers' });
+      conditions = [eq(orderImportSessions.isDeleted, false), inArray(orderImportSessions.id, ids)];
+    } else if (dateStr) {
+      conditions = [
+        eq(orderImportSessions.isDeleted, false),
+        sql`(${orderImportSessions.createdAt})::date = ${dateStr}::date`,
+      ];
+      if (req.query.plant) {
+        conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`);
+      }
+    } else {
+      return res.status(400).json({ message: 'date or sessionIds is required' });
     }
 
-    const where = and(...(conditions as any[]));
+    const where = and(...conditions);
 
     // Fetch sessions ordered by createdAt ASC to preserve upload sequence
     const sessions = await db
@@ -353,7 +490,7 @@ router.get('/order-import/master-view', async (req: Request, res: Response) => {
     const allItems: Array<{
       id: number; sessionId: number; barcode: string | null; itemName: string | null;
       sapCode: string | null; quantity: number | null; expectedPallets: number | null;
-      scannedQty: number | null; scanStatus: string | null;
+      scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
     }> = rawItems;
 
     // Group items by sessionId
@@ -362,6 +499,41 @@ router.get('/order-import/master-view', async (req: Request, res: Response) => {
       if (!itemsBySession.has(item.sessionId)) itemsBySession.set(item.sessionId, []);
       itemsBySession.get(item.sessionId)!.push(item);
     }
+
+    // Fold in "extra" scans — barcodes scanned during one of these sessions that were
+    // never part of that session's CSV (order_import_items has no row for them). These
+    // only exist as order_scan_events rows (scan_item_id is null, is_extra = true), so
+    // without this they'd be invisible in Master View even though real stock arrived.
+    // Grouped/summed per barcode in case the same extra barcode was scanned more than once.
+    const { rows: extraRows } = await pool.query(`
+      SELECT
+        ose.session_id          AS "sessionId",
+        ose.barcode,
+        MAX(ose.item_name)      AS "itemName",
+        SUM(ose.total_qty)::int AS "scannedQty"
+      FROM order_scan_events ose
+      WHERE ose.session_id = ANY($1::int[])
+        AND ose.is_extra = true
+        AND ose.barcode IS NOT NULL
+      GROUP BY ose.session_id, ose.barcode
+    `, [sessionIds]);
+
+    extraRows.forEach((ex: any, idx: number) => {
+      const list = itemsBySession.get(ex.sessionId) ?? [];
+      list.push({
+        id: -1 - idx,
+        sessionId: ex.sessionId,
+        barcode: ex.barcode,
+        itemName: ex.itemName,
+        sapCode: null,
+        quantity: 0,
+        expectedPallets: null,
+        scannedQty: ex.scannedQty,
+        scanStatus: 'extra',
+        isExtra: true,
+      });
+      itemsBySession.set(ex.sessionId, list);
+    });
 
     const files = sessions.map((s) => ({
       sessionId:    s.id,
