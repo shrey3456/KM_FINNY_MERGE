@@ -214,12 +214,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "scan-order",
         },
         {
-          label: "Pallet Stock Report",
-          icon: <FileBarChart className="h-5 w-5 mr-3 text-[#001d6e]" style={{ fill: "#a78bfa" }} />,
-          path: "/scan-stock-report",
-          pageKey: "pallet-stock",
-        },
-        {
           label: "Overall Stock",
           icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/overall-stock",
@@ -254,11 +248,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
     {
       title: "INVENTORY",
       items: [
-        {
+         {
           label: "Inventory",
-          icon: <Package className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/inventory",
-          pageKey: "inventory",
+          icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/notion-inventory",
+          pageKey: "notion-inventory",
         },
         {
           label: "Purchases",
@@ -276,12 +270,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           icon: <Users className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/users",
           pageKey: "user-management",
-        },
-        {
-          label: "Notion Inventory",
-          icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/notion-inventory",
-          pageKey: "notion-inventory",
         },
         {
           label: "Plant Management",

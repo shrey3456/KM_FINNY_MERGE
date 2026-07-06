@@ -304,8 +304,6 @@ export default function ScanOrderPage() {
   const [scanTab, setScanTab] = useState<"scan" | "master-view" | "separate-csvs">("scan");
   const [osTab,   setOsTab]   = useState<"scan" | "master-view" | "separate-csvs">("scan");
   const scanTodayStr = scanLocalISODate();
-  const [mvDate,      setMvDate]      = useState(scanTodayStr);
-  const [mvPlant,     setMvPlant]     = useState("");
   const [mvSearch,    setMvSearch]    = useState("");
   const [csvDate,     setCsvDate]     = useState(scanTodayStr);
   const [csvPlant,    setCsvPlant]    = useState("");
@@ -410,6 +408,14 @@ export default function ScanOrderPage() {
     refetchOnMount: "always",
   });
   const activeOrderScanSession = orderScanNotif?.active ? orderScanNotif.session : null;
+
+  // Master View has no manual plant/date pickers — it always shows the currently active
+  // session's own plant/date, derived from scanActivatedAt (stored as IST wall-clock, same
+  // convention as createdAt, so its date portion matches the day that CSV was uploaded).
+  const mvPlant = activeOrderScanSession?.plant ?? "";
+  const mvDate = activeOrderScanSession?.scanActivatedAt
+    ? String(activeOrderScanSession.scanActivatedAt).slice(0, 10)
+    : "";
 
   // ── Embedded order-scan state (admin-loaded CSV) ───────────────────────────
   // Two video elements exist (mobile sm:hidden block + desktop hidden sm:block block).
@@ -1989,10 +1995,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           {scanTab === "master-view" && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-3">
-                <input type="date" value={mvDate} onChange={(e) => setMvDate(e.target.value)}
-                  className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
-                <input type="text" value={mvPlant} onChange={(e) => setMvPlant(e.target.value)} placeholder="Plant (optional)"
-                  className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-36" />
+                <span className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
+                  {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                </span>
                 <div className="relative flex-1 min-w-48">
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
                   <input value={mvSearch} onChange={(e) => setMvSearch(e.target.value)} placeholder="Search items…"
@@ -2092,7 +2097,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
 
               {!mvQuery.isFetching && !mvData && (
-                <p className="text-sm text-gray-400">Select a date to load master view.</p>
+                <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>
               )}
             </div>
           )}
@@ -2387,8 +2392,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             {/* Session info row */}
             <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5">
-              <Button variant="outline" size="sm" className="h-7 px-2.5 text-[11px] border-[#001d6e] text-[#001d6e] hover:bg-[#001d6e] hover:text-white shrink-0" onClick={() => navigate("/scan")}>
-                <ArrowLeft className="mr-1 h-3 w-3" />Dashboard
+              <Button variant="outline" size="sm" className="h-7 px-2.5 text-[11px] border-[#001d6e] text-[#001d6e] hover:bg-[#001d6e] hover:text-white shrink-0" onClick={() => navigate("/")}>
+                <ArrowLeft className="mr-1 h-3 w-3" />Home
               </Button>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-bold text-gray-900 truncate leading-tight">
@@ -2772,8 +2777,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {/* Header row */}
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
-                <Button variant="outline" size="sm" className="h-8 px-3 text-xs border-[#001d6e] text-[#001d6e] hover:bg-[#001d6e] hover:text-white shrink-0" onClick={() => navigate("/scan")}>
-                  <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Scan Dashboard
+                <Button variant="outline" size="sm" className="h-8 px-3 text-xs border-[#001d6e] text-[#001d6e] hover:bg-[#001d6e] hover:text-white shrink-0" onClick={() => navigate("/")}>
+                  <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Home
                 </Button>
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400">
                   <Zap className="h-4 w-4 text-white" />
@@ -3151,10 +3156,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "master-view" && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <input type="date" value={mvDate} onChange={(e) => setMvDate(e.target.value)}
-                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
-                  <input type="text" value={mvPlant} onChange={(e) => setMvPlant(e.target.value)} placeholder="Plant (optional)"
-                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-36" />
+                  <span className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
+                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                  </span>
                   <div className="relative flex-1 min-w-48">
                     <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
                     <input value={mvSearch} onChange={(e) => setMvSearch(e.target.value)} placeholder="Search items…"
@@ -3245,7 +3249,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </div>
                   </>
                 )}
-                {!mvQuery.isFetching && !mvData && <p className="text-sm text-gray-400">Select a date to load master view.</p>}
+                {!mvQuery.isFetching && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
               </div>
             )}
 

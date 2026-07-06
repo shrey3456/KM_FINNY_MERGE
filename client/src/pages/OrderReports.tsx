@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import {
-  ArrowLeft, CalendarDays, ChevronDown, Download, Layers, ListChecks, Loader2, RefreshCw, Search, X,
+  ArrowLeft, CalendarDays, ChevronDown, Download, Eye, Layers, ListChecks, Loader2, RefreshCw, Search, Trash2, X,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
@@ -11,8 +11,15 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogCancel, AlertDialogAction,
+} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -105,7 +112,10 @@ export default function OrderReports() {
   const [date, setDate] = useState(getLocalISODate());
   const [plant, setPlant] = useState("");
   const [search, setSearch] = useState("");
-  const [busy, setBusy] = useState<string | null>(null); // key of the report currently downloading
+  const [busy, setBusy] = useState<string | null>(null); // key of the report currently downloading/opening
+  const [viewData, setViewData] = useState<{ title: string; rows: Row[] } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; csvFileName: string } | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const plantsQuery = useQuery<{ name: string }[]>({
     queryKey: ["/api/plants"],
@@ -125,6 +135,23 @@ export default function OrderReports() {
     refetchInterval: 15000,
   });
 
+  // Deletes one CSV/part (soft-delete on the server — scan history is kept for existing
+  // reports, it just stops showing up here). Same endpoint the Order Import page used.
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      await apiRequest("DELETE", `/api/order-import/sessions/${deleteTarget.id}`);
+      toast({ title: "Deleted", description: `"${deleteTarget.csvFileName}" removed.` });
+      setDeleteTarget(null);
+      sessionsQuery.refetch();
+    } catch {
+      toast({ title: "Failed to delete", variant: "destructive" });
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   const allSessions = sessionsQuery.data?.sessions ?? [];
   const sessions = search
     ? allSessions.filter((s) => [s.csvFileName, s.plant, s.importedByName].some((v) => v?.toLowerCase().includes(search.toLowerCase())))
@@ -143,23 +170,71 @@ export default function OrderReports() {
   }
   groups.forEach((arr) => arr.sort((a, b) => (a.partIndex ?? 0) - (b.partIndex ?? 0)));
 
-  // ── Download actions ──
-  async function downloadPart(session: ImportSessionRow, fmt: Fmt) {
-    const key = `part-${session.id}-${fmt}`;
-    setBusy(key);
-    try {
-      const part: GroupReportPart = await (await apiRequest("GET", `/api/order-import/sessions/${session.id}/part-report`)).json();
-      const rows: Row[] = [[
-        "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing",
-        "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing",
-      ]];
-      part.items.forEach((i) => rows.push([
-        i.barcode, i.itemName, i.expectedQty, i.receivedQty, i.extraQty, i.missingQty,
+  // ── Row builders — shared by both Download and View so they can never drift apart ──
+  function buildPartRows(part: GroupReportPart): Row[] {
+    const rows: Row[] = [[
+      "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing",
+      "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing",
+    ]];
+    part.items.forEach((i) => rows.push([
+      i.barcode, i.itemName, i.expectedQty, i.receivedQty, i.extraQty, i.missingQty,
+      i.adjustedTo.reduce((s, a) => s + a.qty, 0), i.adjustedFrom.reduce((s, a) => s + a.qty, 0),
+      i.remainingExtra, i.remainingMissing,
+    ]));
+    rows.push([]);
+    rows.push(["TOTAL", "", part.summary.totalExpected, part.summary.totalReceived, part.summary.totalExtra, part.summary.totalMissing, part.summary.totalAdjustedTo, part.summary.totalAdjustedFrom, part.summary.netExtraAfterAdjustment, part.summary.netMissingAfterAdjustment]);
+    return rows;
+  }
+
+  function buildGroupRows(report: GroupReport, kind: "partwise" | "final"): Row[] {
+    if (kind === "partwise") {
+      const rows: Row[] = [["Part", "File", "Status", "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing", "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing"]];
+      report.parts.forEach((p) => p.items.forEach((i) => rows.push([
+        p.partIndex, p.csvFileName, p.scanStatus ?? "", i.barcode, i.itemName,
+        i.expectedQty, i.receivedQty, i.extraQty, i.missingQty,
         i.adjustedTo.reduce((s, a) => s + a.qty, 0), i.adjustedFrom.reduce((s, a) => s + a.qty, 0),
         i.remainingExtra, i.remainingMissing,
-      ]));
-      rows.push([]);
-      rows.push(["TOTAL", "", part.summary.totalExpected, part.summary.totalReceived, part.summary.totalExtra, part.summary.totalMissing, part.summary.totalAdjustedTo, part.summary.totalAdjustedFrom, part.summary.netExtraAfterAdjustment, part.summary.netMissingAfterAdjustment]);
+      ])));
+      return rows;
+    }
+    const rows: Row[] = [["Barcode", "Item Name", "Total Expected", "Total Received", "Total Extra", "Total Missing", "Total Adjusted"]];
+    report.consolidated.productWise.forEach((pw) => rows.push([pw.barcode, pw.itemName, pw.totalExpected, pw.totalReceived, pw.totalExtra, pw.totalMissing, pw.totalAdjusted]));
+    rows.push([]);
+    rows.push(["CONSOLIDATED", "", report.consolidated.totalExpected, report.consolidated.totalReceived, report.consolidated.totalExtra, report.consolidated.totalMissing, report.consolidated.totalAdjustments]);
+    rows.push(["Final Stock Added", report.consolidated.finalStockAdded, "Net Extra", report.consolidated.netExtraAfterAdjustment, "Net Missing", report.consolidated.netMissingAfterAdjustment, ""]);
+    return rows;
+  }
+
+  function buildActivityRows(data: ScanActivity, scope: "part" | "group"): Row[] {
+    const groupCols = scope === "group";
+    const header: Row = [
+      "#", ...(groupCols ? ["Part", "File"] : []),
+      "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time",
+    ];
+    const rows: Row[] = [header];
+    data.events.forEach((e, idx) => rows.push([
+      idx + 1, ...(groupCols ? [e.partIndex ?? "", e.csvFileName ?? ""] : []),
+      e.scannedByName ?? "", e.scannedByCode ?? "", e.barcode ?? "", e.itemName ?? "",
+      e.pallets ?? 0, e.looseQty ?? 0, e.totalQty ?? 0, e.isExtra ? "Extra" : "Regular",
+      e.stv ?? "", fmtIST(e.scannedAt),
+    ]));
+    if (data.events.length === 0) rows.push(["No scans recorded"]);
+    return rows;
+  }
+
+  // ── Fetchers ──
+  const fetchPartReport = (sessionId: number) =>
+    apiRequest("GET", `/api/order-import/sessions/${sessionId}/part-report`).then((r) => r.json()) as Promise<GroupReportPart>;
+  const fetchGroupReport = (groupId: number) =>
+    apiRequest("GET", `/api/order-import/sessions/${groupId}/group-report`).then((r) => r.json()) as Promise<GroupReport>;
+  const fetchActivity = (sessionId: number, scope: "part" | "group") =>
+    apiRequest("GET", `/api/order-import/sessions/${sessionId}/scan-activity?scope=${scope}`).then((r) => r.json()) as Promise<ScanActivity>;
+
+  // ── Download actions ──
+  async function downloadPart(session: ImportSessionRow, fmt: Fmt) {
+    setBusy(`part-${session.id}-${fmt}`);
+    try {
+      const rows = buildPartRows(await fetchPartReport(session.id));
       exportRows(fmt, `part-report-${safe(session.csvFileName)}`, `Part Report — ${session.csvFileName}`, rows);
     } catch {
       toast({ title: "Failed to download report", variant: "destructive" });
@@ -167,26 +242,9 @@ export default function OrderReports() {
   }
 
   async function downloadGroup(groupId: number, kind: "partwise" | "final", fmt: Fmt) {
-    const key = `group-${groupId}-${kind}-${fmt}`;
-    setBusy(key);
+    setBusy(`group-${groupId}-${kind}-${fmt}`);
     try {
-      const report: GroupReport = await (await apiRequest("GET", `/api/order-import/sessions/${groupId}/group-report`)).json();
-      let rows: Row[];
-      if (kind === "partwise") {
-        rows = [["Part", "File", "Status", "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing", "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing"]];
-        report.parts.forEach((p) => p.items.forEach((i) => rows.push([
-          p.partIndex, p.csvFileName, p.scanStatus ?? "", i.barcode, i.itemName,
-          i.expectedQty, i.receivedQty, i.extraQty, i.missingQty,
-          i.adjustedTo.reduce((s, a) => s + a.qty, 0), i.adjustedFrom.reduce((s, a) => s + a.qty, 0),
-          i.remainingExtra, i.remainingMissing,
-        ])));
-      } else {
-        rows = [["Barcode", "Item Name", "Total Expected", "Total Received", "Total Extra", "Total Missing", "Total Adjusted"]];
-        report.consolidated.productWise.forEach((pw) => rows.push([pw.barcode, pw.itemName, pw.totalExpected, pw.totalReceived, pw.totalExtra, pw.totalMissing, pw.totalAdjusted]));
-        rows.push([]);
-        rows.push(["CONSOLIDATED", "", report.consolidated.totalExpected, report.consolidated.totalReceived, report.consolidated.totalExtra, report.consolidated.totalMissing, report.consolidated.totalAdjustments]);
-        rows.push(["Final Stock Added", report.consolidated.finalStockAdded, "Net Extra", report.consolidated.netExtraAfterAdjustment, "Net Missing", report.consolidated.netMissingAfterAdjustment, ""]);
-      }
+      const rows = buildGroupRows(await fetchGroupReport(groupId), kind);
       exportRows(fmt, `fifo-${kind}-group${groupId}`, `FIFO ${kind === "partwise" ? "CSV-wise" : "Final"} Report`, rows);
     } catch {
       toast({ title: "Failed to download report", variant: "destructive" });
@@ -198,23 +256,41 @@ export default function OrderReports() {
   async function downloadActivity(sessionId: number, scope: "part" | "group", baseName: string, fmt: Fmt) {
     setBusy(`activity-${scope}-${sessionId}-${fmt}`);
     try {
-      const data: ScanActivity = await (await apiRequest("GET", `/api/order-import/sessions/${sessionId}/scan-activity?scope=${scope}`)).json();
-      const groupCols = scope === "group";
-      const header: Row = [
-        "#", ...(groupCols ? ["Part", "File"] : []),
-        "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time",
-      ];
-      const rows: Row[] = [header];
-      data.events.forEach((e, idx) => rows.push([
-        idx + 1, ...(groupCols ? [e.partIndex ?? "", e.csvFileName ?? ""] : []),
-        e.scannedByName ?? "", e.scannedByCode ?? "", e.barcode ?? "", e.itemName ?? "",
-        e.pallets ?? 0, e.looseQty ?? 0, e.totalQty ?? 0, e.isExtra ? "Extra" : "Regular",
-        e.stv ?? "", fmtIST(e.scannedAt),
-      ]));
-      if (data.events.length === 0) rows.push(["No scans recorded"]);
+      const rows = buildActivityRows(await fetchActivity(sessionId, scope), scope);
       exportRows(fmt, `scan-activity-${baseName}`, `Scan Activity — ${baseName}`, rows);
     } catch {
       toast({ title: "Failed to download activity", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+
+  // ── View-in-browser actions (same builders, opens a dialog instead of downloading) ──
+  async function viewPart(session: ImportSessionRow) {
+    setBusy(`view-part-${session.id}`);
+    try {
+      const rows = buildPartRows(await fetchPartReport(session.id));
+      setViewData({ title: `Part Report — ${session.csvFileName}`, rows });
+    } catch {
+      toast({ title: "Failed to load report", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+
+  async function viewGroup(groupId: number, kind: "partwise" | "final") {
+    setBusy(`view-group-${groupId}-${kind}`);
+    try {
+      const rows = buildGroupRows(await fetchGroupReport(groupId), kind);
+      setViewData({ title: `FIFO ${kind === "partwise" ? "CSV-wise" : "Final"} Report — Group #${groupId}`, rows });
+    } catch {
+      toast({ title: "Failed to load report", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+
+  async function viewActivity(sessionId: number, scope: "part" | "group", label: string) {
+    setBusy(`view-activity-${scope}-${sessionId}`);
+    try {
+      const rows = buildActivityRows(await fetchActivity(sessionId, scope), scope);
+      setViewData({ title: `Scan Activity — ${label}`, rows });
+    } catch {
+      toast({ title: "Failed to load activity", variant: "destructive" });
     } finally { setBusy(null); }
   }
 
@@ -227,10 +303,11 @@ export default function OrderReports() {
     return <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize ${map[status ?? "available"] ?? "bg-gray-100 text-gray-500"}`}>{status ?? "available"}</span>;
   };
 
-  // One button → dropdown to pick CSV / Excel / PDF.
-  const DownloadMenu = ({ label, icon, onPick, busyKey, variant = "outline" }: {
-    label: string; icon?: React.ReactNode; onPick: (f: Fmt) => void; busyKey: string;
-    variant?: "outline" | "default";
+  // One button → dropdown offering "View" (opens in-browser, no file) plus CSV/Excel/PDF
+  // download. onView is optional so a caller can still offer download-only if needed.
+  const DownloadMenu = ({ label, icon, onPick, onView, busyKey, variant = "outline" }: {
+    label: string; icon?: React.ReactNode; onPick: (f: Fmt) => void; onView?: () => void;
+    busyKey: string; variant?: "outline" | "default";
   }) => {
     const isBusy = busy?.startsWith(busyKey) ?? false;
     return (
@@ -244,7 +321,15 @@ export default function OrderReports() {
             <ChevronDown className="h-3 w-3 opacity-60" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-[8rem]">
+        <DropdownMenuContent align="end" className="min-w-[9rem]">
+          {onView && (
+            <>
+              <DropdownMenuItem onClick={onView} className="text-xs cursor-pointer">
+                <Eye className="mr-2 h-3.5 w-3.5" /> View
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
           {(["CSV", "Excel", "PDF"] as Fmt[]).map((f) => (
             <DropdownMenuItem key={f} onClick={() => onPick(f)} className="text-xs cursor-pointer">
               <Download className="mr-2 h-3.5 w-3.5" /> {f}
@@ -333,11 +418,14 @@ export default function OrderReports() {
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-[11px] font-medium text-gray-500">Final:</span>
                         <DownloadMenu label="Summary" variant="default" busyKey={`group-${groupId}-final`}
-                          onPick={(f) => downloadGroup(groupId, "final", f)} />
+                          onPick={(f) => downloadGroup(groupId, "final", f)}
+                          onView={() => viewGroup(groupId, "final")} />
                         <DownloadMenu label="Activity" icon={<ListChecks className="h-3 w-3" />} busyKey={`activity-group-${groupId}`}
-                          onPick={(f) => downloadActivity(groupId, "group", `group${groupId}-all`, f)} />
+                          onPick={(f) => downloadActivity(groupId, "group", `group${groupId}-all`, f)}
+                          onView={() => viewActivity(groupId, "group", `Group #${groupId} (all parts)`)} />
                         <DownloadMenu label="CSV-wise" busyKey={`group-${groupId}-partwise`}
-                          onPick={(f) => downloadGroup(groupId, "partwise", f)} />
+                          onPick={(f) => downloadGroup(groupId, "partwise", f)}
+                          onView={() => viewGroup(groupId, "partwise")} />
                       </div>
                     </div>
                     <div className="divide-y">
@@ -349,9 +437,15 @@ export default function OrderReports() {
                             <p className="text-xs text-gray-400">{p.rowCount ?? 0} rows · {fmtIST(p.createdAt)}</p>
                           </div>
                           {statusPill(p.scanStatus)}
-                          <DownloadMenu label="Summary" busyKey={`part-${p.id}`} onPick={(f) => downloadPart(p, f)} />
+                          <DownloadMenu label="Summary" busyKey={`part-${p.id}`} onPick={(f) => downloadPart(p, f)} onView={() => viewPart(p)} />
                           <DownloadMenu label="Activity" icon={<ListChecks className="h-3 w-3" />} busyKey={`activity-part-${p.id}`}
-                            onPick={(f) => downloadActivity(p.id, "part", safe(p.csvFileName), f)} />
+                            onPick={(f) => downloadActivity(p.id, "part", safe(p.csvFileName), f)}
+                            onView={() => viewActivity(p.id, "part", p.csvFileName)} />
+                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                            title={`Delete ${p.csvFileName}`}
+                            onClick={() => setDeleteTarget({ id: p.id, csvFileName: p.csvFileName })}>
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
                         </div>
                       ))}
                     </div>
@@ -375,9 +469,15 @@ export default function OrderReports() {
                         </p>
                       </div>
                       {statusPill(s.scanStatus)}
-                      <DownloadMenu label="Summary" busyKey={`part-${s.id}`} onPick={(f) => downloadPart(s, f)} />
+                      <DownloadMenu label="Summary" busyKey={`part-${s.id}`} onPick={(f) => downloadPart(s, f)} onView={() => viewPart(s)} />
                       <DownloadMenu label="Activity" icon={<ListChecks className="h-3 w-3" />} busyKey={`activity-part-${s.id}`}
-                        onPick={(f) => downloadActivity(s.id, "part", safe(s.csvFileName), f)} />
+                        onPick={(f) => downloadActivity(s.id, "part", safe(s.csvFileName), f)}
+                        onView={() => viewActivity(s.id, "part", s.csvFileName)} />
+                      <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                        title={`Delete ${s.csvFileName}`}
+                        onClick={() => setDeleteTarget({ id: s.id, csvFileName: s.csvFileName })}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
                   ))}
                 </div>
@@ -386,6 +486,67 @@ export default function OrderReports() {
           </div>
         )}
       </div>
+
+      {/* View-in-browser — same data as the downloads, rendered as a table instead of a file */}
+      <Dialog open={!!viewData} onOpenChange={(open) => { if (!open) setViewData(null); }}>
+        <DialogContent className="max-w-5xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="text-base">{viewData?.title}</DialogTitle>
+            <DialogDescription className="text-xs">
+              {viewData ? `${Math.max(0, viewData.rows.length - 1)} row(s)` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="overflow-auto rounded-md border flex-1 min-h-0">
+            <table className="w-max min-w-full border-collapse text-xs">
+              {viewData && viewData.rows.length > 0 && (
+                <thead>
+                  <tr className="bg-[#001d6e] sticky top-0">
+                    {viewData.rows[0].map((h, i) => (
+                      <th key={i} className="whitespace-nowrap border-r border-white/10 px-3 py-2 text-left font-semibold text-white">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+              )}
+              <tbody>
+                {viewData?.rows.slice(1).map((row, idx) => {
+                  const isEmpty = row.length === 0;
+                  const isSummaryRow = typeof row[0] === "string" && /^(TOTAL|CONSOLIDATED|Final Stock Added|No scans recorded)$/i.test(String(row[0]));
+                  if (isEmpty) return <tr key={idx}><td colSpan={viewData.rows[0]?.length || 1} className="h-2" /></tr>;
+                  return (
+                    <tr key={idx} className={`border-b hover:bg-gray-50 ${isSummaryRow ? "bg-slate-50 font-semibold" : idx % 2 === 0 ? "bg-white" : "bg-slate-50/40"}`}>
+                      {row.map((cell, ci) => (
+                        <td key={ci} className="whitespace-nowrap border-r px-3 py-1.5">{cell === "" || cell == null ? "—" : String(cell)}</td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <DialogFooter className="mt-2">
+            <Button variant="outline" onClick={() => setViewData(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation */}
+      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this import?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes <strong>{deleteTarget?.csvFileName}</strong> and its rows from Order Import/Reports.
+              Past scan history tied to it is kept for existing reports, but it won't appear in new ones. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-red-600 text-white hover:bg-red-700" disabled={isDeleting} onClick={confirmDelete}>
+              {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

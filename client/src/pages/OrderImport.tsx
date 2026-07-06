@@ -5,15 +5,12 @@ import Papa from "papaparse";
 import { getCurrentUserPermissions } from "../lib/permissions";
 import {
   AlertCircle,
-  AlertTriangle,
   CheckCircle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Download,
   FileUp,
   History,
-  Layers,
   Loader2,
   PackageCheck,
   Pencil,
@@ -143,55 +140,6 @@ type ScanSession = {
   scanActivatedByCode:string | null;
 };
 
-// ── Batch Master View (multi-file upload) ───────────────────────────────────
-type MvItem = {
-  id: number; barcode: string | null; itemName: string | null;
-  sapCode: string | null; quantity: number | null; expectedPallets: number | null;
-  scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
-};
-type MvFile = {
-  sessionId: number; csvFileName: string; rowCount: number | null;
-  uploadedAt: string | null; uploadedBy: string; plant: string;
-  scanStatus: string | null; items: MvItem[];
-};
-type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
-type MvMergedItem = {
-  barcode: string | null; itemName: string | null; sapCode: string | null;
-  quantity: number; scannedQty: number; expectedPallets: number | null;
-  _files: string[]; _isExtra: boolean;
-};
-type BatchResult = { sessionIds: number[]; fileNames: string[]; totalRows: number; failed: string[]; groupId: number | null };
-
-// ── FIFO group report (per-part + consolidated, with cross-part adjustments) ────
-type GroupReportEntry = {
-  barcode: string; itemName: string; expectedQty: number; receivedQty: number;
-  extraQty: number; missingQty: number;
-  adjustedTo: { toPartId: number; toCsvFileName: string; qty: number }[];
-  adjustedFrom: { fromPartId: number; fromCsvFileName: string; qty: number }[];
-  remainingExtra: number; remainingMissing: number;
-};
-type GroupReportPart = {
-  id: number; partIndex: number; csvFileName: string; plant: string;
-  scanStatus: string | null; rowCount: number | null;
-  items: GroupReportEntry[];
-  summary: {
-    totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number;
-    totalAdjustedTo: number; totalAdjustedFrom: number;
-    netExtraAfterAdjustment: number; netMissingAfterAdjustment: number;
-  };
-};
-type GroupReport = {
-  groupId: number; plant: string;
-  parts: GroupReportPart[];
-  consolidated: {
-    totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number;
-    totalAdjustments: number; finalStockAdded: number;
-    netExtraAfterAdjustment: number; netMissingAfterAdjustment: number;
-    allComplete: boolean;
-    productWise: { barcode: string; itemName: string; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }[];
-  };
-};
-
 // DB stores timestamps in IST (server local time). The pg driver reads them as UTC
 // and JSON serializes with Z, shifting the time by +5:30. To undo this, display
 // using timeZone "UTC" so the raw stored value (= actual IST time) is shown as-is.
@@ -226,19 +174,16 @@ export default function OrderImport() {
   // Form state
   const [plant, setPlant] = useState("");
   const [orderDate, setOrderDate] = useState(getLocalISODate());
-  // One file → existing single-import flow (mapping dialog for review).
-  // Multiple files → automatic batch import, each file auto-mapped independently.
+  // Upload CSV: select one or many files; you Map & Import EACH one in turn (a mapping
+  // dialog per file). All files sharing the same plant + Order Date auto-group into one
+  // FIFO batch server-side (Part 1 loads, the rest auto-advance on complete).
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isBatchImporting, setIsBatchImporting] = useState(false);
-  const [batchResult, setBatchResult] = useState<BatchResult | null>(null);
-  const [showBatchMasterView, setShowBatchMasterView] = useState(false);
-
-  // FIFO Session upload — separate from the plain multi-file batch above: these files
-  // become one group (Part 1, Part 2, ...) and completing a part auto-activates the next.
-  const [fifoPlant, setFifoPlant] = useState("");
-  const [fifoFiles, setFifoFiles] = useState<File[]>([]);
-  const fifoFileRef = useRef<HTMLInputElement>(null);
-  const [isFifoImporting, setIsFifoImporting] = useState(false);
+  // Sequential per-file Map & Import queue.
+  const uploadQueueRef = useRef<File[]>([]);
+  const uploadIdxRef = useRef(0);
+  const uploadCollectedRef = useRef<{ sessionIds: number[]; fileNames: string[]; failed: string[]; totalRows: number; groupId: number | null }>({ sessionIds: [], fileNames: [], failed: [], totalRows: 0, groupId: null });
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
 
   // CSV parse result
   const [csvData, setCsvData] = useState<{
@@ -366,54 +311,6 @@ export default function OrderImport() {
     refetchIntervalInBackground: true,
     refetchOnMount: true,
     refetchOnWindowFocus: true,
-  });
-
-  // Master View scoped to exactly the sessions from the last batch upload (not the
-  // broader date+plant view) — see GET /order-import/master-view?sessionIds=...
-  const batchMvQuery = useQuery<MvResponse>({
-    queryKey: ["/api/order-import/master-view", "batch", batchResult?.sessionIds],
-    queryFn: async () =>
-      (await apiRequest("GET", `/api/order-import/master-view?sessionIds=${batchResult!.sessionIds.join(",")}`)).json(),
-    enabled: showBatchMasterView && !!batchResult && batchResult.sessionIds.length > 0,
-    staleTime: 0,
-  });
-
-  // Same barcode-merge logic as the Scan page's Master View: same item across the
-  // batch's files has its expected/scanned qty summed into one row.
-  const batchMvItems: MvMergedItem[] = (() => {
-    const data = batchMvQuery.data;
-    if (!data) return [];
-    const groups = new Map<string, MvMergedItem>();
-    data.files.forEach((f) => {
-      f.items.forEach((item) => {
-        const key = item.barcode?.trim().toLowerCase()
-          || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
-        let g = groups.get(key);
-        if (!g) {
-          g = { barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode, quantity: 0, scannedQty: 0, expectedPallets: null, _files: [], _isExtra: true };
-          groups.set(key, g);
-        }
-        g.quantity += item.quantity ?? 0;
-        g.scannedQty += item.scannedQty ?? 0;
-        if (item.expectedPallets != null) g.expectedPallets = (g.expectedPallets ?? 0) + item.expectedPallets;
-        if (!g.itemName && item.itemName) g.itemName = item.itemName;
-        if (!g.sapCode && item.sapCode) g.sapCode = item.sapCode;
-        if (!g._files.includes(f.csvFileName)) g._files.push(f.csvFileName);
-        if (!item.isExtra) g._isExtra = false;
-      });
-    });
-    return Array.from(groups.values());
-  })();
-
-  // FIFO batch report — per-part expected/received/extra/missing with cross-part
-  // adjustments. Only meaningful (and only enabled) when the batch is a FIFO group.
-  const groupReportQuery = useQuery<GroupReport>({
-    queryKey: ["/api/order-import/sessions", batchResult?.groupId, "group-report"],
-    queryFn: async () =>
-      (await apiRequest("GET", `/api/order-import/sessions/${batchResult!.groupId}/group-report`)).json(),
-    enabled: showBatchMasterView && !!batchResult?.groupId,
-    staleTime: 0,
-    refetchInterval: 10000,
   });
 
   // ── WebSocket: real-time sync ──────────────────────────────────────────────
@@ -889,6 +786,8 @@ export default function OrderImport() {
     e.target.value = "";
   }
 
+  // Start the sequential Map & Import queue: opens the mapping dialog for the first file;
+  // each confirm imports that file and advances to the next file's mapping dialog.
   function handleImportClick() {
     if (!plant.trim()) {
       toast({ title: "Select a plant first", variant: "destructive" });
@@ -898,11 +797,11 @@ export default function OrderImport() {
       toast({ title: "Select a CSV file first", variant: "destructive" });
       return;
     }
-    if (selectedFiles.length === 1) {
-      parseAndOpen(selectedFiles[0]);
-    } else {
-      runBatchImport();
-    }
+    uploadQueueRef.current = selectedFiles;
+    uploadIdxRef.current = 0;
+    uploadCollectedRef.current = { sessionIds: [], fileNames: [], failed: [], totalRows: 0, groupId: null };
+    setUploadProgress({ current: 1, total: selectedFiles.length });
+    parseAndOpen(selectedFiles[0]);
   }
 
   function handleConfirmImport() {
@@ -911,224 +810,63 @@ export default function OrderImport() {
     if (editTargetSession) {
       updateMutation.mutate({ id: editTargetSession.id, csvFileName: csvData.name, items });
     } else {
-      importMutation.mutate({ plant, csvFileName: csvData.name, items });
+      importQueuedFile(csvData.name, items);
     }
   }
 
-  // Multi-file upload: each file gets its own auto-detected column mapping (different
-  // suppliers use different headers) and becomes its own independent order_import_sessions
-  // row — no FIFO/receiving-session grouping, no manual per-file review. Continues past a
-  // single file's failure so one bad CSV doesn't block the rest of the batch.
-  async function runBatchImport() {
-    const files = selectedFiles;
-    if (files.length === 0) return;
+  // Imports the current queued file (with the shared plant + Order Date, so the server
+  // auto-groups it), then either opens the next file's mapping dialog or finishes the batch.
+  async function importQueuedFile(csvFileName: string, items: object[]) {
     setIsBatchImporting(true);
-    const sessionIds: number[] = [];
-    const fileNames: string[] = [];
-    const failed: string[] = [];
-    let totalRows = 0;
-
-    for (const file of files) {
-      try {
-        const parsed = await parseCsvRaw(file);
-        if (!parsed) { failed.push(file.name); continue; }
-        const fileMapping = autoMatch(parsed.headers);
-        const items = buildItemsFromRows(parsed.rows, fileMapping);
-        const resp = await apiRequest("POST", "/api/order-import/sessions", { plant, csvFileName: file.name, items });
-        const data = await resp.json();
-        if (data?.session?.id) {
-          sessionIds.push(data.session.id);
-          fileNames.push(file.name);
-          totalRows += data.rowCount ?? 0;
-        } else {
-          failed.push(file.name);
-        }
-      } catch {
-        failed.push(file.name);
+    const c = uploadCollectedRef.current;
+    try {
+      const resp = await apiRequest("POST", "/api/order-import/sessions", { plant, csvFileName, items, orderDate });
+      const data = await resp.json();
+      if (data?.session?.id) {
+        if (c.groupId == null) c.groupId = data.session.receivingSessionId ?? data.session.id;
+        c.sessionIds.push(data.session.id);
+        c.fileNames.push(csvFileName);
+        c.totalRows += data.rowCount ?? 0;
+      } else {
+        c.failed.push(csvFileName);
       }
+    } catch {
+      c.failed.push(csvFileName);
     }
 
+    const nextIdx = uploadIdxRef.current + 1;
+    const queue = uploadQueueRef.current;
+    if (nextIdx < queue.length) {
+      uploadIdxRef.current = nextIdx;
+      setUploadProgress({ current: nextIdx + 1, total: queue.length });
+      setIsBatchImporting(false);
+      await parseAndOpen(queue[nextIdx]); // reopen mapping dialog for the next file
+    } else {
+      finishQueuedImport();
+    }
+  }
+
+  function finishQueuedImport() {
+    const c = uploadCollectedRef.current;
     setIsBatchImporting(false);
+    setShowMappingDialog(false);
+    setCsvData(null);
     setSelectedFiles([]);
     if (fileRef.current) fileRef.current.value = "";
-    setLastImport({ rowCount: totalRows });
+    setUploadProgress(null);
+    setLastImport({ rowCount: c.totalRows });
     setShowHistory(true);
     setCurrentPage(1);
     setFilterDate("");
     setFilterPlant("");
     refetchAllSessionQueries();
 
-    if (sessionIds.length > 0) {
-      setBatchResult({ sessionIds, fileNames, totalRows, failed, groupId: null });
-      setShowBatchMasterView(true);
-    }
-
+    const n = c.sessionIds.length;
     toast({
-      title: failed.length === 0 ? "Batch import complete" : sessionIds.length === 0 ? "Batch import failed" : "Batch import finished with errors",
-      description: `${sessionIds.length} of ${files.length} file(s) imported · ${totalRows} rows${failed.length ? ` · failed: ${failed.join(", ")}` : ""}`,
-      variant: sessionIds.length === 0 ? "destructive" : undefined,
-      className: failed.length === 0 ? "bg-green-50 border-green-200 text-green-900" : undefined,
-    });
-  }
-
-  // FIFO Session upload: files become ONE group (Part 1, Part 2, ...). Part 1 is created
-  // first with partIndex:1 and no receivingSessionId — the server self-assigns Part 1's own
-  // id as the group id and returns it, which is then attached to every subsequent part.
-  // Only Part 1 auto-activates immediately (nothing else in the group is active yet);
-  // completing a part auto-activates the next by partIndex (see /order-scan/.../complete).
-  // Reopens the Batch Master View / FIFO Report for a group after the fact (e.g. from
-  // the History tab), not just right after uploading it. Derives sessionIds from the
-  // report's own parts list since we don't have them cached from the original upload.
-  async function openGroupReport(groupId: number) {
-    try {
-      const resp = await apiRequest("GET", `/api/order-import/sessions/${groupId}/group-report`);
-      const data: GroupReport = await resp.json();
-      setBatchResult({
-        sessionIds: data.parts.map((p) => p.id),
-        fileNames: data.parts.map((p) => p.csvFileName),
-        totalRows: data.parts.reduce((s, p) => s + (p.rowCount ?? 0), 0),
-        failed: [],
-        groupId,
-      });
-      setShowBatchMasterView(true);
-    } catch {
-      toast({ title: "Failed to load FIFO report", variant: "destructive" });
-    }
-  }
-
-  function downloadCsvFile(filename: string, rows: (string | number)[][]) {
-    const csv = rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }
-
-  // CSV-wise export: one row per (part, item) with expected/received/extra/missing and the
-  // cross-part adjustments applied to that line.
-  function downloadGroupPartCsv(report: GroupReport) {
-    const rows: (string | number)[][] = [[
-      "Part", "File", "Status", "Barcode", "Item Name",
-      "Expected", "Received", "Extra", "Missing", "Adjusted To Next", "Adjusted From Prev", "Net Extra", "Net Missing",
-    ]];
-    report.parts.forEach((p) => {
-      p.items.forEach((i) => {
-        rows.push([
-          p.partIndex, p.csvFileName, p.scanStatus ?? "", i.barcode, i.itemName,
-          i.expectedQty, i.receivedQty, i.extraQty, i.missingQty,
-          i.adjustedTo.reduce((s, a) => s + a.qty, 0),
-          i.adjustedFrom.reduce((s, a) => s + a.qty, 0),
-          i.remainingExtra, i.remainingMissing,
-        ]);
-      });
-    });
-    downloadCsvFile(`fifo-report-partwise-group${report.groupId}.csv`, rows);
-  }
-
-  // Per-CSV report download — works as soon as THAT one part is completed, no need to wait
-  // for the whole group. Fetches the single part's report and writes one CSV for it.
-  async function downloadPartReport(sessionId: number, csvFileName: string) {
-    try {
-      const resp = await apiRequest("GET", `/api/order-import/sessions/${sessionId}/part-report`);
-      const part: GroupReportPart = await resp.json();
-      const rows: (string | number)[][] = [[
-        "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing",
-        "Adjusted To Next", "Adjusted From Prev", "Net Extra", "Net Missing",
-      ]];
-      part.items.forEach((i) => {
-        rows.push([
-          i.barcode, i.itemName, i.expectedQty, i.receivedQty, i.extraQty, i.missingQty,
-          i.adjustedTo.reduce((s, a) => s + a.qty, 0),
-          i.adjustedFrom.reduce((s, a) => s + a.qty, 0),
-          i.remainingExtra, i.remainingMissing,
-        ]);
-      });
-      rows.push([]);
-      rows.push(["TOTAL", "", part.summary.totalExpected, part.summary.totalReceived, part.summary.totalExtra, part.summary.totalMissing, part.summary.totalAdjustedTo, part.summary.totalAdjustedFrom, part.summary.netExtraAfterAdjustment, part.summary.netMissingAfterAdjustment]);
-      const safeName = csvFileName.replace(/\.csv$/i, "").replace(/[^\w.-]+/g, "_");
-      downloadCsvFile(`part-report-${safeName}.csv`, rows);
-    } catch {
-      toast({ title: "Failed to download part report", variant: "destructive" });
-    }
-  }
-
-  // Final export: consolidated product-wise totals across the whole group (post-adjustment).
-  function downloadGroupFinalCsv(report: GroupReport) {
-    const rows: (string | number)[][] = [[
-      "Barcode", "Item Name", "Total Expected", "Total Received", "Total Extra", "Total Missing", "Total Adjusted",
-    ]];
-    report.consolidated.productWise.forEach((pw) => {
-      rows.push([pw.barcode, pw.itemName, pw.totalExpected, pw.totalReceived, pw.totalExtra, pw.totalMissing, pw.totalAdjusted]);
-    });
-    rows.push([]);
-    rows.push(["CONSOLIDATED", "", report.consolidated.totalExpected, report.consolidated.totalReceived, report.consolidated.totalExtra, report.consolidated.totalMissing, report.consolidated.totalAdjustments]);
-    rows.push(["Final Stock Added", report.consolidated.finalStockAdded, "Net Extra", report.consolidated.netExtraAfterAdjustment, "Net Missing", report.consolidated.netMissingAfterAdjustment, ""]);
-    downloadCsvFile(`fifo-report-final-group${report.groupId}.csv`, rows);
-  }
-
-  async function runFifoImport() {
-    if (!fifoPlant.trim()) {
-      toast({ title: "Select a plant first", variant: "destructive" });
-      return;
-    }
-    const files = fifoFiles;
-    if (files.length === 0) {
-      toast({ title: "Select at least one CSV file", variant: "destructive" });
-      return;
-    }
-    setIsFifoImporting(true);
-    let groupId: number | null = null;
-    const sessionIds: number[] = [];
-    const fileNames: string[] = [];
-    const failed: string[] = [];
-    let totalRows = 0;
-    let partIndex = 1;
-
-    for (const file of files) {
-      try {
-        const parsed = await parseCsvRaw(file);
-        if (!parsed) { failed.push(file.name); partIndex++; continue; }
-        const fileMapping = autoMatch(parsed.headers);
-        const items = buildItemsFromRows(parsed.rows, fileMapping);
-        const body: Record<string, unknown> = { plant: fifoPlant, csvFileName: file.name, items, partIndex };
-        if (groupId) body.receivingSessionId = groupId;
-        const resp = await apiRequest("POST", "/api/order-import/sessions", body);
-        const data = await resp.json();
-        if (data?.session?.id) {
-          if (!groupId) groupId = data.session.receivingSessionId ?? data.session.id;
-          sessionIds.push(data.session.id);
-          fileNames.push(file.name);
-          totalRows += data.rowCount ?? 0;
-        } else {
-          failed.push(file.name);
-        }
-      } catch {
-        failed.push(file.name);
-      }
-      partIndex++;
-    }
-
-    setIsFifoImporting(false);
-    setFifoFiles([]);
-    if (fifoFileRef.current) fifoFileRef.current.value = "";
-    setLastImport({ rowCount: totalRows });
-    setShowHistory(true);
-    setCurrentPage(1);
-    setFilterDate("");
-    setFilterPlant("");
-    refetchAllSessionQueries();
-
-    if (sessionIds.length > 0) {
-      setBatchResult({ sessionIds, fileNames, totalRows, failed, groupId });
-      setShowBatchMasterView(true);
-    }
-
-    toast({
-      title: failed.length === 0 ? "FIFO session created" : sessionIds.length === 0 ? "FIFO session failed" : "FIFO session created with errors",
-      description: `${sessionIds.length} of ${files.length} part(s) created · ${totalRows} rows${failed.length ? ` · failed: ${failed.join(", ")}` : ""}. Part 1 is active; the rest auto-load as each part is completed.`,
-      variant: sessionIds.length === 0 ? "destructive" : undefined,
-      className: failed.length === 0 ? "bg-green-50 border-green-200 text-green-900" : undefined,
+      title: c.failed.length === 0 ? "Import complete" : n === 0 ? "Import failed" : "Import finished with errors",
+      description: `${n} file(s) imported · ${c.totalRows} rows${c.failed.length ? ` · failed: ${c.failed.join(", ")}` : ""}. Same plant + order date auto-group; Part 1 loads now, the rest auto-load as each completes. View reports on the Order Reports page.`,
+      variant: n === 0 ? "destructive" : undefined,
+      className: c.failed.length === 0 ? "bg-green-50 border-green-200 text-green-900" : undefined,
     });
   }
 
@@ -1209,6 +947,13 @@ export default function OrderImport() {
   const plantOptions = (plantsQuery.data ?? []).filter((p) => p.name && p.name.trim() !== "");
 
   const _allScanSessions = scanSessionsQuery.data ?? [];
+
+  // Plants that currently have an active session — UNFILTERED by the Active tab's own
+  // plant/date filters, since this drives whether Load is disabled on the Available tab
+  // and must always reflect true global state, not whatever the user is filtering by.
+  const activePlantsSet = new Set(
+    _allScanSessions.filter((s) => s.scanStatus === "active").map((s) => (s.plant ?? "").toLowerCase()),
+  );
 
   // Client-side filters — empty string means "all". Status filter ensures a session
   // removed via completeMutation disappears from Currently Active immediately (cache
@@ -1377,57 +1122,6 @@ export default function OrderImport() {
           </div>
         </div>
 
-        {/* ── FIFO Session Upload ── */}
-        <div className="rounded-xl border border-purple-200 bg-white shadow-sm">
-          <div className="flex items-center gap-2 border-b border-gray-100 px-5 py-4">
-            <Layers className="h-5 w-5 text-purple-700" />
-            <h2 className="text-base font-semibold text-gray-900">FIFO Session Upload</h2>
-            <span className="text-xs text-gray-400">Multiple files → one ordered group; Part 1 loads now, the rest auto-load as each part completes</span>
-          </div>
-          <div className="p-5 space-y-4">
-            <div className="flex flex-wrap items-end gap-3">
-              <div className="grid gap-1 min-w-[130px] flex-1">
-                <Label className="text-xs text-gray-500">Plant</Label>
-                {plantOptions.length > 0 ? (
-                  <Select value={fifoPlant || "_none_"} onValueChange={(v) => setFifoPlant(v === "_none_" ? "" : v)}>
-                    <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_none_">— Select —</SelectItem>
-                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input className="h-9 text-sm" value={fifoPlant} onChange={(e) => setFifoPlant(e.target.value)} placeholder="Plant…" />
-                )}
-              </div>
-              <div className="grid gap-1 flex-[2] min-w-[220px]">
-                <Label className="text-xs text-gray-500">
-                  CSV Files (in scan order){fifoFiles.length > 0 && <span className="text-purple-700 font-medium"> · {fifoFiles.length} selected</span>}
-                </Label>
-                <Input ref={fifoFileRef} type="file" accept=".csv" multiple className="h-9 text-sm"
-                  onChange={(e) => { setFifoFiles(Array.from(e.target.files ?? [])); e.target.value = ""; }}
-                  disabled={isFifoImporting} />
-              </div>
-              <div className="flex gap-2 pb-0.5">
-                <Button variant="outline" className="h-9" onClick={() => { setFifoFiles([]); if (fifoFileRef.current) fifoFileRef.current.value = ""; }}
-                  disabled={fifoFiles.length === 0 || isFifoImporting}>
-                  <X className="h-4 w-4" />
-                </Button>
-                <Button className="h-9 bg-purple-700 hover:bg-purple-800 text-white" onClick={runFifoImport}
-                  disabled={fifoFiles.length === 0 || !fifoPlant.trim() || isFifoImporting}>
-                  {isFifoImporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Layers className="mr-2 h-4 w-4" />}
-                  Create FIFO Session ({fifoFiles.length || 0} part{fifoFiles.length === 1 ? "" : "s"})
-                </Button>
-              </div>
-            </div>
-            {fifoFiles.length > 1 && (
-              <div className="rounded-lg border bg-purple-50/50 px-4 py-2.5 text-xs text-purple-800">
-                Order: {fifoFiles.map((f, i) => `Part ${i + 1}: ${f.name}`).join(" · ")}
-              </div>
-            )}
-          </div>
-        </div>
-
         {/* ── Session Manager Tabs ── */}
         <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
           {/* Tab pills header */}
@@ -1520,6 +1214,12 @@ export default function OrderImport() {
                     const scanFiltered = scanItemSearch
                       ? scanAllItems.filter((i) => [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(scanItemSearch.toLowerCase())))
                       : scanAllItems;
+                    // Only one session may be active per plant at a time. Disabling Load up
+                    // front (rather than only reacting to the server's 409) is the primary
+                    // guard; the backend re-checks under a row lock on every /activate call
+                    // regardless, so a race between two admins clicking at the same instant
+                    // is still caught server-side even if both buttons briefly looked enabled.
+                    const plantBusy = activePlantsSet.has((s.plant ?? "").toLowerCase());
                     return (
                       <div key={s.id}>
                         <div
@@ -1536,6 +1236,11 @@ export default function OrderImport() {
                                 <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
                                 <span className="text-xs text-gray-400">{fmtIST(s.createdAt)}</span>
                                 {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
+                                {plantBusy && (
+                                  <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700" title="Another session is already active for this plant">
+                                    Plant busy
+                                  </span>
+                                )}
                               </div>
                             </div>
                             <div className="flex shrink-0 items-center gap-1.5">
@@ -1543,9 +1248,10 @@ export default function OrderImport() {
                                 {s.rowCount}
                               </span>
                               <Button size="sm"
-                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white"
-                                disabled={loadForScanMutation.isPending}
-                                onClick={(e) => { e.stopPropagation(); loadForScanMutation.mutate(s.id); }}>
+                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50"
+                                disabled={loadForScanMutation.isPending || plantBusy}
+                                title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
+                                onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
                                 {loadForScanMutation.isPending
                                   ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
                                   : <ScanLine className="h-3 w-3 mr-1" />}
@@ -1775,11 +1481,6 @@ export default function OrderImport() {
                           <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
                             <CheckCircle2 className="h-3 w-3" /> Done
                           </span>
-                          <Button size="sm" variant="outline"
-                            className="h-7 gap-1 px-2 text-xs text-green-700 border-green-200 hover:bg-green-50"
-                            onClick={() => downloadPartReport(s.id, s.csvFileName)}>
-                            <Download className="h-3.5 w-3.5" /> Report
-                          </Button>
                         </div>
                       </div>
                     </div>
@@ -1878,12 +1579,9 @@ export default function OrderImport() {
                                     {importerName}
                                   </span>
                                   {(session as any).receivingSessionId && (
-                                    <button
-                                      className="rounded bg-purple-50 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700 hover:bg-purple-100"
-                                      onClick={(e) => { e.stopPropagation(); openGroupReport((session as any).receivingSessionId); }}
-                                    >
-                                      Part {(session as any).partIndex ?? "?"} · View FIFO Report
-                                    </button>
+                                    <span className="rounded bg-purple-50 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
+                                      Part {(session as any).partIndex ?? "?"}
+                                    </span>
                                   )}
                                 </div>
                               </div>
@@ -1906,13 +1604,6 @@ export default function OrderImport() {
                                   <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 whitespace-nowrap">
                                     Ready
                                   </span>
-                                )}
-                                {(session as any).scanStatus === "completed" && (
-                                  <Button size="sm" variant="ghost" title="Download this CSV's report"
-                                    className="h-8 w-8 p-0 text-gray-400 hover:text-green-600"
-                                    onClick={(e) => { e.stopPropagation(); downloadPartReport(session.id, session.csvFileName); }}>
-                                    <Download className="h-3.5 w-3.5" />
-                                  </Button>
                                 )}
                                 <Button size="sm" variant="ghost" title="Re-import with new CSV"
                                   className="h-8 w-8 p-0 text-gray-400 hover:text-blue-600"
@@ -2141,19 +1832,30 @@ export default function OrderImport() {
           )}
 
           <DialogFooter className="mt-2 gap-2">
-            <Button variant="outline" onClick={() => { setShowMappingDialog(false); setEditTargetSession(null); }}
-              disabled={importMutation.isPending || updateMutation.isPending}>
+            {!editTargetSession && uploadProgress && (
+              <span className="mr-auto self-center text-xs text-gray-500">File {uploadProgress.current} of {uploadProgress.total}</span>
+            )}
+            <Button variant="outline"
+              onClick={() => {
+                // Cancel aborts the whole queue.
+                setShowMappingDialog(false);
+                setEditTargetSession(null);
+                uploadQueueRef.current = [];
+                uploadIdxRef.current = 0;
+                setUploadProgress(null);
+              }}
+              disabled={isBatchImporting || updateMutation.isPending}>
               Cancel
             </Button>
             <Button onClick={handleConfirmImport}
-              disabled={importMutation.isPending || updateMutation.isPending || !csvData}
+              disabled={isBatchImporting || updateMutation.isPending || !csvData}
               className="bg-[#001d6e] hover:bg-[#00154b] text-white">
-              {(importMutation.isPending || updateMutation.isPending) ? (
+              {(isBatchImporting || updateMutation.isPending) ? (
                 <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />{editTargetSession ? "Replacing…" : "Importing…"}</>
               ) : editTargetSession ? (
                 <><Pencil className="mr-1.5 h-4 w-4" />Replace {csvData?.rows.length ?? 0} rows</>
               ) : (
-                <><Upload className="mr-1.5 h-4 w-4" />Import {csvData?.rows.length ?? 0} rows</>
+                <><Upload className="mr-1.5 h-4 w-4" />Import {csvData?.rows.length ?? 0} rows{uploadProgress && uploadProgress.total > 1 ? ` · next file →` : ""}</>
               )}
             </Button>
           </DialogFooter>
@@ -2193,223 +1895,6 @@ export default function OrderImport() {
                 : <Upload className="mr-1.5 h-4 w-4" />}
               Replace Data
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Batch Master View — merged view of just the files from the last multi-upload ── */}
-      <Dialog open={showBatchMasterView} onOpenChange={(open) => { if (!open) setShowBatchMasterView(false); }}>
-        <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle>Batch Master View</DialogTitle>
-            <DialogDescription>
-              {batchResult ? `${batchResult.sessionIds.length} file(s) imported · ${batchResult.totalRows} rows` : "Loading…"}
-              {batchResult && batchResult.failed.length > 0 && (
-                <span className="block mt-1 text-red-600 font-medium">Failed: {batchResult.failed.join(", ")}</span>
-              )}
-            </DialogDescription>
-          </DialogHeader>
-
-          {batchMvQuery.isLoading ? (
-            <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
-          ) : (
-            <div className="flex flex-col gap-3 overflow-y-auto flex-1 min-h-0 pr-1">
-              <div className="flex flex-wrap gap-2">
-                {(batchMvQuery.data?.files ?? []).map((f) => (
-                  <span key={f.sessionId} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600">
-                    <Layers className="h-3 w-3 text-gray-400" />
-                    {f.csvFileName} <span className="text-gray-400">· {f.rowCount ?? f.items.length} rows</span>
-                  </span>
-                ))}
-              </div>
-              <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
-                  <h3 className="text-sm font-semibold text-gray-900">Merged Items</h3>
-                  <span className="text-xs text-gray-400">{batchMvItems.length} items</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs sm:text-sm">
-                    <thead>
-                      <tr className="bg-[#001d6e]">
-                        <th className="px-3 py-2 w-8" />
-                        <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
-                        <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
-                        <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Files</th>
-                        <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
-                        <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
-                        <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
-                        <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {batchMvItems.length === 0 ? (
-                        <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
-                      ) : batchMvItems.map((item, idx) => {
-                        const exp  = item.quantity ?? 0;
-                        const done = item.scannedQty ?? 0;
-                        const remain = Math.max(0, exp - done);
-                        const isExtraOnly = item._isExtra;
-                        const isDone = done >= exp && exp > 0;
-                        const isPartial = done > 0 && !isDone && !isExtraOnly;
-                        const rowBg = isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
-                        return (
-                          <tr key={idx} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
-                            <td className="px-3 py-2 text-center">
-                              {isExtraOnly
-                                ? <AlertTriangle className="h-4 w-4 text-orange-500 mx-auto" />
-                                : isDone
-                                ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
-                                : isPartial
-                                ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
-                                : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
-                            </td>
-                            <td className="px-3 py-2 font-medium text-gray-900 min-w-[200px]"><span className="block whitespace-normal break-words">{item.itemName ?? "—"}</span></td>
-                            <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
-                            <td className="px-3 py-2 text-xs text-gray-400 max-w-[130px] truncate" title={item._files.join(", ")}>
-                              {item._files.length > 1 ? `${item._files.length} files` : item._files[0]}
-                            </td>
-                            <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
-                            <td className="px-3 py-2 text-right tabular-nums font-bold">
-                              <span className={isExtraOnly ? "text-orange-700" : isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
-                            </td>
-                            <td className="px-3 py-2 text-right tabular-nums font-bold">
-                              <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
-                            </td>
-                            <td className="px-3 py-2 text-center">
-                              <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isExtraOnly ? "bg-orange-100 text-orange-700" : isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
-                                {isExtraOnly ? "Extra" : isDone ? "Done" : isPartial ? "Partial" : "Pending"}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* ── FIFO batch report — only for a FIFO Session upload, not the plain multi-file batch ── */}
-              {batchResult?.groupId && (
-                <div className="rounded-xl border border-purple-200 bg-white shadow-sm overflow-hidden">
-                  <div className="flex items-center justify-between gap-2 px-4 py-3 border-b bg-purple-50/50 flex-wrap">
-                    <h3 className="text-sm font-semibold text-purple-900 flex items-center gap-1.5">
-                      <Layers className="h-4 w-4" /> FIFO Batch Report
-                    </h3>
-                    <div className="flex items-center gap-2">
-                      {groupReportQuery.data?.consolidated.allComplete && (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                          <CheckCircle2 className="h-3 w-3" /> All parts complete
-                        </span>
-                      )}
-                      {groupReportQuery.data && (
-                        <>
-                          <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
-                            onClick={() => downloadGroupPartCsv(groupReportQuery.data!)}>
-                            <Download className="h-3 w-3" /> CSV-wise
-                          </Button>
-                          <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
-                            onClick={() => downloadGroupFinalCsv(groupReportQuery.data!)}>
-                            <Download className="h-3 w-3" /> Final
-                          </Button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {groupReportQuery.isLoading ? (
-                    <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-purple-700" /></div>
-                  ) : groupReportQuery.data ? (
-                    <div className="p-4 space-y-4">
-                      {/* Consolidated summary — running total until every part is complete */}
-                      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                        {[
-                          { label: "Expected", value: groupReportQuery.data.consolidated.totalExpected, cls: "text-gray-700" },
-                          { label: "Received", value: groupReportQuery.data.consolidated.totalReceived, cls: "text-[#001d6e]" },
-                          { label: "Extra", value: groupReportQuery.data.consolidated.totalExtra, cls: "text-amber-600" },
-                          { label: "Missing", value: groupReportQuery.data.consolidated.totalMissing, cls: "text-red-600" },
-                          { label: "Adjusted", value: groupReportQuery.data.consolidated.totalAdjustments, cls: "text-purple-600" },
-                          { label: "Final Stock", value: groupReportQuery.data.consolidated.finalStockAdded, cls: "text-green-600" },
-                        ].map((c) => (
-                          <div key={c.label} className="rounded-md border bg-gray-50 px-2 py-2 text-center">
-                            <p className={`text-lg font-bold ${c.cls}`}>{c.value}</p>
-                            <p className="text-[10px] uppercase tracking-wide text-gray-500">{c.label}</p>
-                          </div>
-                        ))}
-                      </div>
-                      {(groupReportQuery.data.consolidated.netMissingAfterAdjustment > 0 || groupReportQuery.data.consolidated.netExtraAfterAdjustment > 0) && (
-                        <p className="text-xs text-gray-500">
-                          After cross-part adjustment: <strong className="text-red-600">{groupReportQuery.data.consolidated.netMissingAfterAdjustment}</strong> still missing,{" "}
-                          <strong className="text-amber-600">{groupReportQuery.data.consolidated.netExtraAfterAdjustment}</strong> unmatched extra
-                          {!groupReportQuery.data.consolidated.allComplete && " (may still resolve once remaining parts are scanned)"}.
-                        </p>
-                      )}
-
-                      {/* Part-wise breakdown */}
-                      <div className="overflow-x-auto rounded-md border">
-                        <table className="w-max min-w-full border-collapse text-xs">
-                          <thead>
-                            <tr>
-                              {["Part", "File", "Status", "Expected", "Received", "Extra", "Missing", "Adj. To Next", "Adj. From Prev", "Net Extra", "Net Missing", "Report"].map((h) => (
-                                <th key={h} className="sticky top-0 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-2 text-left font-semibold text-purple-900">{h}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {groupReportQuery.data.parts.map((p) => (
-                              <tr key={p.id} className="border-b hover:bg-gray-50">
-                                <td className="border-r px-3 py-1.5 font-semibold">{p.partIndex}</td>
-                                <td className="max-w-[160px] truncate border-r px-3 py-1.5" title={p.csvFileName}>{p.csvFileName}</td>
-                                <td className="border-r px-3 py-1.5 capitalize">{p.scanStatus}</td>
-                                <td className="border-r px-3 py-1.5 text-right">{p.summary.totalExpected}</td>
-                                <td className="border-r px-3 py-1.5 text-right">{p.summary.totalReceived}</td>
-                                <td className="border-r px-3 py-1.5 text-right text-amber-600">{p.summary.totalExtra}</td>
-                                <td className="border-r px-3 py-1.5 text-right text-red-600">{p.summary.totalMissing}</td>
-                                <td className="border-r px-3 py-1.5 text-right text-purple-600">{p.summary.totalAdjustedTo}</td>
-                                <td className="border-r px-3 py-1.5 text-right text-purple-600">{p.summary.totalAdjustedFrom}</td>
-                                <td className="border-r px-3 py-1.5 text-right font-semibold">{p.summary.netExtraAfterAdjustment}</td>
-                                <td className="border-r px-3 py-1.5 text-right font-semibold">{p.summary.netMissingAfterAdjustment}</td>
-                                <td className="px-3 py-1.5 text-center">
-                                  <button
-                                    className="inline-flex items-center gap-1 rounded border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-600 hover:bg-gray-50"
-                                    title={`Download report for ${p.csvFileName}`}
-                                    onClick={() => downloadPartReport(p.id, p.csvFileName)}>
-                                    <Download className="h-3 w-3" /> CSV
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-
-                      {/* Adjustment detail — only barcodes with an actual cross-part adjustment */}
-                      {groupReportQuery.data.parts.some((p) => p.items.some((i) => i.adjustedTo.length > 0)) && (
-                        <div>
-                          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">Adjustment Detail</p>
-                          <div className="space-y-1.5 text-xs">
-                            {groupReportQuery.data.parts.flatMap((p) =>
-                              p.items.flatMap((i) =>
-                                i.adjustedTo.map((a, idx) => (
-                                  <div key={`${p.id}-${i.barcode}-${idx}`} className="rounded border border-purple-100 bg-purple-50 px-3 py-1.5 text-purple-800">
-                                    <span className="font-mono">{i.barcode}</span> ({i.itemName}) — <strong>{a.qty}</strong> extra from Part {p.partIndex} ({p.csvFileName}) covers Part {groupReportQuery.data!.parts.find((x) => x.id === a.toPartId)?.partIndex ?? "?"} ({a.toCsvFileName})
-                                  </div>
-                                )),
-                              ),
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="py-6 text-center text-sm text-gray-400">No report data yet.</p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          <DialogFooter className="mt-2">
-            <Button variant="outline" onClick={() => setShowBatchMasterView(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

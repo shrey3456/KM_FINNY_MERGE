@@ -162,7 +162,7 @@ function extractPlant(s: string): string {
 const ADMIN_ROLES = ['admin', 'super-admin', 'billing'];
 const NON_PLANT_WORDS = new Set(['admin', 'super-admin', 'billing', 'user', 'dispatch', 'read', 'write', 'it', 'management', '']);
 
-function getPlantFilter(user: any): string | null {
+export function getPlantFilter(user: any): string | null {
   const role = (user?.role ?? '').toLowerCase().trim();
   const dept = (user?.department ?? '').toLowerCase().trim();
 
@@ -192,6 +192,10 @@ function getPalletSize(product: any, plant: string): number {
 // Shared by the activate route and the auto-activation paths (upload + completion
 // progression) so every activation produces scannable items. Without the seeding,
 // the scan page reads zero items and shows "Loading items…" forever.
+// Returns true if this call actually activated the session, false if it was skipped
+// (not found, or another session is already active for the plant). Safe to call from
+// multiple concurrent contexts (upload auto-activate, complete auto-advance) for the
+// same plant — the advisory lock below serializes them so only one can win.
 export async function seedAndActivateSession(id: number, userCode: string | null): Promise<boolean> {
   const client = await pool.connect();
   try {
@@ -203,6 +207,18 @@ export async function seedAndActivateSession(id: number, userCode: string | null
     );
     const session = sessResult.rows[0];
     if (!session) { await client.query('ROLLBACK'); return false; }
+
+    // Plant-scoped advisory lock — see the matching comment in /activate. Needed here too
+    // because this function is the shared activation path for BOTH the upload auto-activate
+    // and the complete auto-advance callers, and two of those could otherwise race for the
+    // same plant the same way two manual /activate clicks could.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [String(session.plant).toLowerCase()]);
+    const conflict = await client.query(
+      `SELECT id FROM order_import_sessions
+       WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active' AND is_deleted = false AND id != $2`,
+      [session.plant, id],
+    );
+    if (conflict.rows[0]) { await client.query('ROLLBACK'); return false; }
 
     await client.query(
       `UPDATE order_import_sessions
@@ -471,8 +487,17 @@ router.post('/order-scan/sessions/:id/activate', async (req: Request, res: Respo
       return res.status(409).json({ message: 'Session already completed' });
     }
 
-    // Check for a conflicting active session on the same plant (exclude deleted sessions)
+    // Plant-scoped advisory lock — closes a real race the row lock above does NOT: two
+    // DIFFERENT sessions for the SAME plant being activated at the same instant lock two
+    // different rows, so neither blocks the other, and both could read the conflict-check
+    // below as "nothing active yet" before either commits. This serializes all /activate
+    // calls for one plant so the second one always sees the first's committed row. Held for
+    // the transaction; released automatically on COMMIT/ROLLBACK.
     const plantFilter = getPlantFilter(req.user);
+    const lockPlant = (plantFilter ?? session.plant).toLowerCase();
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockPlant]);
+
+    // Check for a conflicting active session on the same plant (exclude deleted sessions)
     const conflictResult = await client.query(
       `SELECT id, csv_file_name FROM order_import_sessions
        WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active'
@@ -584,11 +609,19 @@ router.post('/order-scan/sessions/:id/complete', async (req: Request, res: Respo
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
-    // Use new Date() so node-postgres sends IST local time, matching how createdAt is stored.
-    const [completed] = await db.update(orderImportSessions)
-      .set({ scanStatus: 'completed', scanCompletedAt: new Date() })
-      .where(eq(orderImportSessions.id, id))
-      .returning();
+    // Raw pg query (not Drizzle's .update().set()) — Drizzle's timestamp column serializes
+    // a JS Date via .toISOString() (UTC) before sending it, while raw pg sends the Date's
+    // local (IST) wall-clock value. Every other timestamp write in this file (activate,
+    // stock_applied_at) already goes through raw pg for that reason; this one must match or
+    // scan_completed_at ends up ~5.5h off from scan_activated_at for the exact same instant.
+    const { rows: completedRows } = await pool.query(
+      `UPDATE order_import_sessions
+       SET scan_status = 'completed', scan_completed_at = $1
+       WHERE id = $2
+       RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName"`,
+      [new Date(), id],
+    );
+    const completed = completedRows[0];
 
     // ── Auto-progress ─────────────────────────────────────────────────────────
     // After a CSV finishes, find the next not-yet-scanned CSV and activate it
@@ -630,9 +663,13 @@ router.post('/order-scan/sessions/:id/complete', async (req: Request, res: Respo
 
         if (next) {
           const userCode = (req.user as any)?.userCode ?? null;
-          await seedAndActivateSession(next.id, userCode);
-          nextSessionId = next.id;
-          console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${id}`);
+          const activatedNext = await seedAndActivateSession(next.id, userCode);
+          if (activatedNext) {
+            nextSessionId = next.id;
+            console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${id}`);
+          } else {
+            console.log(`[order-scan] auto-activate of ${next.id} lost the race (another activation won) after completing ${id}`);
+          }
         } else {
           console.log(`[order-scan] no more 'available' sessions in scope after completing ${id}`);
         }

@@ -745,9 +745,11 @@ export const orderImportSessions = pgTable("order_import_sessions", {
   scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
   scanActivatedAt: timestamp("scan_activated_at"),
   scanCompletedAt: timestamp("scan_completed_at"),
-  // FIFO batch grouping: all parts of one multi-CSV upload share the same receivingSessionId
-  // (the group's Part 1 uses its own id as the group id). No DB-level FK — self-referencing,
-  // enforced at the app level — so both columns stay null for standalone (non-batch) imports.
+  // FIFO grouping is automatic by (plant + order date): every CSV uploaded for the same
+  // plant and order date shares one receivingSessionId (the group's Part 1 uses its own id
+  // as the group id) and gets the next partIndex. orderDate is the "Order Date" chosen at
+  // upload (YYYY-MM-DD) — the grouping key, distinct from createdAt (the upload timestamp).
+  orderDate: text("order_date"),
   receivingSessionId: integer("receiving_session_id"),
   partIndex: integer("part_index"),
   // Set once this part's received boxes have been added to products.in_stock, so stock is
