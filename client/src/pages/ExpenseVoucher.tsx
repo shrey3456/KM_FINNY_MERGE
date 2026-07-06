@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -12,11 +13,18 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Calendar as DatePickerCalendar } from "@/components/ui/calendar";
+import {
   Printer,
   Search,
   Package,
   Building,
   Calendar,
+  CalendarIcon,
   Users,
   FileText,
   IndianRupee,
@@ -33,6 +41,7 @@ import {
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { useSingleDateFilter } from "@/hooks/useSingleDateFilter";
 import { TruckLoadingAnimation } from "@/components/TruckLoadingAnimation";
 import * as QRCode from "qrcode";
 import logoPath from "@assets/logo_wo_bg_1757152661130.png";
@@ -183,6 +192,56 @@ export default function ExpenseVoucher() {
   const [voucherPrefix, setVoucherPrefix] = useState<string>("KM2526-EV-");
   const [isAdminUser, setIsAdminUser] = useState(false);
 
+  // Date filter: which day's vouchers to search. Defaults to today and
+  // persists across page refreshes (per-page localStorage key).
+  const [todayMidnight] = useState(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  });
+  const { savedDate: selectedDate, saveDateFilter: setSelectedDate } =
+    useSingleDateFilter("expense-voucher", todayMidnight);
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+  const effectiveDate = selectedDate || todayMidnight;
+  const selectedDateStr = format(effectiveDate, "yyyy-MM-dd");
+
+  // Driver-name autocomplete for the search bar.
+  const [driverSuggestions, setDriverSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  useEffect(() => {
+    const term = voucherNumber.trim();
+    // Only worth suggesting once there's a letter to match against (a purely
+    // numeric term is a voucher number, not a driver name).
+    if (term.length < 2 || !/[a-zA-Z]/.test(term)) {
+      setDriverSuggestions([]);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiRequest(
+          "GET",
+          `/api/expense-voucher/driver-suggestions?q=${encodeURIComponent(term)}`,
+          undefined,
+          false,
+          true
+        );
+        if (!cancelled && res?.success) {
+          setDriverSuggestions(res.suggestions || []);
+        }
+      } catch (e) {
+        if (!cancelled) setDriverSuggestions([]);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [voucherNumber]);
+
   // Fetch global prefixes from server
   useEffect(() => {
     (async () => {
@@ -250,15 +309,15 @@ export default function ExpenseVoucher() {
     refetch,
     isError,
   } = useQuery<ExpenseVoucherResponse>({
-    queryKey: ["/api/expense-voucher", searchMode, selectedOrder],
+    queryKey: ["/api/expense-voucher", searchMode, selectedOrder, selectedDateStr],
     enabled: !!selectedOrder && hasAccess,
     queryFn: async () => {
       if (!selectedOrder) throw new Error("No order selected");
       try {
         const body =
           searchMode === "driver"
-            ? { driverName: selectedOrder }
-            : { orderNumber: selectedOrder };
+            ? { driverName: selectedOrder, voucherDate: selectedDateStr }
+            : { orderNumber: selectedOrder, voucherDate: selectedDateStr };
         const response = await apiRequest(
           "POST",
           "/api/expense-voucher",
@@ -460,8 +519,8 @@ export default function ExpenseVoucher() {
     setIsEditingConveyanceAllowance(false);
   };
 
-  const handleSearch = async () => {
-    const term = voucherNumber.trim();
+  const handleSearch = async (termOverride?: string) => {
+    const term = (termOverride ?? voucherNumber).trim();
     if (!term) {
       toast({
         title: "Search Term Required",
@@ -1185,8 +1244,38 @@ export default function ExpenseVoucher() {
           </CardDescription>
         </CardHeader>
         <CardContent>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-4">
+            <span className="text-sm font-medium text-gray-600 whitespace-nowrap">
+              Voucher Date:
+            </span>
+            <Popover open={isDatePickerOpen} onOpenChange={setIsDatePickerOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="w-full sm:w-[220px] justify-start text-left font-normal"
+                >
+                  <CalendarIcon className="mr-2 h-4 w-4" />
+                  {format(effectiveDate, "dd/MM/yyyy")}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="start">
+                <DatePickerCalendar
+                  mode="single"
+                  selected={effectiveDate}
+                  defaultMonth={effectiveDate}
+                  onSelect={(date) => {
+                    if (date) {
+                      setSelectedDate(date);
+                      setIsDatePickerOpen(false);
+                    }
+                  }}
+                  initialFocus
+                />
+              </PopoverContent>
+            </Popover>
+          </div>
           <div className="flex gap-4 items-end">
-            <div className="flex-1">
+            <div className="flex-1 relative">
               <div className="flex items-center">
                 <Input
                   type="text"
@@ -1203,13 +1292,48 @@ export default function ExpenseVoucher() {
                   placeholder="Voucher number or driver name..."
                   value={voucherNumber}
                   onChange={(e) => setVoucherNumber(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      setShowSuggestions(false);
+                      handleSearch();
+                    } else if (e.key === "Escape") {
+                      setShowSuggestions(false);
+                    }
+                  }}
+                  onFocus={() => setShowSuggestions(true)}
+                  onBlur={() => {
+                    // Delay so a click on a suggestion registers before the
+                    // dropdown unmounts.
+                    setTimeout(() => setShowSuggestions(false), 150);
+                  }}
                   className="rounded-l-none focus-visible:ring-2 focus-visible:ring-blue-500"
                 />
               </div>
+              {showSuggestions && driverSuggestions.length > 0 && (
+                <div className="absolute z-10 mt-1 w-full rounded-md border bg-white shadow-lg max-h-56 overflow-y-auto">
+                  {driverSuggestions.map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-orange-50 flex items-center gap-2"
+                      onMouseDown={(e) => {
+                        // onMouseDown (not onClick) fires before the input's
+                        // onBlur, so the click isn't lost to the blur timeout.
+                        e.preventDefault();
+                        setVoucherNumber(name);
+                        setShowSuggestions(false);
+                        handleSearch(name);
+                      }}
+                    >
+                      <User className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <Button
-              onClick={handleSearch}
+              onClick={() => handleSearch()}
               disabled={
                 expenseVoucherLoading || isFetching || !voucherNumber.trim()
               }
@@ -1619,11 +1743,11 @@ export default function ExpenseVoucher() {
               </div>
               
               <h3 className="text-2xl font-bold text-gray-900 mb-3">
-                Voucher Not Found
+                No Records Found
               </h3>
-              
+
               <p className="text-gray-600 max-w-md mb-8 text-lg">
-                We couldn't locate an expense voucher with number <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedOrder}</span>
+                We couldn't locate an expense voucher with number <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedOrder}</span> on <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{format(effectiveDate, "dd/MM/yyyy")}</span>
               </p>
               
               <div className="grid gap-4 w-full max-w-lg">
