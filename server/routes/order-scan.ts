@@ -9,6 +9,7 @@ import {
 import { eq, and, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
+import { computeGroupReport, resolveGroupId, applySessionStock } from '../lib/orderGroupReport';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
 function plantEq(filter: string) {
@@ -161,7 +162,7 @@ function extractPlant(s: string): string {
 const ADMIN_ROLES = ['admin', 'super-admin', 'billing'];
 const NON_PLANT_WORDS = new Set(['admin', 'super-admin', 'billing', 'user', 'dispatch', 'read', 'write', 'it', 'management', '']);
 
-function getPlantFilter(user: any): string | null {
+export function getPlantFilter(user: any): string | null {
   const role = (user?.role ?? '').toLowerCase().trim();
   const dept = (user?.department ?? '').toLowerCase().trim();
 
@@ -191,6 +192,10 @@ function getPalletSize(product: any, plant: string): number {
 // Shared by the activate route and the auto-activation paths (upload + completion
 // progression) so every activation produces scannable items. Without the seeding,
 // the scan page reads zero items and shows "Loading items…" forever.
+// Returns true if this call actually activated the session, false if it was skipped
+// (not found, or another session is already active for the plant). Safe to call from
+// multiple concurrent contexts (upload auto-activate, complete auto-advance) for the
+// same plant — the advisory lock below serializes them so only one can win.
 export async function seedAndActivateSession(id: number, userCode: string | null): Promise<boolean> {
   const client = await pool.connect();
   try {
@@ -202,6 +207,18 @@ export async function seedAndActivateSession(id: number, userCode: string | null
     );
     const session = sessResult.rows[0];
     if (!session) { await client.query('ROLLBACK'); return false; }
+
+    // Plant-scoped advisory lock — see the matching comment in /activate. Needed here too
+    // because this function is the shared activation path for BOTH the upload auto-activate
+    // and the complete auto-advance callers, and two of those could otherwise race for the
+    // same plant the same way two manual /activate clicks could.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [String(session.plant).toLowerCase()]);
+    const conflict = await client.query(
+      `SELECT id FROM order_import_sessions
+       WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active' AND is_deleted = false AND id != $2`,
+      [session.plant, id],
+    );
+    if (conflict.rows[0]) { await client.query('ROLLBACK'); return false; }
 
     await client.query(
       `UPDATE order_import_sessions
@@ -299,6 +316,8 @@ router.get('/order-scan/notification', async (req: Request, res: Response) => {
         rowCount:    orderImportSessions.rowCount,
         importedByName: importedBy.name,
         scanActivatedAt: orderImportSessions.scanActivatedAt,
+        receivingSessionId: orderImportSessions.receivingSessionId,
+        partIndex: orderImportSessions.partIndex,
       })
       .from(orderImportSessions)
       .leftJoin(importedBy, eq(orderImportSessions.importedByCode, importedBy.userCode))
@@ -419,6 +438,8 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
         scanActivatedByName:  activatedBy.name,
         scanActivatedAt:      orderImportSessions.scanActivatedAt,
         scanCompletedAt:      orderImportSessions.scanCompletedAt,
+        receivingSessionId:   orderImportSessions.receivingSessionId,
+        partIndex:            orderImportSessions.partIndex,
       })
       .from(orderImportSessions)
       .leftJoin(importedBy,  eq(orderImportSessions.importedByCode,      importedBy.userCode))
@@ -466,8 +487,17 @@ router.post('/order-scan/sessions/:id/activate', async (req: Request, res: Respo
       return res.status(409).json({ message: 'Session already completed' });
     }
 
-    // Check for a conflicting active session on the same plant (exclude deleted sessions)
+    // Plant-scoped advisory lock — closes a real race the row lock above does NOT: two
+    // DIFFERENT sessions for the SAME plant being activated at the same instant lock two
+    // different rows, so neither blocks the other, and both could read the conflict-check
+    // below as "nothing active yet" before either commits. This serializes all /activate
+    // calls for one plant so the second one always sees the first's committed row. Held for
+    // the transaction; released automatically on COMMIT/ROLLBACK.
     const plantFilter = getPlantFilter(req.user);
+    const lockPlant = (plantFilter ?? session.plant).toLowerCase();
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockPlant]);
+
+    // Check for a conflicting active session on the same plant (exclude deleted sessions)
     const conflictResult = await client.query(
       `SELECT id, csv_file_name FROM order_import_sessions
        WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active'
@@ -579,49 +609,112 @@ router.post('/order-scan/sessions/:id/complete', async (req: Request, res: Respo
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
-    // Use new Date() so node-postgres sends IST local time, matching how createdAt is stored.
-    const [completed] = await db.update(orderImportSessions)
-      .set({ scanStatus: 'completed', scanCompletedAt: new Date() })
-      .where(eq(orderImportSessions.id, id))
-      .returning();
+    // Raw pg query (not Drizzle's .update().set()) — Drizzle's timestamp column serializes
+    // a JS Date via .toISOString() (UTC) before sending it, while raw pg sends the Date's
+    // local (IST) wall-clock value. Every other timestamp write in this file (activate,
+    // stock_applied_at) already goes through raw pg for that reason; this one must match or
+    // scan_completed_at ends up ~5.5h off from scan_activated_at for the exact same instant.
+    const { rows: completedRows } = await pool.query(
+      `UPDATE order_import_sessions
+       SET scan_status = 'completed', scan_completed_at = $1
+       WHERE id = $2
+       RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName"`,
+      [new Date(), id],
+    );
+    const completed = completedRows[0];
 
     // ── Auto-progress ─────────────────────────────────────────────────────────
-    // After a CSV finishes, find the next not-yet-scanned CSV for the same plant
-    // (in upload order) and activate it automatically, so scanning continues
-    // without anyone having to pick the next file. Only do this if no other
-    // session is already active for the plant (avoid stealing an active lock).
+    // After a CSV finishes, find the next not-yet-scanned CSV and activate it
+    // automatically, so scanning continues without anyone having to pick the next
+    // file. If this part belongs to a FIFO batch (receivingSessionId set), scope
+    // strictly to that batch — ordered by partIndex — so an unrelated 'available'
+    // session for the same plant can never jump the queue. Otherwise fall back to
+    // the original plant-wide behaviour. Either way, only proceed if nothing else
+    // in that scope is already active (avoid stealing an active lock).
     let nextSessionId: number | null = null;
     if (completed) {
-      const activeForPlant = await db.select({ id: orderImportSessions.id })
+      const scopeConditions = completed.receivingSessionId
+        ? [eq(orderImportSessions.receivingSessionId, completed.receivingSessionId)]
+        : [sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`];
+
+      const activeInScope = await db.select({ id: orderImportSessions.id })
         .from(orderImportSessions)
         .where(and(
-          sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`,
+          ...scopeConditions,
           eq(orderImportSessions.scanStatus, 'active'),
           eq(orderImportSessions.isDeleted, false),
         ))
         .limit(1);
 
-      if (activeForPlant.length === 0) {
+      if (activeInScope.length === 0) {
+        const orderBy = completed.receivingSessionId
+          ? [asc(orderImportSessions.partIndex), asc(orderImportSessions.id)]
+          : [asc(orderImportSessions.createdAt), asc(orderImportSessions.id)];
+
         const [next] = await db.select()
           .from(orderImportSessions)
           .where(and(
-            sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`,
+            ...scopeConditions,
             eq(orderImportSessions.scanStatus, 'available'),
             eq(orderImportSessions.isDeleted, false),
           ))
-          .orderBy(asc(orderImportSessions.createdAt), asc(orderImportSessions.id))
+          .orderBy(...orderBy)
           .limit(1);
 
         if (next) {
           const userCode = (req.user as any)?.userCode ?? null;
-          await seedAndActivateSession(next.id, userCode);
-          nextSessionId = next.id;
-          console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${id}`);
+          const activatedNext = await seedAndActivateSession(next.id, userCode);
+          if (activatedNext) {
+            nextSessionId = next.id;
+            console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${id}`);
+          } else {
+            console.log(`[order-scan] auto-activate of ${next.id} lost the race (another activation won) after completing ${id}`);
+          }
         } else {
-          console.log(`[order-scan] no more 'available' sessions for plant ${completed.plant} after completing ${id}`);
+          console.log(`[order-scan] no more 'available' sessions in scope after completing ${id}`);
         }
       } else {
-        console.log(`[order-scan] another session already active for plant ${completed.plant}; skip auto-progress`);
+        console.log(`[order-scan] another session already active in scope; skip auto-progress`);
+      }
+    }
+
+    // ── Stock application (Option C) ─────────────────────────────────────────────
+    // Add received boxes to products.in_stock on TERMINAL completion only:
+    //   • standalone session → on its own completion
+    //   • FIFO group → only once the LAST part completes (whole group done), so the
+    //     cross-part extras/shortfalls are all final first
+    // applySessionStock is idempotent per session (stock_applied_at guard + row lock),
+    // so a retried /complete can never double-count. Best-effort: a failure here is
+    // logged but does not fail the completion (which is already committed above).
+    if (completed) {
+      const stockClient = await pool.connect();
+      try {
+        await stockClient.query('BEGIN');
+        if (!completed.receivingSessionId) {
+          const n = await applySessionStock(stockClient, id);
+          if (n > 0) console.log(`[order-scan] stock applied for standalone session ${id} → ${n} product(s)`);
+        } else {
+          const remaining = await stockClient.query(
+            `SELECT 1 FROM order_import_sessions
+             WHERE receiving_session_id = $1 AND is_deleted = false AND scan_status <> 'completed' LIMIT 1`,
+            [completed.receivingSessionId],
+          );
+          if (remaining.rows.length === 0) {
+            const partsRes = await stockClient.query(
+              `SELECT id FROM order_import_sessions WHERE receiving_session_id = $1 AND is_deleted = false`,
+              [completed.receivingSessionId],
+            );
+            let total = 0;
+            for (const row of partsRes.rows) total += await applySessionStock(stockClient, row.id);
+            console.log(`[order-scan] FIFO group ${completed.receivingSessionId} complete → stock applied to ${total} product row(s)`);
+          }
+        }
+        await stockClient.query('COMMIT');
+      } catch (e) {
+        await stockClient.query('ROLLBACK');
+        console.error('[order-scan] stock application failed:', e);
+      } finally {
+        stockClient.release();
       }
     }
 
@@ -643,6 +736,40 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
     res.json(items);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch items' });
+  }
+});
+
+// ── GET /api/order-scan/sessions/:id/group-credits ───────────────────────────
+// For a part that belongs to a FIFO batch: per barcode, how much of this part's
+// expected qty is already covered by an earlier part's over-scan (extra), so the
+// scan dashboard can show "3 already covered from Part 1" instead of dispatch
+// re-scanning boxes that already physically arrived and were counted earlier.
+// Read-only — computed from the same FIFO-netting used by the group report;
+// order_scan_items/order_scan_events are never modified here. Empty map (not an
+// error) for a session that isn't part of a batch.
+router.get('/order-scan/sessions/:id/group-credits', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+  try {
+    const groupId = await resolveGroupId(id);
+    if (!groupId) return res.json({ credits: [], partIndex: null, totalParts: 0 });
+
+    const report = await computeGroupReport(groupId);
+    const part = report?.parts.find((p) => p.id === id);
+    if (!part || !report) return res.json({ credits: [], partIndex: null, totalParts: 0 });
+
+    const credits = part.items
+      .filter((item) => item.adjustedFrom.length > 0)
+      .map((item) => ({
+        barcode: item.barcode,
+        itemName: item.itemName,
+        creditedQty: item.adjustedFrom.reduce((s, a) => s + a.qty, 0),
+        sources: item.adjustedFrom.map((a) => ({ fromCsvFileName: a.fromCsvFileName, qty: a.qty })),
+      }));
+
+    res.json({ credits, partIndex: part.partIndex, totalParts: report.parts.length });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to compute group credits' });
   }
 });
 

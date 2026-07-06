@@ -174,7 +174,16 @@ export default function OrderImport() {
   // Form state
   const [plant, setPlant] = useState("");
   const [orderDate, setOrderDate] = useState(getLocalISODate());
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  // Upload CSV: select one or many files; you Map & Import EACH one in turn (a mapping
+  // dialog per file). All files sharing the same plant + Order Date auto-group into one
+  // FIFO batch server-side (Part 1 loads, the rest auto-advance on complete).
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [isBatchImporting, setIsBatchImporting] = useState(false);
+  // Sequential per-file Map & Import queue.
+  const uploadQueueRef = useRef<File[]>([]);
+  const uploadIdxRef = useRef(0);
+  const uploadCollectedRef = useRef<{ sessionIds: number[]; fileNames: string[]; failed: string[]; totalRows: number; groupId: number | null }>({ sessionIds: [], fileNames: [], failed: [], totalRows: 0, groupId: null });
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
 
   // CSV parse result
   const [csvData, setCsvData] = useState<{
@@ -414,7 +423,7 @@ export default function OrderImport() {
     onSuccess: (data) => {
       setShowMappingDialog(false);
       setCsvData(null);
-      setSelectedFile(null);
+      setSelectedFiles([]);
       setLastImport({ rowCount: data.rowCount });
       setShowHistory(true);
       setCurrentPage(1);
@@ -680,88 +689,74 @@ export default function OrderImport() {
   }
 
   // ── Handlers ───────────────────────────────────────────────────────────────
-  function parseAndOpen(file: File) {
-    // Parse as raw arrays first so we can find the real header row.
-    // Excel pivot-table exports often have a report-title row before the actual headers.
-    Papa.parse<string[]>(file, {
-      header: false,
-      skipEmptyLines: true,
-      delimiter: "",   // auto-detect delimiter
-      encoding: "UTF-8",
-      complete: (result) => {
-        const rawRows = result.data as string[][];
-        if (rawRows.length === 0) {
-          toast({ title: "Empty file", description: "The CSV has no rows.", variant: "destructive" });
-          return;
-        }
 
-        // Find the row with the most non-empty cells in the first 15 rows.
-        // That row is almost always the real header row.
-        let headerRowIdx = 0;
-        let maxCols = 0;
-        for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
-          const nonEmpty = rawRows[i].filter((c) => c.trim() !== "").length;
-          if (nonEmpty > maxCols) {
-            maxCols = nonEmpty;
-            headerRowIdx = i;
+  // Parses raw arrays first so we can find the real header row — Excel pivot-table
+  // exports often have a report-title row before the actual headers. Shared by the
+  // single-file review flow (parseAndOpen) and the automatic multi-file batch import,
+  // so both detect headers the same way.
+  function parseCsvRaw(file: File): Promise<{ name: string; headers: string[]; rows: Record<string, string>[] } | null> {
+    return new Promise((resolve) => {
+      Papa.parse<string[]>(file, {
+        header: false,
+        skipEmptyLines: true,
+        delimiter: "",   // auto-detect delimiter
+        encoding: "UTF-8",
+        complete: (result) => {
+          const rawRows = result.data as string[][];
+          if (rawRows.length === 0) {
+            toast({ title: "Empty file", description: `"${file.name}" has no rows.`, variant: "destructive" });
+            resolve(null);
+            return;
           }
-        }
 
-        // Clean and filter header cells
-        const headers = rawRows[headerRowIdx]
-          .map((h) => cleanHeader(h))
-          .filter((h) => h !== "");
+          // Find the row with the most non-empty cells in the first 15 rows.
+          // That row is almost always the real header row.
+          let headerRowIdx = 0;
+          let maxCols = 0;
+          for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+            const nonEmpty = rawRows[i].filter((c) => c.trim() !== "").length;
+            if (nonEmpty > maxCols) {
+              maxCols = nonEmpty;
+              headerRowIdx = i;
+            }
+          }
 
-        if (headers.length === 0) {
-          toast({
-            title: "No columns found",
-            description: "Could not detect column headers in the file.",
-            variant: "destructive",
+          // Clean and filter header cells
+          const headers = rawRows[headerRowIdx]
+            .map((h) => cleanHeader(h))
+            .filter((h) => h !== "");
+
+          if (headers.length === 0) {
+            toast({
+              title: "No columns found",
+              description: `Could not detect column headers in "${file.name}".`,
+              variant: "destructive",
+            });
+            resolve(null);
+            return;
+          }
+
+          // Build data rows from everything after the header row
+          const rows = rawRows.slice(headerRowIdx + 1).map((row) => {
+            const obj: Record<string, string> = {};
+            headers.forEach((h, i) => { obj[h] = row[i] ?? ""; });
+            return obj;
           });
-          return;
-        }
 
-        // Build data rows from everything after the header row
-        const dataRows = rawRows.slice(headerRowIdx + 1).map((row) => {
-          const obj: Record<string, string> = {};
-          headers.forEach((h, i) => { obj[h] = row[i] ?? ""; });
-          return obj;
-        });
-
-        setCsvData({ name: file.name, headers, rows: dataRows });
-        setMapping(autoMatch(headers));
-        setShowMappingDialog(true);
-      },
-      error: (err) =>
-        toast({ title: "Could not parse CSV", description: err.message, variant: "destructive" }),
+          resolve({ name: file.name, headers, rows });
+        },
+        error: (err) => {
+          toast({ title: "Could not parse CSV", description: `"${file.name}": ${err.message}`, variant: "destructive" });
+          resolve(null);
+        },
+      });
     });
   }
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setSelectedFile(file);
-    setLastImport(null);
-    e.target.value = "";
-  }
-
-  function handleImportClick() {
-    if (!plant.trim()) {
-      toast({ title: "Select a plant first", variant: "destructive" });
-      return;
-    }
-    if (!selectedFile) {
-      toast({ title: "Select a CSV file first", variant: "destructive" });
-      return;
-    }
-    parseAndOpen(selectedFile);
-  }
-
-  function handleConfirmImport() {
-    if (!csvData) return;
-    const items = csvData.rows.map((row) => {
+  function buildItemsFromRows(rows: Record<string, string>[], activeMapping: Mapping) {
+    return rows.map((row) => {
       const get = (key: TargetKey) => {
-        const col = mapping[key];
+        const col = activeMapping[key];
         return col && col !== SKIP ? (row[col] ?? "") : "";
       };
       return {
@@ -773,11 +768,106 @@ export default function OrderImport() {
         date:            orderDate || null,
       };
     });
+  }
+
+  async function parseAndOpen(file: File) {
+    const parsed = await parseCsvRaw(file);
+    if (!parsed) return;
+    setCsvData(parsed);
+    setMapping(autoMatch(parsed.headers));
+    setShowMappingDialog(true);
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+    setSelectedFiles(files);
+    setLastImport(null);
+    e.target.value = "";
+  }
+
+  // Start the sequential Map & Import queue: opens the mapping dialog for the first file;
+  // each confirm imports that file and advances to the next file's mapping dialog.
+  function handleImportClick() {
+    if (!plant.trim()) {
+      toast({ title: "Select a plant first", variant: "destructive" });
+      return;
+    }
+    if (selectedFiles.length === 0) {
+      toast({ title: "Select a CSV file first", variant: "destructive" });
+      return;
+    }
+    uploadQueueRef.current = selectedFiles;
+    uploadIdxRef.current = 0;
+    uploadCollectedRef.current = { sessionIds: [], fileNames: [], failed: [], totalRows: 0, groupId: null };
+    setUploadProgress({ current: 1, total: selectedFiles.length });
+    parseAndOpen(selectedFiles[0]);
+  }
+
+  function handleConfirmImport() {
+    if (!csvData) return;
+    const items = buildItemsFromRows(csvData.rows, mapping);
     if (editTargetSession) {
       updateMutation.mutate({ id: editTargetSession.id, csvFileName: csvData.name, items });
     } else {
-      importMutation.mutate({ plant, csvFileName: csvData.name, items });
+      importQueuedFile(csvData.name, items);
     }
+  }
+
+  // Imports the current queued file (with the shared plant + Order Date, so the server
+  // auto-groups it), then either opens the next file's mapping dialog or finishes the batch.
+  async function importQueuedFile(csvFileName: string, items: object[]) {
+    setIsBatchImporting(true);
+    const c = uploadCollectedRef.current;
+    try {
+      const resp = await apiRequest("POST", "/api/order-import/sessions", { plant, csvFileName, items, orderDate });
+      const data = await resp.json();
+      if (data?.session?.id) {
+        if (c.groupId == null) c.groupId = data.session.receivingSessionId ?? data.session.id;
+        c.sessionIds.push(data.session.id);
+        c.fileNames.push(csvFileName);
+        c.totalRows += data.rowCount ?? 0;
+      } else {
+        c.failed.push(csvFileName);
+      }
+    } catch {
+      c.failed.push(csvFileName);
+    }
+
+    const nextIdx = uploadIdxRef.current + 1;
+    const queue = uploadQueueRef.current;
+    if (nextIdx < queue.length) {
+      uploadIdxRef.current = nextIdx;
+      setUploadProgress({ current: nextIdx + 1, total: queue.length });
+      setIsBatchImporting(false);
+      await parseAndOpen(queue[nextIdx]); // reopen mapping dialog for the next file
+    } else {
+      finishQueuedImport();
+    }
+  }
+
+  function finishQueuedImport() {
+    const c = uploadCollectedRef.current;
+    setIsBatchImporting(false);
+    setShowMappingDialog(false);
+    setCsvData(null);
+    setSelectedFiles([]);
+    if (fileRef.current) fileRef.current.value = "";
+    setUploadProgress(null);
+    setLastImport({ rowCount: c.totalRows });
+    setShowHistory(true);
+    setCurrentPage(1);
+    setFilterDate("");
+    setFilterPlant("");
+    refetchAllSessionQueries();
+
+    const n = c.sessionIds.length;
+    toast({
+      title: c.failed.length === 0 ? "Import complete" : n === 0 ? "Import failed" : "Import finished with errors",
+      description: `${n} file(s) imported · ${c.totalRows} rows${c.failed.length ? ` · failed: ${c.failed.join(", ")}` : ""}. Same plant + order date auto-group; Part 1 loads now, the rest auto-load as each completes. View reports on the Order Reports page.`,
+      variant: n === 0 ? "destructive" : undefined,
+      className: c.failed.length === 0 ? "bg-green-50 border-green-200 text-green-900" : undefined,
+    });
   }
 
   function parseAndReplace(file: File) {
@@ -834,7 +924,7 @@ export default function OrderImport() {
   }
 
   function clearForm() {
-    setSelectedFile(null);
+    setSelectedFiles([]);
     setLastImport(null);
     setOrderDate(getLocalISODate());
     if (fileRef.current) fileRef.current.value = "";
@@ -857,6 +947,13 @@ export default function OrderImport() {
   const plantOptions = (plantsQuery.data ?? []).filter((p) => p.name && p.name.trim() !== "");
 
   const _allScanSessions = scanSessionsQuery.data ?? [];
+
+  // Plants that currently have an active session — UNFILTERED by the Active tab's own
+  // plant/date filters, since this drives whether Load is disabled on the Available tab
+  // and must always reflect true global state, not whatever the user is filtering by.
+  const activePlantsSet = new Set(
+    _allScanSessions.filter((s) => s.scanStatus === "active").map((s) => (s.plant ?? "").toLowerCase()),
+  );
 
   // Client-side filters — empty string means "all". Status filter ensures a session
   // removed via completeMutation disappears from Currently Active immediately (cache
@@ -945,21 +1042,22 @@ export default function OrderImport() {
               {/* File */}
               <div className="grid gap-1 flex-[2] min-w-[180px]">
                 <Label className="text-xs text-gray-500">
-                  CSV File {selectedFile && <span className="text-green-600 font-medium">· {selectedFile.name}</span>}
+                  CSV File{selectedFiles.length === 1 && <span className="text-green-600 font-medium"> · {selectedFiles[0].name}</span>}
+                  {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
                 </Label>
-                <Input ref={fileRef} type="file" accept=".csv" className="h-9 text-sm"
-                  onChange={handleFileChange} disabled={importMutation.isPending} />
+                <Input ref={fileRef} type="file" accept=".csv" multiple className="h-9 text-sm"
+                  onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
               {/* Actions */}
               <div className="flex gap-2 pb-0.5">
                 <Button variant="outline" className="h-9" onClick={clearForm}
-                  disabled={!selectedFile || importMutation.isPending}>
+                  disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
                 </Button>
                 <Button className="h-9 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={!selectedFile || !plant.trim() || importMutation.isPending}>
-                  {importMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                  Map &amp; Import
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting}>
+                  {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                  {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
               </div>
             </div>
@@ -968,11 +1066,12 @@ export default function OrderImport() {
             <div className="sm:hidden space-y-3">
               <div className="grid gap-1">
                 <Label className="text-xs text-gray-500 font-medium">
-                  CSV File {selectedFile && <span className="text-green-600 font-medium">· {selectedFile.name}</span>}
+                  CSV File{selectedFiles.length === 1 && <span className="text-green-600 font-medium"> · {selectedFiles[0].name}</span>}
+                  {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
                 </Label>
-                <Input ref={fileRef} type="file" accept=".csv"
+                <Input ref={fileRef} type="file" accept=".csv" multiple
                   className="h-11 text-sm file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:font-medium file:bg-[#001d6e]/10 file:text-[#001d6e]"
-                  onChange={handleFileChange} disabled={importMutation.isPending} />
+                  onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="grid gap-1">
@@ -996,13 +1095,13 @@ export default function OrderImport() {
               </div>
               <div className="flex gap-2">
                 <Button variant="outline" className="h-10 px-3 shrink-0" onClick={clearForm}
-                  disabled={!selectedFile || importMutation.isPending}>
+                  disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
                 </Button>
                 <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={!selectedFile || !plant.trim() || importMutation.isPending}>
-                  {importMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                  Map &amp; Import
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting}>
+                  {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                  {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
               </div>
             </div>
@@ -1115,6 +1214,12 @@ export default function OrderImport() {
                     const scanFiltered = scanItemSearch
                       ? scanAllItems.filter((i) => [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(scanItemSearch.toLowerCase())))
                       : scanAllItems;
+                    // Only one session may be active per plant at a time. Disabling Load up
+                    // front (rather than only reacting to the server's 409) is the primary
+                    // guard; the backend re-checks under a row lock on every /activate call
+                    // regardless, so a race between two admins clicking at the same instant
+                    // is still caught server-side even if both buttons briefly looked enabled.
+                    const plantBusy = activePlantsSet.has((s.plant ?? "").toLowerCase());
                     return (
                       <div key={s.id}>
                         <div
@@ -1131,6 +1236,11 @@ export default function OrderImport() {
                                 <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
                                 <span className="text-xs text-gray-400">{fmtIST(s.createdAt)}</span>
                                 {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
+                                {plantBusy && (
+                                  <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700" title="Another session is already active for this plant">
+                                    Plant busy
+                                  </span>
+                                )}
                               </div>
                             </div>
                             <div className="flex shrink-0 items-center gap-1.5">
@@ -1138,9 +1248,10 @@ export default function OrderImport() {
                                 {s.rowCount}
                               </span>
                               <Button size="sm"
-                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white"
-                                disabled={loadForScanMutation.isPending}
-                                onClick={(e) => { e.stopPropagation(); loadForScanMutation.mutate(s.id); }}>
+                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50"
+                                disabled={loadForScanMutation.isPending || plantBusy}
+                                title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
+                                onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
                                 {loadForScanMutation.isPending
                                   ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
                                   : <ScanLine className="h-3 w-3 mr-1" />}
@@ -1467,6 +1578,11 @@ export default function OrderImport() {
                                     </svg>
                                     {importerName}
                                   </span>
+                                  {(session as any).receivingSessionId && (
+                                    <span className="rounded bg-purple-50 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
+                                      Part {(session as any).partIndex ?? "?"}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                               <div className="flex shrink-0 items-center gap-1 ml-1">
@@ -1716,19 +1832,30 @@ export default function OrderImport() {
           )}
 
           <DialogFooter className="mt-2 gap-2">
-            <Button variant="outline" onClick={() => { setShowMappingDialog(false); setEditTargetSession(null); }}
-              disabled={importMutation.isPending || updateMutation.isPending}>
+            {!editTargetSession && uploadProgress && (
+              <span className="mr-auto self-center text-xs text-gray-500">File {uploadProgress.current} of {uploadProgress.total}</span>
+            )}
+            <Button variant="outline"
+              onClick={() => {
+                // Cancel aborts the whole queue.
+                setShowMappingDialog(false);
+                setEditTargetSession(null);
+                uploadQueueRef.current = [];
+                uploadIdxRef.current = 0;
+                setUploadProgress(null);
+              }}
+              disabled={isBatchImporting || updateMutation.isPending}>
               Cancel
             </Button>
             <Button onClick={handleConfirmImport}
-              disabled={importMutation.isPending || updateMutation.isPending || !csvData}
+              disabled={isBatchImporting || updateMutation.isPending || !csvData}
               className="bg-[#001d6e] hover:bg-[#00154b] text-white">
-              {(importMutation.isPending || updateMutation.isPending) ? (
+              {(isBatchImporting || updateMutation.isPending) ? (
                 <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />{editTargetSession ? "Replacing…" : "Importing…"}</>
               ) : editTargetSession ? (
                 <><Pencil className="mr-1.5 h-4 w-4" />Replace {csvData?.rows.length ?? 0} rows</>
               ) : (
-                <><Upload className="mr-1.5 h-4 w-4" />Import {csvData?.rows.length ?? 0} rows</>
+                <><Upload className="mr-1.5 h-4 w-4" />Import {csvData?.rows.length ?? 0} rows{uploadProgress && uploadProgress.total > 1 ? ` · next file →` : ""}</>
               )}
             </Button>
           </DialogFooter>

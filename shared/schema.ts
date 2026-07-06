@@ -745,6 +745,18 @@ export const orderImportSessions = pgTable("order_import_sessions", {
   scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
   scanActivatedAt: timestamp("scan_activated_at"),
   scanCompletedAt: timestamp("scan_completed_at"),
+  // FIFO grouping is automatic by (plant + order date): every CSV uploaded for the same
+  // plant and order date shares one receivingSessionId (the group's Part 1 uses its own id
+  // as the group id) and gets the next partIndex. orderDate is the "Order Date" chosen at
+  // upload (YYYY-MM-DD) — the grouping key, distinct from createdAt (the upload timestamp).
+  orderDate: text("order_date"),
+  receivingSessionId: integer("receiving_session_id"),
+  partIndex: integer("part_index"),
+  // Set once this part's received boxes have been added to products.in_stock, so stock is
+  // never double-counted (e.g. a retried /complete). Stock is applied on terminal
+  // completion — a standalone session on its own complete, a FIFO part when the whole
+  // group finishes — using SUM(order_scan_events.total_qty) per barcode.
+  stockAppliedAt: timestamp("stock_applied_at"),
   // Soft-delete: keeps scan_items/scan_events intact so history/reports survive
   isDeleted: boolean("is_deleted").default(false).notNull(),
   deletedAt: timestamp("deleted_at"),
@@ -767,6 +779,7 @@ export const orderImportItems = pgTable("order_import_items", {
 
 export const insertOrderImportSessionSchema = createInsertSchema(orderImportSessions).pick({
   plant: true, csvFileName: true, rowCount: true, importedByCode: true,
+  receivingSessionId: true, partIndex: true,
 });
 
 export const insertOrderImportItemSchema = createInsertSchema(orderImportItems).pick({
@@ -825,6 +838,11 @@ export const orderScanEvents = pgTable("order_scan_events", {
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
   scannedByName: text("scanned_by_name"),
   scannedAt: timestamp("scanned_at").defaultNow(),
+  // Added via a raw ALTER TABLE migration in server/index.ts on server startup, not through
+  // Drizzle — declared here so drizzle-kit push/generate stop treating it as drift to drop.
+  // Used by the Notion sync feature (server/routes/scan-sessions.ts) to track which scan
+  // events have already been pushed to Notion.
+  notionSyncedAt: timestamp("notion_synced_at", { withTimezone: true }),
 });
 
 export const insertOrderScanItemSchema = createInsertSchema(orderScanItems).pick({
