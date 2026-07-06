@@ -9,6 +9,15 @@ const searchCache = new Map<string, { data: any, timestamp: number }>();
 const partyCache = new Map<string, { data: any, timestamp: number }>();
 const CACHE_DURATION = (60 * 1000)/2; // 1 hour cache for maximum speed
 
+// Driver master-list cache for the search-bar autocomplete: refreshed at
+// most once per DRIVER_LIST_CACHE_DURATION so typing in the search box never
+// hits Notion per keystroke -- suggestions are filtered from this cache.
+// Stale entries are still served instantly (see getDriverNameList) while a
+// fresh copy is fetched in the background, so this duration only controls
+// how often that background refresh happens, never how long a user waits.
+let driverNameListCache: { names: string[]; timestamp: number } | null = null;
+const DRIVER_LIST_CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -57,22 +66,29 @@ function normalizeVoucherValue(value: string): string {
   return value.trim().toUpperCase();
 }
 
-function extractVoucherNoFromPage(page: any): string {
-  const prop = page?.properties?.['Voucher No. :'];
-  if (!prop) return '';
-  if (prop.rich_text && Array.isArray(prop.rich_text)) {
-    return prop.rich_text.map((t: any) => t.plain_text || '').join('');
+// Today's date as YYYY-MM-DD in the server's local timezone.
+function getTodayDateStr(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// Accepts only a strict YYYY-MM-DD string from the client; anything else
+// (missing, malformed) falls back to today so a search always has a date scope.
+function normalizeVoucherDate(input: any): string {
+  if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    return input;
   }
-  if (prop.title && Array.isArray(prop.title)) {
-    return prop.title.map((t: any) => t.plain_text || '').join('');
-  }
-  if (prop.formula?.string) {
-    return prop.formula.string;
-  }
-  if (typeof prop.number === 'number') {
-    return String(prop.number);
-  }
-  return '';
+  return getTodayDateStr();
+}
+
+// Notion filter fragment that scopes a query to vouchers whose "Voucher Date :"
+// property equals the given day. Every voucher search is scoped by date, so
+// this is combined (via `and`) into every Notion query below.
+function buildDateFilter(voucherDate: string) {
+  return { property: 'Voucher Date :', date: { equals: voucherDate } };
 }
 
 // The AEV expense-voucher database stores some fields under different property
@@ -461,50 +477,383 @@ function groupInfosByVehicle(
   return groups;
 }
 
+// Searches for a voucher by number, scoped to voucherDate. Every filter
+// variant (rich_text/title/formula x equals/contains, across both the raw
+// and normalized search value) is combined with the date filter and fired
+// concurrently -- only the property-type match actually succeeds (the rest
+// throw a validation_error), so this trades a handful of parallel requests
+// for what would otherwise be up to 12 sequential round-trips. Priority
+// order (equals before contains, raw value before normalized) is preserved
+// by scanning the resolved results in the original order, not by which
+// request finishes first.
 async function queryByVoucherNumber(
   notion: Client,
   databaseId: string,
-  voucherNumber: string
+  voucherNumber: string,
+  voucherDate: string
 ): Promise<any[]> {
   const searchValues = Array.from(new Set([voucherNumber.trim(), normalizeVoucherValue(voucherNumber)]));
+  const dateFilter = buildDateFilter(voucherDate);
 
-  for (const value of searchValues) {
-    const filters = [
-      { property: 'Voucher No. :', rich_text: { equals: value } },
-      { property: 'Voucher No. :', rich_text: { contains: value } },
-      { property: 'Voucher No. :', title: { equals: value } },
-      { property: 'Voucher No. :', title: { contains: value } },
-      { property: 'Voucher No. :', formula: { string: { equals: value } } },
-      { property: 'Voucher No. :', formula: { string: { contains: value } } }
-    ];
+  const filtersInPriorityOrder = searchValues.flatMap((value) => [
+    { property: 'Voucher No. :', rich_text: { equals: value } },
+    { property: 'Voucher No. :', rich_text: { contains: value } },
+    { property: 'Voucher No. :', title: { equals: value } },
+    { property: 'Voucher No. :', title: { contains: value } },
+    { property: 'Voucher No. :', formula: { string: { equals: value } } },
+    { property: 'Voucher No. :', formula: { string: { contains: value } } }
+  ]).map((filter) => ({ and: [filter, dateFilter] }));
 
-    for (const filter of filters) {
-      try {
-        const response = await queryNotionWithRetry(notion, {
-          database_id: databaseId,
-          page_size: 25,
-          filter
-        });
+  const resultsByFilter = await Promise.all(
+    filtersInPriorityOrder.map((filter) =>
+      queryNotionWithRetry(notion, { database_id: databaseId, page_size: 25, filter })
+        .then((response) => response.results ?? [])
+        .catch((error: any) => {
+          if (error?.code === 'validation_error') return [];
+          throw error;
+        })
+    )
+  );
 
-        if (response.results?.length) {
-          return response.results;
-        }
-      } catch (error: any) {
-        if (error?.code === 'validation_error') {
-          continue;
-        }
-        throw error;
-      }
-    }
+  for (const results of resultsByFilter) {
+    if (results.length) return results;
   }
 
   return [];
 }
 
+// Extract a single "best" text value out of a Notion property, used only to
+// test whether a page matches a free-text lookup value (diesel bill no.,
+// order no., driver name) -- shared by findMatchingPage below.
+function extractLookupFieldValue(prop: any): string {
+  if (prop?.rich_text?.[0]?.plain_text) return prop.rich_text[0].plain_text;
+  if (prop?.title?.[0]?.plain_text) return prop.title[0].plain_text;
+  if (prop?.formula?.string) return prop.formula.string;
+  if (prop?.formula?.number) return prop.formula.number.toString();
+  if (prop?.number) return prop.number.toString();
+  if (prop?.select?.name) return prop.select.name;
+  return '';
+}
+
+// Paginate a database looking for the first page containing targetValue in
+// any property, stopping as soon as a match is found (or maxBatches is hit).
+// Used for diesel-bill / order / driver lookups, which aren't date-scoped.
+async function findMatchingPage(
+  notion: Client,
+  databaseId: string,
+  targetValue: string,
+  maxBatches: number,
+  pageSize: number
+): Promise<any | null> {
+  let cursor: string | undefined = undefined;
+  let hasMore = true;
+  let batches = 0;
+
+  while (hasMore && batches < maxBatches) {
+    const response = await queryNotionWithRetry(notion, {
+      database_id: databaseId,
+      page_size: pageSize,
+      start_cursor: cursor
+    });
+    batches++;
+
+    const match = (response.results as any[]).find((page: any) => {
+      if (!('properties' in page)) return false;
+      return Object.values(page.properties).some((value) => {
+        const fieldValue = extractLookupFieldValue(value);
+        return fieldValue && (fieldValue === targetValue || fieldValue.includes(targetValue));
+      });
+    });
+    if (match) return match;
+
+    hasMore = response.has_more;
+    cursor = response.next_cursor || undefined;
+  }
+
+  return null;
+}
+
+// Build the { propertyName: displayValue } map used for diesel bill / order /
+// driver detail side-panels (no alias resolution needed, unlike buildVoucherInfo).
+function extractDisplayProperties(properties: Record<string, any>): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    const prop = value as any;
+    let displayValue = '';
+    switch (prop.type) {
+      case 'title':
+      case 'rich_text':
+        displayValue = prop[prop.type]?.[0]?.plain_text || '';
+        break;
+      case 'date':
+        if (prop.date?.start) {
+          const date = new Date(prop.date.start);
+          displayValue = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
+        }
+        break;
+      case 'select':
+        displayValue = prop.select?.name || '';
+        break;
+      case 'number':
+        displayValue = prop.number?.toString() || '';
+        break;
+      case 'formula':
+        if (prop.formula?.string) {
+          displayValue = prop.formula.string;
+        } else if (prop.formula?.number) {
+          displayValue = prop.formula.number.toString();
+        }
+        break;
+      case 'phone_number':
+        displayValue = prop.phone_number || '';
+        break;
+    }
+    if (displayValue) result[key] = displayValue;
+  }
+  return result;
+}
+
+// Paginate one expense-voucher database, scoped to voucherDate, collecting
+// every voucher whose driver name contains `query`. Also captures the
+// plant/status off the FIRST match found in this database, so callers
+// scanning multiple databases can combine results while still preferring the
+// earliest database's plant/status.
+async function findDriverVouchers(
+  notion: Client,
+  databaseId: string,
+  query: string,
+  voucherDate: string,
+  maxBatches: number
+): Promise<{ infos: Record<string, string>[]; firstPlant?: string; firstStatus?: string }> {
+  const infos: Record<string, string>[] = [];
+  let firstPlant: string | undefined;
+  let firstStatus: string | undefined;
+  let cursor: string | undefined = undefined;
+  let hasMore = true;
+  let batches = 0;
+  const dateFilter = buildDateFilter(voucherDate);
+
+  while (hasMore && batches < maxBatches) {
+    const resp = await queryNotionWithRetry(notion, {
+      database_id: databaseId,
+      page_size: 100,
+      start_cursor: cursor,
+      filter: dateFilter,
+      sorts: [{ timestamp: 'created_time', direction: 'descending' }]
+    });
+    batches++;
+
+    for (const page of resp.results as any[]) {
+      if (!('properties' in page)) continue;
+      const info = buildVoucherInfo(page.properties);
+      const driver = getVoucherDriverName(info);
+      if (!driver || !driver.toLowerCase().includes(query)) continue;
+
+      if (firstPlant === undefined) {
+        const p = page.properties;
+        firstPlant = p['Plant']?.select?.name || p['Stk Plant :']?.select?.name || 'INDORE';
+        firstStatus = p['Finny Status :']?.status?.name || p['Finny Status :']?.select?.name || 'Unknown';
+      }
+      infos.push(info);
+    }
+
+    hasMore = resp.has_more;
+    cursor = resp.next_cursor || undefined;
+  }
+
+  if (hasMore && batches >= maxBatches) {
+    console.warn(
+      `⚠️ Driver search hit batch cap (${maxBatches}) for db ${databaseId}; some vouchers for "${query}" on ${voucherDate} may not have been included.`
+    );
+  }
+
+  return { infos, firstPlant, firstStatus };
+}
+
+// Paginate the expense-voucher database, scoped to voucherDate, looking for
+// OTHER vouchers (excluding excludeId) that share the same driver as the base
+// voucher, so they can be merged into one printout.
+async function findMergeSiblings(
+  notion: Client,
+  databaseId: string,
+  baseDriverKey: string,
+  voucherDate: string,
+  excludeId: string,
+  maxBatches: number
+): Promise<Record<string, string>[]> {
+  const siblings: Record<string, string>[] = [];
+  let cursor: string | undefined = undefined;
+  let hasMore = true;
+  let batches = 0;
+  const dateFilter = buildDateFilter(voucherDate);
+
+  while (hasMore && batches < maxBatches) {
+    const resp = await queryNotionWithRetry(notion, {
+      database_id: databaseId,
+      page_size: 100,
+      start_cursor: cursor,
+      filter: dateFilter,
+      sorts: [{ timestamp: 'created_time', direction: 'descending' }]
+    });
+    batches++;
+
+    for (const page of resp.results as any[]) {
+      if (page.id === excludeId) continue;
+      if (!('properties' in page)) continue;
+      const info = buildVoucherInfo(page.properties);
+      if (getVoucherDriverName(info).toLowerCase() === baseDriverKey) {
+        siblings.push(info);
+      }
+    }
+
+    hasMore = resp.has_more;
+    cursor = resp.next_cursor || undefined;
+  }
+
+  if (hasMore && batches >= maxBatches) {
+    console.warn(
+      `⚠️ Merge scan hit batch cap (${maxBatches}); some sibling vouchers may not have been merged.`
+    );
+  }
+
+  return siblings;
+}
+
+// Paginates the driver database once, start to finish, and returns every
+// display name. This is the slow part (up to 10 sequential Notion calls) --
+// getDriverNameList below exists specifically to make sure a real user's
+// request almost never has to wait on this directly.
+async function fetchDriverNameList(notion: Client, driverDatabaseId: string): Promise<string[]> {
+  const names = new Set<string>();
+  let cursor: string | undefined = undefined;
+  let hasMore = true;
+  let batches = 0;
+  const MAX_BATCHES = 10; // up to ~1000 drivers
+
+  while (hasMore && batches < MAX_BATCHES) {
+    const resp = await queryNotionWithRetry(notion, {
+      database_id: driverDatabaseId,
+      page_size: 100,
+      start_cursor: cursor
+    });
+    batches++;
+
+    for (const page of resp.results as any[]) {
+      if (!('properties' in page)) continue;
+      const titleProp = Object.values(page.properties).find((p: any) => p.type === 'title') as any;
+      const name = titleProp?.title?.map((t: any) => t.plain_text || '').join('').trim();
+      if (name) names.add(name);
+    }
+
+    hasMore = resp.has_more;
+    cursor = resp.next_cursor || undefined;
+  }
+
+  return Array.from(names).sort((a, b) => a.localeCompare(b));
+}
+
+// In-flight refresh, shared across callers so a cold cache (or an expired
+// one) never triggers more than one concurrent full scan of the driver DB.
+let driverNameListRefreshPromise: Promise<string[]> | null = null;
+
+function refreshDriverNameListInBackground(notion: Client, driverDatabaseId: string): Promise<string[]> {
+  if (!driverNameListRefreshPromise) {
+    driverNameListRefreshPromise = fetchDriverNameList(notion, driverDatabaseId)
+      .then((names) => {
+        driverNameListCache = { names, timestamp: Date.now() };
+        return names;
+      })
+      .catch((err) => {
+        console.error('👤 Driver-list refresh failed:', err);
+        // Keep serving whatever was cached before; don't let a failed
+        // refresh wipe out a previously-good list.
+        return driverNameListCache?.names ?? [];
+      })
+      .finally(() => {
+        driverNameListRefreshPromise = null;
+      });
+  }
+  return driverNameListRefreshPromise;
+}
+
+// Fetch (and cache) the driver master list's display names, used to power
+// the search-bar autocomplete. Stale-while-revalidate: once warm, a request
+// NEVER waits on Notion -- an expired cache is still served immediately
+// while a fresh copy is fetched in the background for next time. Only a
+// true cold start (nothing cached yet, e.g. right after a server restart
+// before the warm-up below has finished) blocks on the full scan.
+function getDriverNameList(notion: Client, driverDatabaseId: string): Promise<string[]> {
+  if (!driverNameListCache) {
+    return refreshDriverNameListInBackground(notion, driverDatabaseId);
+  }
+
+  const isStale = (Date.now() - driverNameListCache.timestamp) >= DRIVER_LIST_CACHE_DURATION;
+  if (isStale) {
+    refreshDriverNameListInBackground(notion, driverDatabaseId); // fire and forget
+  }
+  return Promise.resolve(driverNameListCache.names);
+}
+
+// Warm the cache shortly after the server boots, so the FIRST real user to
+// open the search bar already finds it populated instead of paying for the
+// full driver-list scan themselves. Deferred via setImmediate so it runs
+// after the rest of the module graph (env vars included) has finished
+// loading, regardless of import order.
+setImmediate(() => {
+  const driverDatabaseId = process.env.DRIVER_DATABASE_ID;
+  if (!driverDatabaseId) return;
+  const notion = new Client({
+    auth: process.env.NOTION_INTEGRATION_SECRET,
+    timeoutMs: 120000
+  });
+  refreshDriverNameListInBackground(notion, driverDatabaseId).catch((err) => {
+    console.error('👤 Driver-list warm-up failed:', err);
+  });
+});
+
+// Driver-name autocomplete for the search bar. Filters the cached driver
+// master list in memory, so typing never triggers a fresh Notion query.
+router.get('/expense-voucher/driver-suggestions', async (req, res) => {
+  try {
+    const query = String(req.query.q || '').trim().toLowerCase();
+    const DRIVER_DATABASE_ID = process.env.DRIVER_DATABASE_ID;
+
+    if (!DRIVER_DATABASE_ID) {
+      return res.status(500).json({
+        success: false,
+        message: 'DRIVER_DATABASE_ID environment variable is not set',
+        suggestions: []
+      });
+    }
+
+    const notion = new Client({
+      auth: process.env.NOTION_INTEGRATION_SECRET,
+      timeoutMs: 30000
+    });
+
+    const allNames = await getDriverNameList(notion, DRIVER_DATABASE_ID);
+    const suggestions = query
+      ? allNames.filter((name) => name.toLowerCase().includes(query)).slice(0, 10)
+      : allNames.slice(0, 10);
+
+    return res.json({ success: true, suggestions });
+  } catch (error: any) {
+    console.error('👤 Error fetching driver suggestions:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch driver suggestions',
+      suggestions: []
+    });
+  }
+});
+
 // Expense voucher API - Protected
 router.post('/expense-voucher', async (req, res) => {
   try {
     const { orderNumber, driverName } = req.body;
+    // Every search is scoped to a single day; falls back to today if the
+    // client didn't send a valid YYYY-MM-DD date.
+    const voucherDate = normalizeVoucherDate(req.body?.voucherDate);
 
     if (!orderNumber && !driverName) {
       return res.status(400).json({
@@ -513,37 +862,37 @@ router.post('/expense-voucher', async (req, res) => {
       });
     }
 
-    // Check cache first
+    // Check cache first (date is part of the key since results are scoped to it)
     const cacheKey = driverName
-      ? `expense_voucher_driver_${String(driverName).trim().toUpperCase()}`
-      : `expense_voucher_${orderNumber}`;
+      ? `expense_voucher_driver_${String(driverName).trim().toUpperCase()}_${voucherDate}`
+      : `expense_voucher_${orderNumber}_${voucherDate}`;
     const cached = searchCache.get(cacheKey);
     if (cached && (Date.now() - cached.timestamp) < CACHE_DURATION) {
       // Cache hit
       return res.json(cached.data);
     }
-    
+
     // Increase Notion client timeout to 60 seconds to reduce timeout errors
     const notion = new Client({
       auth: process.env.NOTION_INTEGRATION_SECRET,
       timeoutMs: 120000 // 60 seconds
     });
-    
+
     // Extract database ID from the provided URL: https://www.notion.so/kmfinny/173604c4adf080f7853dc9a41a8a69a9?v=173604c4adf08158ba8a000c964da041&source=copy_link
     const EXPENSE_VOUCHER_DATABASE_ID = process.env.EXPENSE_VOUCHER_DATABASE_ID;
-    
+
     const AEV_EXPENSE_DATABASE_ID = process.env.AEV_EXPENSE_VOUCHER_DATABASE_ID;
     // Diesel bill database ID from: https://www.notion.so/kmfinny/dfba335ed74d4cd991b5b1a597c90605?v=a1866200419647f898d21f0fb6983a47&source=copy_link
     const DIESEL_BILL_DATABASE_ID = process.env.DIESEL_BILL_DATABASE_ID;
-    
+
     // Order details database ID from: https://www.notion.so/kmfinny/296851d9af9e4a14966376e58f8475e5?v=71fd049ebcc042dba43cc985ac6520a0&source=copy_link
     const ORDER_DETAILS_DATABASE_ID = process.env.ORDER_DATABASE_ID;
-    
+
     // Driver database ID from: https://www.notion.so/kmfinny/7ac590de16e645cb96478236d5c47618?v=af0c988b17994ba7b7bdcce02f0a0cc2&source=copy_link
     const DRIVER_DATABASE_ID = process.env.DRIVER_DATABASE_ID;
-    
+
     const PARTY_DATABASE_ID = process.env.PARTY_DATABASE_ID;
-    
+
     if (!EXPENSE_VOUCHER_DATABASE_ID) {
       return res.status(500).json({
         success: false,
@@ -582,88 +931,53 @@ router.post('/expense-voucher', async (req, res) => {
     }
 
     // ===== DRIVER-NAME SEARCH =====
-    // Return ALL of that driver's vouchers merged into one voucher (same output
-    // shape as a voucher-number search, so the client view / print are reused).
+    // Return ALL of that driver's vouchers on voucherDate merged into one
+    // voucher (same output shape as a voucher-number search, so the client
+    // view / print are reused).
     if (driverName) {
       const query = String(driverName).trim().toLowerCase();
       const databases = [EXPENSE_VOUCHER_DATABASE_ID];
       if (AEV_EXPENSE_DATABASE_ID) databases.push(AEV_EXPENSE_DATABASE_ID);
 
-      const infos: Record<string, string>[] = [];
+      // Scan every database concurrently instead of one after another --
+      // "first match wins" for plant/status is preserved by preferring the
+      // earliest database in `databases` that produced any match, not by
+      // whichever database's scan happens to finish first.
+      const perDbResults = await Promise.all(
+        databases.map((dbId) =>
+          findDriverVouchers(notion, dbId, query, voucherDate, 10).catch((dbError: any) => {
+            console.error(
+              `👤 Driver search failed for database ${dbId}:`,
+              dbError?.code || dbError?.status || '',
+              dbError?.message || dbError
+            );
+            // Continue with the remaining databases instead of failing the request.
+            return { infos: [] as Record<string, string>[], firstPlant: undefined, firstStatus: undefined };
+          })
+        )
+      );
+
+      const infos: Record<string, string>[] = perDbResults.flatMap((r) => r.infos);
       let firstPlant = 'INDORE';
       let firstStatus = 'Unknown';
-      let gotFirst = false;
-
-      for (const dbId of databases) {
-        try {
-          let cursor: string | undefined = undefined;
-          let hasMore = true;
-          let batches = 0;
-          const MAX_BATCHES = 10; // scan up to ~1000 recent records per database
-
-          while (hasMore && batches < MAX_BATCHES) {
-            const resp = await queryNotionWithRetry(notion, {
-              database_id: dbId,
-              page_size: 100,
-              start_cursor: cursor,
-              sorts: [{ timestamp: 'created_time', direction: 'descending' }]
-            });
-            batches++;
-
-            for (const page of resp.results as any[]) {
-              if (!('properties' in page)) continue;
-              const info = buildVoucherInfo(page.properties);
-              const driver = getVoucherDriverName(info);
-              if (!driver || !driver.toLowerCase().includes(query)) continue;
-
-              if (!gotFirst) {
-                const p = page.properties;
-                firstPlant =
-                  p['Plant']?.select?.name ||
-                  p['Stk Plant :']?.select?.name ||
-                  'INDORE';
-                firstStatus =
-                  p['Finny Status :']?.status?.name ||
-                  p['Finny Status :']?.select?.name ||
-                  'Unknown';
-                gotFirst = true;
-              }
-              infos.push(info);
-            }
-
-            hasMore = resp.has_more;
-            cursor = resp.next_cursor || undefined;
-
-            if (hasMore && batches >= MAX_BATCHES) {
-              console.warn(
-                `⚠️ Driver search hit batch cap (${MAX_BATCHES}) for db ${dbId}; older vouchers for "${query}" were not merged.`
-              );
-            }
-          }
-        } catch (dbError: any) {
-          console.error(
-            `👤 Driver search failed for database ${dbId}:`,
-            dbError?.code || dbError?.status || '',
-            dbError?.message || dbError
-          );
-          // Continue with the remaining databases instead of failing the request.
-        }
+      const firstMatchDb = perDbResults.find((r) => r.firstPlant !== undefined);
+      if (firstMatchDb) {
+        firstPlant = firstMatchDb.firstPlant!;
+        firstStatus = firstMatchDb.firstStatus!;
       }
 
       if (infos.length === 0) {
         return res.status(404).json({
           success: false,
-          message: `No vouchers found for driver "${driverName}"`
+          message: `No vouchers found for driver "${driverName}" on ${voucherDate}`
         });
       }
 
       // Different vehicles for the same driver are kept as separate vouchers
       // instead of being blended together; the client shows a dropdown to
       // switch between them when more than one vehicle is found.
-      // DEBUG: log the vehicle value read from every matched voucher so we can
-      // see why the grouping did / didn't split into multiple vehicles.
       console.log(
-        `🚚 Driver "${driverName}" vehicle values:`,
+        `🚚 Driver "${driverName}" on ${voucherDate} vehicle values:`,
         infos.map((info) => ({
           vehicle: getVoucherVehicleNumber(info),
           voucherNo: info['Voucher No. :'] || ''
@@ -697,7 +1011,7 @@ router.post('/expense-voucher', async (req, res) => {
 
       const driverResult = {
         success: true,
-        message: `${infos.length} voucher(s) merged for driver ${driverName}`,
+        message: `${infos.length} voucher(s) merged for driver ${driverName} on ${voucherDate}`,
         data: driverData,
         itemCount: 0
       };
@@ -714,111 +1028,91 @@ router.post('/expense-voucher', async (req, res) => {
         : EXPENSE_VOUCHER_DATABASE_ID;
 
     try {
-
-      // Simple query without any filters
-      // Fetching records
-      
-      // Fetch records with smart batching and early exit
-      console.log(`🔍 Searching for voucher: ${orderNumber}`);
-      let allResults: any[] = [];
+      console.log(`🔍 Searching for voucher: ${orderNumber} on ${voucherDate}`);
       let matchingResults: any[] = [];
       const normalizedOrderNumber = normalizeVoucherValue(String(orderNumber));
-      
+
       try {
-        console.log(`Trying direct Notion filter for voucher: ${normalizedOrderNumber}`);
         const directMatches = await queryByVoucherNumber(
           notion,
           expenseVoucherDatabaseId,
-          String(orderNumber)
+          String(orderNumber),
+          voucherDate
         );
         if (directMatches.length > 0) {
           matchingResults = directMatches;
           console.log(`Direct filter matched ${directMatches.length} record(s).`);
-          console.log(
-            'Direct filter Voucher No. samples:',
-            directMatches.slice(0, 5).map((page: any) => {
-              const raw = extractVoucherNoFromPage(page);
-              return { raw, normalized: normalizeVoucherValue(raw) };
-            })
-          );
         }
 
         if (matchingResults.length === 0) {
-        // TODO: Optimize this query by using Notion API filters if possible to avoid fetching all records and reduce timeouts.
-        // Fetch in small batches and check after each batch (early exit when found)
-        console.log(`📅 Fetching recent records (newest first)...`);
-        let hasMore = true;
-        let cursor: string | undefined = undefined;
-        let batchCount = 0;
-        const MAX_BATCHES = 10; // Fallback scan up to 500 recent records
-        while (hasMore && batchCount < MAX_BATCHES && matchingResults.length === 0) {
-          const response = await queryNotionWithRetry(notion, {
-            database_id: expenseVoucherDatabaseId,
-            page_size: 50,
-            start_cursor: cursor,
-            sorts: [
-              {
-                timestamp: 'created_time',
-                direction: 'descending'
+          // Fallback: Notion's date filter narrows the scan to just this
+          // date's records (instead of paginating hundreds of historical
+          // vouchers), then match the voucher number exactly in JS -- covers
+          // property-type quirks the direct filters above can miss.
+          console.log(`📅 Fetching records for ${voucherDate} (newest first)...`);
+          let hasMore = true;
+          let cursor: string | undefined = undefined;
+          let batchCount = 0;
+          const MAX_BATCHES = 10;
+          const dateFilter = buildDateFilter(voucherDate);
+
+          while (hasMore && batchCount < MAX_BATCHES && matchingResults.length === 0) {
+            const response = await queryNotionWithRetry(notion, {
+              database_id: expenseVoucherDatabaseId,
+              page_size: 50,
+              start_cursor: cursor,
+              filter: dateFilter,
+              sorts: [
+                {
+                  timestamp: 'created_time',
+                  direction: 'descending'
+                }
+              ]
+            });
+            batchCount++;
+            const batchResults = response.results;
+            console.log(`📄 Batch ${batchCount}: Fetched ${batchResults.length} records`);
+
+            // Search THIS batch immediately for early exit
+            const batchMatches = batchResults.filter((page: any) => {
+              if (!('properties' in page)) return false;
+              const properties = page.properties;
+              // Check ALL fields for the voucher number
+              for (const [key, value] of Object.entries(properties)) {
+                const prop = value as any;
+                let fieldValue = '';
+                // FIX: Join ALL text parts. Notion splits text if formatting changes
+                if (prop.rich_text && Array.isArray(prop.rich_text)) {
+                  fieldValue = prop.rich_text.map((t: any) => t.plain_text).join('');
+                } else if (prop.title && Array.isArray(prop.title)) {
+                  fieldValue = prop.title.map((t: any) => t.plain_text).join('');
+                } else if (prop.formula?.string) {
+                  fieldValue = prop.formula.string;
+                } else if (prop.formula?.number) {
+                  fieldValue = prop.formula.number.toString();
+                } else if (prop.number) {
+                  fieldValue = prop.number.toString();
+                } else if (prop.select?.name) {
+                  fieldValue = prop.select.name;
+                }
+                // Check for exact match ONLY
+                // If searching for "6417", we do NOT want "6417A"
+                if (fieldValue && normalizeVoucherValue(fieldValue) === normalizedOrderNumber) {
+                  return true;
+                }
               }
-            ]
-          });
-          batchCount++;
-          const batchResults = response.results;
-          allResults = allResults.concat(batchResults);
-          console.log(
-            `Batch ${batchCount} Voucher No. samples:`,
-            batchResults.slice(0, 5).map((page: any) => {
-              const raw = extractVoucherNoFromPage(page);
-              return { raw, normalized: normalizeVoucherValue(raw) };
-            })
-          );
-          console.log(`📄 Batch ${batchCount}: Fetched ${batchResults.length} records, total: ${allResults.length}`);
-          // Log property keys from the first record in the first batch for debugging
-          if (batchCount === 1 && batchResults.length > 0) {
-            const firstProps = batchResults[0].properties;
-            console.log('🔑 Property keys in first record:', Object.keys(firstProps));
-          }
-          // Search THIS batch immediately for early exit
-          const batchMatches = batchResults.filter((page: any) => {
-            if (!('properties' in page)) return false;
-            const properties = page.properties;
-            // Check ALL fields for the voucher number
-            for (const [key, value] of Object.entries(properties)) {
-              const prop = value as any;
-              let fieldValue = '';
-              // FIX: Join ALL text parts. Notion splits text if formatting changes
-              if (prop.rich_text && Array.isArray(prop.rich_text)) {
-                fieldValue = prop.rich_text.map((t: any) => t.plain_text).join('');
-              } else if (prop.title && Array.isArray(prop.title)) {
-                fieldValue = prop.title.map((t: any) => t.plain_text).join('');
-              } else if (prop.formula?.string) {
-                fieldValue = prop.formula.string;
-              } else if (prop.formula?.number) {
-                fieldValue = prop.formula.number.toString();
-              } else if (prop.number) {
-                fieldValue = prop.number.toString();
-              } else if (prop.select?.name) {
-                fieldValue = prop.select.name;
-              }
-              // Check for exact match ONLY
-              // If searching for "6417", we do NOT want "6417A"
-              if (fieldValue && normalizeVoucherValue(fieldValue) === normalizedOrderNumber) {
-                return true;
-              }
+              return false;
+            });
+            if (batchMatches.length > 0) {
+              console.log(`✅ FOUND in batch ${batchCount}! Stopping search.`);
+              matchingResults = batchMatches;
+              break; // Early exit - found it!
             }
-            return false;
-          });
-          if (batchMatches.length > 0) {
-            console.log(`✅ FOUND in batch ${batchCount}! Stopping search.`);
-            matchingResults = batchMatches;
-            break; // Early exit - found it!
+            hasMore = response.has_more;
+            cursor = response.next_cursor || undefined;
           }
-          hasMore = response.has_more;
-          cursor = response.next_cursor || undefined;
         }
-        }
-        console.log(`✅ Search complete: ${allResults.length} records checked, ${matchingResults.length} matches found`);
+        console.log(`✅ Search complete: ${matchingResults.length} matches found`);
       } catch (error: any) {
         console.error('📋 Error fetching expense voucher data:', error);
         if ([502, 503, 504].includes(error?.status)) {
@@ -832,27 +1126,20 @@ router.post('/expense-voucher', async (req, res) => {
           message: 'Failed to fetch expense voucher data'
         });
       }
-      
+
       // Check if we found any matches
       if (matchingResults.length === 0) {
-        console.log(`No voucher match for input raw="${orderNumber}", normalized="${normalizedOrderNumber}"`);
-        console.log(
-          'Scanned Voucher No. sample (first 20):',
-          allResults.slice(0, 20).map((page: any) => {
-            const raw = extractVoucherNoFromPage(page);
-            return { raw, normalized: normalizeVoucherValue(raw) };
-          })
-        );
+        console.log(`No voucher match for input raw="${orderNumber}", normalized="${normalizedOrderNumber}" on ${voucherDate}`);
         return res.status(404).json({
           success: false,
-          message: `Voucher ${orderNumber} not found in expense voucher database`
+          message: `Voucher ${orderNumber} not found in expense voucher database on ${voucherDate}`
         });
       }
-      
+
       // Process first matching result
       const firstMatch = matchingResults[0] as any;
       const properties = firstMatch.properties;
-      
+
       const expenseVoucherData: any = {
         orderNumber: orderNumber,
         plant: properties['Plant']?.select?.name || properties['Stk Plant :']?.select?.name || 'INDORE',
@@ -860,389 +1147,52 @@ router.post('/expense-voucher', async (req, res) => {
         items: [],
         voucherInfo: {} as any
       };
-      
+
       // Extract all property data from expense voucher record
       expenseVoucherData.voucherInfo = buildVoucherInfo(properties);
 
-
-      // Fetch related diesel bill details if diesel bill number exists
-      let dieselBillDetails = null;
+      // Fetch diesel bill / order / driver detail lookups AND scan for sibling
+      // vouchers to merge. These four reads are all independent of each other
+      // (they only depend on the already-fetched base voucher's properties),
+      // but used to run one after another; running them concurrently cuts
+      // wall-clock time down to the slowest single lookup instead of their sum.
       const dieselBillNo = expenseVoucherData.voucherInfo['For Diesel Bill No. :'];
-      
-      if (dieselBillNo) {
-        try {
-          // Search diesel bill database efficiently
-          let dieselResponse = await queryNotionWithRetry(notion, {
-            database_id: DIESEL_BILL_DATABASE_ID,
-            page_size: 50
-          });
-            
-            // Find matching diesel bill record
-            const matchingDieselResults = dieselResponse.results.filter((page: any) => {
-              if (!('properties' in page)) return false;
-              const properties = page.properties;
-              
-              // Check ALL fields for the diesel bill number
-              for (const [key, value] of Object.entries(properties)) {
-                const prop = value as any;
-                let fieldValue = '';
-                
-                if (prop.rich_text?.[0]?.plain_text) {
-                  fieldValue = prop.rich_text[0].plain_text;
-                } else if (prop.title?.[0]?.plain_text) {
-                  fieldValue = prop.title[0].plain_text;
-                } else if (prop.formula?.string) {
-                  fieldValue = prop.formula.string;
-                } else if (prop.number) {
-                  fieldValue = prop.number.toString();
-                } else if (prop.select?.name) {
-                  fieldValue = prop.select.name;
-                }
-                
-                if (fieldValue && (fieldValue === dieselBillNo || fieldValue.includes(dieselBillNo))) {
-                  return true;
-                }
-              }
-              
-              return false;
-            });
-            
-            if (matchingDieselResults.length > 0) {
-              const dieselRecord = matchingDieselResults[0] as any;
-              const dieselProperties = dieselRecord.properties;
-              
-              dieselBillDetails = {} as any;
-              
-              // Extract all property data from diesel bill record
-              for (const [key, value] of Object.entries(dieselProperties)) {
-                const prop = value as any;
-                let displayValue = '';
-                
-                switch (prop.type) {
-                  case 'title':
-                  case 'rich_text':
-                    displayValue = prop[prop.type]?.[0]?.plain_text || '';
-                    break;
-                  case 'date':
-                    if (prop.date?.start) {
-                      const date = new Date(prop.date.start);
-                      displayValue = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
-                    }
-                    break;
-                  case 'select':
-                    displayValue = prop.select?.name || '';
-                    break;
-                  case 'number':
-                    displayValue = prop.number?.toString() || '';
-                    break;
-                  case 'formula':
-                    if (prop.formula?.string) {
-                      displayValue = prop.formula.string;
-                    } else if (prop.formula?.number) {
-                      displayValue = prop.formula.number.toString();
-                    }
-                    break;
-                }
-                
-                if (displayValue) {
-                  dieselBillDetails[key] = displayValue;
-                }
-              }
-              
-            } else {
-            }
-            
-          } catch (dieselError) {
-            // Silently handle diesel error
-          }
-          
-      }
-      
-      // Fetch related order details if available
-      let orderDetails = null;
       const relatedOrderNumber = expenseVoucherData.voucherInfo['ORD{25-26-Current}'] || expenseVoucherData.voucherInfo['Order-Date :'];
-      
-      if (relatedOrderNumber) {
-        try {
-          
-          let orderResponse;
-          try {
-            let allOrderResults: any[] = [];
-            let orderCursor = undefined;
-            let orderBatchCount = 0;
-            
-            do {
-              let orderBatchResponse = await queryNotionWithRetry(notion, {
-                database_id: ORDER_DETAILS_DATABASE_ID,
-                page_size: 100,
-                start_cursor: orderCursor
-              });
-              
-              allOrderResults = allOrderResults.concat(orderBatchResponse.results);
-              orderCursor = orderBatchResponse.has_more ? orderBatchResponse.next_cursor : undefined;
-              orderBatchCount++;
-              
-              // Check if we found our target order in this batch
-              const foundOrderInBatch = orderBatchResponse.results.some((page: any) => {
-                if (!('properties' in page)) return false;
-                const props = page.properties;
-                
-                for (const [key, value] of Object.entries(props)) {
-                  const prop = value as any;
-                  let fieldValue = '';
-                  
-                  if (prop.rich_text?.[0]?.plain_text) {
-                    fieldValue = prop.rich_text[0].plain_text;
-                  } else if (prop.title?.[0]?.plain_text) {
-                    fieldValue = prop.title[0].plain_text;
-                  } else if (prop.formula?.string) {
-                    fieldValue = prop.formula.string;
-                  } else if (prop.number) {
-                    fieldValue = prop.number.toString();
-                  }
-                  
-                  if (fieldValue && (fieldValue === relatedOrderNumber || fieldValue.includes(relatedOrderNumber))) {
-                    return true;
-                  }
-                }
-                return false;
-              });
-              
-              if (foundOrderInBatch) {
-                break;
-              }
-              
-            } while (orderCursor && orderBatchCount < 3);
-            
-            orderResponse = { results: allOrderResults };
-            
-            const matchingOrderResults = orderResponse.results.filter((page: any) => {
-              if (!('properties' in page)) return false;
-              const properties = page.properties;
-              
-              for (const [key, value] of Object.entries(properties)) {
-                const prop = value as any;
-                let fieldValue = '';
-                
-                if (prop.rich_text?.[0]?.plain_text) {
-                  fieldValue = prop.rich_text[0].plain_text;
-                } else if (prop.title?.[0]?.plain_text) {
-                  fieldValue = prop.title[0].plain_text;
-                } else if (prop.formula?.string) {
-                  fieldValue = prop.formula.string;
-                } else if (prop.number) {
-                  fieldValue = prop.number.toString();
-                } else if (prop.select?.name) {
-                  fieldValue = prop.select.name;
-                }
-                
-                if (fieldValue && (fieldValue === relatedOrderNumber || fieldValue.includes(relatedOrderNumber))) {
-                  return true;
-                }
-              }
-              
-              return false;
-            });
-            
-            if (matchingOrderResults.length > 0) {
-              const orderRecord = matchingOrderResults[0] as any;
-              const orderProperties = orderRecord.properties;
-              
-              orderDetails = {} as any;
-              
-              for (const [key, value] of Object.entries(orderProperties)) {
-                const prop = value as any;
-                let displayValue = '';
-                
-                switch (prop.type) {
-                  case 'title':
-                  case 'rich_text':
-                    displayValue = prop[prop.type]?.[0]?.plain_text || '';
-                    break;
-                  case 'date':
-                    if (prop.date?.start) {
-                      const date = new Date(prop.date.start);
-                      displayValue = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
-                    }
-                    break;
-                  case 'select':
-                    displayValue = prop.select?.name || '';
-                    break;
-                  case 'number':
-                    displayValue = prop.number?.toString() || '';
-                    break;
-                  case 'formula':
-                    if (prop.formula?.string) {
-                      displayValue = prop.formula.string;
-                    } else if (prop.formula?.number) {
-                      displayValue = prop.formula.number.toString();
-                    }
-                    break;
-                }
-                
-                if (displayValue) {
-                  orderDetails[key] = displayValue;
-                }
-              }
-              
-            }
-            
-          } catch (orderError) {
-            console.error('📦 Error fetching order details:', orderError);
-          }
-          
-        } catch (error) {
-          console.error('📦 Error in order details lookup:', error);
-        }
-      }
-      console.log("========== ALL EXPENSE VOUCHER PROPERTIES ==========");
+      const driverNameForLookup = expenseVoucherData.voucherInfo['Link to Driver'] || expenseVoucherData.voucherInfo['Driver :'] || expenseVoucherData.voucherInfo['Driver - Aadhar Wise Name :'];
+      const baseInfo = expenseVoucherData.voucherInfo as Record<string, string>;
+      const baseDriver = getVoucherDriverName(baseInfo);
 
-        for (const [key, value] of Object.entries(properties)) {
-          console.log("--------------------------------");
-          console.log("Property Name:", key);
-          console.log("Property Type:", (value as any).type);
-          console.dir(value, { depth: null });
-        }
+      const [dieselBillDetails, orderDetails, driverDetails, mergeSiblings] = await Promise.all([
+        dieselBillNo
+          ? findMatchingPage(notion, DIESEL_BILL_DATABASE_ID, dieselBillNo, 1, 50)
+              .then((page) => (page ? extractDisplayProperties(page.properties) : null))
+              .catch(() => null) // Silently handle diesel error
+          : Promise.resolve(null),
+        relatedOrderNumber
+          ? findMatchingPage(notion, ORDER_DETAILS_DATABASE_ID, relatedOrderNumber, 3, 100)
+              .then((page) => (page ? extractDisplayProperties(page.properties) : null))
+              .catch((err) => {
+                console.error('📦 Error fetching order details:', err);
+                return null;
+              })
+          : Promise.resolve(null),
+        driverNameForLookup
+          ? findMatchingPage(notion, DRIVER_DATABASE_ID, driverNameForLookup, 3, 100)
+              .then((page) => (page ? extractDisplayProperties(page.properties) : null))
+              .catch((err) => {
+                console.error('👤 Error fetching driver details:', err);
+                return null;
+              })
+          : Promise.resolve(null),
+        baseDriver
+          ? findMergeSiblings(notion, expenseVoucherDatabaseId, baseDriver.toLowerCase(), voucherDate, firstMatch.id, 10)
+              .catch((err) => {
+                console.error('🔗 Error merging same driver/date vouchers:', err);
+                return [] as Record<string, string>[];
+              })
+          : Promise.resolve([] as Record<string, string>[])
+      ]);
 
-        console.log("==============================================");
-      // Fetch driver details if available
-      let driverDetails = null;
-      const driverName = expenseVoucherData.voucherInfo['Link to Driver'] || expenseVoucherData.voucherInfo['Driver :'] || expenseVoucherData.voucherInfo['Driver - Aadhar Wise Name :'];
-      
-      if (driverName) {
-        try {
-          
-          let driverResponse;
-          try {
-            let allDriverResults: any[] = [];
-            let driverCursor = undefined;
-            let driverBatchCount = 0;
-            
-            do {
-              let driverBatchResponse = await queryNotionWithRetry(notion, {
-                database_id: DRIVER_DATABASE_ID,
-                page_size: 100,
-                start_cursor: driverCursor
-              });
-              
-              allDriverResults = allDriverResults.concat(driverBatchResponse.results);
-              driverCursor = driverBatchResponse.has_more ? driverBatchResponse.next_cursor : undefined;
-              driverBatchCount++;
-              
-              const foundDriverInBatch = driverBatchResponse.results.some((page: any) => {
-                if (!('properties' in page)) return false;
-                const props = page.properties;
-                
-                for (const [key, value] of Object.entries(props)) {
-                  const prop = value as any;
-                  let fieldValue = '';
-                  
-                  if (prop.rich_text?.[0]?.plain_text) {
-                    fieldValue = prop.rich_text[0].plain_text;
-                  } else if (prop.title?.[0]?.plain_text) {
-                    fieldValue = prop.title[0].plain_text;
-                  } else if (prop.formula?.string) {
-                    fieldValue = prop.formula.string;
-                  } else if (prop.select?.name) {
-                    fieldValue = prop.select.name;
-                  }
-                  
-                  if (fieldValue && (fieldValue === driverName || fieldValue.includes(driverName))) {
-                    return true;
-                  }
-                }
-                return false;
-              });
-              
-              if (foundDriverInBatch) {
-                break;
-              }
-              
-            } while (driverCursor && driverBatchCount < 3);
-            
-            driverResponse = { results: allDriverResults };
-            
-            const matchingDriverResults = driverResponse.results.filter((page: any) => {
-              if (!('properties' in page)) return false;
-              const properties = page.properties;
-              
-              for (const [key, value] of Object.entries(properties)) {
-                const prop = value as any;
-                let fieldValue = '';
-                
-                if (prop.rich_text?.[0]?.plain_text) {
-                  fieldValue = prop.rich_text[0].plain_text;
-                } else if (prop.title?.[0]?.plain_text) {
-                  fieldValue = prop.title[0].plain_text;
-                } else if (prop.formula?.string) {
-                  fieldValue = prop.formula.string;
-                } else if (prop.select?.name) {
-                  fieldValue = prop.select.name;
-                }
-                
-                if (fieldValue && (fieldValue === driverName || fieldValue.includes(driverName))) {
-                  return true;
-                }
-              }
-              
-              return false;
-            });
-            
-            if (matchingDriverResults.length > 0) {
-              const driverRecord = matchingDriverResults[0] as any;
-              const driverProperties = driverRecord.properties;
-              
-              driverDetails = {} as any;
-              
-              for (const [key, value] of Object.entries(driverProperties)) {
-                const prop = value as any;
-                let displayValue = '';
-                
-                switch (prop.type) {
-                  case 'title':
-                  case 'rich_text':
-                    displayValue = prop[prop.type]?.[0]?.plain_text || '';
-                    break;
-                  case 'date':
-                    if (prop.date?.start) {
-                      const date = new Date(prop.date.start);
-                      displayValue = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
-                    }
-                    break;
-                  case 'select':
-                    displayValue = prop.select?.name || '';
-                    break;
-                  case 'number':
-                    displayValue = prop.number?.toString() || '';
-                    break;
-                  case 'formula':
-                    if (prop.formula?.string) {
-                      displayValue = prop.formula.string;
-                    } else if (prop.formula?.number) {
-                      displayValue = prop.formula.number.toString();
-                    }
-                    break;
-                  case 'phone_number':
-                    displayValue = prop.phone_number || '';
-                    break;
-                }
-                
-                if (displayValue) {
-                  driverDetails[key] = displayValue;
-                }
-              }
-              
-            }
-            
-          } catch (driverError) {
-            console.error('👤 Error fetching driver details:', driverError);
-          }
-          
-        } catch (error) {
-          console.error('👤 Error in driver details lookup:', error);
-        }
-      }
-      
       // Add all additional details to the expense voucher data
       if (dieselBillDetails) {
         expenseVoucherData.dieselBillDetails = dieselBillDetails;
@@ -1254,113 +1204,52 @@ router.post('/expense-voucher', async (req, res) => {
         expenseVoucherData.driverDetails = driverDetails;
       }
 
-      // ===== Merge vouchers with the SAME driver name + SAME voucher date =====
+      // ===== Merge vouchers with the SAME driver name on voucherDate =====
       // All such vouchers are combined into one printout:
       //  - Expense amounts (Toll, OnRoad, Conveyance, Deduction, ECS, Amount) are
       //    summed across every voucher.
       //  - Diesel liters and Route KM's are summed only ONCE per UNIQUE diesel bill
       //    no. If two vouchers share the same bill no, the duplicate is NOT re-added.
-      // Runs last so the diesel / order / driver lookups above still use the single
-      // searched voucher's values.
-      try {
-        const baseInfo = expenseVoucherData.voucherInfo as Record<string, string>;
-        const baseDriver = getVoucherDriverName(baseInfo);
-        const baseDate = (baseInfo['Voucher Date :'] || '').trim();
+      if (mergeSiblings.length > 0) {
+        const candidateInfos: Record<string, string>[] = [baseInfo, ...mergeSiblings];
 
         console.log(
-          `🔎 Voucher-number merge check: driver="${baseDriver}", date="${baseDate}", vehicle="${getVoucherVehicleNumber(baseInfo)}"`
+          `🚚 Voucher-number siblings (${candidateInfos.length}) on ${voucherDate} vehicle values:`,
+          candidateInfos.map((info) => ({
+            vehicle: getVoucherVehicleNumber(info),
+            voucherNo: info['Voucher No. :'] || ''
+          }))
         );
-        if (!baseDriver || !baseDate) {
-          console.warn(
-            `⚠️ Sibling merge skipped (no ${!baseDriver ? 'driver' : ''}${!baseDriver && !baseDate ? ' & ' : ''}${!baseDate ? 'date' : ''}). Available keys: ${Object.keys(baseInfo).join(' | ')}`
+
+        // Same driver + same date but different vehicles (e.g. two trucks
+        // dispatched the same day) must stay separate vouchers; default to
+        // the vehicle the user actually searched for and offer the rest
+        // as dropdown options.
+        const vehicleGroups = groupInfosByVehicle(candidateInfos);
+        if (vehicleGroups.length > 1) {
+          const vehicleOptions = vehicleGroups.map((g) => ({
+            vehicleNumber: g.vehicleNumber || 'Unknown',
+            voucherInfo: mergeVoucherInfos(g.infos),
+            mergedVoucherCount: g.infos.length
+          }));
+          const baseVehicle = getVoucherVehicleNumber(baseInfo).toUpperCase();
+          const defaultIdx = Math.max(
+            0,
+            vehicleGroups.findIndex((g) => g.vehicleNumber.toUpperCase() === baseVehicle)
           );
-        }
-
-        if (baseDriver && baseDate) {
-          const candidateInfos: Record<string, string>[] = [baseInfo];
-          const seenIds = new Set<string>([firstMatch.id]);
-
-          let mergeCursor: string | undefined = undefined;
-          let mergeHasMore = true;
-          let mergeBatches = 0;
-          const MAX_MERGE_BATCHES = 10; // scan up to ~1000 recent records for siblings
-
-          while (mergeHasMore && mergeBatches < MAX_MERGE_BATCHES) {
-            const mergeResp = await queryNotionWithRetry(notion, {
-              database_id: expenseVoucherDatabaseId,
-              page_size: 100,
-              start_cursor: mergeCursor,
-              sorts: [{ timestamp: 'created_time', direction: 'descending' }]
-            });
-            mergeBatches++;
-
-            const baseDriverKey = baseDriver.toLowerCase();
-            for (const page of mergeResp.results as any[]) {
-              if (seenIds.has(page.id)) continue;
-              if (!('properties' in page)) continue;
-              const info = buildVoucherInfo(page.properties);
-              if (
-                getVoucherDriverName(info).toLowerCase() === baseDriverKey &&
-                (info['Voucher Date :'] || '').trim() === baseDate
-              ) {
-                seenIds.add(page.id);
-                candidateInfos.push(info);
-              }
-            }
-
-            mergeHasMore = mergeResp.has_more;
-            mergeCursor = mergeResp.next_cursor || undefined;
-          }
-
-          if (mergeHasMore && mergeBatches >= MAX_MERGE_BATCHES) {
-            console.warn(
-              `⚠️ Merge scan hit batch cap (${MAX_MERGE_BATCHES}); vouchers for driver "${baseDriver}" on ${baseDate} beyond ${MAX_MERGE_BATCHES * 100} records were not merged.`
-            );
-          }
-
           console.log(
-            `🚚 Voucher-number siblings (${candidateInfos.length}) vehicle values:`,
-            candidateInfos.map((info) => ({
-              vehicle: getVoucherVehicleNumber(info),
-              voucherNo: info['Voucher No. :'] || ''
-            }))
+            `🔗 Driver "${baseDriver}" on ${voucherDate}: ${vehicleGroups.length} distinct vehicles found; keeping them separate`
           );
-
-          if (candidateInfos.length > 1) {
-            // Same driver + same date but different vehicles (e.g. two trucks
-            // dispatched the same day) must stay separate vouchers; default to
-            // the vehicle the user actually searched for and offer the rest
-            // as dropdown options.
-            const vehicleGroups = groupInfosByVehicle(candidateInfos);
-            if (vehicleGroups.length > 1) {
-              const vehicleOptions = vehicleGroups.map((g) => ({
-                vehicleNumber: g.vehicleNumber || 'Unknown',
-                voucherInfo: mergeVoucherInfos(g.infos),
-                mergedVoucherCount: g.infos.length
-              }));
-              const baseVehicle = getVoucherVehicleNumber(baseInfo).toUpperCase();
-              const defaultIdx = Math.max(
-                0,
-                vehicleGroups.findIndex((g) => g.vehicleNumber.toUpperCase() === baseVehicle)
-              );
-              console.log(
-                `🔗 Driver "${baseDriver}" on ${baseDate}: ${vehicleGroups.length} distinct vehicles found; keeping them separate`
-              );
-              expenseVoucherData.voucherInfo = vehicleOptions[defaultIdx].voucherInfo;
-              expenseVoucherData.mergedVoucherCount = vehicleOptions[defaultIdx].mergedVoucherCount;
-              expenseVoucherData.vehicleOptions = vehicleOptions;
-            } else {
-              console.log(
-                `🔗 Merging ${candidateInfos.length} vouchers for driver "${baseDriver}" on ${baseDate}`
-              );
-              expenseVoucherData.voucherInfo = mergeVoucherInfos(candidateInfos);
-              expenseVoucherData.mergedVoucherCount = candidateInfos.length;
-            }
-          }
+          expenseVoucherData.voucherInfo = vehicleOptions[defaultIdx].voucherInfo;
+          expenseVoucherData.mergedVoucherCount = vehicleOptions[defaultIdx].mergedVoucherCount;
+          expenseVoucherData.vehicleOptions = vehicleOptions;
+        } else {
+          console.log(
+            `🔗 Merging ${candidateInfos.length} vouchers for driver "${baseDriver}" on ${voucherDate}`
+          );
+          expenseVoucherData.voucherInfo = mergeVoucherInfos(candidateInfos);
+          expenseVoucherData.mergedVoucherCount = candidateInfos.length;
         }
-      } catch (mergeError) {
-        console.error('🔗 Error merging same driver/date vouchers:', mergeError);
-        // On any merge failure, fall back to the single searched voucher's data.
       }
 
       const result = {
@@ -1369,12 +1258,12 @@ router.post('/expense-voucher', async (req, res) => {
         data: expenseVoucherData,
         itemCount: 0
       };
-      
+
       // Cache the successful result
       searchCache.set(cacheKey, { data: result, timestamp: Date.now() });
-      
+
       return res.json(result);
-      
+
     } catch (error) {
       console.error('📋 Error in expense voucher search:', error);
       return res.status(500).json({
@@ -1382,7 +1271,7 @@ router.post('/expense-voucher', async (req, res) => {
         message: 'Failed to search expense voucher database'
       });
     }
-    
+
   } catch (error) {
     console.error('📋 Error in expense voucher route:', error);
     return res.status(500).json({
@@ -1390,7 +1279,7 @@ router.post('/expense-voucher', async (req, res) => {
       message: 'Internal server error'
     });
   }
-  
+
 });
 
 export default router;
