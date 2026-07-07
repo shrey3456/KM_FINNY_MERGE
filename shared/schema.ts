@@ -2,7 +2,7 @@ import { pgTable, text, serial, integer, boolean, timestamp, date, real } from "
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-
+// db-migration
 // ============================================================================
 // USERS
 // Purpose : Employee accounts. Each user has a unique userCode (employee ID)
