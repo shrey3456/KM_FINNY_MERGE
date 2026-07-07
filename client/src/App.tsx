@@ -5,7 +5,6 @@ import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
 import Home from "@/pages/Dashboard";
 import ScanOrder from "@/pages/Scanning/Scan";
-import StockReport from "@/pages/Scanning/StockReport";
 import Inventory from "@/pages/Inventory";
 import NotionInventory from "@/pages/NotionInventory";
 import Reports from "@/pages/Reports";
@@ -25,15 +24,12 @@ import StockSheets from "./pages/StockSheets";
 import OrderManagement from "./pages/OrderManagement";
 import OrderImport from "./pages/OrderImport";
 import OrderReports from "./pages/OrderReports";
-import OrderScan from "./pages/OrderScan";
-// BackupPage removed as requested
 import MessagesPage from "./pages/MessagesPage";
 import CheckInOutPage from "./pages/CheckInOutPage";
 import Profile from "./pages/Profile";
 import { useState, useEffect, useCallback, Suspense, lazy } from "react";
 import Layout from "@/components/Layout";
 import { useToast } from "@/hooks/use-toast";
-import { getCurrentUserPermissions } from "./lib/permissions";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { initializeStatePreservation } from "./utils/statePreservationInit.tsx";
 import { useAuth, AuthProvider } from "@/hooks/use-auth";
@@ -253,7 +249,6 @@ function Router() {
         <ProtectedRoute path="/toll-voucher" component={TollVoucher} requiredPage="toll-voucher" />
         <Route path="/stock-sheets" component={StockSheets} />
         <ProtectedRoute path="/reports" component={Reports} requiredPage="scan-history" />
-        <ProtectedRoute path="/scan-stock-report" component={StockReport} requiredPage="pallet-stock" />
         <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
         <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />

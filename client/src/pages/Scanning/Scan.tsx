@@ -442,7 +442,8 @@ export default function ScanOrderPage() {
   const osMultiMatchRef = useRef<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const [osPallets, setOsPallets] = useState(1);
   const [osLooseQty, setOsLooseQty] = useState(0);
-  const [osQty, setOsQty] = useState(1); // total boxes — user-editable; pallets auto-calculated
+  const [osQty, setOsQty] = useState(1); // total boxes — canonical value sent to the server
+  const [osPalletsInput, setOsPalletsInput] = useState(""); // pallets field's own text — kept in sync with osQty in both directions
   const [osSelectedStv, setOsSelectedStv] = useState("");
   const lastSelectedStvRef = useRef("");
   const [osSearch, setOsSearch] = useState("");
@@ -676,6 +677,7 @@ export default function ScanOrderPage() {
     const match = matches[0] ?? null;
     const defaultQty = _defaultScanQty(match, plantPalletSize);
     setOsQty(defaultQty);
+    setOsPalletsInput(plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
     setOsPallets(1);
     setOsLooseQty(0);
     setOsSelectedStv(lastSelectedStvRef.current);
@@ -690,6 +692,7 @@ export default function ScanOrderPage() {
     const defaultQty = _defaultScanQty(item, plantPalletSize);
     setOsMultiMatch(null);
     setOsQty(defaultQty);
+    setOsPalletsInput(plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
     setOsPallets(1);
     setOsLooseQty(0);
     setOsSelectedStv(lastSelectedStvRef.current);
@@ -2702,18 +2705,29 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         </span>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-gray-900 leading-snug">{item.itemName ?? "—"}</p>
+                          <p className="text-[11px] text-gray-400 font-mono truncate">
+                            {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                          </p>
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
                             <span className="text-xs text-gray-500">
                               <span className="font-bold text-gray-800">{scanned}</span>/{exp}
+                              {(item.itemsPerPallet ?? 0) > 0 && (
+                                <span className="text-gray-400"> ({(exp / (item.itemsPerPallet ?? 1)).toFixed(2)} plt)</span>
+                              )}
                             </span>
                             {remaining > 0 && (
-                              <span className="text-xs font-semibold text-[#001d6e]">{remaining} left</span>
+                              <span className="text-xs font-semibold text-[#001d6e]">
+                                {remaining} left
+                                {(item.itemsPerPallet ?? 0) > 0 && (
+                                  <span className="text-purple-600"> (≈{(remaining / (item.itemsPerPallet ?? 1)).toFixed(2)} plt)</span>
+                                )}
+                              </span>
                             )}
                             {extra > 0 && (
                               <span className="text-xs font-semibold text-amber-600">+{extra} extra</span>
                             )}
-                            {(item.scannedPallets ?? 0) > 0 && (
-                              <span className="text-xs text-purple-600">{item.scannedPallets} plt</span>
+                            {scanned > 0 && (item.itemsPerPallet ?? 0) > 0 && (
+                              <span className="text-xs text-purple-600">{(scanned / (item.itemsPerPallet ?? 1)).toFixed(2)} plt</span>
                             )}
                           </div>
                           {credit && (
@@ -2869,11 +2883,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           <tr className="bg-[#001d6e]">
                             <th className="px-3 py-3 w-9" />
                             <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white min-w-[180px]">Item</th>
-                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode / SKU</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Exp</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Done</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Pallets</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Remain</th>
+                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode / SAP</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Exp Qty</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Exp Plt</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Done Qty</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Done Plt</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Remain Qty</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Remain Plt</th>
                             <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Extra</th>
                             <th className="px-3 py-3 text-center text-[11px] font-semibold uppercase tracking-wide text-white">Status</th>
                           </tr>
@@ -2917,30 +2933,46 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   )}
                                 </td>
                                 <td className="px-3 py-3 font-mono text-gray-500">
-                                  {item.barcode ?? <span className="text-gray-300">—</span>}
+                                  <span className="block">{item.barcode ?? <span className="text-gray-300">—</span>}</span>
+                                  {item.sapCode && (
+                                    <span className="block text-[10px] text-gray-400">SAP: {item.sapCode}</span>
+                                  )}
                                 </td>
                                 <td className="px-3 py-3 text-right text-gray-600 font-medium tabular-nums">
                                   {item.expectedQty}
                                 </td>
+                                <td className="px-3 py-3 text-right tabular-nums text-gray-500">
+                                  {(item.itemsPerPallet ?? 0) > 0
+                                    ? (exp / (item.itemsPerPallet ?? 1)).toFixed(2)
+                                    : <span className="text-gray-300">0.00</span>}
+                                </td>
                                 <td className="px-3 py-3 text-right tabular-nums font-bold">
-                                  <span className={done ? "text-emerald-700" : partial ? "text-amber-700" : "text-gray-400"}>
+                                  <span
+                                    className={done ? "text-emerald-700" : partial ? "text-amber-700" : "text-gray-400"}
+                                    title={`${item.scannedPallets ?? 0} plt + ${item.scannedLooseQty ?? 0} loose`}
+                                  >
                                     {doneQty}
                                   </span>
                                 </td>
                                 <td className="px-3 py-3 text-right tabular-nums font-semibold">
-                                  {(item.scannedPallets ?? 0) > 0
-                                    ? <span className="text-[#001d6e]">{item.scannedPallets}</span>
-                                    : <span className="text-gray-300">—</span>}
+                                  {doneQty > 0 && (item.itemsPerPallet ?? 0) > 0
+                                    ? <span className="text-[#001d6e]">{(doneQty / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
+                                    : <span className="text-gray-300">0.00</span>}
                                 </td>
                                 <td className="px-3 py-3 text-right tabular-nums font-bold">
                                   {rem > 0
                                     ? <span className="text-[#001d6e]">{rem}</span>
-                                    : <span className="text-gray-300">—</span>}
+                                    : <span className="text-gray-300">0</span>}
+                                </td>
+                                <td className="px-3 py-3 text-right tabular-nums font-semibold">
+                                  {rem > 0 && (item.itemsPerPallet ?? 0) > 0
+                                    ? <span className="text-purple-600">{(rem / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
+                                    : <span className="text-gray-300">0.00</span>}
                                 </td>
                                 <td className="px-3 py-3 text-right tabular-nums font-semibold">
                                   {extra > 0
                                     ? <span className="text-amber-600">+{extra}</span>
-                                    : <span className="text-gray-300">—</span>}
+                                    : <span className="text-gray-300">0</span>}
                                 </td>
                                 <td className="px-3 py-3 text-center">
                                   <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
@@ -3487,29 +3519,51 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
               )}
               
-              {/* Qty input — user edits boxes; pallets auto-calculated */}
+              {/* Qty input — editing boxes recalculates pallets */}
               <div className="space-y-1">
                 <Label className="text-sm">Qty (boxes)</Label>
                 <Input
                   type="number" min={0}
                   value={osQty === 0 ? "" : osQty}
-                  onChange={(e) => setOsQty(parseInt(e.target.value) || 0)}
-                  onBlur={(e) => { if (!e.target.value || parseInt(e.target.value) < 1) setOsQty(1); }}
+                  onChange={(e) => {
+                    const q = parseInt(e.target.value) || 0;
+                    setOsQty(q);
+                    setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                  }}
+                  onBlur={(e) => {
+                    if (!e.target.value || parseInt(e.target.value) < 1) {
+                      setOsQty(1);
+                      setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
+                    }
+                  }}
                   className="text-center text-3xl font-bold h-14"
                   autoFocus
                 />
               </div>
 
-              {/* Auto-calculated pallets (read-only) */}
+              {/* Pallets input — editing pallets recalculates boxes (2-way conversion) */}
               {plt > 1 && (
-                <div className="rounded-md bg-[#001d6e]/5 border border-[#001d6e]/20 px-4 py-3 flex items-center justify-between">
-                  <div>
-                    <p className="text-xs text-gray-500">Pallets</p>
-                    <p className="text-2xl font-bold text-[#001d6e]">
-                      {osQty > 0 ? (osQty / plt).toFixed(2) : "—"}
-                    </p>
+                <div className="rounded-md bg-[#001d6e]/5 border border-[#001d6e]/20 px-4 py-3 flex items-center justify-between gap-3">
+                  <div className="flex-1">
+                    <Label className="text-xs text-gray-500">Pallets</Label>
+                    <Input
+                      type="number" min={0} step="0.01"
+                      value={osPalletsInput}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setOsPalletsInput(raw);
+                        const p = parseFloat(raw);
+                        if (!isNaN(p) && p >= 0) setOsQty(Math.round(p * plt));
+                      }}
+                      onBlur={() => {
+                        if (osPalletsInput === "" || isNaN(parseFloat(osPalletsInput))) {
+                          setOsPalletsInput((osQty / plt).toFixed(2));
+                        }
+                      }}
+                      className="text-2xl font-bold text-[#001d6e] h-11 bg-white"
+                    />
                   </div>
-                  <div className="text-right">
+                  <div className="text-right shrink-0">
                     <p className="text-xs text-gray-500">Pallet size</p>
                     <p className="text-lg font-semibold text-gray-700">{plt} <span className="text-xs font-normal text-gray-400">boxes</span></p>
                   </div>
