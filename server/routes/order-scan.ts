@@ -6,7 +6,7 @@ import {
   orderImportSessions, orderScanItems, orderScanEvents,
   users, plants, plantStvs,
 } from '../../shared/schema';
-import { eq, and, desc, asc, gte, sql } from 'drizzle-orm';
+import { eq, and, or, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
 import { computeGroupReport, resolveGroupId, applySessionStock } from '../lib/orderGroupReport';
@@ -447,7 +447,11 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
       .where(
         and(
           eq(orderImportSessions.isDeleted, false),
-          dateCondition,
+          // A currently-active session must always be visible regardless of how long ago
+          // it was uploaded — the recency window only applies to non-active sessions, so an
+          // old CSV that's still actively being scanned never silently disappears from the
+          // Active tab.
+          or(dateCondition, eq(orderImportSessions.scanStatus, 'active')),
           ...(plantFilter ? [plantEq(plantFilter)] : []),
           ...(statusFilter ? [eq(orderImportSessions.scanStatus, statusFilter)] : []),
         ),
