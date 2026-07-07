@@ -1,4 +1,5 @@
 import { pgTable, text, serial, integer, boolean, timestamp, date, real } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -474,7 +475,7 @@ export const orders = pgTable("orders", {
   dealer: text("dealer").notNull(),
   plant: text("plant"),
   vehicleNumber: text("vehicle_number"),
-  orderDate: text("order_date").default(new Date().toISOString().split('T')[0]),
+  orderDate: text("order_date").default(sql`(CURRENT_DATE)::text`), // defaults to today's date at insert time (stable SQL default — no migration churn)
   status: text("status").default("DRAFT"), // "DRAFT" | "CONFIRMED" | "DISPATCHED"
   createdByCode: text("created_by_code").references(() => users.userCode),
   createdAt: timestamp("created_at").defaultNow(),
