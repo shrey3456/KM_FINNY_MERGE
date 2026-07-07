@@ -13,7 +13,6 @@ import {
   History,
   Loader2,
   PackageCheck,
-  Pencil,
   RefreshCw,
   ScanLine,
   Search,
@@ -143,6 +142,11 @@ type ScanSession = {
 // DB stores timestamps in IST (server local time). The pg driver reads them as UTC
 // and JSON serializes with Z, shifting the time by +5:30. To undo this, display
 // using timeZone "UTC" so the raw stored value (= actual IST time) is shown as-is.
+// Display-only: strips a trailing ".csv" from a file name so it reads cleanly in the UI.
+function stripCsvExt(name?: string | null): string {
+  return (name ?? "").replace(/\.csv$/i, "");
+}
+
 function fmtIST(dt: string | Date | null | undefined): string {
   if (!dt) return "—";
   const s = dt instanceof Date ? dt.toISOString() : String(dt);
@@ -203,10 +207,6 @@ export default function OrderImport() {
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<number | null>(null);
   const [completeTarget, setCompleteTarget] = useState<number | null>(null);
-  const [editTargetSession, setEditTargetSession] = useState<{ id: number; plant: string; csvFileName: string } | null>(null);
-  const [showEditDialog, setShowEditDialog] = useState(false);
-  const [editFile, setEditFile] = useState<File | null>(null);
-  const editFileRef = useRef<HTMLInputElement>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
@@ -659,21 +659,6 @@ export default function OrderImport() {
     onSettled: () => refetchAllSessionQueries(),
   });
 
-  const updateMutation = useMutation({
-    mutationFn: async (payload: { id: number; csvFileName: string; items: object[] }) =>
-      (await apiRequest("PUT", `/api/order-import/sessions/${payload.id}`, payload)).json(),
-    onSuccess: (data, vars) => {
-      setShowMappingDialog(false);
-      setCsvData(null);
-      setEditTargetSession(null);
-      qc.invalidateQueries({ queryKey: ["/api/order-import/items", vars.id] });
-      toast({ title: "Import updated", description: `${data.rowCount} rows replaced.`, className: "bg-green-50 border-green-200 text-green-900" });
-    },
-    onError: (err: any) =>
-      toast({ title: "Update failed", description: err.message, variant: "destructive" }),
-    onSettled: () => refetchAllSessionQueries(),
-  });
-
   if (!isImportRole) {
     return (
       <main className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
@@ -807,11 +792,7 @@ export default function OrderImport() {
   function handleConfirmImport() {
     if (!csvData) return;
     const items = buildItemsFromRows(csvData.rows, mapping);
-    if (editTargetSession) {
-      updateMutation.mutate({ id: editTargetSession.id, csvFileName: csvData.name, items });
-    } else {
-      importQueuedFile(csvData.name, items);
-    }
+    importQueuedFile(csvData.name, items);
   }
 
   // Imports the current queued file (with the shared plant + Order Date, so the server
@@ -867,59 +848,6 @@ export default function OrderImport() {
       description: `${n} file(s) imported · ${c.totalRows} rows${c.failed.length ? ` · failed: ${c.failed.join(", ")}` : ""}. Same plant + order date auto-group; Part 1 loads now, the rest auto-load as each completes. View reports on the Order Reports page.`,
       variant: n === 0 ? "destructive" : undefined,
       className: c.failed.length === 0 ? "bg-green-50 border-green-200 text-green-900" : undefined,
-    });
-  }
-
-  function parseAndReplace(file: File) {
-    if (!editTargetSession) return;
-    Papa.parse<string[]>(file, {
-      header: false,
-      skipEmptyLines: true,
-      delimiter: "",
-      encoding: "UTF-8",
-      complete: (result) => {
-        const rawRows = result.data as string[][];
-        if (rawRows.length === 0) {
-          toast({ title: "Empty file", description: "The CSV has no rows.", variant: "destructive" });
-          return;
-        }
-        let headerRowIdx = 0;
-        let maxCols = 0;
-        for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
-          const nonEmpty = rawRows[i].filter((c) => c.trim() !== "").length;
-          if (nonEmpty > maxCols) { maxCols = nonEmpty; headerRowIdx = i; }
-        }
-        const headers = rawRows[headerRowIdx].map((h) => cleanHeader(h)).filter((h) => h !== "");
-        if (headers.length === 0) {
-          toast({ title: "No columns found", description: "Could not detect column headers in the file.", variant: "destructive" });
-          return;
-        }
-        const dataRows = rawRows.slice(headerRowIdx + 1).map((row) => {
-          const obj: Record<string, string> = {};
-          headers.forEach((h, i) => { obj[h] = row[i] ?? ""; });
-          return obj;
-        });
-        const autoMapping = autoMatch(headers);
-        const get = (row: Record<string, string>, key: TargetKey) => {
-          const col = autoMapping[key];
-          return col && col !== SKIP ? (row[col] ?? "") : "";
-        };
-        const items = dataRows.map((row) => ({
-          barcode:         get(row, "barcode") || null,
-          itemName:        get(row, "itemName") || null,
-          sapCode:         get(row, "sapCode") || null,
-          quantity:        parseInt(get(row, "quantity")) || 0,
-          expectedPallets: parseFloat(get(row, "expectedPallets")) || null,
-        }));
-        if (items.length === 0) {
-          toast({ title: "No data rows found", description: "The CSV contained no data rows.", variant: "destructive" });
-          return;
-        }
-        setShowEditDialog(false);
-        setEditFile(null);
-        if (editFileRef.current) editFileRef.current.value = "";
-        updateMutation.mutate({ id: editTargetSession!.id, csvFileName: file.name, items });
-      },
     });
   }
 
@@ -1231,7 +1159,7 @@ export default function OrderImport() {
                               {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                             </span>
                             <div className="flex-1 min-w-0">
-                              <p className="truncate text-sm font-medium text-gray-900">{s.csvFileName}</p>
+                              <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                               <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
                                 <span className="text-xs text-gray-400">{fmtIST(s.createdAt)}</span>
@@ -1340,7 +1268,7 @@ export default function OrderImport() {
                           <ScanLine className="h-5 w-5 text-amber-600" />
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="truncate text-sm font-bold text-gray-900">{s.csvFileName}</p>
+                          <p className="truncate text-sm font-bold text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                             <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 uppercase">{s.plant}</span>
                             <span className="text-xs text-gray-500">{s.rowCount} rows</span>
@@ -1370,11 +1298,6 @@ export default function OrderImport() {
                               onClick={() => setCompleteTarget(s.id)}>
                               <CheckCircle2 className="mr-1 h-3 w-3" /> Complete
                             </Button>
-                            <Button size="sm" variant="ghost"
-                              className="h-9 w-9 p-0 text-gray-400 hover:text-red-600"
-                              onClick={() => setDeleteTarget(s.id)}>
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
                           </div>
                         </div>
                         {/* Desktop buttons */}
@@ -1395,11 +1318,6 @@ export default function OrderImport() {
                               disabled={completeMutation.isPending}
                               onClick={() => setCompleteTarget(s.id)}>
                               <CheckCircle2 className="mr-1 h-3 w-3" /> Complete
-                            </Button>
-                            <Button size="sm" variant="ghost"
-                              className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
-                              onClick={() => setDeleteTarget(s.id)}>
-                              <Trash2 className="h-3.5 w-3.5" />
                             </Button>
                           </div>
                         </div>
@@ -1466,7 +1384,7 @@ export default function OrderImport() {
                     <div key={s.id} className="px-5 py-3 hover:bg-gray-50">
                       <div className="flex items-center gap-3">
                         <div className="flex-1 min-w-0">
-                          <p className="truncate text-sm font-medium text-gray-900">{s.csvFileName}</p>
+                          <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                             <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700 uppercase">{s.plant}</span>
                             {s.scanCompletedAt && <span className="text-xs text-green-700 font-medium">Done {fmtIST(s.scanCompletedAt)}</span>}
@@ -1568,7 +1486,7 @@ export default function OrderImport() {
                                   : <ChevronRight className="h-4 w-4" />}
                               </span>
                               <div className="flex-1 min-w-0">
-                                <p className="truncate text-sm font-medium text-gray-900">{session.csvFileName}</p>
+                                <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(session.csvFileName)}</p>
                                 <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                   <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{session.plant}</span>
                                   <span className="text-xs text-gray-400">{fmtIST(session.createdAt)}</span>
@@ -1605,20 +1523,6 @@ export default function OrderImport() {
                                     Ready
                                   </span>
                                 )}
-                                <Button size="sm" variant="ghost" title="Re-import with new CSV"
-                                  className="h-8 w-8 p-0 text-gray-400 hover:text-blue-600"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setEditTargetSession({ id: session.id, plant: session.plant, csvFileName: session.csvFileName });
-                                    setShowEditDialog(true);
-                                  }}>
-                                  <Pencil className="h-3.5 w-3.5" />
-                                </Button>
-                                <Button size="sm" variant="ghost"
-                                  className="h-8 w-8 p-0 text-gray-400 hover:text-red-600"
-                                  onClick={(e) => { e.stopPropagation(); setDeleteTarget(session.id); }}>
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </Button>
                               </div>
                             </div>
                           </div>
@@ -1729,16 +1633,11 @@ export default function OrderImport() {
       >
         <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
           <DialogHeader>
-            <DialogTitle>{editTargetSession ? "Re-map & Replace" : "Map CSV Columns"}</DialogTitle>
+            <DialogTitle>Map CSV Columns</DialogTitle>
             <DialogDescription>
               {csvData
                 ? `"${csvData.name}" — ${csvData.rows.length} rows detected. Match each target field to a CSV column.`
                 : "Map columns."}
-              {editTargetSession && (
-                <span className="block mt-1 text-amber-600 font-medium">
-                  Replacing: {editTargetSession.csvFileName} (Plant: {editTargetSession.plant})
-                </span>
-              )}
             </DialogDescription>
           </DialogHeader>
 
@@ -1832,68 +1731,28 @@ export default function OrderImport() {
           )}
 
           <DialogFooter className="mt-2 gap-2">
-            {!editTargetSession && uploadProgress && (
+            {uploadProgress && (
               <span className="mr-auto self-center text-xs text-gray-500">File {uploadProgress.current} of {uploadProgress.total}</span>
             )}
             <Button variant="outline"
               onClick={() => {
                 // Cancel aborts the whole queue.
                 setShowMappingDialog(false);
-                setEditTargetSession(null);
                 uploadQueueRef.current = [];
                 uploadIdxRef.current = 0;
                 setUploadProgress(null);
               }}
-              disabled={isBatchImporting || updateMutation.isPending}>
+              disabled={isBatchImporting}>
               Cancel
             </Button>
             <Button onClick={handleConfirmImport}
-              disabled={isBatchImporting || updateMutation.isPending || !csvData}
+              disabled={isBatchImporting || !csvData}
               className="bg-[#001d6e] hover:bg-[#00154b] text-white">
-              {(isBatchImporting || updateMutation.isPending) ? (
-                <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />{editTargetSession ? "Replacing…" : "Importing…"}</>
-              ) : editTargetSession ? (
-                <><Pencil className="mr-1.5 h-4 w-4" />Replace {csvData?.rows.length ?? 0} rows</>
+              {isBatchImporting ? (
+                <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>
               ) : (
                 <><Upload className="mr-1.5 h-4 w-4" />Import {csvData?.rows.length ?? 0} rows{uploadProgress && uploadProgress.total > 1 ? ` · next file →` : ""}</>
               )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Edit / Re-import dialog ── */}
-      <Dialog
-        open={showEditDialog}
-        onOpenChange={(open) => { if (!open) { setShowEditDialog(false); setEditTargetSession(null); setEditFile(null); } }}
-      >
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Re-import CSV</DialogTitle>
-            <DialogDescription>
-              Upload a new CSV to replace all rows in <strong>{editTargetSession?.csvFileName}</strong>.
-              Plant: <strong>{editTargetSession?.plant}</strong>
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <div className="grid gap-1.5">
-              <Label>New CSV File</Label>
-              <Input ref={editFileRef} type="file" accept=".csv" className="h-10"
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) setEditFile(f); }} />
-              {editFile && <p className="text-xs text-gray-500">{editFile.name} ({Math.max(1, Math.round(editFile.size / 1024))} KB)</p>}
-            </div>
-          </div>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => { setShowEditDialog(false); setEditTargetSession(null); setEditFile(null); }}>
-              Cancel
-            </Button>
-            <Button disabled={!editFile || updateMutation.isPending}
-              className="bg-[#001d6e] hover:bg-[#00154b] text-white"
-              onClick={() => { if (editFile) parseAndReplace(editFile); }}>
-              {updateMutation.isPending
-                ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                : <Upload className="mr-1.5 h-4 w-4" />}
-              Replace Data
             </Button>
           </DialogFooter>
         </DialogContent>

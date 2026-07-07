@@ -25,9 +25,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   const { user, isLoading } = useAuth();
 
   return (
-    <Route
-      path={path}
-      component={(props) => {
+    <Route path={path}>
+      {(params) => {
         // While session user is loading, don't block access yet
         if (isLoading) return null;
 
@@ -60,9 +59,9 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
           }
         }
 
-        return <Component {...props} />;
+        return <Component {...params} />;
       }}
-    />
+    </Route>
   );
 };
 
