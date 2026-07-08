@@ -284,7 +284,7 @@ export async function applySessionStock(client: import('pg').PoolClient, session
     `WITH received AS (
        SELECT LOWER(barcode) AS bc, SUM(total_qty)::int AS qty
        FROM order_scan_events
-       WHERE session_id = $1 AND barcode IS NOT NULL
+       WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
        GROUP BY LOWER(barcode)
      )
      UPDATE products p

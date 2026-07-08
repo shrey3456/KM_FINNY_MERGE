@@ -22,6 +22,7 @@ import {
   ScanLine,
   Search,
   Square,
+  Trash2,
   User,
   X,
   Zap,
@@ -455,7 +456,29 @@ export default function ScanOrderPage() {
     refetchInterval: 5000,
     refetchOnMount: "always",
   });
-  const activeOrderScanSession = orderScanNotif?.active ? orderScanNotif.session : null;
+
+  // Plural counterpart — lets an admin see/switch between MULTIPLE simultaneously-active
+  // sessions across different plants (e.g. Valsad + Indore both scanning at once), instead
+  // of only ever seeing whichever one /notification picks as "the" active session. For
+  // dispatch/non-admin users this returns the same 0-or-1 sessions as /notification, so
+  // nothing changes for them — the switcher UI below only renders when there's a real choice.
+  const { data: osActiveSessions } = useQuery<any[]>({
+    queryKey: ["/api/order-scan/active-sessions"],
+    queryFn: () => apiRequest("GET", "/api/order-scan/active-sessions").then((r) => r.json()),
+    staleTime: 0,
+    refetchInterval: 5000,
+    refetchOnMount: "always",
+  });
+  const [osSelectedSessionId, setOsSelectedSessionId] = useState<number | null>(null);
+  const activeOrderScanSession = (() => {
+    const list = osActiveSessions ?? [];
+    if (list.length > 0) {
+      return list.find((s) => s.id === osSelectedSessionId) ?? list[0];
+    }
+    // Fallback to the singular endpoint (covers the moment active-sessions hasn't
+    // resolved yet on first load) so behavior is identical to before this existed.
+    return orderScanNotif?.active ? orderScanNotif.session : null;
+  })();
 
   // Master View has no manual plant/date pickers — it always shows the currently active
   // session's own plant/date, derived from scanActivatedAt (stored as IST wall-clock, same
@@ -547,6 +570,37 @@ export default function ScanOrderPage() {
     enabled: !!activeOrderScanSession,
     refetchInterval: wsConnected ? 30000 : 8000,
     refetchIntervalInBackground: false,
+  });
+
+  // ── Manage Scans (admin-only "void a mistaken scan") — new, additive feature ──
+  type OsScanEventRow = {
+    id: number; barcode: string; itemName: string | null; pallets: number | null;
+    looseQty: number | null; totalQty: number | null; isExtra: boolean | null;
+    scannedByName: string | null; scannedAt: string | null;
+    voided: boolean | null; voidedAt: string | null; voidReason: string | null;
+  };
+  const [osVoidTarget, setOsVoidTarget] = useState<OsScanEventRow | null>(null);
+  const [osVoidReason, setOsVoidReason] = useState("");
+  const osEventsQuery = useQuery<OsScanEventRow[]>({
+    queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "events"],
+    queryFn: () =>
+      apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/events`).then((r) => r.json()),
+    enabled: !!activeOrderScanSession && canCompletePart,
+    refetchInterval: wsConnected ? 30000 : 8000,
+    refetchIntervalInBackground: false,
+  });
+  const osVoidMutation = useMutation({
+    mutationFn: (payload: { id: number; reason: string }) =>
+      apiRequest("POST", `/api/order-scan/events/${payload.id}/void`, { reason: payload.reason }).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "events"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "extras"] });
+      setOsVoidTarget(null);
+      setOsVoidReason("");
+      toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
+    },
+    onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
 
   const osSuggestions = useMemo(() => {
@@ -2474,6 +2528,33 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     return (
       <div className="flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6">
 
+        {/* ── Plant switcher — only appears when 2+ plants have a simultaneously active
+            session (e.g. Valsad + Indore both scanning at once). New/additive: for a
+            single active session, or non-admin users, this renders nothing and the page
+            behaves exactly as before. ── */}
+        {(osActiveSessions?.length ?? 0) > 1 && (
+          <div className="flex flex-wrap items-center gap-1.5 bg-white sm:bg-transparent px-3 py-2 sm:px-0 sm:py-0 sm:mb-3 border-b sm:border-0 border-gray-100">
+            <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wide text-gray-400 mr-1">Active:</span>
+            {(osActiveSessions ?? []).map((s) => (
+              <button
+                key={s.id}
+                onClick={() => {
+                  setOsSelectedSessionId(s.id);
+                  setOsSearch("");
+                  setMvSearch("");
+                }}
+                className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+                  activeOrderScanSession?.id === s.id
+                    ? "bg-[#001d6e] text-white"
+                    : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                {s.plant}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* ══════════════════════════════════════════════════
             MOBILE LAYOUT  (hidden on sm+)
             - Sticky header strip with session info + progress
@@ -2542,6 +2623,31 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <Keyboard className="h-4 w-4" /> Manual
                 </button>
               </div>
+
+              {/* Main STV selector — sets the default for the next scan confirmation too */}
+              {stvs.length > 0 && (
+                <div className="flex items-center gap-1.5 rounded-lg border border-[#001d6e]/15 bg-[#001d6e]/5 px-3 py-1">
+                  <Label className="text-[10px] font-semibold shrink-0 text-[#001d6e]">STV</Label>
+                  <Select
+                    value={osSelectedStv || NO_STV}
+                    onValueChange={(v) => {
+                      const nextValue = v === NO_STV ? "" : v;
+                      setOsSelectedStv(nextValue);
+                      lastSelectedStvRef.current = nextValue;
+                    }}
+                  >
+                    <SelectTrigger className="h-7 flex-1 text-xs bg-white border-[#001d6e]/30 text-[#001d6e]">
+                      <SelectValue placeholder="Select STV…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                      {stvs.map((s) => (
+                        <SelectItem key={s} value={s}>{s}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
 
               {/* Camera feed — always in DOM so ref is set before scanner starts */}
               <div
@@ -2775,6 +2881,36 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }`}>
                         {s.isExtra ? "EXTRA" : `+${s.total}`}
                       </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── Manage Scans (admin-only) — void a mistaken scan; new/additive, doesn't touch Recent Scans above ── */}
+            {canCompletePart && (osEventsQuery.data ?? []).length > 0 && (
+              <div className="bg-white rounded-xl border overflow-hidden shadow-sm">
+                <div className="bg-[#001d6e] px-4 py-2">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-white">Manage Scans</p>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {(osEventsQuery.data ?? []).map((e) => (
+                    <div key={e.id} className={`flex items-center gap-2 px-4 py-2.5 text-xs ${e.voided ? "opacity-50" : ""}`}>
+                      <div className="min-w-0 flex-1">
+                        <p className={`truncate font-medium text-gray-800 ${e.voided ? "line-through" : ""}`}>
+                          {e.itemName ?? e.barcode}
+                        </p>
+                        <p className="text-[10px] text-gray-400">
+                          {e.scannedByName ?? "—"} · {e.totalQty ?? 0} {e.isExtra ? "(extra)" : ""}
+                          {e.voided && <span className="ml-1 font-semibold text-red-500">Voided</span>}
+                        </p>
+                      </div>
+                      {!e.voided && (
+                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 shrink-0"
+                          onClick={() => setOsVoidTarget(e)}>
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -3470,6 +3606,31 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </Button>
                 </div>
 
+                {/* Main STV selector — sets the default for the next scan confirmation too */}
+                {stvs.length > 0 && (
+                  <div className="flex items-center gap-2 rounded-lg border border-[#001d6e]/15 bg-[#001d6e]/5 px-3 py-1.5">
+                    <Label className="text-xs font-semibold shrink-0 text-[#001d6e]">STV</Label>
+                    <Select
+                      value={osSelectedStv || NO_STV}
+                      onValueChange={(v) => {
+                        const nextValue = v === NO_STV ? "" : v;
+                        setOsSelectedStv(nextValue);
+                        lastSelectedStvRef.current = nextValue;
+                      }}
+                    >
+                      <SelectTrigger className="h-7 flex-1 text-xs bg-white border-[#001d6e]/30 text-[#001d6e]">
+                        <SelectValue placeholder="Select STV…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                        {stvs.map((s) => (
+                          <SelectItem key={s} value={s}>{s}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+
                 {/* Camera card — always in DOM so ref stays set; hidden via display:none when not in camera mode */}
                 <Card className="rounded-xl shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
                   <div className="relative bg-black" style={{ height: "320px" }}>
@@ -3589,6 +3750,36 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           }`}>
                             {s.isExtra ? "EXTRA" : `+${s.total}`}
                           </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Manage Scans (admin-only) — void a mistaken scan; new/additive, doesn't touch Recent Scans above ── */}
+                {canCompletePart && (osEventsQuery.data ?? []).length > 0 && (
+                  <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                    <div className="bg-[#001d6e] px-4 py-2.5">
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-white">Manage Scans</p>
+                    </div>
+                    <div className="divide-y divide-gray-100">
+                      {(osEventsQuery.data ?? []).map((e) => (
+                        <div key={e.id} className={`flex items-center gap-2 px-4 py-2 text-xs ${e.voided ? "opacity-50" : ""}`}>
+                          <div className="min-w-0 flex-1">
+                            <p className={`truncate font-medium max-w-[170px] text-gray-800 ${e.voided ? "line-through" : ""}`}>
+                              {e.itemName ?? e.barcode}
+                            </p>
+                            <p className="text-[10px] text-gray-400">
+                              {e.scannedByName ?? "—"} · {e.totalQty ?? 0} {e.isExtra ? "(extra)" : ""}
+                              {e.voided && <span className="ml-1 font-semibold text-red-500">Voided</span>}
+                            </p>
+                          </div>
+                          {!e.voided && (
+                            <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 shrink-0"
+                              onClick={() => setOsVoidTarget(e)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -3971,6 +4162,40 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               >
                 {osCompleteMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Complete Part
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* ── Void scan confirmation (admin-only, Manage Scans panel) — new/additive dialog ── */}
+        <Dialog open={!!osVoidTarget} onOpenChange={(o) => { if (!o) { setOsVoidTarget(null); setOsVoidReason(""); } }}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>Void this scan?</DialogTitle>
+              <DialogDescription className="space-y-1 pt-1">
+                <p>
+                  <span className="font-semibold text-gray-900">{osVoidTarget?.itemName ?? osVoidTarget?.barcode}</span> — {osVoidTarget?.totalQty ?? 0} scanned by {osVoidTarget?.scannedByName ?? "—"}.
+                </p>
+                <p className="text-sm text-gray-500">
+                  This removes it from totals and stock, but the entry stays here marked "Voided" for the record — it is never deleted.
+                </p>
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-1.5">
+              <Label className="text-sm">Reason (optional)</Label>
+              <Input value={osVoidReason} onChange={(e) => setOsVoidReason(e.target.value)} placeholder="e.g. wrong barcode scanned by mistake" />
+            </div>
+            <DialogFooter className="gap-2">
+              <Button variant="outline" onClick={() => { setOsVoidTarget(null); setOsVoidReason(""); }} disabled={osVoidMutation.isPending}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => { if (osVoidTarget) osVoidMutation.mutate({ id: osVoidTarget.id, reason: osVoidReason }); }}
+                disabled={osVoidMutation.isPending}
+                className="bg-red-600 hover:bg-red-700 text-white"
+              >
+                {osVoidMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Void Scan
               </Button>
             </DialogFooter>
           </DialogContent>
