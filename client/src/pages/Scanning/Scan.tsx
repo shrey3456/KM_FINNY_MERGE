@@ -1545,6 +1545,62 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     }
   };
 
+  // ── Barcode gun (HID keyboard-wedge) support ─────────────────────────────
+  // Any USB/Bluetooth barcode gun in keyboard-wedge mode just "types" the
+  // barcode very fast and then sends Enter or Tab (some send neither). We
+  // listen globally so a gun works no matter what's focused on the page --
+  // human typing never sustains the ~<50ms/char burst speed a gun produces,
+  // so this can't misfire on real typing. Inputs with their own Enter
+  // handler (manual code boxes) are skipped here to avoid double-submitting.
+  useEffect(() => {
+    const inScanContext = (view === "scan" && !!activeSession) || !!activeOrderScanSession;
+    if (!inScanContext) return;
+
+    const MAX_KEY_INTERVAL = 50;  // ms between chars -- faster than any human types
+    const MIN_BARCODE_LENGTH = 3;
+    const BURST_END_DELAY = 80;   // ms of silence = end of scan, for guns with no suffix key
+
+    let buffer = "";
+    let lastKeyAt = 0;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearFlush = () => { if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; } };
+
+    const process = (code: string) => {
+      if (code.length < MIN_BARCODE_LENGTH) return;
+      if (activeOrderScanSession) handleOsBarcode(code);
+      else if (activeSession) handleScannedCode(code);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const isTypingTarget = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (isTypingTarget) return; // manual code inputs already handle their own Enter
+
+      const now = Date.now();
+      const delta = now - lastKeyAt;
+      lastKeyAt = now;
+
+      if (e.key === "Enter" || e.key === "Tab") {
+        clearFlush();
+        const code = buffer;
+        buffer = "";
+        if (code.length >= MIN_BARCODE_LENGTH) { e.preventDefault(); process(code); }
+        return;
+      }
+
+      if (e.key.length !== 1) return; // ignore Shift/Escape/ArrowUp/etc.
+      if (delta > MAX_KEY_INTERVAL) buffer = ""; // gap too long -- not a scanner burst
+      buffer += e.key;
+
+      clearFlush();
+      flushTimer = setTimeout(() => { process(buffer); buffer = ""; }, BURST_END_DELAY);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => { window.removeEventListener("keydown", handleKeyDown); clearFlush(); };
+  }, [view, activeSession, activeOrderScanSession]);
+
   const startScanner = async () => {
     if (!videoRef.current) return;
     const scanner = new BarcodeScanner({
@@ -2093,6 +2149,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </div>
                 </div>
                 <p className="text-xs text-gray-500">Every matched scan is recorded against the loaded CSV order. Boxes not in this CSV are kept in the extra report.</p>
+                <p className="flex items-center gap-1.5 text-xs text-gray-400"><Zap className="h-3 w-3" />USB/Bluetooth barcode gun ready -- just scan, no need to click into a field.</p>
               </CardContent>
             </Card>
           </div>
@@ -2818,6 +2875,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </Button>
                 </div>
               )}
+              <p className="flex items-center gap-1.5 text-[11px] text-gray-400"><Zap className="h-3 w-3" />Barcode gun ready -- just scan.</p>
             </div>
             )}
           </div>
@@ -3605,6 +3663,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <Keyboard className="mr-2 h-4 w-4" /> Manual
                   </Button>
                 </div>
+                <p className="flex items-center gap-1.5 text-[11px] text-gray-400"><Zap className="h-3 w-3" />Barcode gun ready -- just scan, no field needs focus.</p>
 
                 {/* Main STV selector — sets the default for the next scan confirmation too */}
                 {stvs.length > 0 && (
