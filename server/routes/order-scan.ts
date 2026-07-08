@@ -331,6 +331,47 @@ router.get('/order-scan/notification', async (req: Request, res: Response) => {
   }
 });
 
+// ── GET /api/order-scan/active-sessions ──────────────────────────────────────
+// Plural counterpart to /notification: returns EVERY currently-active session the
+// user can see, not just the most-recently-activated one. Admin/billing (no plant
+// filter) can have simultaneously active sessions across different plants (e.g.
+// Valsad and Indore scanning at once) — this lets them switch between all of them
+// instead of only ever seeing whichever one is "on top". Dispatch/non-admin users
+// are still plant-scoped, so this returns the same 0-or-1 sessions they already see
+// via /notification — no behavior change for them.
+router.get('/order-scan/active-sessions', async (req: Request, res: Response) => {
+  try {
+    const plantFilter = getPlantFilter(req.user);
+    const importedBy  = alias(users, 'imported_by');
+
+    const conditions: any[] = [
+      eq(orderImportSessions.scanStatus, 'active'),
+      eq(orderImportSessions.isDeleted, false),
+    ];
+    if (plantFilter) conditions.push(plantEq(plantFilter));
+
+    const sessions = await db
+      .select({
+        id:          orderImportSessions.id,
+        plant:       orderImportSessions.plant,
+        csvFileName: orderImportSessions.csvFileName,
+        rowCount:    orderImportSessions.rowCount,
+        importedByName: importedBy.name,
+        scanActivatedAt: orderImportSessions.scanActivatedAt,
+        receivingSessionId: orderImportSessions.receivingSessionId,
+        partIndex: orderImportSessions.partIndex,
+      })
+      .from(orderImportSessions)
+      .leftJoin(importedBy, eq(orderImportSessions.importedByCode, importedBy.userCode))
+      .where(and(...conditions))
+      .orderBy(desc(orderImportSessions.scanActivatedAt));
+
+    res.json(sessions);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed' });
+  }
+});
+
 // ── GET /api/order-scan/whoami — returns what plant the server sees for this user ──
 router.get('/order-scan/whoami', (req: Request, res: Response) => {
   const plant = getPlantFilter(req.user);
@@ -939,7 +980,7 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
         MAX(ose.scanned_at)                  AS "lastScannedAt",
         MAX(ose.scanned_by_name)             AS "scannedByName"
       FROM order_scan_events ose
-      WHERE ose.session_id = $1 AND ose.is_extra = true
+      WHERE ose.session_id = $1 AND ose.is_extra = true AND ose.voided IS NOT TRUE
       GROUP BY COALESCE(ose.barcode, '')
       ORDER BY MAX(ose.scanned_at) DESC
     `, [id]);
@@ -962,6 +1003,98 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
     res.json(events);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch events' });
+  }
+});
+
+// ── POST /api/order-scan/events/:id/void ─────────────────────────────────────
+// Admin-only. Marks a single scan event as a mistake: the row stays in history
+// (never deleted) but its quantity is reversed out of the linked order_scan_items
+// row, mirroring exactly what the original /scan increment did, in reverse. Only
+// allowed while the parent session is still active — once completed, stock has
+// already been finalized from these numbers, so voiding is blocked at that point.
+// This is purely additive: it doesn't touch the /scan endpoint or any other
+// existing read path — everything that already worked keeps working unchanged.
+router.post('/order-scan/events/:id/void', async (req: Request, res: Response) => {
+  const eventId = parseInt(req.params.id);
+  if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+
+  const role = ((req.user as any)?.role ?? '').toLowerCase().trim();
+  if (!ADMIN_ROLES.includes(role)) {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : null;
+  const userCode = (req.user as any)?.userCode ?? null;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const eventResult = await client.query(
+      `SELECT * FROM order_scan_events WHERE id = $1 FOR UPDATE`,
+      [eventId],
+    );
+    const event = eventResult.rows[0];
+    if (!event) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Scan event not found' });
+    }
+    if (event.voided) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'This scan is already voided' });
+    }
+
+    const sessResult = await client.query(
+      `SELECT scan_status FROM order_import_sessions WHERE id = $1`,
+      [event.session_id],
+    );
+    if (sessResult.rows[0]?.scan_status === 'completed') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'This part is already completed — stock has been finalized and this scan can no longer be voided.' });
+    }
+
+    let updatedItem: any = null;
+    if (event.scan_item_id) {
+      const itemResult = await client.query(
+        `SELECT * FROM order_scan_items WHERE id = $1 FOR UPDATE`,
+        [event.scan_item_id],
+      );
+      const item = itemResult.rows[0];
+      if (item) {
+        const newTotal = Math.max(0, Number(item.total_scanned_qty ?? 0) - Number(event.total_qty ?? 0));
+        const updateResult = await client.query(
+          `UPDATE order_scan_items
+           SET scanned_pallets   = GREATEST(0, COALESCE(scanned_pallets, 0) - $1),
+               scanned_loose_qty = GREATEST(0, COALESCE(scanned_loose_qty, 0) - $2),
+               total_scanned_qty = $3,
+               status            = CASE
+                 WHEN $3 >= expected_qty AND expected_qty > 0 THEN 'complete'
+                 WHEN $3 > 0                                  THEN 'partial'
+                 ELSE 'pending'
+               END
+           WHERE id = $4
+           RETURNING *`,
+          [event.pallets, event.loose_qty, newTotal, item.id],
+        );
+        updatedItem = updateResult.rows[0];
+      }
+    }
+
+    const voidResult = await client.query(
+      `UPDATE order_scan_events
+       SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2
+       WHERE id = $3
+       RETURNING *`,
+      [userCode, reason, eventId],
+    );
+
+    await client.query('COMMIT');
+    res.json({ event: voidResult.rows[0], updatedItem });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to void scan' });
+  } finally {
+    client.release();
   }
 });
 

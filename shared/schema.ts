@@ -844,6 +844,13 @@ export const orderScanEvents = pgTable("order_scan_events", {
   // Used by the Notion sync feature (server/routes/scan-sessions.ts) to track which scan
   // events have already been pushed to Notion.
   notionSyncedAt: timestamp("notion_synced_at", { withTimezone: true }),
+  // Admin-only "void" — marks a mistaken scan so it's excluded from live totals/stock while
+  // staying in history for audit. Never physically deleted. Only allowed while the parent
+  // session is still active (not yet completed, since stock is already finalized by then).
+  voided: boolean("voided").default(false),
+  voidedByCode: text("voided_by_code").references(() => users.userCode),
+  voidedAt: timestamp("voided_at"),
+  voidReason: text("void_reason"),
 });
 
 export const insertOrderScanItemSchema = createInsertSchema(orderScanItems).pick({
