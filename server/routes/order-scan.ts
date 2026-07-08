@@ -10,6 +10,7 @@ import { eq, and, or, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
 import { computeGroupReport, resolveGroupId, applySessionStock } from '../lib/orderGroupReport';
+import { requirePageWrite } from '../lib/pageAccess';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
 function plantEq(filter: string) {
@@ -508,7 +509,7 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
 // ── POST /api/order-scan/sessions/:id/activate ───────────────────────────────
 // Activates a session for scanning. Pre-populates orderScanItems from import items.
 // Only one active session per plant at a time.
-router.post('/order-scan/sessions/:id/activate', async (req: Request, res: Response) => {
+router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 
@@ -635,7 +636,7 @@ router.post('/order-scan/sessions/:id/activate', async (req: Request, res: Respo
 
 // ── POST /api/order-scan/sessions/:id/deactivate ─────────────────────────────
 // Releases the active lock without completing — allows another session to go active.
-router.post('/order-scan/sessions/:id/deactivate', async (req: Request, res: Response) => {
+router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
@@ -650,7 +651,7 @@ router.post('/order-scan/sessions/:id/deactivate', async (req: Request, res: Res
 });
 
 // ── POST /api/order-scan/sessions/:id/complete ───────────────────────────────
-router.post('/order-scan/sessions/:id/complete', async (req: Request, res: Response) => {
+router.post('/order-scan/sessions/:id/complete', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
@@ -824,7 +825,7 @@ router.get('/order-scan/sessions/:id/group-credits', async (req: Request, res: R
 // hint is ignored — so concurrent scans by different users never race on the
 // order-vs-extra decision. UPDATE...RETURNING eliminates the stale read-after-
 // write that previously caused SSE broadcasts to carry an old snapshot.
-router.post('/order-scan/sessions/:id/scan', async (req: Request, res: Response) => {
+router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ message: 'Invalid session ID' });
 

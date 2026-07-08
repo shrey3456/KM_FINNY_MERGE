@@ -449,7 +449,7 @@ export default function ScanOrderPage() {
   // Poll for admin-loaded order-import session (from /order-scan flow).
   // 5s interval + refetchOnMount:'always' so changes made on the Import page
   // are visible here within 5 seconds without a manual page refresh.
-  const { data: orderScanNotif } = useQuery<{ active: boolean; session: any }>({
+  const { data: orderScanNotif, isLoading: orderScanNotifLoading } = useQuery<{ active: boolean; session: any }>({
     queryKey: ["/api/order-scan/notification"],
     queryFn: () => apiRequest("GET", "/api/order-scan/notification").then((r) => r.json()),
     staleTime: 0,
@@ -1545,6 +1545,115 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     }
   };
 
+  // ── Barcode gun (HID keyboard-wedge) support ─────────────────────────────
+  useEffect(() => {
+    const inScanContext = (view === "scan" && !!activeSession) || !!activeOrderScanSession;
+    if (!inScanContext) return;
+
+    const MAX_KEY_INTERVAL = 50;  // ms between chars -- faster than any human types
+    const MIN_BARCODE_LENGTH = 3;
+    const BURST_END_DELAY = 80;   // ms of silence = end of scan, for guns with no suffix key
+
+    let buffer = "";
+    let lastKeyAt = 0;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let qtySnapshot: string | null = null; // qty field's value right before a suspected burst
+    let qtyKind: "classic" | "os" | null = null;
+
+    const clearFlush = () => { if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; } };
+    const resetQtyTracking = () => { qtySnapshot = null; qtyKind = null; };
+
+    const revertQtyField = () => {
+      if (qtySnapshot === null) return;
+      if (qtyKind === "classic") {
+        setPendingQty(qtySnapshot);
+      } else if (qtyKind === "os") {
+        const q = parseInt(qtySnapshot, 10) || 0;
+        const plt = osPendingRef.current?.plantPalletSize ?? osPendingRef.current?.matchedItem?.itemsPerPallet ?? 1;
+        setOsQty(q);
+        setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+      }
+    };
+
+    const process = (code: string) => {
+      if (code.length < MIN_BARCODE_LENGTH) return;
+      if (activeOrderScanSession) handleOsBarcode(code);
+      else if (activeSession) handleScannedCode(code);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLInputElement | null;
+      const gunQtyKind = target?.dataset?.gunQty as "classic" | "os" | undefined;
+      const isQtyField = gunQtyKind === "classic" || gunQtyKind === "os";
+      const isTypingTarget = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (isTypingTarget && !isQtyField) return; // manual code inputs already handle their own Enter
+
+      const now = Date.now();
+      const delta = now - lastKeyAt;
+      lastKeyAt = now;
+
+      if (e.key === "Enter" || e.key === "Tab") {
+        clearFlush();
+        const code = buffer;
+        buffer = "";
+        if (code.length >= MIN_BARCODE_LENGTH) {
+          e.preventDefault();
+          if (isQtyField) {
+            e.stopPropagation();
+            revertQtyField();
+            resetQtyTracking();
+            toast({ title: "Scan blocked", description: "Finish or cancel the current item before scanning the next one.", variant: "destructive" });
+          } else {
+            process(code);
+          }
+        } else if (isQtyField) {
+          resetQtyTracking();
+        }
+        return;
+      }
+
+      if (e.key.length !== 1) return; // ignore Shift/Escape/ArrowUp/etc.
+
+      if (isQtyField) {
+        if (delta > MAX_KEY_INTERVAL || buffer.length === 0) {
+          // First character of a fresh burst -- or just an isolated human keystroke.
+          // Remember the pre-keystroke value so we can undo it if the next char proves
+          // this is a gun burst rather than manual typing.
+          buffer = "";
+          qtySnapshot = target!.value;
+          qtyKind = gunQtyKind!;
+        } else {
+          // A second fast character confirms this is a gun scan, not manual typing --
+          // undo the character that already leaked into the field and block the rest.
+          e.preventDefault();
+          e.stopPropagation();
+          revertQtyField();
+        }
+        buffer += e.key;
+        clearFlush();
+        flushTimer = setTimeout(() => {
+          if (buffer.length >= MIN_BARCODE_LENGTH) {
+            revertQtyField();
+            toast({ title: "Scan blocked", description: "Finish or cancel the current item before scanning the next one.", variant: "destructive" });
+          }
+          resetQtyTracking();
+          buffer = "";
+        }, BURST_END_DELAY);
+        return;
+      }
+
+      if (delta > MAX_KEY_INTERVAL) buffer = ""; // gap too long -- not a scanner burst
+      buffer += e.key;
+
+      clearFlush();
+      flushTimer = setTimeout(() => { process(buffer); buffer = ""; }, BURST_END_DELAY);
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => { window.removeEventListener("keydown", handleKeyDown, true); clearFlush(); };
+  }, [view, activeSession, activeOrderScanSession]);
+
   const startScanner = async () => {
     if (!videoRef.current) return;
     const scanner = new BarcodeScanner({
@@ -1680,6 +1789,18 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   const submitManualCode = () => { handleScannedCode(manualCode); setManualCode(""); };
 
   // ─── Views ────────────────────────────────────────────────────────────────
+
+  // Don't show the plain dashboard for a split second before we actually know whether
+  // an order-scan session is active — without this, a refresh always flashes the
+  // dashboard first (since the notification query hasn't resolved yet) and then jumps
+  // to the scan view once it loads a moment later.
+  if (orderScanNotifLoading) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-gray-50">
+        <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
+      </div>
+    );
+  }
 
   if (view === "map") {
     return (
@@ -2093,6 +2214,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </div>
                 </div>
                 <p className="text-xs text-gray-500">Every matched scan is recorded against the loaded CSV order. Boxes not in this CSV are kept in the extra report.</p>
+                <p className="flex items-center gap-1.5 text-xs text-gray-400"><Zap className="h-3 w-3" />USB/Bluetooth barcode gun ready -- just scan, no need to click into a field.</p>
               </CardContent>
             </Card>
           </div>
@@ -2391,7 +2513,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <Pencil className="h-3.5 w-3.5" />Quantity to Add
                   </Label>
                   <div className="flex gap-2 items-center">
-                    <Input id="confirm-qty" type="number" min={1} value={pendingQty} onChange={(e) => setPendingQty(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirmPendingScan()} className="text-lg font-semibold h-11" autoFocus />
+                    <Input id="confirm-qty" data-gun-qty="classic" type="number" min={1} value={pendingQty} onChange={(e) => setPendingQty(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirmPendingScan()} className="text-lg font-semibold h-11" autoFocus />
                     {pendingScan.itemsPerPallet > 0 && (
                       <Button type="button" variant="outline" size="sm" className="shrink-0 text-xs" onClick={() => setPendingQty(String(pendingScan.itemsPerPallet))}>
                         1 Pallet ({pendingScan.itemsPerPallet})
@@ -2818,6 +2940,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </Button>
                 </div>
               )}
+              <p className="flex items-center gap-1.5 text-[11px] text-gray-400"><Zap className="h-3 w-3" />Barcode gun ready -- just scan.</p>
             </div>
             )}
           </div>
@@ -3605,6 +3728,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <Keyboard className="mr-2 h-4 w-4" /> Manual
                   </Button>
                 </div>
+                <p className="flex items-center gap-1.5 text-[11px] text-gray-400"><Zap className="h-3 w-3" />Barcode gun ready -- just scan, no field needs focus.</p>
 
                 {/* Main STV selector — sets the default for the next scan confirmation too */}
                 {stvs.length > 0 && (
@@ -4068,6 +4192,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-1">
                 <Label className="text-sm">Qty (boxes)</Label>
                 <Input
+                  data-gun-qty="os"
                   type="number" min={0}
                   value={osQty === 0 ? "" : osQty}
                   onChange={(e) => {

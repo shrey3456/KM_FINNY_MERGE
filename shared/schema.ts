@@ -21,6 +21,10 @@ export const users = pgTable("users", {
   profileImage: text("profile_image"), // Base64-encoded JPEG
   plants: text("plants").default("[]"), // JSON array of plant names e.g. ["VALSAD","INDORE"]
   allowedPages: text("allowed_pages").default("[]"), // JSON array of page keys e.g. ["inventory","dispatch"]
+  // Subset of allowedPages where this user can also write (not just view). A page key
+  // present here without also being in allowedPages has no effect — read access is the
+  // prerequisite. Admin/super-admin ignore this entirely (implicit full write access).
+  pageWriteAccess: text("page_write_access").default("[]"),
 });
 
 export const insertUserSchema = createInsertSchema(users);

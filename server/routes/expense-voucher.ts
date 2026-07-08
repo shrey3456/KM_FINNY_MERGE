@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { Client } from '@notionhq/client';
 import { authenticateToken } from '../middleware/authMiddleware'; // Import middleware
+import { requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -848,7 +849,7 @@ router.get('/expense-voucher/driver-suggestions', async (req, res) => {
 });
 
 // Expense voucher API - Protected
-router.post('/expense-voucher', async (req, res) => {
+router.post('/expense-voucher', requirePageWrite('expense-voucher'), async (req, res) => {
   try {
     const { orderNumber, driverName } = req.body;
     // Every search is scoped to a single day; falls back to today if the

@@ -111,6 +111,7 @@ import orderImportRoutes from "./routes/order-import";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
+import { requirePageWrite } from "./lib/pageAccess";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -769,7 +770,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  apiRouter.post("/scans", async (req: Request, res: Response) => {
+  apiRouter.post("/scans", requirePageWrite("scan-order"), async (req: Request, res: Response) => {
     try {
       const scanData = scanEntrySchema.parse(req.body);
 
@@ -1231,7 +1232,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  apiRouter.post("/loading-operations", async (req: Request, res: Response) => {
+  apiRouter.post("/loading-operations", requirePageWrite("load-operations"), async (req: Request, res: Response) => {
     try {
       const operationData = insertLoadingOperationSchema.parse(req.body);
 
@@ -1574,6 +1575,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Endpoint to update a loading operation (vehicle number, driver name, etc.)
   apiRouter.put(
     "/loading-operations/:id",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         // Import the cache utility in a try/catch to handle errors
@@ -1908,6 +1910,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Endpoint to update a specific loading operation item
   apiRouter.put(
     "/loading-operations/items/:id",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         // Import the cache utility for cache invalidation
@@ -2013,6 +2016,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Add items to a loading operation
   apiRouter.post(
     "/loading-operations/:id/items",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -2758,7 +2762,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  apiRouter.post("/loading-operations", async (req: Request, res: Response) => {
+  apiRouter.post("/loading-operations", requirePageWrite("load-operations"), async (req: Request, res: Response) => {
     try {
       const operationData = req.body;
       const operation = await storage.createLoadingOperation(operationData);
@@ -2792,6 +2796,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.put(
     "/loading-operations/:id",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -2862,6 +2867,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Add a loading operation item
   apiRouter.post(
     "/loading-operations/:id/items",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -3065,6 +3071,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Delete a loading operation
   apiRouter.delete(
     "/loading-operations/:id",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -3167,6 +3174,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Clear all inventory data
   apiRouter.delete(
     "/products/clear-all",
+    requirePageWrite("settings"),
     async (req: Request, res: Response) => {
       try {
         await storage.clearInventory();
@@ -3184,7 +3192,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   );
 
   // Alternative route with POST method for browsers that don't support DELETE
-  apiRouter.post("/products/clear", async (req: Request, res: Response) => {
+  apiRouter.post("/products/clear", requirePageWrite("settings"), async (req: Request, res: Response) => {
     try {
       console.log("Clearing inventory via POST method...");
       await storage.clearInventory();
@@ -3267,6 +3275,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Reset only the sold counts to zero
   apiRouter.post(
     "/products/reset-sold",
+    requirePageWrite("settings"),
     async (req: Request, res: Response) => {
       try {
         const updatedCount = await storage.resetSoldCounts();
@@ -3284,6 +3293,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Reset all inStock values to zero
   apiRouter.post(
     "/products/reset-stock",
+    requirePageWrite("settings"),
     async (req: Request, res: Response) => {
       try {
         const updatedCount = await storage.resetInventoryStock();
@@ -7809,6 +7819,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // POST /api/dealer-purchase-orders/from-excel - Create dealer purchase order from Excel data
   apiRouter.post(
     "/dealer-purchase-orders/from-excel",
+    requirePageWrite("purchases"),
     upload.single("file"),
     async (req: Request, res: Response) => {
       try {
@@ -8243,7 +8254,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const role = String((req as any)?.user?.role ?? "").toLowerCase();
       const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
+      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
+      // write access to Plant Management via pageWriteAccess on the Users page.
+      let plantMgmtWritable: string[] = [];
+      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
+      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
         return res.status(403).json({ message: "Access denied" });
       }
 
@@ -8260,7 +8275,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const role = String((req as any)?.user?.role ?? "").toLowerCase();
       const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
+      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
+      // write access to Plant Management via pageWriteAccess on the Users page.
+      let plantMgmtWritable: string[] = [];
+      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
+      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
         return res.status(403).json({ message: "Access denied" });
       }
 
@@ -8278,7 +8297,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const role = String((req as any)?.user?.role ?? "").toLowerCase();
       const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
+      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
+      // write access to Plant Management via pageWriteAccess on the Users page.
+      let plantMgmtWritable: string[] = [];
+      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
+      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
         return res.status(403).json({ message: "Access denied" });
       }
 
@@ -8307,7 +8330,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const role = String((req as any)?.user?.role ?? "").toLowerCase();
       const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
+      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
+      // write access to Plant Management via pageWriteAccess on the Users page.
+      let plantMgmtWritable: string[] = [];
+      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
+      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
         return res.status(403).json({ message: "Access denied" });
       }
 
@@ -8336,7 +8363,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const role = String((req as any)?.user?.role ?? "").toLowerCase();
       const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
+      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
+      // write access to Plant Management via pageWriteAccess on the Users page.
+      let plantMgmtWritable: string[] = [];
+      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
+      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
         return res.status(403).json({ message: "Access denied" });
       }
 
@@ -8362,7 +8393,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const role = String((req as any)?.user?.role ?? "").toLowerCase();
       const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
+      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
+      // write access to Plant Management via pageWriteAccess on the Users page.
+      let plantMgmtWritable: string[] = [];
+      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
+      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
         return res.status(403).json({ message: "Access denied" });
       }
 

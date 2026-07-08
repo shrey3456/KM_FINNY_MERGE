@@ -32,6 +32,7 @@ import { useEffect, useState } from 'react';
 import { Smartphone, Radio, QrCode, Zap, Shield, Database } from 'lucide-react';
 import { apiRequest } from '@/lib/queryClient';
 import { useQueryClient } from '@tanstack/react-query';
+import { hasPageWriteAccess } from '@/lib/permissions';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -51,6 +52,7 @@ const Settings = () => {
   const [isClearing, setIsClearing] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [showClearDialog, setShowClearDialog] = useState(false);
+  const canWrite = hasPageWriteAccess('settings');
 
   // Voucher prefixes state
   const [prefixes, setPrefixes] = useState<{ expense?: string; toll?: string } | null>(null);
@@ -368,7 +370,7 @@ const Settings = () => {
                       <Input
                         value={prefixes?.expense || ''}
                         onChange={(e) => setPrefixes((p: any) => ({ ...(p||{}), expense: e.target.value }))}
-                        disabled={!isAdminUser}
+                        disabled={!isAdminUser && !canWrite}
                         placeholder="e.g. KM2526-EV-"
                       />
                     </div>
@@ -377,7 +379,7 @@ const Settings = () => {
                       <Input
                         value={prefixes?.toll || ''}
                         onChange={(e) => setPrefixes((p: any) => ({ ...(p||{}), toll: e.target.value }))}
-                        disabled={!isAdminUser}
+                        disabled={!isAdminUser && !canWrite}
                         placeholder="e.g. KM2526-TV-"
                       />
                     </div>
@@ -437,7 +439,7 @@ const Settings = () => {
                           setSaving(false);
                         }
                       }}
-                      disabled={!isAdminUser || saving}
+                      disabled={(!isAdminUser && !canWrite) || saving}
                     >
                       {saving ? 'Saving...' : 'Save Prefixes'}
                     </Button>
@@ -479,19 +481,21 @@ const Settings = () => {
                         >
                           Clear Scan History
                         </Button>
-                        <Button 
-                          variant="destructive" 
-                          size="sm" 
+                        <Button
+                          variant="destructive"
+                          size="sm"
                           onClick={() => setShowClearDialog(true)}
-                          disabled={isClearing}
+                          disabled={isClearing || !canWrite}
+                          title={!canWrite ? "You have read-only access to Settings" : undefined}
                         >
                           {isClearing ? "Clearing..." : "Clear Inventory"}
                         </Button>
-                        <Button 
-                          variant="destructive" 
+                        <Button
+                          variant="destructive"
                           size="sm"
                           onClick={resetStock}
-                          disabled={isResetting}
+                          disabled={isResetting || !canWrite}
+                          title={!canWrite ? "You have read-only access to Settings" : undefined}
                         >
                           {isResetting ? "Resetting..." : "Reset Stock Values"}
                         </Button>

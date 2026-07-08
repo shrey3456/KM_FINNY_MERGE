@@ -14,6 +14,7 @@ import {
 } from '@shared/schema';
 import { eq, desc, inArray, count, asc } from 'drizzle-orm';
 import { z } from 'zod';
+import { requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -86,7 +87,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 // ── Create session + bulk insert items ────────────────────────────────────
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   try {
     const { session: sessionData, items: itemsData } = req.body as {
       session: z.infer<typeof insertScanSessionSchema>;
@@ -118,7 +119,7 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 // ── Update session status ──────────────────────────────────────────────────
-router.patch('/:id', async (req: Request, res: Response) => {
+router.patch('/:id', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid session ID' });
 
@@ -141,7 +142,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
 // ── Increment scannedQty for an item ──────────────────────────────────────
 // Accepts { increment: number } — uses a SQL-side add so concurrent scans
 // never overwrite each other (avoids stale-closure race conditions on the client).
-router.patch('/:id/items/:itemId', async (req: Request, res: Response) => {
+router.patch('/:id/items/:itemId', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   const itemId = parseInt(req.params.itemId);
   if (isNaN(sessionId) || isNaN(itemId)) return res.status(400).json({ error: 'Invalid ID' });
@@ -182,7 +183,7 @@ router.patch('/:id/items/:itemId', async (req: Request, res: Response) => {
 });
 
 // ── Upsert an extra scan ───────────────────────────────────────────────────
-router.post('/:id/extras', async (req: Request, res: Response) => {
+router.post('/:id/extras', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
 
@@ -223,7 +224,7 @@ router.post('/:id/extras', async (req: Request, res: Response) => {
 // ── Bulk-sync all item scannedQty values for a session ───────────────────
 // Called when the user navigates away from the scan view to guarantee
 // every item's quantity is persisted, even if individual PATCHes were missed.
-router.put('/:id/sync-items', async (req: Request, res: Response) => {
+router.put('/:id/sync-items', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
 
@@ -258,7 +259,7 @@ router.put('/:id/sync-items', async (req: Request, res: Response) => {
 // ── Record a pallet scan ──────────────────────────────────────────────────
 // One row per confirmed scan event. palletNumber is auto-assigned as
 // (total prior pallet scans for this item in this session) + 1.
-router.post('/:id/pallet-scans', async (req: Request, res: Response) => {
+router.post('/:id/pallet-scans', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
 
@@ -1197,7 +1198,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
 });
 
 // ── Upload scan-history rows into an existing Notion database ────────────────
-router.post('/reports/upload-to-notion', async (_req: Request, res: Response) => {
+router.post('/reports/upload-to-notion', requirePageWrite('scan-history'), async (_req: Request, res: Response) => {
   try {
     const { pageId, columns, date, search, scanner, type } = _req.body as {
       pageId: string;

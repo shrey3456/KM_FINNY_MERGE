@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { storage } from "../storage";
 import { insertUserSchema } from "@shared/schema";
+import { requirePageWrite } from "../lib/pageAccess";
 
 const router = Router();
 
@@ -36,7 +37,7 @@ router.get("/users/:userCode", async (req: Request, res: Response) => {
 });
 
 // Create user
-router.post("/users", async (req: Request, res: Response) => {
+router.post("/users", requirePageWrite("user-management"), async (req: Request, res: Response) => {
   try {
     const userData = insertUserSchema.parse(req.body);
 
@@ -79,7 +80,7 @@ router.post("/users", async (req: Request, res: Response) => {
 });
 
 // Update user
-router.put("/users/:userCode", async (req: Request, res: Response) => {
+router.put("/users/:userCode", requirePageWrite("user-management"), async (req: Request, res: Response) => {
   try {
     const userCode = req.params.userCode;
     const user = await storage.getUser(userCode);
@@ -125,7 +126,7 @@ router.put("/users/:userCode", async (req: Request, res: Response) => {
 });
 
 // Delete user
-router.delete("/users/:userCode", async (req: Request, res: Response) => {
+router.delete("/users/:userCode", requirePageWrite("user-management"), async (req: Request, res: Response) => {
   try {
     const userCode = req.params.userCode;
     const user = await storage.getUser(userCode);

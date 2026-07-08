@@ -253,9 +253,9 @@ function Router() {
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
         <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
         <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />
-        <ProtectedRoute path="/settings" component={Settings} requireAdmin={true} requiredPage="settings" />
-        <ProtectedRoute path="/plant-settings" component={PlantSettings} requireAdmin={true} requiredPage="plant-management" />
-        <ProtectedRoute path="/order-management" component={OrderManagement} requireAdmin={true} requiredPage="order-management" />
+        <ProtectedRoute path="/settings" component={Settings} requiredPage="settings" />
+        <ProtectedRoute path="/plant-settings" component={PlantSettings} requiredPage="plant-management" />
+        <ProtectedRoute path="/order-management" component={OrderManagement} requiredPage="order-management" />
         <ProtectedRoute path="/order-import" component={OrderImport} requireOrderManagement={true} requiredPage="order-import" />
         <ProtectedRoute path="/order-reports" component={OrderReports} requiredPage="order-import" />
         <Route path="/messages" component={MessagesPage} />

@@ -382,3 +382,20 @@ export function getCurrentUserPermissions(): Permissions {
     return getPermissionsForRole(); // Default permissions on error
   }
 }
+
+// Per-page write access, set by admin on the User Management page (pageWriteAccess is a
+// subset of allowedPages). Admin/super-admin always have full write access. A page not in
+// pageWriteAccess is view-only for that user, even if it's in allowedPages. Not yet enforced
+// anywhere — pages must opt in by calling this before allowing a save/edit/delete action.
+export function hasPageWriteAccess(pageKey: string): boolean {
+  try {
+    const currentUserStr = localStorage.getItem('currentUser');
+    if (!currentUserStr) return false;
+    const currentUser = JSON.parse(currentUserStr);
+    if (currentUser.role === 'admin' || currentUser.role === 'super-admin') return true;
+    const writable: string[] = JSON.parse(currentUser.pageWriteAccess || '[]');
+    return writable.includes(pageKey);
+  } catch {
+    return false;
+  }
+}
