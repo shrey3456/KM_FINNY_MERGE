@@ -35,7 +35,11 @@ jobs:
             perf
             revert
 
-          requireScope: true
+          # Scope is optional: GitHub auto-fills a single-commit PR's title from
+          # the commit message, so requiring "(scope)" made plain "feat: ..." /
+          # "fix: ..." commit messages fail validation. A "type:" prefix is still
+          # required, but the scope is now optional.
+          requireScope: false
 
       - name: "[PR Check] Pull Request Title Validation Passed"
         if: success()
@@ -45,8 +49,10 @@ jobs:
         if: failure()
         run: |
           echo "[PR Check] Invalid pull request title!"
-          echo "[PR Check] Use format like:"
+          echo "[PR Check] Title must start with a type. Scope is optional."
+          echo "[PR Check] Valid examples:"
+          echo "feat: add vehicle scan validation"
           echo "feat(scanning): add vehicle scan validation"
-          echo "fix(auth): resolve login issue"
+          echo "fix: resolve login issue"
           echo "refactor(report): optimize report query"
           exit 1
