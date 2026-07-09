@@ -202,8 +202,11 @@ export default function ExpenseVoucher() {
   const { savedDate: selectedDate, saveDateFilter: setSelectedDate } =
     useSingleDateFilter("expense-voucher", todayMidnight);
   const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
-  const effectiveDate = selectedDate || todayMidnight;
-  const selectedDateStr = format(effectiveDate, "yyyy-MM-dd");
+  // Date is optional. When no date is selected the search spans ALL dates
+  // (the server drops its date filter for an empty voucherDate). The calendar
+  // still opens on today when nothing is picked.
+  const calendarMonth = selectedDate || todayMidnight;
+  const selectedDateStr = selectedDate ? format(selectedDate, "yyyy-MM-dd") : "";
 
   // Driver-name autocomplete for the search bar.
   const [driverSuggestions, setDriverSuggestions] = useState<string[]>([]);
@@ -1255,14 +1258,14 @@ export default function ExpenseVoucher() {
                   className="w-full sm:w-[220px] justify-start text-left font-normal"
                 >
                   <CalendarIcon className="mr-2 h-4 w-4" />
-                  {format(effectiveDate, "dd/MM/yyyy")}
+                  {selectedDate ? format(selectedDate, "dd/MM/yyyy") : "All dates"}
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="w-auto p-0" align="start">
                 <DatePickerCalendar
                   mode="single"
-                  selected={effectiveDate}
-                  defaultMonth={effectiveDate}
+                  selected={selectedDate ?? undefined}
+                  defaultMonth={calendarMonth}
                   onSelect={(date) => {
                     if (date) {
                       setSelectedDate(date);
@@ -1273,6 +1276,18 @@ export default function ExpenseVoucher() {
                 />
               </PopoverContent>
             </Popover>
+            {selectedDate && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-gray-500 hover:text-gray-700"
+                onClick={() => setSelectedDate(null)}
+                title="Clear date — search across all dates"
+              >
+                <X className="h-4 w-4 mr-1" />
+                Clear
+              </Button>
+            )}
           </div>
           <div className="flex gap-4 items-end">
             <div className="flex-1 relative">
