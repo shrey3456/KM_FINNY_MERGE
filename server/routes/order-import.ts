@@ -314,10 +314,22 @@ router.get('/order-import/sessions/:id/items', requireImportViewAccess, async (r
 // GET /api/order-import/sessions/:id/group-report
 // Per-part + consolidated FIFO-adjusted report for the whole batch a part belongs to.
 // :id can be any part in the group. 404 if the part isn't part of a FIFO batch upload.
-router.get('/order-import/sessions/:id/group-report', requireAdmin, async (req: Request, res: Response) => {
+router.get('/order-import/sessions/:id/group-report', requireImportViewAccess, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+    // Same plant-ownership check as GET .../items — a dispatch user may only pull the
+    // report for a group whose parts belong to their own plant.
+    const forcedPlant = (req as any).importViewPlant as string | null;
+    if (forcedPlant) {
+      const [session] = await db.select({ plant: orderImportSessions.plant })
+        .from(orderImportSessions)
+        .where(eq(orderImportSessions.id, id));
+      if (!session || session.plant.toLowerCase() !== forcedPlant.toLowerCase()) {
+        return res.status(403).json({ message: 'Access required' });
+      }
+    }
 
     const groupId = await resolveGroupId(id);
     if (!groupId) return res.status(404).json({ message: 'This session is not part of a FIFO batch upload' });
@@ -334,10 +346,20 @@ router.get('/order-import/sessions/:id/group-report', requireAdmin, async (req: 
 // GET /api/order-import/sessions/:id/part-report
 // Single-CSV report — downloadable as soon as THAT one part is completed, no need to wait
 // for the whole FIFO group. Includes cross-part adjustments when the CSV is part of a group.
-router.get('/order-import/sessions/:id/part-report', requireAdmin, async (req: Request, res: Response) => {
+router.get('/order-import/sessions/:id/part-report', requireImportViewAccess, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+    const forcedPlant = (req as any).importViewPlant as string | null;
+    if (forcedPlant) {
+      const [session] = await db.select({ plant: orderImportSessions.plant })
+        .from(orderImportSessions)
+        .where(eq(orderImportSessions.id, id));
+      if (!session || session.plant.toLowerCase() !== forcedPlant.toLowerCase()) {
+        return res.status(403).json({ message: 'Access required' });
+      }
+    }
 
     const report = await computePartReport(id);
     if (!report) return res.status(404).json({ message: 'Session not found' });
@@ -351,10 +373,20 @@ router.get('/order-import/sessions/:id/part-report', requireAdmin, async (req: R
 // GET /api/order-import/sessions/:id/scan-activity
 // Full scan history for one CSV/part — every scan event (who, when, qty, extra, STV).
 // ?scope=group returns the whole FIFO group's events, each tagged with its Part # + file.
-router.get('/order-import/sessions/:id/scan-activity', requireAdmin, async (req: Request, res: Response) => {
+router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+    const forcedPlant = (req as any).importViewPlant as string | null;
+    if (forcedPlant) {
+      const [session] = await db.select({ plant: orderImportSessions.plant })
+        .from(orderImportSessions)
+        .where(eq(orderImportSessions.id, id));
+      if (!session || session.plant.toLowerCase() !== forcedPlant.toLowerCase()) {
+        return res.status(403).json({ message: 'Access required' });
+      }
+    }
 
     const scope = String(req.query.scope ?? 'part');
 

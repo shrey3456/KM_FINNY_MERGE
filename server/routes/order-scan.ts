@@ -188,6 +188,23 @@ function getPalletSize(product: any, plant: string): number {
   return Number(product.itemsPerPallet) || 0;
 }
 
+// Full pallet-size fallback chain, shared by session population and the scan handler:
+// plant-specific val_plt/ind_plt → generic items_per_pallet → generic pallets column →
+// parse *NNN from the product name (e.g. "16GM*192 ..." → 192). Same chain the old
+// classic-scan flow used, so pallet math never silently falls back to 1.
+function resolveFullPalletSize(
+  product: { itemsPerPallet?: number | null; valPlt?: number | null; indPlt?: number | null; pallets?: number | null; name?: string | null },
+  plant: string,
+): number {
+  let size = getPalletSize(product, plant);
+  if (size === 0) size = Number(product.pallets ?? 0);
+  if (size === 0 && product.name) {
+    const m = String(product.name).match(/\*(\d{1,5})/);
+    if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) size = n; }
+  }
+  return size;
+}
+
 // Marks a session active AND seeds order_scan_items from order_import_items (with
 // product/pallet lookups) if they don't exist yet — all in one locked transaction.
 // Shared by the activate route and the auto-activation paths (upload + completion
@@ -245,7 +262,7 @@ export async function seedAndActivateSession(id: number, userCode: string | null
         const productMap = new Map<string, any>();
         if (barcodes.length > 0) {
           const prodResult = await client.query(
-            `SELECT barcode, items_per_pallet, val_plt, ind_plt
+            `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
              FROM products WHERE barcode = ANY($1)`,
             [barcodes],
           );
@@ -258,9 +275,9 @@ export async function seedAndActivateSession(id: number, userCode: string | null
         for (const item of importItems) {
           const prod = item.barcode ? productMap.get(item.barcode) : null;
           const prodObj = prod
-            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet }
+            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
             : null;
-          const palletSize = prodObj ? getPalletSize(prodObj, session.plant) : 0;
+          const palletSize = prodObj ? resolveFullPalletSize(prodObj, session.plant) : 0;
           vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
           placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
           pi += 7;
@@ -489,11 +506,18 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
       .where(
         and(
           eq(orderImportSessions.isDeleted, false),
-          // A currently-active session must always be visible regardless of how long ago
-          // it was uploaded — the recency window only applies to non-active sessions, so an
-          // old CSV that's still actively being scanned never silently disappears from the
-          // Active tab.
-          or(dateCondition, eq(orderImportSessions.scanStatus, 'active')),
+          // A currently-active OR available (not yet scanned/deactivated-back-to-available)
+          // session must always be visible regardless of how long ago it was uploaded — the
+          // recency window only applies to completed sessions, which is what makes them
+          // "history". Without the 'available' exemption, deactivating an older-than-48h
+          // session flipped its status back to available in the DB but it dropped out of
+          // this query entirely, so it vanished from the Available tab and only remained
+          // visible in History — the deactivate button looked like it did nothing.
+          or(
+            dateCondition,
+            eq(orderImportSessions.scanStatus, 'active'),
+            eq(orderImportSessions.scanStatus, 'available'),
+          ),
           ...(plantFilter ? [plantEq(plantFilter)] : []),
           ...(statusFilter ? [eq(orderImportSessions.scanStatus, statusFilter)] : []),
         ),
@@ -592,7 +616,7 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
         let productMap = new Map<string, any>();
         if (barcodes.length > 0) {
           const prodResult = await client.query(
-            `SELECT barcode, items_per_pallet, val_plt, ind_plt
+            `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
              FROM products WHERE barcode = ANY($1)`,
             [barcodes],
           );
@@ -606,9 +630,9 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
           const prod = item.barcode ? productMap.get(item.barcode) : null;
           // Reuse getPalletSize but with snake_case keys from pg driver
           const prodObj = prod
-            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet }
+            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
             : null;
-          const palletSize = prodObj ? getPalletSize(prodObj, session.plant) : 0;
+          const palletSize = prodObj ? resolveFullPalletSize(prodObj, session.plant) : 0;
           vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
           placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
           pi += 7;
@@ -779,6 +803,35 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
     const items = await db.select().from(orderScanItems)
       .where(eq(orderScanItems.sessionId, id))
       .orderBy(asc(orderScanItems.id));
+
+    // items_per_pallet on this row is a one-time snapshot taken when the session was
+    // activated (see resolveFullPalletSize / seedAndActivateSession) — if the product's
+    // pallet config was blank then and got filled in afterward, the stored value stays
+    // stale forever for a session that's already active. Re-resolve live here too, same
+    // as the scan handler, so every screen reading this endpoint (CSV Items table,
+    // Separate CSVs, Master View) shows correct pallet math without re-activating.
+    const barcodes = items.map((i) => i.barcode?.toLowerCase()).filter((b): b is string => !!b);
+    if (barcodes.length > 0) {
+      const [sessionRow] = await db.select({ plant: orderImportSessions.plant })
+        .from(orderImportSessions).where(eq(orderImportSessions.id, id));
+      const plant = sessionRow?.plant ?? '';
+      const prodRows = await pool.query(
+        `SELECT LOWER(barcode) AS barcode, name, items_per_pallet, pallets, val_plt, ind_plt
+         FROM products WHERE LOWER(barcode) = ANY($1)`,
+        [barcodes],
+      );
+      const productMap = new Map(prodRows.rows.map((p: any) => [p.barcode, p]));
+      for (const item of items) {
+        const p = item.barcode ? productMap.get(item.barcode.toLowerCase()) : null;
+        if (!p) continue;
+        const liveIpp = resolveFullPalletSize(
+          { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt, pallets: p.pallets, name: p.name },
+          plant,
+        );
+        if (liveIpp > 0) item.itemsPerPallet = liveIpp;
+      }
+    }
+
     res.json(items);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch items' });
@@ -829,8 +882,13 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ message: 'Invalid session ID' });
 
-  const { barcode, pallets = 1, looseQty = 0, stv = null } = req.body as {
-    barcode: string; pallets: number; looseQty: number; isExtra?: boolean; stv?: string | null;
+  // `qty` (total boxes) is the authoritative field — it's what the user actually counted.
+  // `pallets`/`looseQty` are accepted for backward compatibility only: if a caller doesn't
+  // send `qty`, they're reconstructed via pallets*itemsPerPallet+looseQty using the
+  // CLIENT's idea of itemsPerPallet, which can silently diverge from the server's live-
+  // resolved value (see the itemsPerPallet resolution below) and corrupt the box count.
+  const { barcode, qty, pallets = 1, looseQty = 0, stv = null } = req.body as {
+    barcode: string; qty?: number; pallets?: number; looseQty?: number; isExtra?: boolean; stv?: string | null;
   };
   if (!barcode) return res.status(400).json({ message: 'barcode is required' });
 
@@ -858,64 +916,80 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     );
     const scanItem = itemResult.rows[0] ?? null;
 
-    // For items not in the CSV, look up name AND plant-specific pallet size from inventory.
+    // Always look up name AND plant-specific pallet size fresh from live inventory —
+    // even when the barcode matches a CSV item. order_scan_items.items_per_pallet is only
+    // a one-time snapshot taken when the session was activated (see populatePartScanItems /
+    // seedAndActivateSession); if the product's pallet config (items_per_pallet / val_plt /
+    // ind_plt) was blank at that moment and got filled in on the Products page afterward,
+    // every scan against that CSV item would silently keep using the stale 0 forever,
+    // recording 1 box = 1 "pallet". Resolving live here (same fallback chain the old
+    // classic-scan flow used) means pallet math is always correct regardless of when the
+    // product's config was set relative to session activation.
     // Must fetch val_plt/ind_plt too — getPalletSize picks the right one for the session's plant.
-    // Fallback: parse *NNN from the product name (e.g. "16GM*192 ..." → 192) just like the frontend
-    // extractPalletSize does, for products where the DB columns are still 0.
+    // Fallback: parse *NNN from the product name (e.g. "16GM*192 ..." → 192) just like the old
+    // flow's extractPalletSize did, for products where the DB columns are still 0.
     let resolvedItemName: string | null = scanItem?.item_name ?? null;
     let resolvedIpp = Number(scanItem?.items_per_pallet ?? 0);
-    if (!scanItem) {
-      const prodResult = await client.query(
-        `SELECT name, items_per_pallet, pallets, val_plt, ind_plt
-         FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
-        [barcode],
+    const prodResult = await client.query(
+      `SELECT name, items_per_pallet, pallets, val_plt, ind_plt
+       FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
+      [barcode],
+    );
+    if (prodResult.rows[0]) {
+      const p = prodResult.rows[0];
+      resolvedItemName = resolvedItemName ?? p.name ?? null;
+      const liveIpp = resolveFullPalletSize(
+        { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt, pallets: p.pallets, name: p.name },
+        sessResult.rows[0]?.plant ?? '',
       );
-      if (prodResult.rows[0]) {
-        const p = prodResult.rows[0];
-        resolvedItemName = p.name ?? null;
-        resolvedIpp = getPalletSize(
-          { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt },
-          sessResult.rows[0]?.plant ?? '',
-        );
-        // Fall back to generic pallets column (used by old scan system and product catalog)
-        if (resolvedIpp === 0) resolvedIpp = Number(p.pallets ?? 0);
-        // Last resort: parse *NNN from name only if pallets column is also 0
-        if (resolvedIpp === 0 && p.name) {
-          const m = String(p.name).match(/\*(\d{1,5})/);
-          if (m) { const n = parseInt(m[1], 10); if (n > 1) resolvedIpp = n; }
-        }
-      }
+      // Live inventory data always wins over the stale activation-time snapshot.
+      if (liveIpp > 0) resolvedIpp = liveIpp;
     }
 
     const itemsPerPallet = resolvedIpp;
-    const totalQty = Math.round(pallets * Math.max(1, itemsPerPallet)) + looseQty;
+    const totalQty = qty != null
+      ? Math.max(1, Math.round(qty))
+      : Math.round(pallets * Math.max(1, itemsPerPallet)) + looseQty;
     const userCode = (req.user as any)?.userCode ?? null;
     const userName  = (req.user as any)?.name ?? null;
 
-    // Server-side isExtra: barcode not in order OR item already fully received
-    const isExtraActual = !scanItem
-      || (Number(scanItem.total_scanned_qty ?? 0) >= Number(scanItem.expected_qty ?? 0));
+    // Split this scan at the expected-qty boundary instead of an all-or-nothing
+    // isExtra check. A single scan that both finishes the order AND overshoots it
+    // (e.g. 20 remaining, 30 boxes scanned) used to be logged entirely as
+    // "regular", letting total_scanned_qty run past expected_qty with nothing
+    // flagged as extra. And once an item was already complete, a later scan's
+    // full qty was logged as an extra EVENT while total_scanned_qty (read by the
+    // "Regular" report) was *also* bumped by that same qty — double-counting the
+    // same boxes as both regular and extra in the Overall Stock Report. Only the
+    // portion beyond what's still needed for the order is ever extra; the order
+    // portion is capped so total_scanned_qty never exceeds expected_qty.
+    const remainingForOrder = scanItem
+      ? Math.max(0, Number(scanItem.expected_qty ?? 0) - Number(scanItem.total_scanned_qty ?? 0))
+      : 0;
+    const orderQty = Math.min(totalQty, remainingForOrder);
+    const extraQty = totalQty - orderQty;
+    const splitPallets = (qty: number) => ({
+      pallets: itemsPerPallet > 0 ? Math.floor(qty / itemsPerPallet) : qty,
+      looseQty: itemsPerPallet > 0 ? qty % itemsPerPallet : 0,
+    });
 
-    // Record the scan event
-    const eventResult = await client.query(
-      `INSERT INTO order_scan_events
-         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-          items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-       RETURNING *`,
-      [sessionId, scanItem?.id ?? null, barcode, resolvedItemName,
-       pallets, looseQty, totalQty, itemsPerPallet, isExtraActual,
-       stv ?? null, userCode, userName],
-    );
-    const event = eventResult.rows[0];
+    const events: any[] = [];
+    let updatedItem: any = scanItem;
 
-    // Always update order_scan_items when the barcode is in the CSV — even for
-    // extra scans. This lets total_scanned_qty exceed expected_qty, which is
-    // exactly what the "Extra" column reads: totalScannedQty - expectedQty.
-    // Without this update, extra scans were silently recorded in events but
-    // the item row never changed, so the UI showed nothing.
-    let updatedItem: any = null;
-    if (scanItem) {
+    if (orderQty > 0) {
+      const part = splitPallets(orderQty);
+      const orderEventResult = await client.query(
+        `INSERT INTO order_scan_events
+           (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+            items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         RETURNING *`,
+        [sessionId, scanItem.id, barcode, resolvedItemName,
+         part.pallets, part.looseQty, orderQty, itemsPerPallet, false,
+         stv ?? null, userCode, userName],
+      );
+      events.push(orderEventResult.rows[0]);
+
       const updateResult = await client.query(
         `UPDATE order_scan_items
          SET scanned_pallets    = COALESCE(scanned_pallets,   0) + $1,
@@ -929,35 +1003,55 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
              last_scanned_at    = NOW()
          WHERE id = $4
          RETURNING *`,
-        [pallets, looseQty, totalQty, scanItem.id],
+        [part.pallets, part.looseQty, orderQty, scanItem.id],
       );
       updatedItem = updateResult.rows[0];
     }
 
+    // extraQty is recorded purely as an event — it must NOT also be added to
+    // order_scan_items, since that row already feeds the "Regular" report total.
+    if (extraQty > 0) {
+      const part = splitPallets(extraQty);
+      const extraEventResult = await client.query(
+        `INSERT INTO order_scan_events
+           (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+            items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         RETURNING *`,
+        [sessionId, scanItem?.id ?? null, barcode, resolvedItemName,
+         part.pallets, part.looseQty, extraQty, itemsPerPallet, true,
+         stv ?? null, userCode, userName],
+      );
+      events.push(extraEventResult.rows[0]);
+    }
+
     await client.query('COMMIT');
 
-    // Broadcast after commit so subscribers always see the committed state
-    broadcastScanEvent(sessionId, {
-      type: 'scan',
-      item: updatedItem ? {
-        id:              updatedItem.id,
-        barcode:         updatedItem.barcode,
-        totalScannedQty: updatedItem.total_scanned_qty,
-        scannedPallets:  updatedItem.scanned_pallets,
-        scannedLooseQty: updatedItem.scanned_loose_qty,
-        status:          updatedItem.status,
-        lastScannedAt:   updatedItem.last_scanned_at,
-      } : null,
-      event: {
-        barcode:       event.barcode,
-        itemName:      event.item_name,
-        totalQty:      event.total_qty,
-        isExtra:       event.is_extra,
-        scannedByName: event.scanned_by_name,
-      },
-    });
+    // Broadcast after commit so subscribers always see the committed state.
+    // One message per split portion so recent-scans feeds show both parts.
+    for (const event of events) {
+      broadcastScanEvent(sessionId, {
+        type: 'scan',
+        item: updatedItem ? {
+          id:              updatedItem.id,
+          barcode:         updatedItem.barcode,
+          totalScannedQty: updatedItem.total_scanned_qty,
+          scannedPallets:  updatedItem.scanned_pallets,
+          scannedLooseQty: updatedItem.scanned_loose_qty,
+          status:          updatedItem.status,
+          lastScannedAt:   updatedItem.last_scanned_at,
+        } : null,
+        event: {
+          barcode:       event.barcode,
+          itemName:      event.item_name,
+          totalQty:      event.total_qty,
+          isExtra:       event.is_extra,
+          scannedByName: event.scanned_by_name,
+        },
+      });
+    }
 
-    res.status(201).json({ event, updatedItem });
+    res.status(201).json({ event: events[events.length - 1] ?? null, events, updatedItem });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ message: err instanceof Error ? err.message : 'Scan failed' });
@@ -977,7 +1071,8 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
       SELECT
         COALESCE(ose.barcode, '')            AS barcode,
         MAX(ose.item_name)                   AS "itemName",
-        SUM(ose.total_qty)                   AS "totalQty",
+        SUM(ose.total_qty)::int              AS "totalQty",
+        COUNT(*)::int                        AS "scanCount",
         MAX(ose.scanned_at)                  AS "lastScannedAt",
         MAX(ose.scanned_by_name)             AS "scannedByName"
       FROM order_scan_events ose
