@@ -2812,38 +2812,38 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             {/* Stats row — horizontal inline cells like reference */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-              <div className="grid grid-cols-3 divide-x divide-gray-100">
-                <div className="flex items-center gap-3 p-5">
+              <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-gray-100">
+                <div className="flex items-center gap-3 p-4 sm:p-5">
                   <div className="h-11 w-11 rounded-full bg-blue-50 flex items-center justify-center shrink-0">
                     <ScanLine className="h-5 w-5 text-[#001d6e]" />
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Active Orders</p>
-                    <p className="text-4xl font-bold text-gray-900 leading-tight">
+                    <p className="text-3xl sm:text-4xl font-bold text-gray-900 leading-tight">
                       {osAllSessions.filter((s: any) => s.scanStatus === "active").length}
                     </p>
                     <p className="text-sm text-gray-400">in progress</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-3 p-5">
+                <div className="flex items-center gap-3 p-4 sm:p-5">
                   <div className="h-11 w-11 rounded-full bg-emerald-50 flex items-center justify-center shrink-0">
                     <CheckCircle2 className="h-5 w-5 text-emerald-600" />
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Completed</p>
-                    <p className="text-4xl font-bold text-gray-900 leading-tight">
+                    <p className="text-3xl sm:text-4xl font-bold text-gray-900 leading-tight">
                       {osAllSessions.filter((s: any) => s.scanStatus === "completed").length}
                     </p>
                     <p className="text-sm text-gray-400">orders done</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-3 p-5">
+                <div className="flex items-center gap-3 p-4 sm:p-5">
                   <div className="h-11 w-11 rounded-full bg-indigo-50 flex items-center justify-center shrink-0">
                     <PackageCheck className="h-5 w-5 text-indigo-600" />
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Boxes Scanned</p>
-                    <p className="text-4xl font-bold text-gray-900 leading-tight">{dispatchHistory?.totalBoxes ?? 0}</p>
+                    <p className="text-3xl sm:text-4xl font-bold text-gray-900 leading-tight">{dispatchHistory?.totalBoxes ?? 0}</p>
                     <p className="text-sm text-gray-400">scanned by you</p>
                   </div>
                 </div>
@@ -2877,7 +2877,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* Table */}
               {(dispatchHistory?.items?.length ?? 0) > 0 && (
                 <div className="overflow-x-auto" style={{ WebkitOverflowScrolling: "touch" }}>
-                  <table className="w-full border-collapse text-xs">
+                  <table className="w-full min-w-[560px] border-collapse text-xs">
                     <thead>
                       <tr className="bg-[#001d6e]">
                         <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c] w-8">#</th>
@@ -2954,11 +2954,125 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
 
         ) : (
-          /* ── REGULAR USER: no active order-scan session for their plant right now ── */
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden py-20 text-center">
-            <ScanLine className="h-10 w-10 text-gray-200 mx-auto mb-3" />
-            <p className="text-gray-500 font-medium">No active scan session right now</p>
-            <p className="text-sm text-gray-400 mt-1">An admin needs to activate a CSV for your plant before you can start scanning.</p>
+          /* ── REGULAR USER DASHBOARD ───────────────────────────── */
+          <div className="space-y-4">
+
+            {/* Stats row — horizontal inline cells */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-gray-100">
+                <div className="flex items-center gap-3 p-4 sm:p-5">
+                  <div className="h-11 w-11 rounded-full bg-blue-50 flex items-center justify-center shrink-0">
+                    <ScanLine className="h-5 w-5 text-[#001d6e]" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Active</p>
+                    <p className="text-3xl sm:text-4xl font-bold text-gray-900 leading-tight">{activeSessions.length}</p>
+                    <p className="text-sm text-gray-400">in progress</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 p-4 sm:p-5">
+                  <div className="h-11 w-11 rounded-full bg-emerald-50 flex items-center justify-center shrink-0">
+                    <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Completed</p>
+                    <p className="text-3xl sm:text-4xl font-bold text-gray-900 leading-tight">{completedSessions.length}</p>
+                    <p className="text-sm text-gray-400">orders done</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 p-4 sm:p-5">
+                  <div className="h-11 w-11 rounded-full bg-indigo-50 flex items-center justify-center shrink-0">
+                    <PackageCheck className="h-5 w-5 text-indigo-600" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Boxes Scanned</p>
+                    <p className="text-3xl sm:text-4xl font-bold text-gray-900 leading-tight">{totalScanned}</p>
+                    <p className="text-sm text-gray-400">total units</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Active orders */}
+            {activeSessions.length > 0 && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                <div className="bg-[#001d6e] px-5 py-3 flex items-center gap-2">
+                  <ScanLine className="h-4 w-4 text-blue-300 shrink-0" />
+                  <h2 className="text-sm font-bold text-white uppercase tracking-wide">In Progress</h2>
+                  <span className="text-[11px] font-semibold bg-white/20 text-white rounded-full px-2 py-0.5">{activeSessions.length}</span>
+                </div>
+                <div className="divide-y divide-gray-50">
+                  {activeSessions.map((session) => {
+                    const pct = session.totalExpected > 0 ? Math.round((session.totalScanned / session.totalExpected) * 100) : 0;
+                    return (
+                      <div key={session.id} className="flex flex-col sm:flex-row sm:items-center gap-3 px-4 sm:px-5 py-4 hover:bg-blue-50/30 transition-colors cursor-pointer" onClick={() => loadFullSession(session.id)}>
+                        <div className="flex items-center gap-4 min-w-0">
+                          <div className="h-10 w-10 rounded-full bg-blue-50 flex items-center justify-center shrink-0">
+                            <ScanLine className="h-5 w-5 text-[#001d6e]" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-gray-900 truncate text-sm">{session.orderName}</p>
+                            <p className="text-xs text-gray-400 truncate">{stripCsvExt(session.csvName)}</p>
+                            <div className="flex items-center gap-2 mt-1.5">
+                              <Progress value={pct} className="h-1.5 flex-1" />
+                              <span className="text-xs text-gray-500 shrink-0">{session.totalScanned ?? 0}/{session.totalExpected ?? 0}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <Button size="sm" className="bg-[#001d6e] hover:bg-[#00154b] shrink-0 h-8 px-4 w-full sm:w-auto" onClick={(e) => { e.stopPropagation(); loadFullSession(session.id); }}>
+                          Resume
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Completed orders / History */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              <div className="bg-[#001d6e] px-5 py-3 flex items-center gap-2">
+                <History className="h-4 w-4 text-blue-300 shrink-0" />
+                <h2 className="text-sm font-bold text-white uppercase tracking-wide">History</h2>
+                {completedSessions.length > 0 && (
+                  <span className="text-[11px] font-semibold bg-white/20 text-white rounded-full px-2 py-0.5">{completedSessions.length}</span>
+                )}
+              </div>
+
+              {completedSessions.length === 0 && activeSessions.length === 0 ? (
+                <div className="py-16 text-center">
+                  <ScanLine className="h-10 w-10 text-gray-200 mx-auto mb-3" />
+                  <p className="text-gray-500 font-medium">No scan orders yet</p>
+                  <p className="text-sm text-gray-400 mt-1">Click "New Scan Order" to get started.</p>
+                </div>
+              ) : completedSessions.length === 0 ? (
+                <div className="py-10 text-center text-sm text-gray-400">Completed orders will appear here.</div>
+              ) : (
+                <div className="divide-y divide-gray-50">
+                  {completedSessions.map((session) => {
+                    const pct = session.totalExpected > 0 ? Math.round((session.totalScanned / session.totalExpected) * 100) : 100;
+                    return (
+                      <div key={session.id} className="flex flex-col sm:flex-row sm:items-center gap-3 px-4 sm:px-5 py-4 hover:bg-gray-50/60 transition-colors cursor-pointer" onClick={() => loadFullSession(session.id)}>
+                        <div className="flex items-center gap-4 min-w-0">
+                          <div className="h-10 w-10 rounded-full bg-emerald-50 flex items-center justify-center shrink-0">
+                            <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium text-gray-800 truncate text-sm">{session.orderName}</p>
+                            <p className="text-xs text-gray-400 truncate">{stripCsvExt(session.csvName)}</p>
+                            <Progress value={pct} className="h-1 mt-1.5" />
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-3 sm:block sm:text-right shrink-0">
+                          <p className="text-sm font-semibold text-emerald-700">{session.totalScanned ?? 0}<span className="text-gray-400 font-normal text-xs">/{session.totalExpected ?? 0}</span></p>
+                          <p className="text-xs text-gray-400 mt-0.5">{new Date(session.updatedAt).toLocaleDateString()}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>

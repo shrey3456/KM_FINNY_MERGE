@@ -9,6 +9,7 @@ import {
 import { eq, and, or, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
+import { enqueueScanEventForNotion } from '../lib/notionScanSync';
 import { computeGroupReport, resolveGroupId, applySessionStock } from '../lib/orderGroupReport';
 import { requirePageWrite } from '../lib/pageAccess';
 
@@ -1053,6 +1054,11 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // Broadcast after commit so subscribers always see the committed state.
     // One message per split portion so recent-scans feeds show both parts.
     for (const event of events) {
+      // Auto-push this scan event to Notion (no-op if not configured, queued
+      // so concurrent scans don't fire overlapping Notion requests; failures
+      // are left for the manual "Upload to Notion" button to retry).
+      enqueueScanEventForNotion(event.id);
+
       broadcastScanEvent(sessionId, {
         type: 'scan',
         item: updatedItem ? {
