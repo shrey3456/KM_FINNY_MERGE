@@ -52,7 +52,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-// ─── Types ─────────────────────────────────────────────────────────────────
 
 type Product = {
   id: number;
