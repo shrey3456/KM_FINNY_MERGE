@@ -4461,7 +4461,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  apiRouter.post("/proforma-slips", async (req: Request, res: Response) => {
+  apiRouter.post("/proforma-slips", requirePageWrite("proforma"), async (req: Request, res: Response) => {
     try {
       const slipData = insertProformaSlipSchema.parse(req.body);
 
@@ -4637,7 +4637,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  apiRouter.put("/proforma-slips/:id", async (req: Request, res: Response) => {
+  apiRouter.put("/proforma-slips/:id", requirePageWrite("proforma"), async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       console.log(`PUT /api/proforma-slips/${id} - Request body:`, req.body);

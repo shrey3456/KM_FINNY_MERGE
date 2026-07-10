@@ -116,6 +116,15 @@ const Reports = () => {
   const [historySearch,  setHistorySearch]  = useState("");
   const [historyScanner, setHistoryScanner] = useState("__all__");
   const [historyType,    setHistoryType]    = useState("all");
+  const [historyPlant,   setHistoryPlant]   = useState("__all__");
+
+  // Plant options for the filter. Non-admins are already restricted server-side, so this
+  // dropdown mainly lets admins narrow to one plant; picking a plant you can't see returns
+  // nothing (the server ignores/blocks it).
+  const { data: plantList = [] } = useQuery<{ id: number; name: string }[]>({
+    queryKey: ["/api/plants"],
+    queryFn: () => apiRequest("GET", "/api/plants", undefined, false, true),
+  });
 
   // Notion upload state
   const [notionOpen,      setNotionOpen]      = useState(false);
@@ -152,6 +161,7 @@ const Reports = () => {
         search:  historySearch                                  || undefined,
         scanner: historyScanner !== "__all__" ? historyScanner : undefined,
         type:    historyType    !== "all"     ? historyType     : undefined,
+        plant:   historyPlant   !== "__all__" ? historyPlant   : undefined,
       }, false, true);
       setNotionResult({ uploaded: (r as any).uploaded, fetched: (r as any).fetched, url: (r as any).url, errors: (r as any).errors ?? [] });
     } catch (e: any) {
@@ -161,7 +171,7 @@ const Reports = () => {
     }
   };
 
-  useEffect(() => { setHistoryPage(1); }, [historySearch, historyScanner, historyType, selectedDate]);
+  useEffect(() => { setHistoryPage(1); }, [historySearch, historyScanner, historyType, historyPlant, selectedDate]);
 
   const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
@@ -169,6 +179,7 @@ const Reports = () => {
     search:  historySearch                                  || undefined,
     scanner: historyScanner !== "__all__" ? historyScanner : undefined,
     type:    historyType    !== "all"     ? historyType     : undefined,
+    plant:   historyPlant   !== "__all__" ? historyPlant   : undefined,
     limit:   HISTORY_PAGE_SIZE,
     offset:  historyOffset,
   });
@@ -177,13 +188,14 @@ const Reports = () => {
     useQuery<ScanHistoryResponse>({
       queryKey: [
         "/api/scan-sessions/reports/scan-history",
-        selectedDate, historySearch, historyScanner, historyType, historyPage,
+        selectedDate, historySearch, historyScanner, historyType, historyPlant, historyPage,
       ],
       queryFn: async () => {
         const r = await apiRequest("GET", withCacheBuster(historyUrl), undefined, false, true);
         return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
       },
       refetchInterval: 5000,
+      placeholderData: (previousData) => previousData,
     });
 
   const historyItems        = historyData?.items ?? [];
@@ -275,6 +287,18 @@ const Reports = () => {
               <SelectItem value="all">All types</SelectItem>
               <SelectItem value="regular">Regular only</SelectItem>
               <SelectItem value="extra">Extra only</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <Select value={historyPlant} onValueChange={setHistoryPlant}>
+            <SelectTrigger className="h-9 w-[150px] text-sm">
+              <SelectValue placeholder="All plants" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All plants</SelectItem>
+              {plantList.map((p) => (
+                <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
 
@@ -370,9 +394,12 @@ const Reports = () => {
                 </TableRow>
               ) : (
                 historyItems.map((h, idx) => {
+                  // Stripe by the row's stable id (not its position), so a new scan
+                  // landing at the top doesn't flip every row's color/number on each poll.
+                  const stripeEven = h.id % 2 === 0;
                   const rowBg = h.isExtra
-                    ? (idx % 2 === 0 ? "bg-amber-50/50" : "bg-amber-50/80")
-                    : (idx % 2 === 0 ? "bg-white" : "bg-slate-50");
+                    ? (stripeEven ? "bg-amber-50/50" : "bg-amber-50/80")
+                    : (stripeEven ? "bg-white" : "bg-slate-50");
                   return (
                     <TableRow key={h.id} className={`${rowBg} transition-colors hover:bg-slate-100/70`}>
                       <TableCell className="text-gray-400 text-[11px] py-2.5 w-[44px]">

@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date, real } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1034,3 +1034,48 @@ export type LoadingOpItemBackup = typeof loadingOpItemsBackup.$inferSelect;
 export type LoadingOperationBackup = typeof loadingOperationsBackup.$inferSelect;
 export type ProformaSlipBackup = typeof proformaSlipsBackup.$inferSelect;
 export type ProformaSlipItemBackup = typeof proformaSlipItemsBackup.$inferSelect;
+
+// ============================================================================
+// PRODUCT PLANT STOCK  — plant-wise running stock totals
+// Purpose : One row per (barcode, plant). The live plant-wise stock count.
+//           inStock = all boxes physically received for that plant (extras
+//           included). extraQty = how many of those arrived beyond the ordered
+//           quantity (shown separately in Overall Stock, never hidden/netted).
+//           Written by applySessionStock() on order completion; global
+//           products.in_stock stays the all-plants sum for backward compat.
+// Design  : Additive today (receiving only). A future dispatch/out flow will
+//           decrement inStock and log a negative stock_movements row — the
+//           table shape already supports that with no rework.
+// ============================================================================
+export const productPlantStock = pgTable("product_plant_stock", {
+  id: serial("id").primaryKey(),
+  barcode: text("barcode").notNull(),
+  plant: text("plant").notNull(),
+  inStock: integer("in_stock").default(0).notNull(),
+  extraQty: integer("extra_qty").default(0).notNull(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (t) => ({
+  uniqBarcodePlant: unique("uq_product_plant_stock_barcode_plant").on(t.barcode, t.plant),
+}));
+
+// ============================================================================
+// STOCK MOVEMENTS  — append-only ledger of every change to plant stock
+// Purpose : Full in/out history per plant. qty is +received (today) and will be
+//           −dispatched once the future out-flow is added. Gives an audit trail
+//           and makes future subtraction trivial (just insert a negative row).
+// ============================================================================
+export const stockMovements = pgTable("stock_movements", {
+  id: serial("id").primaryKey(),
+  barcode: text("barcode").notNull(),
+  plant: text("plant").notNull(),
+  qty: integer("qty").notNull(),                 // +received / −sent (future)
+  extraQty: integer("extra_qty").default(0),     // portion of qty that was extra (over-order)
+  type: text("type").notNull(),                  // 'receive' | 'dispatch' | 'adjust'
+  reason: text("reason"),
+  sessionId: integer("session_id"),              // order_import_sessions.id when from a scan completion
+  createdByCode: text("created_by_code"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type ProductPlantStock = typeof productPlantStock.$inferSelect;
+export type StockMovement = typeof stockMovements.$inferSelect;

@@ -265,38 +265,73 @@ export async function computePartReport(sessionId: number): Promise<PartReport |
   };
 }
 
-// Adds a completed session's physically-received boxes to products.in_stock, exactly once.
-// "Received" = SUM(order_scan_events.total_qty) per barcode for that session, which covers
-// both CSV lines (incl. over-scan) and pure extras. Guarded by stock_applied_at + a row lock
-// so a retried /complete (or two racing clicks) can't double-count. Barcodes with no matching
-// product row are simply skipped (an extra that isn't in inventory adds nothing). Runs on the
-// caller's transaction client so it commits atomically with the completion.
-// Returns the number of stock-adjusted barcodes (0 if already applied / nothing scanned).
+// Adds a completed session's physically-received boxes to stock, exactly once. Writes THREE
+// places atomically (all on the caller's transaction client, guarded by stock_applied_at +
+// a row lock so a retried /complete can't double-count):
+//   1. products.in_stock          — global all-plants running total (backward compat).
+//   2. product_plant_stock         — plant-wise running total for THIS session's plant, split
+//                                    into in_stock (all boxes, extras included) + extra_qty
+//                                    (the over-order portion, shown separately, never hidden).
+//   3. stock_movements             — one append-only 'receive' ledger row per barcode.
+// "Received" per barcode = SUM(total_qty) over all non-voided events (covers CSV lines incl.
+// over-scan AND pure extras). "Extra" per barcode = SUM(total_qty) WHERE is_extra — because
+// every scan is split at scan time into a regular event (is_extra=false, capped at the order
+// qty) and an extra event (is_extra=true, the overflow), so is_extra already IS the raw extra.
+// Barcodes with no matching product row still get plant stock + a movement (an extra that
+// isn't in the catalogue is still a physical box), but are skipped for the global products
+// update. Returns the number of barcodes that moved stock (0 if already applied / nothing scanned).
 export async function applySessionStock(client: import('pg').PoolClient, sessionId: number): Promise<number> {
-  // Lock the session row and re-check the guard inside the lock.
+  // Lock the session row and re-check the guard inside the lock. Also grab the plant.
   const guard = await client.query(
-    'SELECT stock_applied_at FROM order_import_sessions WHERE id = $1 FOR UPDATE',
+    'SELECT stock_applied_at, plant FROM order_import_sessions WHERE id = $1 FOR UPDATE',
     [sessionId],
   );
   if (guard.rows.length === 0 || guard.rows[0].stock_applied_at != null) return 0;
+  const plant: string = guard.rows[0].plant;
 
-  const result = await client.query(
-    `WITH received AS (
-       SELECT LOWER(barcode) AS bc, SUM(total_qty)::int AS qty
-       FROM order_scan_events
-       WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
-       GROUP BY LOWER(barcode)
-     )
-     UPDATE products p
-     SET in_stock = COALESCE(p.in_stock, 0) + r.qty
-     FROM received r
-     WHERE LOWER(p.barcode) = r.bc AND r.qty <> 0`,
+  // Per-barcode received + extra for this session. Barcodes are numeric here so the raw
+  // string equals its lowercase — MAX(barcode) picks a canonical spelling per group.
+  const { rows: received } = await client.query(
+    `SELECT MAX(barcode) AS barcode,
+            SUM(total_qty)::int AS qty,
+            COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
+     FROM order_scan_events
+     WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
+     GROUP BY LOWER(barcode)
+     HAVING SUM(total_qty) <> 0`,
     [sessionId],
   );
+
+  for (const r of received) {
+    // 1. Global all-plants total (only for barcodes that exist in the catalogue).
+    await client.query(
+      `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1
+       WHERE LOWER(barcode) = LOWER($2)`,
+      [r.qty, r.barcode],
+    );
+
+    // 2. Plant-wise running total (upsert; extras tracked alongside the physical total).
+    await client.query(
+      `INSERT INTO product_plant_stock (barcode, plant, in_stock, extra_qty, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (barcode, plant) DO UPDATE
+         SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
+             extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
+             updated_at = NOW()`,
+      [r.barcode, plant, r.qty, r.extra_qty],
+    );
+
+    // 3. Append-only ledger row (positive = received). Future dispatch inserts negatives.
+    await client.query(
+      `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
+       VALUES ($1, $2, $3, $4, 'receive', 'Order scan completed', $5, NOW())`,
+      [r.barcode, plant, r.qty, r.extra_qty, sessionId],
+    );
+  }
 
   await client.query(
     'UPDATE order_import_sessions SET stock_applied_at = $1 WHERE id = $2',
     [new Date(), sessionId],
   );
-  return result.rowCount ?? 0;
+  return received.length;
 }

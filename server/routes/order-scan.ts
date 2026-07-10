@@ -180,6 +180,29 @@ export function getPlantFilter(user: any): string | null {
   return null;
 }
 
+// Which plant names a user may view, for plant-scoped pages (Overall Stock, Scan History).
+// Returns null for admin/super-admin/billing → "see ALL plants, no filter". Otherwise returns
+// the user's assigned plants from the Users page (users.plants JSON array), lowercased. Falls
+// back to the department-derived single plant (getPlantFilter) when no plants are assigned yet,
+// so existing dispatch users keep working before anyone edits their plant list. An empty array
+// (non-admin with nothing resolvable) means "see nothing" — safer than accidentally showing all.
+export function getUserPlants(user: any): string[] | null {
+  const role = (user?.role ?? '').toLowerCase().trim();
+  if (ADMIN_ROLES.includes(role)) return null; // all plants
+
+  let assigned: string[] = [];
+  try {
+    const raw = user?.plants;
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (Array.isArray(parsed)) assigned = parsed.map((p) => String(p).toLowerCase().trim()).filter(Boolean);
+  } catch { /* fall through to department fallback */ }
+
+  if (assigned.length > 0) return assigned;
+
+  const fallback = getPlantFilter(user); // department/role-derived single plant
+  return fallback ? [fallback.toLowerCase()] : [];
+}
+
 // Pick correct pallet size based on plant
 function getPalletSize(product: any, plant: string): number {
   const p = (plant ?? '').toUpperCase();

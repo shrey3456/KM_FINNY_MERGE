@@ -3,6 +3,7 @@ import { Route } from 'wouter';
 import { getCurrentUserPermissions } from '../lib/permissions';
 import { useAuth } from '../hooks/use-auth';
 import NotFound from '@/pages/not-found';
+import type { PageKey } from '@shared/pageKeys';
 
 interface ProtectedRouteProps {
   path: string;
@@ -10,7 +11,7 @@ interface ProtectedRouteProps {
   requireInventoryAccess?: boolean;
   requireAdmin?: boolean;
   requireOrderManagement?: boolean;
-  requiredPage?: string;
+  requiredPage?: PageKey | (string & {});
 }
 
 const ProtectedRoute: React.FC<ProtectedRouteProps> = ({

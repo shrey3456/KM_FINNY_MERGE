@@ -2584,6 +2584,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         ) : null}
                       </p>
                       <p>Expected: <strong>{osPending.matchedItem.expectedQty}</strong> · Already scanned: <strong>{osPending.matchedItem.totalScannedQty}</strong></p>
+                      {(() => {
+                        const remaining = Math.max(0, (osPending.matchedItem.expectedQty ?? 0) - (osPending.matchedItem.totalScannedQty ?? 0));
+                        const remainingPallets = plt > 0 ? (remaining / plt).toFixed(2) : null;
+                        return (
+                          <p>
+                            Remaining: <strong>{remaining}</strong> boxes
+                            {remainingPallets != null && <> · <strong>{remainingPallets}</strong> plt</>}
+                          </p>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
@@ -2629,6 +2639,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
                     }
                   }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleOsConfirmScan();
+                    }
+                  }}
                   className="text-center text-3xl font-bold h-14"
                   autoFocus
                 />
@@ -2651,6 +2667,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       onBlur={() => {
                         if (osPalletsInput === "" || isNaN(parseFloat(osPalletsInput))) {
                           setOsPalletsInput((osQty / plt).toFixed(2));
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleOsConfirmScan();
                         }
                       }}
                       className="text-2xl font-bold text-[#001d6e] h-11 bg-white"
@@ -2859,7 +2881,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <thead>
                       <tr className="bg-[#001d6e]">
                         <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c] w-8">#</th>
-                        <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c]">Item Name</th>
+                        <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c] min-w-[220px]">Item Name</th>
                         <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c]">Barcode</th>
                         <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c]">Qty</th>
                         <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c]">Order</th>
@@ -2875,7 +2897,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               {(showAllHistory ? historyPage * 10 : 0) + idx + 1}
                             </td>
                             <td className="px-3 py-2 border-r border-gray-100">
-                              <p className="text-gray-800 font-medium truncate max-w-[200px] text-xs">{ev.itemName ?? "—"}</p>
+                              <p className="text-gray-800 font-medium min-w-[220px] max-w-[320px] whitespace-normal break-words text-xs">{ev.itemName ?? "—"}</p>
                             </td>
                             <td className="px-3 py-2 font-mono text-xs text-gray-500 border-r border-gray-100">{ev.barcode ?? "—"}</td>
                             <td className="px-3 py-2 text-center border-r border-gray-100">

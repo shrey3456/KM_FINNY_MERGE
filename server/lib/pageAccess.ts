@@ -8,7 +8,8 @@ const WRITE_ADMIN_ROLES = ["admin", "super-admin", "superadmin", "super_admin", 
 // on the Users page. Used for routes that previously had NO server-side check at all —
 // this is a NEW restriction there (not a role-check swap), so it's applied deliberately,
 // page by page, rather than globally.
-export function requirePageWrite(pageKey: string) {
+export function requirePageWrite(pageKey: string | string[]) {
+  const pageKeys = Array.isArray(pageKey) ? pageKey : [pageKey];
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.isAuthenticated || !req.isAuthenticated()) {
       return res.status(401).json({ message: "Not authenticated" });
@@ -18,7 +19,7 @@ export function requirePageWrite(pageKey: string) {
     if (WRITE_ADMIN_ROLES.includes(role)) return next();
     let writable: string[] = [];
     try { writable = JSON.parse(user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-    if (writable.includes(pageKey)) return next();
+    if (pageKeys.some((key) => writable.includes(key))) return next();
     return res.status(403).json({ message: "Write access required" });
   };
 }
