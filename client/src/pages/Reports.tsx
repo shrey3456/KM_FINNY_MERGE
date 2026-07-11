@@ -184,6 +184,7 @@ const Reports = () => {
         return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
       },
       refetchInterval: 5000,
+      placeholderData: (previousData) => previousData,
     });
 
   const historyItems        = historyData?.items ?? [];
@@ -370,9 +371,12 @@ const Reports = () => {
                 </TableRow>
               ) : (
                 historyItems.map((h, idx) => {
+                  // Stripe by the row's stable id (not its position), so a new scan
+                  // landing at the top doesn't flip every row's color/number on each poll.
+                  const stripeEven = h.id % 2 === 0;
                   const rowBg = h.isExtra
-                    ? (idx % 2 === 0 ? "bg-amber-50/50" : "bg-amber-50/80")
-                    : (idx % 2 === 0 ? "bg-white" : "bg-slate-50");
+                    ? (stripeEven ? "bg-amber-50/50" : "bg-amber-50/80")
+                    : (stripeEven ? "bg-white" : "bg-slate-50");
                   return (
                     <TableRow key={h.id} className={`${rowBg} transition-colors hover:bg-slate-100/70`}>
                       <TableCell className="text-gray-400 text-[11px] py-2.5 w-[44px]">

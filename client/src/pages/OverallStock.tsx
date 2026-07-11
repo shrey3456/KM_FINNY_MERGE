@@ -39,10 +39,10 @@ type CombinedRow = {
   hsnCode: string | null;
   category: string | null;
   brand: string | null;
-  qty: number;
+  regularQty: number;
+  extraQty: number;
   pallets: number | null;
   itemsPerPallet: number | null;
-  type: "regular" | "extra";
   lastArrived: string | null;
 };
 
@@ -53,8 +53,8 @@ const ALL_COLUMNS = [
   { key: "sapCode",     label: "SAP Code" },
   { key: "category",    label: "Category" },
   { key: "brand",       label: "Brand" },
-  { key: "type",        label: "Type" },
-  { key: "qty",         label: "Qty (Boxes)" },
+  { key: "regularQty",  label: "Regular Qty" },
+  { key: "extraQty",    label: "Extra Qty" },
   { key: "pallets",     label: "Pallets" },
   { key: "lastScanned", label: "Last Scanned" },
 ] as const;
@@ -167,39 +167,57 @@ export default function OverallStock() {
     refetchInterval: 30000,
   });
 
-  // Merge into a unified list
+  // Merge into a unified list — an item scanned as both regular and extra
+  // collapses into ONE row (keyed by barcode, falling back to SKU) instead of
+  // showing twice, with its regular/extra quantities added as separate fields.
   const combined = useMemo<CombinedRow[]>(() => {
-    const regularRows: CombinedRow[] = (stockData?.items ?? []).map((s, i) => ({
-      key:           `reg-${s.sku}-${i}`,
-      itemName:      s.itemName,
-      barcode:       s.barcode,
-      sapCode:       s.sapCode,
-      hsnCode:       s.hsnCode,
-      category:      s.category,
-      brand:         s.brand ?? null,
-      qty:           s.totalScanned,
-      pallets:       s.totalPallets,
-      itemsPerPallet: s.itemsPerPallet,
-      type:          "regular",
-      lastArrived:   s.lastArrived,
-    }));
+    const map = new Map<string, CombinedRow>();
+    const keyFor = (barcode: string | null | undefined, fallback: string) =>
+      barcode && barcode.trim() ? `bc:${barcode.trim().toLowerCase()}` : `nb:${fallback}`;
 
-    const extraRows: CombinedRow[] = (extrasData?.items ?? []).map((e, i) => ({
-      key:           `ext-${e.barcode ?? i}-${i}`,
-      itemName:      e.itemName ?? e.barcode ?? "Unknown",
-      barcode:       e.barcode,
-      sapCode:       e.sapCode ?? null,
-      hsnCode:       e.hsnCode ?? null,
-      category:      e.category ?? null,
-      brand:         e.brand ?? null,
-      qty:           e.totalQuantity,
-      pallets:       e.totalPallets,
-      itemsPerPallet: e.itemsPerPallet,
-      type:          "extra",
-      lastArrived:   e.lastArrived,
-    }));
+    const newerDate = (a: string | null, b: string | null) =>
+      !a ? b : !b ? a : new Date(b).getTime() > new Date(a).getTime() ? b : a;
 
-    return [...regularRows, ...extraRows].sort((a, b) => {
+    // API aggregates (totalScanned/totalQuantity/totalPallets) can come back as
+    // numeric strings — coerce with Number() so `+=` adds instead of concatenating
+    // (e.g. 0 + "30" would otherwise yield the string "030").
+    const num = (v: number | string | null | undefined) => Number(v ?? 0) || 0;
+
+    (stockData?.items ?? []).forEach((s) => {
+      const key = keyFor(s.barcode, `sku:${s.sku}`);
+      const existing = map.get(key);
+      if (existing) {
+        existing.regularQty += num(s.totalScanned);
+        existing.pallets = num(existing.pallets) + num(s.totalPallets);
+        existing.lastArrived = newerDate(existing.lastArrived, s.lastArrived);
+      } else {
+        map.set(key, {
+          key, itemName: s.itemName, barcode: s.barcode, sapCode: s.sapCode,
+          hsnCode: s.hsnCode, category: s.category, brand: s.brand ?? null,
+          regularQty: num(s.totalScanned), extraQty: 0, pallets: num(s.totalPallets),
+          itemsPerPallet: s.itemsPerPallet, lastArrived: s.lastArrived,
+        });
+      }
+    });
+
+    (extrasData?.items ?? []).forEach((e, i) => {
+      const key = keyFor(e.barcode, `ex:${e.barcode ?? i}`);
+      const existing = map.get(key);
+      if (existing) {
+        existing.extraQty += num(e.totalQuantity);
+        existing.pallets = num(existing.pallets) + num(e.totalPallets);
+        existing.lastArrived = newerDate(existing.lastArrived, e.lastArrived);
+      } else {
+        map.set(key, {
+          key, itemName: e.itemName ?? e.barcode ?? "Unknown", barcode: e.barcode,
+          sapCode: e.sapCode ?? null, hsnCode: e.hsnCode ?? null, category: e.category ?? null,
+          brand: e.brand ?? null, regularQty: 0, extraQty: num(e.totalQuantity),
+          pallets: num(e.totalPallets), itemsPerPallet: e.itemsPerPallet, lastArrived: e.lastArrived,
+        });
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => {
       if (!a.lastArrived && !b.lastArrived) return 0;
       if (!a.lastArrived) return 1;
       if (!b.lastArrived) return -1;
@@ -210,7 +228,8 @@ export default function OverallStock() {
   // Filter
   const filtered = useMemo(() => {
     let rows = combined;
-    if (typeFilter !== "all") rows = rows.filter((r) => r.type === typeFilter);
+    if (typeFilter === "regular") rows = rows.filter((r) => r.regularQty > 0);
+    if (typeFilter === "extra")   rows = rows.filter((r) => r.extraQty > 0);
     if (search) {
       const q = search.toLowerCase();
       rows = rows.filter((r) =>
@@ -237,18 +256,17 @@ export default function OverallStock() {
   const pageRows   = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   // Summary
-  const totalRegularQty = combined.filter((r) => r.type === "regular").reduce((s, r) => s + r.qty, 0);
-  const totalExtraQty   = combined.filter((r) => r.type === "extra").reduce((s, r) => s + r.qty, 0);
-  const totalRegularCount = combined.filter((r) => r.type === "regular").length;
-  const totalExtraCount   = combined.filter((r) => r.type === "extra").length;
+  const totalRegularQty = combined.reduce((s, r) => s + r.regularQty, 0);
+  const totalExtraQty   = combined.reduce((s, r) => s + r.extraQty, 0);
+  const totalRegularCount = combined.filter((r) => r.regularQty > 0).length;
+  const totalExtraCount   = combined.filter((r) => r.extraQty > 0).length;
 
   // Export rows
   const exportRows = (src: CombinedRow[]) => [
-    ["#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Type", "Qty", "Pallets", "Last Scanned"],
+    ["#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Regular Qty", "Extra Qty", "Pallets", "Last Scanned"],
     ...src.map((r, i) => [
       i + 1, r.itemName, r.barcode ?? "", r.sapCode ?? "", r.hsnCode ?? "",
-      r.category ?? "", r.brand ?? "", r.type === "regular" ? "Regular" : "Extra",
-      r.qty,
+      r.category ?? "", r.brand ?? "", r.regularQty, r.extraQty,
       r.pallets != null ? parseFloat(String(r.pallets)).toFixed(2) : "",
       r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "",
     ]),
@@ -418,8 +436,8 @@ export default function OverallStock() {
                       </button>
                     </th>
                   )}
-                  {show("type")        && <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Type</th>}
-                  {show("qty")         && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Qty (Boxes)</th>}
+                  {show("regularQty")  && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Regular Qty</th>}
+                  {show("extraQty")    && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Extra Qty</th>}
                   {show("pallets")     && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Pallets</th>}
                   {show("lastScanned") && (
                     <th className="p-0">
@@ -492,8 +510,8 @@ export default function OverallStock() {
                         )}
                       </td>
                     )}
-                    {show("type")        && <td className="border-r border-[#001d6e]/30" />}
-                    {show("qty")         && <td className="border-r border-[#001d6e]/30" />}
+                    {show("regularQty")  && <td className="border-r border-[#001d6e]/30" />}
+                    {show("extraQty")    && <td className="border-r border-[#001d6e]/30" />}
                     {show("pallets")     && <td className="border-r border-[#001d6e]/30" />}
                     {show("lastScanned") && (
                       <td className="p-1.5">
@@ -519,8 +537,8 @@ export default function OverallStock() {
                   </tr>
                 ) : (
                   pageRows.map((row, idx) => {
-                    const isExtra = row.type === "extra";
-                    const rowBg = isExtra
+                    const hasExtra = row.extraQty > 0;
+                    const rowBg = hasExtra
                       ? (idx % 2 === 0 ? "bg-amber-50/40" : "bg-amber-50/60")
                       : (idx % 2 === 0 ? "bg-white" : "bg-slate-50");
                     const cellBorder = "border-r border-gray-100";
@@ -554,20 +572,18 @@ export default function OverallStock() {
                             {row.brand ?? <span className="text-gray-300">—</span>}
                           </td>
                         )}
-                        {show("type") && (
-                          <td className={`px-3 py-3 ${cellBorder}`}>
-                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                              row.type === "regular"
-                                ? "bg-blue-100 text-blue-800"
-                                : "bg-amber-100 text-amber-800"
-                            }`}>
-                              {row.type === "regular" ? "Regular" : "Extra"}
-                            </span>
+                        {show("regularQty") && (
+                          <td className={`px-3 py-3 text-right font-bold text-[#001d6e] tabular-nums ${cellBorder}`}>
+                            {row.regularQty > 0
+                              ? row.regularQty.toLocaleString()
+                              : <span className="text-gray-300 font-normal">—</span>}
                           </td>
                         )}
-                        {show("qty") && (
-                          <td className={`px-3 py-3 text-right font-bold text-[#001d6e] tabular-nums ${cellBorder}`}>
-                            {row.qty.toLocaleString()}
+                        {show("extraQty") && (
+                          <td className={`px-3 py-3 text-right font-bold tabular-nums ${cellBorder} ${row.extraQty > 0 ? "text-amber-700" : ""}`}>
+                            {row.extraQty > 0
+                              ? row.extraQty.toLocaleString()
+                              : <span className="text-gray-300 font-normal">—</span>}
                           </td>
                         )}
                         {show("pallets") && (
