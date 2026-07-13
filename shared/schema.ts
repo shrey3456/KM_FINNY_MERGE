@@ -55,7 +55,8 @@ export const products = pgTable("products", {
   saleCategory: text("sale_category"), // Sale Category (e.g. 01-PW, 03-CP)
   plant: text("plant"),             // Plant : (e.g. VAL & IND, BARODA, RAJKOT)
   type: text("type"),               // Type : (BOX / NOS / JAR)
-  productImage: text("product_image"), // Product Image filename
+  productImage: text("product_image"), // Local cached filename (server/uploads/product-images/<id>.jpg), not a URL
+  productImageHash: text("product_image_hash"), // SHA-256 of the cached file's bytes — lets sync skip re-downloading unchanged images
   notionPageId: text("notion_page_id"), // Notion page.id for unique identification
 
   // ── Volume / pallet ───────────────────────────────────────────────────────
@@ -131,7 +132,7 @@ export const insertProductSchema = createInsertSchema(products, {
   // core
   newSr: true, itemNo: true, barcode: true, name: true,
   notionWiseName: true, brand: true, category: true, saleCategory: true,
-  plant: true, type: true, productImage: true, notionPageId: true,
+  plant: true, type: true, productImage: true, productImageHash: true, notionPageId: true,
   // volume / pallet
   volumeInCuFt: true, itemsPerPallet: true, pallets: true, indPlt: true, valPlt: true,
   // stock

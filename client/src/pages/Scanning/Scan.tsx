@@ -570,6 +570,15 @@ export default function ScanOrderPage() {
     const normBarcode = normalize(barcode);
     const matches = osItemsRef.current.filter((i) => normalize(i.barcode ?? "") === normBarcode);
     const invProduct = productLookup.get(normalize(barcode)) ?? null;
+
+    // Not on this part's CSV AND not a known product in Inventory at all — this isn't a
+    // legitimate "extra" (early arrival of a real item), it's a barcode the system has no
+    // record of. Block it outright instead of letting it get logged as an extra.
+    if (matches.length === 0 && !invProduct) {
+      toast({ title: "Barcode not in system", description: "This barcode isn't in the order or in Inventory — scanning it is not allowed.", variant: "destructive" });
+      return;
+    }
+
     const plantPalletSize = _computePlantPalletSize(matches[0] ?? null, invProduct);
 
     if (matches.length > 1) {
@@ -1132,6 +1141,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const osItemIsComplete = osPending?.matchedItem
       ? (osPending.matchedItem.totalScannedQty ?? 0) >= (osPending.matchedItem.expectedQty ?? 1)
       : false;
+    const osResolvedImageName = osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name;
 
     // Manage Scans (admin-only) / Extra Items, unified into one tabbed list — built once
     // here and reused as-is in both the mobile and desktop layouts below.
@@ -2534,7 +2544,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
         {/* Scan confirmation dialog */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>
-          <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+          <DialogContent className="w-[calc(100%-2rem)] max-w-md sm:max-w-xl">
             <DialogHeader>
               <DialogTitle className={`flex items-center gap-2 ${
                 !osPending?.matchedItem ? "text-red-700"
@@ -2547,16 +2557,26 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     ? <><AlertTriangle className="h-5 w-5" /> Extra item</>
                     : <><CheckCircle2 className="h-5 w-5" /> Match found</>}
               </DialogTitle>
-              <DialogDescription className="text-left pt-1 space-y-0.5">
-                <p className="font-semibold text-gray-900 text-sm">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
-                <p className="font-mono text-xs text-gray-400">{osPending?.barcode}</p>
-                {!osPending?.matchedItem && (
-                  <p className="text-xs text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
+              <div className="flex gap-3 items-start pt-1">
+                {osResolvedImageName && (
+                  <img
+                    src={`/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`}
+                    alt=""
+                    className="h-24 w-24 shrink-0 object-contain rounded-md bg-gray-50 border border-gray-100"
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                  />
                 )}
-                {osItemIsComplete && (
-                  <p className="text-xs text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
-                )}
-              </DialogDescription>
+                <DialogDescription className="text-left space-y-0.5 flex-1 min-w-0">
+                  <p className="font-semibold text-gray-900 text-sm">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
+                  <p className="font-mono text-xs text-gray-400">{osPending?.barcode}</p>
+                  {!osPending?.matchedItem && (
+                    <p className="text-xs text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
+                  )}
+                  {osItemIsComplete && (
+                    <p className="text-xs text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
+                  )}
+                </DialogDescription>
+              </div>
             </DialogHeader>
 
             <div className="space-y-4 py-1">

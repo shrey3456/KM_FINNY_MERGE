@@ -13,10 +13,9 @@ export const CONTROLLABLE_PAGES = [
   { key: "notion-inventory", label: "Inventory" },
   { key: "purchases", label: "Purchases" },
   { key: "plant-management", label: "Plant Management" },
-  { key: "activities", label: "Activities" },
-  // "user-management" and "settings" are deliberately NOT in this list — both
-  // pages stay strictly admin-only and can never be granted to a non-admin via
-  // Allowed Pages / Write Access.
+  // "user-management", "settings", and "activities" are deliberately NOT in this
+  // list — all three pages stay strictly admin-only and can never be granted to a
+  // non-admin via Allowed Pages / Write Access.
 ] as const;
 
 export type PageKey = (typeof CONTROLLABLE_PAGES)[number]["key"];

@@ -30,7 +30,11 @@ const Home = () => {
         // Check if user should see Sales page instead of Reports
         const userPermissions = getCurrentUserPermissions();
         setShowSalesPage(userPermissions.canAccessSalesPage);
-        setCanAccessExpenseVoucher(userPermissions.canAccessExpenseVoucher);
+
+        // Expense Voucher tile: admin-granted page access (Allowed Pages), not department.
+        let allowedPages: string[] = [];
+        try { allowedPages = JSON.parse(currentUser.allowedPages || '[]'); } catch { /* default [] */ }
+        setCanAccessExpenseVoucher(isAdminOrSuperAdmin(currentUser.role) || allowedPages.includes('expense-voucher'));
 
         // Non-admin/billing users are scanning dept users
         const role = (currentUser.role ?? '').toLowerCase().trim();

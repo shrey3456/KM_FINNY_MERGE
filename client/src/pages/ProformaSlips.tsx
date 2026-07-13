@@ -63,6 +63,7 @@ import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { hasPageWriteAccess } from "@/lib/permissions";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -226,32 +227,32 @@ export default function ProformaSlips() {
   const userDept = String(currentUserInfo?.department || '').toLowerCase().trim();
   const userDesig = String(currentUserInfo?.designation || '').toLowerCase().trim();
   
-  // Define users who have edit access (Read-Write permissions)
-  const isReadWriteUser = ['read/write', 'read-write', 'editor', 'edit', 'rw', 'write'].includes(currentUserRole);
-
-  // NEW: Define isread for read-only users
-  const isread = ['read-only', 'readonly', 'read', 'r'].includes(currentUserRole);
-
   const isITDep= ['IT', 'information technology', 'it'].includes(userDept);
   const ismanagment = ['management', 'manager', 'head', 'director'].includes(userDept);
   // Department: Billing, Designation: Head (Case insensitive check)
   const isBillingHead = userDept === 'billing' && userDesig === 'head';
-  
+
+  // Write access to Proforma Slips is granted per-page by admin (Allowed Pages /
+  // Write Access on the User Management page) rather than by the old global
+  // read/read-write role string.
+  const isReadWriteUser = hasPageWriteAccess("proforma");
+  const isread = !hasPageWriteAccess("proforma") && !isAdminOrSuper;
+
   // Lock/Unlock permissions: Admin, Super-Admin, IT, Management, Billing Head
   const canLockUnlockSlips = (isAdminOrSuper || isITDep || ismanagment || isBillingHead) && (isReadWriteUser || isAdminOrSuper);
 
 
   // Add new slips: Admin, Super-Admin, and Read-Write users
   const canAddSlips = isAdminOrSuper || isReadWriteUser;
-  
+
   // Only Admin/Super-Admin can edit and delete slips
   const canEditSlips = isAdminOrSuper || isReadWriteUser;
 
-  console.log('DEBUG PROFORMA PERMISSIONS:', { 
+  console.log('DEBUG PROFORMA PERMISSIONS:', {
     source: remoteUser ? 'remote' : 'local',
-    role: currentUserRole, 
-    dept: userDept, 
-    desig: userDesig, 
+    role: currentUserRole,
+    dept: userDept,
+    desig: userDesig,
     isAdminOrSuper,
     isReadWriteUser,
     canLockUnlockSlips,
@@ -1508,9 +1509,9 @@ export default function ProformaSlips() {
                             <span>{slip.orderNumber}</span>
                             {/* Lock Icon Logic */}
                             {slip.isPrintLocked ? (
-                              <Lock className="h-3.5 w-3.5 text-red-600" title="Locked after print" />
+                              <span title="Locked after print"><Lock className="h-3.5 w-3.5 text-red-600" /></span>
                             ) : (
-                              <Unlock className="h-3.5 w-3.5 text-emerald-600 opacity-30" title="Unlocked" />
+                              <span title="Unlocked"><Unlock className="h-3.5 w-3.5 text-emerald-600 opacity-30" /></span>
                             )}
                           </div>
                         </TableCell>
@@ -1676,7 +1677,7 @@ export default function ProformaSlips() {
                                           if (e.target.value.trim() !== '' && products) {
                                             const filtered = products.filter(product => 
                                               product.name?.toLowerCase().includes(e.target.value.toLowerCase()) || 
-                                              product.srNo?.toLowerCase().includes(e.target.value.toLowerCase()) || 
+                                              product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
                                               product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
                                             );
                                             setFilteredProducts(filtered);
@@ -1739,7 +1740,7 @@ export default function ProformaSlips() {
                                                 <div className="flex flex-col">
                                                   <span className="font-medium">{product.name}</span>
                                                   <span className="text-xs text-muted-foreground">
-                                                    Sr.No: {product.srNo || ' '} | Barcode: {product.barcode || ' '}
+                                                    Sr.No: {product.newSr || ' '} | Barcode: {product.barcode || ' '}
                                                   </span>
                                                 </div>
                                               </li>

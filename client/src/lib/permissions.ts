@@ -19,9 +19,7 @@ export interface Permissions {
   canAccessLoadOperations: boolean;
   canAccessMPOperations: boolean;
   canAccessSalesPage: boolean;
-  canAccessExpenseVoucher: boolean;
   canAccessOrderManagement: boolean;
-  canAccessOverallStockReport: boolean; // Optional permission for Overall Stock Report
 }
 
 
@@ -160,22 +158,6 @@ function canUserAccessMPOperations(user: any): boolean {
   return false; // By default, deny access
 }
 
-// Check if user can access Expense Voucher based on department and role
-function canUserAccessExpenseVoucher(user: any): boolean {
-  if (!user) return false;
-  
-  // Allow access if user is admin or super-admin
-  const allowedRoles = ['admin', 'super-admin', 'superadmin', 'super_admin'];
-  const userRole = user.role?.toLowerCase();
-  const isAdmin = allowedRoles.includes(userRole);
-  
-  // Allow access for steer department users
-  const userDepartment = user.department?.toLowerCase();
-  const isSteerDept = userDepartment === 'steer';
-  
-  return isAdmin || isSteerDept;
-}
-
 // Check if user should see Sales page in Home screen
 function canUserAccessSalesPage(user: any): boolean {
   if (!user) return false;
@@ -213,22 +195,6 @@ function canUserAccessOrderManagement(user: any): boolean {
   return false;
 }
 
-function canUserAccessOverallStockReport(user: any): boolean {
-  if (!user) return false;
-
-  if (user.role === 'admin' || user.role === 'super-admin') {
-    return true;
-  }
-
-  if (user.department) {
-    const department = user.department.toUpperCase();
-    return department.includes('BILLING') || department.includes('MANAGEMENT') ;
-  }
-
-  return false;
-}
-
-
 // Define default permissions for different roles
 export function getPermissionsForRole(role?: string): Permissions {
   switch (role) {
@@ -247,9 +213,7 @@ export function getPermissionsForRole(role?: string): Permissions {
         canAccessLoadOperations: true,
         canAccessMPOperations: true,
         canAccessSalesPage: true,
-        canAccessExpenseVoucher: true,
         canAccessOrderManagement: true,
-        canAccessOverallStockReport: true
       };
     case UserRole.ADMIN:
       return {
@@ -266,9 +230,7 @@ export function getPermissionsForRole(role?: string): Permissions {
         canAccessLoadOperations: true,
         canAccessMPOperations: true,
         canAccessSalesPage: true,
-        canAccessExpenseVoucher: true,  
         canAccessOrderManagement: true,
-        canAccessOverallStockReport: true
       };
     case UserRole.READ_WRITE:
       return {
@@ -285,9 +247,7 @@ export function getPermissionsForRole(role?: string): Permissions {
         canAccessLoadOperations: true,
         canAccessMPOperations: true,
         canAccessSalesPage: false,
-        canAccessExpenseVoucher: false,
         canAccessOrderManagement: false,
-        canAccessOverallStockReport: false
       };
     case UserRole.READ:
       return {
@@ -304,9 +264,7 @@ export function getPermissionsForRole(role?: string): Permissions {
         canAccessLoadOperations: true,
         canAccessMPOperations: true,
         canAccessSalesPage: false,
-        canAccessExpenseVoucher: false,
         canAccessOrderManagement: false,
-        canAccessOverallStockReport: false
       };
     default:
       // Default to read-only if role is unknown
@@ -324,9 +282,7 @@ export function getPermissionsForRole(role?: string): Permissions {
         canAccessLoadOperations: true,
         canAccessMPOperations: true,
         canAccessSalesPage: false,
-        canAccessExpenseVoucher: false,
         canAccessOrderManagement: false,
-        canAccessOverallStockReport: false
       };
   }
 }
@@ -358,13 +314,9 @@ export function getCurrentUserPermissions(): Permissions {
     
     // Check if user should see Sales page based on department
     const canAccessSalesPage = canUserAccessSalesPage(currentUser);
-    
-    // Check if user can access Expense Voucher based on department and role
-    const canAccessExpenseVoucher = canUserAccessExpenseVoucher(currentUser);
-    
+
     const canAccessOrderManagement = canUserAccessOrderManagement(currentUser);
 
-    const canAccessOverallStockReport = canUserAccessOverallStockReport(currentUser);
     return {
       ...basePermissions,
       canAccessInventory,
@@ -373,9 +325,7 @@ export function getCurrentUserPermissions(): Permissions {
       canAccessLoadOperations,
       canAccessMPOperations,
       canAccessSalesPage,
-      canAccessExpenseVoucher,
       canAccessOrderManagement,
-      canAccessOverallStockReport,
     };
   } catch (error) {
     console.error('Error getting current user permissions:', error);

@@ -273,7 +273,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  apiRouter.get("/products/:id", async (req: Request, res: Response) => {
+  // :id constrained to digits so non-numeric product sub-routes (e.g. /products/image-by-name)
+  // registered elsewhere don't get shadowed by this generic handler and crash on parseInt(NaN).
+  apiRouter.get("/products/:id(\\d+)", async (req: Request, res: Response) => {
     const product = await storage.getProduct(parseInt(req.params.id));
     if (!product) {
       return res.status(404).json({ message: "Product not found" });

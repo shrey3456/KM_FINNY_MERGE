@@ -366,11 +366,16 @@ export function setupAuth(app: Express) {
   });
 
   app.get("/api/user", (req, res) => {
+    // Identity/permissions must never be served stale — a page grant an admin just made
+    // (allowedPages/pageWriteAccess) has to be visible on this user's very next request,
+    // not whatever a browser or intermediate proxy (this app runs behind IIS) cached.
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+
     if (!req.isAuthenticated()) {
       console.log("Unauthenticated user info request");
       return res.status(401).json({ message: "Not authenticated" });
     }
-    
+
     console.log(`User info requested for: ${req.user.username}`);
     console.log(`Sending user object:`, JSON.stringify(req.user, null, 2));
     res.json(req.user);

@@ -105,6 +105,7 @@ type SyncReport = {
     notionPageId: string;
   }>;
   errors: string[];
+  imagesCached?: number;
 };
 
 type PendingResponse = {
@@ -828,9 +829,16 @@ export default function NotionInventory() {
                                   ? `sticky left-0 z-[5] text-[11px] sm:text-xs font-semibold text-[#001d6e] whitespace-normal break-words leading-snug shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${isOdd ? "bg-slate-50" : "bg-white"}`
                                   : `text-[11px] sm:text-xs ${isEmpty ? "text-gray-300" : "text-gray-700"} whitespace-nowrap truncate`
                               }`}
-                              title={val}
+                              title={col.key === "productImage" ? product.name : val}
                             >
-                              {val}
+                              {col.key === "productImage" && !isEmpty ? (
+                                <img
+                                  src={`/api/products/image-by-name?name=${encodeURIComponent(product.name)}`}
+                                  alt=""
+                                  className="h-8 w-8 rounded border border-gray-200 bg-gray-50 object-contain"
+                                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                                />
+                              ) : val}
                             </td>
                           );
                         })}
@@ -996,6 +1004,12 @@ export default function NotionInventory() {
                   <span className="text-2xl font-bold text-blue-700">{reportToShow.total}</span>
                   <span className="text-xs text-blue-600">Total Pages</span>
                 </div>
+                {(reportToShow.imagesCached ?? 0) > 0 && (
+                  <div className="flex flex-col items-center px-4 py-2 bg-purple-50 border border-purple-200 rounded-lg">
+                    <span className="text-2xl font-bold text-purple-700">{reportToShow.imagesCached}</span>
+                    <span className="text-xs text-purple-600">Images Cached</span>
+                  </div>
+                )}
                 {(reportToShow.errors?.length ?? 0) > 0 && (
                   <div className="flex flex-col items-center px-4 py-2 bg-red-50 border border-red-200 rounded-lg">
                     <span className="text-2xl font-bold text-red-700">{reportToShow.errors.length}</span>

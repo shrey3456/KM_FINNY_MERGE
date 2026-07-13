@@ -55,29 +55,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
-
-// All controllable pages (non-common pages selectable per user)
-const CONTROLLABLE_PAGES = [
-  { key: "load-operations",  label: "Load Operations" },
-  { key: "print-operations", label: "Print Operations" },
-  { key: "proforma",         label: "Proforma Slips" },
-  { key: "dispatch",         label: "Dispatch" },
-  { key: "expense-voucher",  label: "Expense Voucher" },
-  { key: "toll-voucher",     label: "Toll Voucher" },
-  { key: "scan-order",       label: "Scan Order" },
-  { key: "pallet-stock",     label: "Pallet Stock Report" },
-  { key: "overall-stock",    label: "Overall Stock" },
-  { key: "scan-history",     label: "Scan History" },
-  { key: "order-import",     label: "Order Import" },
-  { key: "inventory",        label: "Inventory" },
-  { key: "purchases",        label: "Purchases" },
-  { key: "notion-inventory", label: "Notion Inventory" },
-  { key: "user-management",  label: "User Management" },
-  { key: "plant-management", label: "Plant Management" },
-  { key: "activities",       label: "Activities" },
-  { key: "settings",         label: "Settings" },
-  { key: "order-management", label: "Order Management" },
-];
+import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 
 // Form schema
 const userFormSchema = z.object({
@@ -153,7 +131,12 @@ function MultiSelectField({
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-72 p-0" style={{ maxHeight: "none" }}>
-        <div className="overflow-y-auto" style={{ maxHeight: "260px" }}>
+        <div
+          className="overflow-y-auto overscroll-contain"
+          style={{ maxHeight: "260px" }}
+          onWheel={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
+        >
           <div className="p-2">
             {options.map(opt => (
               <div

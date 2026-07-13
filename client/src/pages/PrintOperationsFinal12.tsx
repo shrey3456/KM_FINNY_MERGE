@@ -10,6 +10,7 @@ import axios from 'axios';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import { useLocation } from 'wouter';
+import { hasPageWriteAccess } from '../lib/permissions';
 
 // Product/order interfaces
 interface ProformaSlipItem {
@@ -90,8 +91,10 @@ const PrintOperations: React.FC = () => {
     }
   })();
   const currentUserRole = String(currentUser?.role || '').toLowerCase();
-  const isread = ['read-only', 'readonly', 'read', 'r'].includes(currentUserRole);
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
+  // Write access to Print Operations is granted per-page by admin (Allowed Pages /
+  // Write Access on the User Management page) rather than the old global role string.
+  const isread = !hasPageWriteAccess("print-operations") && !isAdminOrSuper;
 
   const rawDepartment = String(currentUser?.department || '').trim().toLowerCase();
   const rawDesignation = String(currentUser?.designation || '').trim().toLowerCase();

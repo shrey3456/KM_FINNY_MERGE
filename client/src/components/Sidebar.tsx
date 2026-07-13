@@ -210,7 +210,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/expense-voucher",
-          permission: "canAccessExpenseVoucher",
           pageKey: "expense-voucher",
         },
         {
@@ -222,7 +221,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/toll-voucher",
-          permission: "canAccessExpenseVoucher",
           pageKey: "toll-voucher",
         },
         {
@@ -236,7 +234,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           label: "Overall Stock",
           icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/overall-stock",
-          permission: "canAccessOverallStockReport",
           pageKey: "overall-stock",
         },
         {
@@ -261,6 +258,17 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           permission: "canAccessOrderManagement",
           departments: ['billing'],
           pageKey: "order-import",
+        },
+        {
+          label: "Plant Management",
+          icon: (
+            <Factory
+              className="h-5 w-5 mr-3 text-[#001d6e]"
+              style={{ fill: "#4d7eff" }}
+            />
+          ),
+          path: "/plant-settings",
+          pageKey: "plant-management",
         },
       ],
     },
@@ -291,21 +299,10 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "user-management",
         },
         {
-          label: "Plant Management",
-          icon: (
-            <Factory
-              className="h-5 w-5 mr-3 text-[#001d6e]"
-              style={{ fill: "#4d7eff" }}
-            />
-          ),
-          path: "/plant-settings",
-          pageKey: "plant-management",
-        },
-        {
           label: "Activities",
           icon: <Activity className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/activities",
-          pageKey: "activities",
+          adminOnly: true,
         },
         {
           label: "Settings",
