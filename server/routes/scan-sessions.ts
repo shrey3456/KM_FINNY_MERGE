@@ -14,6 +14,8 @@ import {
 } from '@shared/schema';
 import { eq, desc, inArray, count, asc } from 'drizzle-orm';
 import { z } from 'zod';
+import { requirePageWrite } from '../lib/pageAccess';
+import { getUserPlants } from './order-scan';
 
 const router = Router();
 
@@ -86,7 +88,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 // ── Create session + bulk insert items ────────────────────────────────────
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   try {
     const { session: sessionData, items: itemsData } = req.body as {
       session: z.infer<typeof insertScanSessionSchema>;
@@ -118,7 +120,7 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 // ── Update session status ──────────────────────────────────────────────────
-router.patch('/:id', async (req: Request, res: Response) => {
+router.patch('/:id', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid session ID' });
 
@@ -141,7 +143,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
 // ── Increment scannedQty for an item ──────────────────────────────────────
 // Accepts { increment: number } — uses a SQL-side add so concurrent scans
 // never overwrite each other (avoids stale-closure race conditions on the client).
-router.patch('/:id/items/:itemId', async (req: Request, res: Response) => {
+router.patch('/:id/items/:itemId', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   const itemId = parseInt(req.params.itemId);
   if (isNaN(sessionId) || isNaN(itemId)) return res.status(400).json({ error: 'Invalid ID' });
@@ -182,7 +184,7 @@ router.patch('/:id/items/:itemId', async (req: Request, res: Response) => {
 });
 
 // ── Upsert an extra scan ───────────────────────────────────────────────────
-router.post('/:id/extras', async (req: Request, res: Response) => {
+router.post('/:id/extras', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
 
@@ -223,7 +225,7 @@ router.post('/:id/extras', async (req: Request, res: Response) => {
 // ── Bulk-sync all item scannedQty values for a session ───────────────────
 // Called when the user navigates away from the scan view to guarantee
 // every item's quantity is persisted, even if individual PATCHes were missed.
-router.put('/:id/sync-items', async (req: Request, res: Response) => {
+router.put('/:id/sync-items', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
 
@@ -258,7 +260,7 @@ router.put('/:id/sync-items', async (req: Request, res: Response) => {
 // ── Record a pallet scan ──────────────────────────────────────────────────
 // One row per confirmed scan event. palletNumber is auto-assigned as
 // (total prior pallet scans for this item in this session) + 1.
-router.post('/:id/pallet-scans', async (req: Request, res: Response) => {
+router.post('/:id/pallet-scans', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ error: 'Invalid session ID' });
 
@@ -1124,10 +1126,24 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
     const typeParam    = typeof req.query.type    === 'string' && ['regular','extra'].includes(req.query.type) ? req.query.type : null;
     const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
+    const plantParam   = typeof req.query.plant   === 'string' && req.query.plant.trim()   ? req.query.plant.trim()   : null;
+
+    // Plant scoping: admin/super-admin/billing (allowed === null) see every plant; everyone
+    // else is restricted to the plant(s) assigned to them on the Users page. A non-admin with
+    // no resolvable plant sees nothing rather than accidentally seeing all.
+    const allowedPlants = getUserPlants(req.user);
 
     const conditions: string[] = [];
-    const params: (string | boolean)[] = [];
+    const params: (string | boolean | string[])[] = [];
 
+    if (allowedPlants !== null) {
+      if (allowedPlants.length === 0) {
+        return res.json({ items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit, offset });
+      }
+      params.push(allowedPlants);
+      conditions.push(`LOWER(ois.plant) = ANY($${params.length}::text[])`);
+    }
+    if (plantParam)   { params.push(plantParam.toLowerCase()); conditions.push(`LOWER(ois.plant) = $${params.length}`); }
     if (dateParam)    { params.push(dateParam);    conditions.push(`DATE(ose.scanned_at) = $${params.length}`); }
     if (scannerParam) { params.push(scannerParam); conditions.push(`ose.scanned_by_name = $${params.length}`); }
     if (typeParam === 'regular') conditions.push(`ose.is_extra = false`);
@@ -1197,15 +1213,16 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
 });
 
 // ── Upload scan-history rows into an existing Notion database ────────────────
-router.post('/reports/upload-to-notion', async (_req: Request, res: Response) => {
+router.post('/reports/upload-to-notion', requirePageWrite('scan-history'), async (_req: Request, res: Response) => {
   try {
-    const { pageId, columns, date, search, scanner, type } = _req.body as {
+    const { pageId, columns, date, search, scanner, type, plant } = _req.body as {
       pageId: string;
       columns: string[];
       date?: string;
       search?: string;
       scanner?: string;
       type?: string;
+      plant?: string;
     };
 
     // Use env var as default; allow override from request body
@@ -1276,9 +1293,20 @@ router.post('/reports/upload-to-notion', async (_req: Request, res: Response) =>
     }
 
     // --- Step 3: fetch scan history rows ---
+    // Plant scoping mirrors GET /reports/scan-history: admins export any plant; others are
+    // limited to their assigned plant(s), so a restricted user can't push other plants to Notion.
+    const allowedPlants = getUserPlants(_req.user);
     const conditions: string[] = [];
-    const params: (string | boolean)[] = [];
+    const params: (string | boolean | string[])[] = [];
 
+    if (allowedPlants !== null) {
+      if (allowedPlants.length === 0) {
+        return res.json({ success: true, fetched: 0, uploaded: 0, errors: [], databaseId, url: `https://www.notion.so/${databaseId.replace(/-/g, '')}` });
+      }
+      params.push(allowedPlants);
+      conditions.push(`LOWER(ois.plant) = ANY($${params.length}::text[])`);
+    }
+    if (plant)   { params.push(plant.toLowerCase()); conditions.push(`LOWER(ois.plant) = $${params.length}`); }
     if (date)    { params.push(date);    conditions.push(`DATE(ose.scanned_at) = $${params.length}`); }
     if (scanner) { params.push(scanner); conditions.push(`ose.scanned_by_name = $${params.length}`); }
     if (type === 'regular') conditions.push(`ose.is_extra = false`);
@@ -1382,6 +1410,97 @@ router.post('/reports/upload-to-notion', async (_req: Request, res: Response) =>
   } catch (error: any) {
     console.error('Error uploading to Notion:', error);
     return res.status(500).json({ error: error?.message ?? 'Failed to upload to Notion' });
+  }
+});
+
+// ── Plant-wise stock (Overall Stock page) ─────────────────────────────────
+// Reads the live per-plant running totals from product_plant_stock (one row per
+// barcode+plant), enriched with product specs. Access is plant-scoped: admin/
+// super-admin/billing see every plant; everyone else only the plant(s) assigned to
+// them on the Users page (users.plants). Each row carries in_stock (all physical
+// boxes, extras included) AND extraQty (the over-order portion, shown separately).
+router.get('/reports/plant-stock', async (req: Request, res: Response) => {
+  try {
+    const allowed = getUserPlants(req.user); // null = admin (all plants)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const plantParam = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+
+    // Non-admin with no resolvable plant → show nothing (never fall through to "all").
+    if (allowed !== null && allowed.length === 0) {
+      return res.json({ items: [], total: 0, plants: [] });
+    }
+
+    const params: any[] = [];
+    const conds: string[] = [];
+
+    if (allowed !== null) {
+      params.push(allowed);
+      conds.push(`LOWER(pps.plant) = ANY($${params.length}::text[])`);
+    }
+    if (plantParam) {
+      params.push(plantParam.toLowerCase());
+      conds.push(`LOWER(pps.plant) = $${params.length}`); // bounded by allowed set above for non-admins
+    }
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      const n = params.length;
+      conds.push(`(LOWER(COALESCE(p.name, pps.barcode)) LIKE $${n} OR LOWER(pps.barcode) LIKE $${n} OR LOWER(COALESCE(p.sap_code,'')) LIKE $${n} OR LOWER(COALESCE(p.category,'')) LIKE $${n})`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+    const { rows } = await pool.query(`
+      SELECT
+        pps.barcode,
+        pps.plant,
+        pps.in_stock                                       AS "inStock",
+        pps.extra_qty                                      AS "extraQty",
+        COALESCE(p.name, pps.barcode)                      AS "itemName",
+        p.item_no                                          AS "itemNo",
+        CASE
+          WHEN UPPER(pps.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code)
+          WHEN UPPER(pps.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code)
+          ELSE p.sap_code
+        END                                                AS "sapCode",
+        p.hsn_code                                         AS "hsnCode",
+        p.category,
+        p.brand,
+        COALESCE(
+          CASE WHEN UPPER(pps.plant) LIKE '%VAL%' THEN NULLIF(p.val_plt, 0)
+               WHEN UPPER(pps.plant) LIKE '%IND%' THEN NULLIF(p.ind_plt, 0) END,
+          NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0)
+        )                                                  AS "itemsPerPallet",
+        pps.updated_at                                     AS "lastArrived"
+      FROM product_plant_stock pps
+      LEFT JOIN products p ON LOWER(p.barcode) = LOWER(pps.barcode)
+      ${where}
+      ORDER BY "itemName" ASC, pps.plant ASC
+    `, params);
+
+    const items = rows.map((r: any, i: number) => {
+      const ipp = r.itemsPerPallet != null ? Number(r.itemsPerPallet) : 0;
+      return {
+        srNo: i + 1,
+        barcode: r.barcode,
+        plant: r.plant,
+        itemName: r.itemName,
+        itemNo: r.itemNo ?? null,
+        sapCode: r.sapCode ?? null,
+        hsnCode: r.hsnCode ?? null,
+        category: r.category ?? null,
+        brand: r.brand ?? null,
+        itemsPerPallet: ipp || null,
+        inStock: Number(r.inStock) || 0,
+        extraQty: Number(r.extraQty) || 0,
+        pallets: ipp > 0 ? parseFloat((Number(r.inStock) / ipp).toFixed(2)) : null,
+        extraPallets: ipp > 0 ? parseFloat((Number(r.extraQty) / ipp).toFixed(2)) : null,
+        lastArrived: r.lastArrived ?? null,
+      };
+    });
+
+    res.json({ items, total: items.length, plants: allowed });
+  } catch (error) {
+    console.error('Error generating plant stock report:', error);
+    res.status(500).json({ error: 'Failed to generate plant stock report' });
   }
 });
 

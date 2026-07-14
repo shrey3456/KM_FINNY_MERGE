@@ -34,6 +34,7 @@ import { Trash2, Edit, Plus, Factory, Printer, Lock, Unlock, FileText, ScrollTex
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Link } from "wouter";
+import { hasPageWriteAccess } from "@/lib/permissions";
 
 // Schema matching shared/schema.ts
 const plantFormSchema = z.object({
@@ -83,6 +84,7 @@ export default function PlantSettings() {
   const [newStv, setNewStv] = useState("");
   const [editingStvId, setEditingStvId] = useState<number | null>(null);
   const [editingStvValue, setEditingStvValue] = useState("");
+  const canWrite = hasPageWriteAccess("plant-management");
 
   const form = useForm<PlantFormValues>({
     resolver: zodResolver(plantFormSchema),
@@ -470,7 +472,7 @@ export default function PlantSettings() {
           </Link>
           <Dialog open={isDialogOpen} onOpenChange={handleDialogChange}>
             <DialogTrigger asChild>
-              <Button onClick={handleAddNew}>
+              <Button onClick={handleAddNew} disabled={!canWrite} title={!canWrite ? "You have read-only access to Plant Management" : undefined}>
                 <Plus className="mr-2 h-4 w-4" /> Add New Plant
               </Button>
             </DialogTrigger>
@@ -733,6 +735,8 @@ export default function PlantSettings() {
                     <Button
                       variant="ghost"
                       size="icon"
+                      disabled={!canWrite}
+                      title={!canWrite ? "You have read-only access to Plant Management" : undefined}
                       onClick={(event) => {
                         event.stopPropagation();
                         handleEdit(plant);
@@ -744,6 +748,8 @@ export default function PlantSettings() {
                       variant="ghost"
                       size="icon"
                       className="text-destructive"
+                      disabled={!canWrite}
+                      title={!canWrite ? "You have read-only access to Plant Management" : undefined}
                       onClick={(event) => {
                         event.stopPropagation();
                         deleteMutation.mutate(plant.id);
@@ -787,7 +793,8 @@ export default function PlantSettings() {
                                   event.stopPropagation();
                                   handleAddStv();
                                 }}
-                                disabled={createStvMutation.isPending || !newStv.trim()}
+                                disabled={createStvMutation.isPending || !newStv.trim() || !canWrite}
+                                title={!canWrite ? "You have read-only access to Plant Management" : undefined}
                               >
                                 Add
                               </Button>
@@ -819,7 +826,8 @@ export default function PlantSettings() {
                                             stv: editingStvValue.trim(),
                                           });
                                         }}
-                                        disabled={updateStvMutation.isPending || !editingStvValue.trim()}
+                                        disabled={updateStvMutation.isPending || !editingStvValue.trim() || !canWrite}
+                                        title={!canWrite ? "You have read-only access to Plant Management" : undefined}
                                       >
                                         Save
                                       </Button>
@@ -844,6 +852,8 @@ export default function PlantSettings() {
                                         type="button"
                                         variant="ghost"
                                         size="icon"
+                                        disabled={!canWrite}
+                                        title={!canWrite ? "You have read-only access to Plant Management" : undefined}
                                         onClick={(event) => {
                                           event.stopPropagation();
                                           setEditingStvId(stv.id);
@@ -861,7 +871,8 @@ export default function PlantSettings() {
                                           event.stopPropagation();
                                           deleteStvMutation.mutate(stv.id);
                                         }}
-                                        disabled={deleteStvMutation.isPending}
+                                        disabled={deleteStvMutation.isPending || !canWrite}
+                                        title={!canWrite ? "You have read-only access to Plant Management" : undefined}
                                       >
                                         <Trash2 className="h-4 w-4" />
                                       </Button>

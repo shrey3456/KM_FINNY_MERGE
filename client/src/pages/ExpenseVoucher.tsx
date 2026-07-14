@@ -91,7 +91,6 @@ function useAccessControl() {
 
         const user = JSON.parse(userString);
         const userRole = user.role?.toLowerCase();
-        const userDepartment = user.department?.toLowerCase();
 
         const allowedRoles = [
           "admin",
@@ -99,13 +98,17 @@ function useAccessControl() {
           "superadmin",
           "super_admin",
         ];
-        const allowedDepartments = ["steer", "management", "it"];
 
         const isAdmin = allowedRoles.includes(userRole);
-        const hasAllowedDepartment =
-          allowedDepartments.includes(userDepartment);
 
-        setHasAccess(isAdmin || hasAllowedDepartment);
+        // Access is controlled by admin via User Management's Allowed Pages —
+        // route-level access is already enforced by ProtectedRoute before this
+        // component ever renders; this just mirrors that for the page's own state.
+        let allowedPages: string[] = [];
+        try { allowedPages = JSON.parse(user.allowedPages || "[]"); } catch { /* default [] */ }
+        const hasPageGrant = allowedPages.includes("expense-voucher");
+
+        setHasAccess(isAdmin || hasPageGrant);
         setIsLoading(false);
       } catch (error) {
         console.error("Error checking access:", error);
@@ -1183,8 +1186,8 @@ export default function ExpenseVoucher() {
           <CardHeader className="text-center">
             <CardTitle className="text-red-600">Access Denied</CardTitle>
             <CardDescription>
-              This page is restricted to users from the Steer department and
-              administrators only.
+              This page is restricted to administrators and users granted access
+              via User Management.
             </CardDescription>
           </CardHeader>
           <CardContent className="text-center">

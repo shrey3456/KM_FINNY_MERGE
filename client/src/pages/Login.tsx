@@ -154,6 +154,27 @@ const Login = ({ onLogin }: LoginProps) => {
     }
   }, [pin]);
 
+  // Physical keyboard support — listens on window instead of relying on a hidden,
+  // auto-focused <input>. That hidden input used to sit on top of the PIN screen
+  // to catch typing, but on touch devices it could pop the native on-screen
+  // keyboard and shift the layout mid-tap, occasionally swallowing taps on the
+  // number pad. A window listener gets keyboard support without an input to steal
+  // focus or trigger a virtual keyboard.
+  useEffect(() => {
+    const handleWindowKeyDown = (e: KeyboardEvent) => {
+      if (isLoading) return;
+      if (e.key >= '0' && e.key <= '9') {
+        e.preventDefault();
+        handleDigitClick(e.key);
+      } else if (e.key === 'Backspace') {
+        e.preventDefault();
+        handleBackspace();
+      }
+    };
+    window.addEventListener('keydown', handleWindowKeyDown);
+    return () => window.removeEventListener('keydown', handleWindowKeyDown);
+  }, [isLoading, pin]);
+
   return (
     <div className={`min-h-screen flex flex-col items-center justify-center bg-white p-4 ${
       isIOSPWA ? 'ios-pwa-login-container' : ''
@@ -175,12 +196,6 @@ const Login = ({ onLogin }: LoginProps) => {
             '  overflow-y: auto;',
             '  transform: translateZ(0);',
             '  -webkit-transform: translateZ(0);',
-            '}',
-            'input {',
-            '  font-size: 16px !important;',
-            '  line-height: 1.3 !important;',
-            '  -webkit-appearance: none;',
-            '  touch-action: manipulation;',
             '}',
             '@supports (padding-top: env(safe-area-inset-top)) {',
             '  .ios-pwa-login-container {',
@@ -210,33 +225,6 @@ const Login = ({ onLogin }: LoginProps) => {
         
         {/* PIN Input Form */}
         <div className="w-full space-y-8">
-          {/* Hidden input for keyboard access */}
-          <div className="relative">
-            <input
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              maxLength={4}
-              value={pin}
-              onChange={(e) => {
-                // Only allow numbers and maximum 4 digits
-                const newPin = e.target.value.replace(/[^0-9]/g, '');
-                if (newPin.length <= 4) {
-                  setPin(newPin);
-                }
-              }}
-              onKeyDown={(e) => {
-                // Handle backspace key
-                if (e.key === 'Backspace') {
-                  handleBackspace();
-                }
-              }}
-              aria-label="PIN input"
-              className="opacity-0 absolute w-full h-8 top-0 left-0 z-10"
-              autoFocus
-            />
-          </div>
-
           {/* PIN Display */}
           <div className="flex justify-center mb-6">
             <div className="flex gap-4">
@@ -267,8 +255,8 @@ const Login = ({ onLogin }: LoginProps) => {
                 type="button"
                 variant="outline"
                 className="h-[65px] w-[65px] text-2xl font-medium rounded-full shadow-sm
-                border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95 
-                transition-all duration-150"
+                border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95
+                transition-all duration-150 touch-manipulation select-none"
                 onClick={() => handleDigitClick(num.toString())}
                 disabled={isLoading || pin.length >= 4}
               >
@@ -280,8 +268,8 @@ const Login = ({ onLogin }: LoginProps) => {
               type="button"
               variant="outline"
               className="h-[65px] w-[65px] text-2xl font-medium rounded-full shadow-sm
-              border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95 
-              transition-all duration-150"
+              border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95
+              transition-all duration-150 touch-manipulation select-none"
               onClick={() => handleDigitClick("0")}
               disabled={isLoading || pin.length >= 4}
             >
@@ -290,8 +278,8 @@ const Login = ({ onLogin }: LoginProps) => {
             <Button
               type="button"
               variant="outline"
-              className="h-[65px] w-[65px] flex items-center justify-center rounded-full 
-              border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95 transition-all duration-150"
+              className="h-[65px] w-[65px] flex items-center justify-center rounded-full
+              border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95 transition-all duration-150 touch-manipulation select-none"
               onClick={handleBackspace}
               disabled={isLoading || pin.length === 0}
             >

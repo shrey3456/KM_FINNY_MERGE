@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { Client } from '@notionhq/client';
+import { requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -9,7 +10,7 @@ const partyCache = new Map<string, { data: any, timestamp: number }>();
 const CACHE_DURATION = 0 * 1000; // 1 hour cache for maximum speed
 
 // Simple dispatch API without any filtering
-router.post('/dispatch', async (req, res) => {
+router.post('/dispatch', requirePageWrite('dispatch'), async (req, res) => {
   try {
     // Fast dispatch API
     

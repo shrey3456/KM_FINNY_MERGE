@@ -55,29 +55,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
-
-// All controllable pages (non-common pages selectable per user)
-const CONTROLLABLE_PAGES = [
-  { key: "load-operations",  label: "Load Operations" },
-  { key: "print-operations", label: "Print Operations" },
-  { key: "proforma",         label: "Proforma Slips" },
-  { key: "dispatch",         label: "Dispatch" },
-  { key: "expense-voucher",  label: "Expense Voucher" },
-  { key: "toll-voucher",     label: "Toll Voucher" },
-  { key: "scan-order",       label: "Scan Order" },
-  { key: "pallet-stock",     label: "Pallet Stock Report" },
-  { key: "overall-stock",    label: "Overall Stock" },
-  { key: "scan-history",     label: "Scan History" },
-  { key: "order-import",     label: "Order Import" },
-  { key: "inventory",        label: "Inventory" },
-  { key: "purchases",        label: "Purchases" },
-  { key: "notion-inventory", label: "Notion Inventory" },
-  { key: "user-management",  label: "User Management" },
-  { key: "plant-management", label: "Plant Management" },
-  { key: "activities",       label: "Activities" },
-  { key: "settings",         label: "Settings" },
-  { key: "order-management", label: "Order Management" },
-];
+import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 
 // Form schema
 const userFormSchema = z.object({
@@ -91,6 +69,7 @@ const userFormSchema = z.object({
   designation: z.string().optional(),
   plants: z.array(z.string()).default([]),
   allowedPages: z.array(z.string()).default([]),
+  pageWriteAccess: z.array(z.string()).default([]),
 });
 
 type UserFormValues = z.infer<typeof userFormSchema>;
@@ -152,7 +131,12 @@ function MultiSelectField({
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-72 p-0" style={{ maxHeight: "none" }}>
-        <div className="overflow-y-auto" style={{ maxHeight: "260px" }}>
+        <div
+          className="overflow-y-auto overscroll-contain"
+          style={{ maxHeight: "260px" }}
+          onWheel={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
+        >
           <div className="p-2">
             {options.map(opt => (
               <div
@@ -208,6 +192,7 @@ const Users = () => {
         ...data,
         plants: JSON.stringify(data.plants),
         allowedPages: JSON.stringify(data.allowedPages),
+        pageWriteAccess: JSON.stringify(data.pageWriteAccess),
       };
       return apiRequest('POST', '/api/users', payload);
     },
@@ -217,7 +202,7 @@ const Users = () => {
       addUserForm.reset({
         userCode: "", username: "", pin: "", name: "",
         role: "read", department: "", designation: "",
-        plants: [], allowedPages: [],
+        plants: [], allowedPages: [], pageWriteAccess: [],
       });
       setIsAddDialogOpen(false);
     },
@@ -233,6 +218,7 @@ const Users = () => {
         ...data,
         plants: JSON.stringify(data.plants ?? []),
         allowedPages: JSON.stringify(data.allowedPages ?? []),
+        pageWriteAccess: JSON.stringify(data.pageWriteAccess ?? []),
       };
       return apiRequest('PUT', `/api/users/${userCode}`, payload);
     },
@@ -279,7 +265,7 @@ const Users = () => {
     defaultValues: {
       userCode: "", username: "", pin: "", name: "",
       role: "read", department: "", designation: "",
-      plants: [], allowedPages: [],
+      plants: [], allowedPages: [], pageWriteAccess: [],
     }
   });
 
@@ -289,7 +275,7 @@ const Users = () => {
     defaultValues: {
       userCode: "", username: "", name: "",
       role: "read", department: "", designation: "",
-      plants: [], allowedPages: [],
+      plants: [], allowedPages: [], pageWriteAccess: [],
     }
   });
 
@@ -302,7 +288,7 @@ const Users = () => {
       addUserForm.reset({
         userCode: "", username: "", pin: "", name: "",
         role: "read", department: "", designation: "",
-        plants: [], allowedPages: [],
+        plants: [], allowedPages: [], pageWriteAccess: [],
       });
     }
     setIsAddDialogOpen(open);
@@ -332,6 +318,7 @@ const Users = () => {
       designation: user.designation || "",
       plants: parseJsonArray((user as any).plants),
       allowedPages: parseJsonArray((user as any).allowedPages),
+      pageWriteAccess: parseJsonArray((user as any).pageWriteAccess),
     });
     setIsEditDialogOpen(true);
   };
@@ -565,7 +552,14 @@ const Users = () => {
                 label="pages"
                 options={CONTROLLABLE_PAGES}
                 selected={field.value ?? []}
-                onChange={field.onChange}
+                onChange={(val) => {
+                  field.onChange(val);
+                  // A page can't have write access without also having read access —
+                  // drop it from Write Access the moment it's unchecked here.
+                  const currentWrite: string[] = form.getValues("pageWriteAccess") ?? [];
+                  const pruned = currentWrite.filter((k) => val.includes(k));
+                  if (pruned.length !== currentWrite.length) form.setValue("pageWriteAccess", pruned);
+                }}
                 disabled={isAdminRole}
                 disabledNote="Admin / Super-Admin have access to all pages automatically."
               />
@@ -576,6 +570,33 @@ const Users = () => {
             <FormMessage />
           </FormItem>
         )} />
+
+        {/* Write Access multi-select — subset of Allowed Pages; the rest are read-only for this user */}
+        <FormField control={form.control} name="pageWriteAccess" render={({ field }) => {
+          const allowed: string[] = form.watch("allowedPages") ?? [];
+          const writableOptions = CONTROLLABLE_PAGES.filter((p) => allowed.includes(p.key));
+          return (
+            <FormItem>
+              <FormLabel>Write Access</FormLabel>
+              <FormControl>
+                <MultiSelectField
+                  label="pages with write access"
+                  options={writableOptions}
+                  selected={field.value ?? []}
+                  onChange={field.onChange}
+                  disabled={isAdminRole || allowed.length === 0}
+                  disabledNote={isAdminRole
+                    ? "Admin / Super-Admin have full write access to all pages automatically."
+                    : "Select Allowed Pages first — write access can only be granted on pages this user can already view."}
+                />
+              </FormControl>
+              {!isAdminRole && allowed.length > 0 && (
+                <FormDescription>Pages checked here are read/write for this user; any other allowed page is view-only.</FormDescription>
+              )}
+              <FormMessage />
+            </FormItem>
+          );
+        }} />
       </div>
     );
   };

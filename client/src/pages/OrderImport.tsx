@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
-import { getCurrentUserPermissions } from "../lib/permissions";
+import { getCurrentUserPermissions, hasPageWriteAccess } from "../lib/permissions";
 import {
   AlertCircle,
   CheckCircle,
@@ -174,6 +174,14 @@ export default function OrderImport() {
   const isImportRole = ["admin", "super-admin"].includes(role)
     || department === "billing"
     || userPermissions.canAccessOrderManagement;
+  // Separate from page VISIBILITY (isImportRole above) — this controls whether the
+  // currently-visible page's own write actions (Upload, Map & Import, Delete) are enabled.
+  // Admin/super-admin/billing always have write access (unchanged); anyone else needs
+  // admin to have explicitly granted "Order Import" in their Write Access on the
+  // User Management page.
+  const canWriteOrderImport = ["admin", "super-admin"].includes(role)
+    || department === "billing"
+    || hasPageWriteAccess("order-import");
 
   // Form state
   const [plant, setPlant] = useState("");
@@ -983,7 +991,8 @@ export default function OrderImport() {
                   <X className="h-4 w-4" />
                 </Button>
                 <Button className="h-9 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting}>
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport}
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1027,7 +1036,8 @@ export default function OrderImport() {
                   <X className="h-4 w-4" />
                 </Button>
                 <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting}>
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport}
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1186,7 +1196,9 @@ export default function OrderImport() {
                                 Load
                               </Button>
                               <Button size="sm" variant="ghost"
-                                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30"
+                                disabled={!canWriteOrderImport}
+                                title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}
                                 onClick={(e) => { e.stopPropagation(); setDeleteTarget(s.id); }}>
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>

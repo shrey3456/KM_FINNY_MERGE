@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import path from 'path';
 import {
   detectChangesFromNotion,
   applyPendingChanges,
@@ -6,6 +7,7 @@ import {
   getPendingReport,
   getSyncStatus,
   getSyncHistory,
+  PRODUCT_IMAGE_DIR,
 } from '../services/notionInventorySync';
 import { storage } from '../storage';
 
@@ -150,6 +152,40 @@ const CSV_HEADER_MAP: Record<string, string> = {
   "UP Rate": "upRate", "UP IGST": "upIgst", "For UP Order Form": "forUpOrderForm",
 };
 const INTEGER_FIELDS = new Set(["itemsPerPallet", "indPlt", "valPlt"]);
+
+// GET /api/products/image-by-name?name=...
+// Serves a product's locally-cached image (never the raw Notion URL — see
+// notionInventorySync.ts for why). Looked up by name rather than barcode because the
+// same barcode can be shared by multiple distinct products; the Scan page already
+// resolves scans down to one exact item name before it needs the picture.
+router.get('/products/image-by-name', async (req: Request, res: Response) => {
+  try {
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+    const name = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+    if (!name) return res.status(400).json({ message: 'name is required' });
+
+    const product = await storage.getProductByName(name);
+    if (!product?.productImage || !product.productImageHash) {
+      return res.status(404).json({ message: 'No image for this product' });
+    }
+
+    res.set({
+      'Cache-Control': 'public, max-age=3600',
+      'ETag': product.productImageHash,
+    });
+    if (req.headers['if-none-match'] === product.productImageHash) {
+      return res.status(304).end();
+    }
+
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), (err) => {
+      if (err && !res.headersSent) res.status(404).json({ message: 'Image file missing' });
+    });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve product image' });
+  }
+});
 
 // POST /api/products/csv-import
 router.post('/products/csv-import', requireAdminRole, async (req: Request, res: Response) => {

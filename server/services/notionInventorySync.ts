@@ -1,11 +1,59 @@
 import { Client } from '@notionhq/client';
 import { storage } from '../storage';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import crypto from 'crypto';
+import sharp from 'sharp';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const notion = new Client({
   auth: (process.env.NOTION_INTEGRATION_SECRET ?? process.env.NOTION_API_KEY ?? '').trim(),
 });
 
 export const NOTION_INVENTORY_DATABASE_ID = (process.env.NOTION_INVENTORY_DATABASE_ID ?? '').trim() || undefined;
+
+// Local disk cache for product images — never stores the raw Notion URL (Notion-hosted
+// files expire after ~1 hour). Downloaded once per sync, resized down, and reused across
+// every scan afterward; product_image_hash lets re-syncs skip untouched images entirely.
+export const PRODUCT_IMAGE_DIR = path.join(__dirname, '..', 'uploads', 'product-images');
+if (!fs.existsSync(PRODUCT_IMAGE_DIR)) {
+  fs.mkdirSync(PRODUCT_IMAGE_DIR, { recursive: true });
+}
+
+// Downloads a product image from Notion, resizes it down (scan-dialog thumbnails don't
+// need full-resolution photography), and caches it to disk keyed by product id. Skips the
+// download's disk write when the content hash matches what's already cached, so repeat
+// syncs of unchanged images cost a hash compare, not a disk write. Returns the fields to
+// persist on the product row, or null if there's nothing to update.
+async function syncProductImage(
+  productId: number,
+  imageUrl: string,
+  existingHash: string | null | undefined,
+): Promise<{ productImage: string; productImageHash: string } | null> {
+  const response = await fetch(imageUrl);
+  if (!response.ok) throw new Error(`Image download failed (${response.status})`);
+  const original = Buffer.from(await response.arrayBuffer());
+  const hash = crypto.createHash('sha256').update(original).digest('hex');
+
+  if (hash === existingHash) {
+    console.log(`[Notion Inventory Sync] Image unchanged for product ${productId} — skipped`);
+    return null;
+  }
+
+  const resized = await sharp(original)
+    .resize({ width: 600, height: 600, fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 82 })
+    .toBuffer();
+
+  const filename = `${productId}.jpg`;
+  await fs.promises.writeFile(path.join(PRODUCT_IMAGE_DIR, filename), resized);
+  console.log(`[Notion Inventory Sync] Cached image for product ${productId} → ${filename} (${resized.length} bytes, was ${original.length})`);
+
+  return { productImage: filename, productImageHash: hash };
+}
 
 let isSyncing = false;
 
@@ -63,6 +111,7 @@ export interface SyncReport {
   changedProducts: ProductChange[];
   createdProducts: CreatedProduct[];
   errors: string[];
+  imagesCached: number;
 }
 
 const syncHistory: SyncReport[] = [];
@@ -71,6 +120,8 @@ const MAX_HISTORY = 10;
 let pendingReport: SyncReport | null = null;
 const pendingUpdates = new Map<number, Record<string, any>>();
 const pendingCreates: any[] = [];
+const pendingImageUrlByProductId = new Map<number, string>();
+const pendingImageUrlByCreateIndex = new Map<number, string>();
 
 // ─── Notion property helpers ──────────────────────────────────────────────────
 
@@ -117,6 +168,21 @@ function multiSelectToText(values: string[]): string | null {
   return values.length > 0 ? values.join(', ') : null;
 }
 
+// Notion "Files & media" properties aren't covered by extractText (it only handles
+// text-like property types) — the URL lives at a different path depending on whether
+// the file was uploaded to Notion directly (type 'file', a presigned S3 URL that
+// EXPIRES after ~1 hour) or linked externally (type 'external', a stable URL). Either
+// way, the caller must use this URL immediately (download it), never persist it as-is
+// long-term for Notion-hosted files.
+function extractFileUrl(prop: any): string {
+  if (!prop || prop.type !== 'files') return '';
+  const first = (prop.files ?? [])[0];
+  if (!first) return '';
+  if (first.type === 'external') return first.external?.url ?? '';
+  if (first.type === 'file') return first.file?.url ?? '';
+  return '';
+}
+
 function firstOf(props: any, ...keys: string[]): string {
   for (const key of keys) {
     const val = extractText(props[key]);
@@ -143,7 +209,7 @@ function mapNotionPageToFields(page: any) {
     saleCategory:    firstOf(p, 'Sale Category'),
     plant:           firstOf(p, 'Plant :', 'Plant', 'plant'),
     type:            firstOf(p, 'Type :', 'Type', 'type'),
-    productImage:    firstOf(p, 'Product Image'),
+    productImageUrl: extractFileUrl(p['Product Image']), // raw Notion URL — download immediately, never persist as-is
     volumeInCuFt:    firstOf(p, 'Vol Master :', 'Vol Master', 'Volume'),
     itemsPerPallet:  extractInteger(p['Packets :']) ?? extractInteger(p['Packets']) ?? extractInteger(p['Items Per Pallet']),
     indPlt:          extractInteger(p['IND PLT :']),
@@ -199,7 +265,7 @@ function buildProductData(fields: ReturnType<typeof mapNotionPageToFields>): Rec
     status: 'in stock',
   };
   const optional = [
-    'notionWiseName', 'brand', 'category', 'saleCategory', 'plant', 'type', 'productImage',
+    'notionWiseName', 'brand', 'category', 'saleCategory', 'plant', 'type',
     'newSr', 'volumeInCuFt', 'itemsPerPallet', 'indPlt', 'valPlt',
     'gjSr', 'gjHsn', 'gjSap', 'gjSaleRate', 'gjIgst', 'gjGaPur', 'gjMhPur', 'gjNagarPur', 'forGjOrderForm',
     'mpSr', 'mpHsn', 'mpSap', 'mpJhPur', 'mpMhPur', 'mpMpPurJabalpur', 'mpMpPurKhargone', 'mpWbPur',
@@ -238,6 +304,10 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
   const toCreate: ReturnType<typeof buildProductData>[] = [];
   const createdProducts: CreatedProduct[] = [];
   const updatesMap = new Map<number, Record<string, any>>();
+  // Notion image URL per pending change — keyed by existing product id for updates, or by
+  // index into `toCreate` for brand-new products (which have no id until after insert).
+  const imageUrlByProductId = new Map<number, string>();
+  const imageUrlByCreateIndex = new Map<number, string>();
   const errors: string[] = [];
   let skipped = 0, notFound = 0;
 
@@ -250,10 +320,13 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
 
       if (!product) {
         const data = { ...buildProductData(fields), lastChangedBy: triggeredBy };
+        if (fields.productImageUrl) imageUrlByCreateIndex.set(toCreate.length, fields.productImageUrl);
         toCreate.push(data);
         createdProducts.push({ productName: fields.name || '', barcode: fields.barcode || '', notionPageId: fields.notionPageId });
         continue;
       }
+
+      if (fields.productImageUrl) imageUrlByProductId.set(product.id, fields.productImageUrl);
 
       const updates: Record<string, any> = {};
       const fieldChanges: FieldChange[] = [];
@@ -283,7 +356,14 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
       };
 
       check('notionPageId',    fields.notionPageId    || null, product.notionPageId);
-      check('barcode',         fields.barcode         || null, product.barcode);
+      // Never let a blank Notion barcode clear out an existing one — a page going blank
+      // usually means it was archived/discontinued in Notion (e.g. category "ZCLOSED",
+      // Sr "ZI028"), not a genuine request to unset the barcode. products.barcode is
+      // NOT NULL, so trying to null it out used to make this product's update fail on
+      // every single sync run, forever, with no way to resolve it.
+      if (fields.barcode || !product.barcode) {
+        check('barcode', fields.barcode || null, product.barcode);
+      }
       check('name',            fields.name            || null, product.name);
       check('notionWiseName',  fields.notionWiseName  || null, product.notionWiseName);
       check('brand',           fields.brand           || null, product.brand);
@@ -291,7 +371,9 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
       check('saleCategory',    fields.saleCategory    || null, product.saleCategory);
       check('plant',           fields.plant           || null, product.plant);
       check('type',            fields.type            || null, product.type);
-      check('productImage',    fields.productImage    || null, product.productImage);
+      // productImage/productImageHash are never diffed as text — Notion's file URL changes
+      // on every fetch even when the underlying image doesn't. Image updates are detected
+      // separately by content hash (see syncProductImage) and applied outside this loop.
       check('volumeInCuFt',    fields.volumeInCuFt    || null, product.volumeInCuFt);
       check('itemsPerPallet',  fields.itemsPerPallet  ?? null, product.itemsPerPallet ?? null);
       check('indPlt',          fields.indPlt          ?? null, product.indPlt ?? null);
@@ -352,7 +434,7 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
     }
   }
 
-  return { changedProducts, toCreate, createdProducts, updatesMap, errors, skipped, notFound };
+  return { changedProducts, toCreate, createdProducts, updatesMap, errors, skipped, notFound, imageUrlByProductId, imageUrlByCreateIndex };
 }
 
 // ─── Detect-only (dry-run): stores pending, no DB writes ─────────────────────
@@ -366,20 +448,46 @@ export async function detectChangesFromNotion(triggeredBy = 'system'): Promise<S
     console.log('[Notion Inventory Sync] Detecting changes (dry-run)...');
     const notionPages = await fetchAllNotionPages();
     const allProducts = await storage.getAllProducts();
-    const { changedProducts, toCreate, createdProducts, updatesMap, errors, skipped, notFound } =
+    const { changedProducts, toCreate, createdProducts, updatesMap, errors, skipped, notFound, imageUrlByProductId, imageUrlByCreateIndex } =
       await computeChanges(notionPages, allProducts, triggeredBy);
 
     const report: SyncReport = {
       syncTime: new Date(), total: notionPages.length,
       created: toCreate.length, updated: changedProducts.length,
       skipped, notFound, triggeredBy, changedProducts, createdProducts, errors,
+      imagesCached: 0, // filled in below once the image loop runs
     };
 
     pendingReport = report;
     pendingUpdates.clear();
     pendingCreates.length = 0;
+    pendingImageUrlByProductId.clear();
+    pendingImageUrlByCreateIndex.clear();
     for (const [id, upd] of updatesMap.entries()) pendingUpdates.set(id, upd);
     pendingCreates.push(...toCreate);
+    for (const [id, url] of imageUrlByProductId.entries()) pendingImageUrlByProductId.set(id, url);
+    for (const [idx, url] of imageUrlByCreateIndex.entries()) pendingImageUrlByCreateIndex.set(idx, url);
+
+    // Images are never part of the reviewable field-level diff (nobody approves/rejects a
+    // picture), so they can't wait on the Apply button — a product whose ONLY pending thing
+    // is an uncached image would otherwise have hasPendingChanges stay false forever and the
+    // Apply button would never even become clickable. Cache images for EXISTING products
+    // right here, regardless of whether they also have a field-level change to review.
+    // New (not-yet-created) products still wait for Apply, since they need a real id first.
+    let imagesSynced = 0;
+    for (const [productId, imageUrl] of imageUrlByProductId.entries()) {
+      try {
+        const current = allProducts.find((p) => p.id === productId);
+        const result = await syncProductImage(productId, imageUrl, current?.productImageHash);
+        if (result) {
+          await storage.updateProduct(productId, result);
+          imagesSynced++;
+        }
+      } catch (err) {
+        errors.push(`Image for product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (imagesSynced > 0) console.log(`[Notion Inventory Sync] Cached ${imagesSynced} product image(s) during detect`);
 
     console.log(`[Notion Inventory Sync] Detected — new: ${toCreate.length}, changed: ${changedProducts.length}, unchanged: ${skipped}`);
     return report;
@@ -400,24 +508,77 @@ export async function applyPendingChanges(): Promise<SyncReport> {
     let updated = 0, created = 0;
 
     for (const [productId, updates] of pendingUpdates.entries()) {
-      try { await storage.updateProduct(productId, updates); updated++; }
-      catch (err) { errors.push(`Update product ${productId}: ${err instanceof Error ? err.message : String(err)}`); }
-    }
-    for (const data of pendingCreates) {
       try {
-        await storage.createProduct(data as any);
-        created++;
-      } catch (_createErr) {
-        // Silently skip barcode conflicts from prior imports without a Notion ID
+        await storage.updateProduct(productId, updates);
+        updated++;
+      } catch (err) {
+        errors.push(`Update product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+      const imageUrl = pendingImageUrlByProductId.get(productId);
+      if (imageUrl) {
+        try {
+          const current = await storage.getProduct(productId);
+          const result = await syncProductImage(productId, imageUrl, current?.productImageHash);
+          if (result) await storage.updateProduct(productId, result);
+        } catch (err) {
+          errors.push(`Image for product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     }
 
-    const report: SyncReport = { ...pendingReport, updated, created, errors };
+    // Products with a Notion image but no OTHER field change never appear in
+    // pendingUpdates above (they're "skipped" as unchanged in computeChanges) — but their
+    // image still needs to be checked/cached at least once. Handle every remaining tracked
+    // image URL here so a product's picture doesn't stay perpetually un-synced just because
+    // the rest of its data already matches.
+    let imagesSynced = 0;
+    for (const [productId, imageUrl] of pendingImageUrlByProductId.entries()) {
+      if (pendingUpdates.has(productId)) continue; // already handled above
+      try {
+        const current = await storage.getProduct(productId);
+        const result = await syncProductImage(productId, imageUrl, current?.productImageHash);
+        if (result) {
+          await storage.updateProduct(productId, result);
+          imagesSynced++;
+        }
+      } catch (err) {
+        errors.push(`Image for product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (imagesSynced > 0) console.log(`[Notion Inventory Sync] Cached ${imagesSynced} product image(s) with no other field changes`);
+
+    for (let i = 0; i < pendingCreates.length; i++) {
+      const data = pendingCreates[i];
+      try {
+        const newProduct = await storage.createProduct(data as any);
+        created++;
+        const imageUrl = pendingImageUrlByCreateIndex.get(i);
+        if (imageUrl) {
+          try {
+            const result = await syncProductImage(newProduct.id, imageUrl, null);
+            if (result) await storage.updateProduct(newProduct.id, result);
+          } catch (err) {
+            errors.push(`Image for new product ${newProduct.id}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      } catch (createErr) {
+        // Most commonly a barcode conflict with a prior import that has no Notion ID —
+        // surfaced now (was silently swallowed before) so a "detected but not applied"
+        // change is actually explainable instead of just vanishing.
+        const label = data?.name || data?.barcode || `row ${i + 1}`;
+        errors.push(`Create "${label}": ${createErr instanceof Error ? createErr.message : String(createErr)}`);
+      }
+    }
+
+    const report: SyncReport = { ...pendingReport, updated, created, errors, imagesCached: (pendingReport.imagesCached ?? 0) + imagesSynced };
     syncHistory.unshift(report);
     if (syncHistory.length > MAX_HISTORY) syncHistory.splice(MAX_HISTORY);
     pendingReport = null;
     pendingUpdates.clear();
     pendingCreates.length = 0;
+    pendingImageUrlByProductId.clear();
+    pendingImageUrlByCreateIndex.clear();
 
     console.log(`[Notion Inventory Sync] Applied — updated: ${updated}, created: ${created}`);
     return report;
@@ -435,6 +596,7 @@ export async function fullSyncFromNotion(triggeredBy = 'system'): Promise<SyncRe
   isSyncing = true;
   const errors: string[] = [];
   let created = 0;
+  let imagesCached = 0;
   const createdProducts: CreatedProduct[] = [];
 
   try {
@@ -450,9 +612,17 @@ export async function fullSyncFromNotion(triggeredBy = 'system'): Promise<SyncRe
         const fields = mapNotionPageToFields(page);
         if (!fields.barcode && !fields.name) continue;
         const data = { ...buildProductData(fields), lastChangedBy: triggeredBy };
-        await storage.createProduct(data as any);
+        const newProduct = await storage.createProduct(data as any);
         created++;
         createdProducts.push({ productName: fields.name, barcode: fields.barcode, notionPageId: fields.notionPageId });
+        if (fields.productImageUrl) {
+          try {
+            const result = await syncProductImage(newProduct.id, fields.productImageUrl, null);
+            if (result) { await storage.updateProduct(newProduct.id, result); imagesCached++; }
+          } catch (imgErr) {
+            errors.push(`Image for product ${newProduct.id}: ${imgErr instanceof Error ? imgErr.message : String(imgErr)}`);
+          }
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         errors.push(msg);
@@ -464,7 +634,7 @@ export async function fullSyncFromNotion(triggeredBy = 'system'): Promise<SyncRe
       syncTime: new Date(), total: notionPages.length,
       created, updated: 0, skipped: 0,
       notFound: notionPages.length - created - errors.length,
-      triggeredBy, changedProducts: [], createdProducts, errors,
+      triggeredBy, changedProducts: [], createdProducts, errors, imagesCached,
     };
     syncHistory.unshift(report);
     if (syncHistory.length > MAX_HISTORY) syncHistory.splice(MAX_HISTORY);

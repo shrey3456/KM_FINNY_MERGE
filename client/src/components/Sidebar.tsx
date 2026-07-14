@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { getCurrentUserPermissions } from "../lib/permissions";
+import { getCurrentUserPermissions, type Permissions } from "../lib/permissions";
 import { useAuth } from "../hooks/use-auth";
 import { apiRequest } from "../lib/queryClient";
 import { formatUsername } from "@/lib/format-username";
+import type { PageKey } from "@shared/pageKeys";
 import {
   Home,
   Settings,
@@ -39,6 +40,24 @@ interface SidebarProps {
   onLogout?: () => void;
   onCollapse?: () => void;
   isMobile?: boolean;
+}
+
+interface SidebarMenuItem {
+  label: string;
+  icon: React.ReactNode;
+  path: string;
+  pageKey?: PageKey | (string & {});
+  permission?: keyof Permissions;
+  departments?: string[];
+  roles?: string[];
+  adminOnly?: boolean;
+  badge?: number;
+  disabled?: boolean;
+}
+
+interface SidebarMenuCategory {
+  title: string;
+  items: SidebarMenuItem[];
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => {
@@ -114,7 +133,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
   })();
 
   // Group menu items by categories as shown in the image
-  const menuCategories = [
+  const menuCategories: SidebarMenuCategory[] = [
     {
       title: "MAIN",
       items: [
@@ -191,7 +210,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/expense-voucher",
-          permission: "canAccessExpenseVoucher",
           pageKey: "expense-voucher",
         },
         {
@@ -203,7 +221,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
             />
           ),
           path: "/toll-voucher",
-          permission: "canAccessExpenseVoucher",
           pageKey: "toll-voucher",
         },
         {
@@ -217,7 +234,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           label: "Overall Stock",
           icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/overall-stock",
-          permission: "canAccessOverallStockReport",
           pageKey: "overall-stock",
         },
         {
@@ -242,6 +258,17 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           permission: "canAccessOrderManagement",
           departments: ['billing'],
           pageKey: "order-import",
+        },
+        {
+          label: "Plant Management",
+          icon: (
+            <Factory
+              className="h-5 w-5 mr-3 text-[#001d6e]"
+              style={{ fill: "#4d7eff" }}
+            />
+          ),
+          path: "/plant-settings",
+          pageKey: "plant-management",
         },
       ],
     },
@@ -272,21 +299,10 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "user-management",
         },
         {
-          label: "Plant Management",
-          icon: (
-            <Factory
-              className="h-5 w-5 mr-3 text-[#001d6e]"
-              style={{ fill: "#4d7eff" }}
-            />
-          ),
-          path: "/plant-settings",
-          pageKey: "plant-management",
-        },
-        {
           label: "Activities",
           icon: <Activity className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/activities",
-          pageKey: "activities",
+          adminOnly: true,
         },
         {
           label: "Settings",
@@ -344,7 +360,9 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
                   if (it.adminOnly && !isSuperAdmin) return false;
                   // Role-based access: only show to listed roles
                   if (it.roles) return it.roles.includes(userRole);
-                  // Permission-based access (with optional department override)
+                
+                  if (it.pageKey && !isAdminRole && allowedPages.includes(it.pageKey)) return true;
+                 
                   if (it.permission) {
                     return userPermissions[it.permission as keyof typeof userPermissions] === true
                       || it.departments?.includes(userDepartment) === true;

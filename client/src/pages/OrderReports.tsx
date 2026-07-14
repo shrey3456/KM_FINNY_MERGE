@@ -76,11 +76,15 @@ type Row = (string | number)[];
 function getLocalISODate(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+// These timestamps (order_import_sessions.created_at, order_scan_events.scanned_at) are
+// populated by Postgres's own NOW() and come back as genuine UTC instants — they need a
+// real conversion to IST for display, same as the working Scan History page (Reports.tsx)
+// already does with date-fns. Forcing timeZone: "UTC" here (the old code) skipped that
+// conversion entirely, so every time on this page displayed 5.5 hours behind the real time.
 function fmtIST(dt: string | null | undefined): string {
   if (!dt) return "—";
-  const s = String(dt);
-  const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
-  return isNaN(d.getTime()) ? "—" : d.toLocaleString("en-IN", { timeZone: "UTC" });
+  const d = new Date(dt);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 }
 function exportRows(fmt: Fmt, baseName: string, title: string, rows: Row[]) {
   if (fmt === "CSV") {
@@ -109,7 +113,10 @@ function safe(name: string) { return name.replace(/\.csv$/i, "").replace(/[^\w.-
 // ─── Component ──────────────────────────────────────────────────────────────
 export default function OrderReports() {
   const { toast } = useToast();
-  const [date, setDate] = useState(getLocalISODate());
+  // Reports are about reviewing existing data, not just today's — defaulting the filter to
+  // "today" hid everything the moment you looked at this page a day later. Default to "all
+  // dates" instead; the date picker is still right there for narrowing down when needed.
+  const [date, setDate] = useState("");
   const [plant, setPlant] = useState("");
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState<string | null>(null); // key of the report currently downloading/opening

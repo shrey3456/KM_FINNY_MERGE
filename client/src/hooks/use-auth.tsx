@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useContext } from "react";
+import { createContext, ReactNode, useContext, useEffect } from "react";
 import {
   useQuery,
   useMutation,
@@ -8,6 +8,23 @@ import { User as SelectUser } from "@shared/schema";
 import { getQueryFn, apiRequest, queryClient } from "../lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useLocation } from "wouter";
+
+// Mirrors the fields the rest of the app reads out of localStorage('currentUser')
+// (permissions.ts, Sidebar.tsx) so page-access/write-access checks never run
+// against a stale snapshot from whenever the user last typed their password.
+function syncCurrentUserToLocalStorage(user: SelectUser) {
+  localStorage.setItem('currentUser', JSON.stringify({
+    userCode: user.userCode,
+    username: user.username,
+    name: user.name,
+    role: user.role,
+    department: user.department,
+    plants: (user as any).plants ?? '[]',
+    allowedPages: (user as any).allowedPages ?? '[]',
+    pageWriteAccess: (user as any).pageWriteAccess ?? '[]',
+  }));
+  localStorage.setItem('userCode', user.userCode || '');
+}
 
 type AuthContextType = {
   user: SelectUser | null;
@@ -35,7 +52,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   } = useQuery<SelectUser | null, Error>({
     queryKey: ["/api/user"],
     queryFn: getQueryFn({ on401: "returnNull" }),
+    refetchOnWindowFocus: true,
+    staleTime: 0,
   });
+
+  // Keep localStorage('currentUser') in step with whatever /api/user last returned —
+  // otherwise a write-access grant made while the user's tab is already open never
+  // takes effect until they log out and back in (see hasPageWriteAccess in permissions.ts).
+  useEffect(() => {
+    if (user) syncCurrentUserToLocalStorage(user);
+  }, [user]);
 
   const loginMutation = useMutation({
     mutationFn: async (credentials: LoginData) => {
@@ -44,20 +70,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     onSuccess: (user: SelectUser) => {
       queryClient.setQueryData(["/api/user"], user);
-      
-      // Store user info in localStorage for compatibility with existing code
-      localStorage.setItem('currentUser', JSON.stringify({
-        userCode: user.userCode,
-        username: user.username,
-        name: user.name,
-        role: user.role,
-        department: user.department,
-        plants: (user as any).plants ?? '[]',
-        allowedPages: (user as any).allowedPages ?? '[]',
-      }));
-      
-      localStorage.setItem('userCode', user.userCode || '');
-      
+      syncCurrentUserToLocalStorage(user);
+
       toast({
         title: "Login successful",
         description: `Welcome back to KM Finny, ${user.name || user.username}`,

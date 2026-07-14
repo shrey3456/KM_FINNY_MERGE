@@ -71,6 +71,7 @@ export interface IStorage {
   // Product operations
   getProduct(id: number): Promise<Product | undefined>;
   getProductByBarcode(barcode: string): Promise<Product | undefined>;
+  getProductByName(name: string): Promise<Product | undefined>;
   getProductsByIds(ids: number[]): Promise<Product[]>; // Batch get products by IDs
   createProduct(product: InsertProduct): Promise<Product>;
   updateProduct(id: number, product: Partial<InsertProduct>): Promise<Product | undefined>;
@@ -765,6 +766,13 @@ export class MemStorage implements IStorage {
   async getProductByBarcode(barcode: string): Promise<Product | undefined> {
     return Array.from(this.products.values()).find(
       (product) => product.barcode === barcode,
+    );
+  }
+
+  async getProductByName(name: string): Promise<Product | undefined> {
+    const normalized = name.trim().toLowerCase();
+    return Array.from(this.products.values()).find(
+      (product) => product.name?.trim().toLowerCase() === normalized,
     );
   }
 
@@ -2353,6 +2361,11 @@ export class DBStorage implements IStorage {
     return result.length ? result[0] : undefined;
   }
 
+  async getProductByName(name: string): Promise<Product | undefined> {
+    const result = await db.select().from(products).where(ilike(products.name, name.trim())).limit(1);
+    return result.length ? result[0] : undefined;
+  }
+
   async getProductsByIds(ids: number[]): Promise<Product[]> {
     if (!ids || ids.length === 0) return [];
     
@@ -2417,9 +2430,6 @@ export class DBStorage implements IStorage {
       // If no lastUpdated provided, use current date
       updateData.updatedAt = new Date();
     }
-
-    console.log("Updating product with processed data:", JSON.stringify(updateData, null, 2));
-
     const result = await db.update(products).set(updateData).where(eq(products.id, id)).returning();
     return result.length ? result[0] : undefined;
   }
