@@ -292,6 +292,14 @@ export default function ScanOrderPage() {
   // read the same stale qty, independently decide "still under capacity", and double-log one
   // physical scan while skipping the breach dialog it should have hit on the second qty.
   const osScanLockRef = useRef(false);
+  // The matched CSV item + pallet size for the scan currently being submitted. Set by BOTH
+  // the auto-confirm path (_resolveOsScan) and the dialog-confirm path (handleOsConfirmScan)
+  // just before osScanMutation.mutate, so onMutate can apply its optimistic totalScannedQty/
+  // lastScannedAt bump uniformly. Previously onMutate read this only from osPendingRef, which
+  // is null for auto-confirmed (under-capacity) scans — so those scans skipped the optimistic
+  // reorder-to-top and only moved after the slower server round-trip, while full/breach scans
+  // (which open the dialog) reordered instantly. This ref closes that asymmetry.
+  const osScanCtxRef = useRef<{ matchedItem: OsScanItem | null; plantPalletSize: number } | null>(null);
   const [osMultiMatch, setOsMultiMatch] = useState<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osMultiMatchRef = useRef<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const [osPallets, setOsPallets] = useState(1);
@@ -321,10 +329,22 @@ export default function ScanOrderPage() {
   // Brief full-screen tint on a silently auto-confirmed scan (no dialog shown) — the only
   // feedback signal besides the beep for the fast/normal-case path. Cleared via setTimeout.
   const [osFlash, setOsFlash] = useState<"success" | null>(null);
+  // Client-side "most recently scanned floats to top" ordering. A monotonic counter bumped on
+  // every scan (in onMutate), mapping item id → its scan sequence number. Used as the PRIMARY
+  // sort key for the CSV Items list instead of lastScannedAt, because lastScannedAt can't be
+  // compared reliably across items: a just-scanned item still carries its optimistic real-UTC
+  // toISOString() value, while items whose scan already round-tripped carry the server's
+  // IST-wall-clock-as-UTC convention (~5.5h ahead) — so the freshly-scanned item looks OLDER
+  // and wrongly sorts below an already-completed one. A pure client counter sidesteps all of
+  // that. Reset on session change. Held in a ref (not state) because every scan already
+  // triggers a re-render via the optimistic setQueryData/setOsRecentScans, so the sort re-runs
+  // and reads the fresh ref without needing its own state update.
+  const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
   useEffect(() => {
     setOsSelectedStv("");
+    osScanSeqRef.current = { seq: 0, byId: new Map() };
   }, [activeOrderScanSession?.id]);
 
   const osItemsQuery = useQuery<OsScanItem[]>({
@@ -432,14 +452,27 @@ export default function ScanOrderPage() {
       await queryClient.cancelQueries({ queryKey: osItemsKey });
       const previousItems = queryClient.getQueryData<OsScanItem[]>(osItemsKey);
       const previousPending = osPendingRef.current; // save before clearing
+      const scanCtx = osScanCtxRef.current; // set by both auto-confirm and dialog-confirm paths
 
-      // Only optimistically update if the barcode matched a CSV item (not an extra)
-      const matched = previousPending?.matchedItem;
+      // Only optimistically update if the barcode matched a CSV item (not an extra).
+      // Prefer scanCtx (populated for BOTH scan paths) over previousPending (dialog only) so
+      // auto-confirmed under-capacity scans also get the instant totalScannedQty/lastScannedAt
+      // bump — otherwise they wouldn't reorder-to-top until the server round-trip landed.
+      const matched = scanCtx?.matchedItem ?? previousPending?.matchedItem;
+      // Stamp this scan's sequence so the item floats to the very top of the list — for ANY
+      // scan on a real CSV row (partial, completing, or an extra logged onto an already-full
+      // row), not just completing ones. A "not in order" extra has no matched row, so nothing
+      // to reorder.
+      if (matched) {
+        const s = osScanSeqRef.current;
+        s.seq += 1;
+        s.byId.set(matched.id, s.seq);
+      }
       if (matched && !payload.isExtra) {
         // payload.qty is the authoritative box count — pallets/looseQty here are only a
         // display estimate using this client's best-known plant pallet size; the server
         // reconciles with the live-resolved value via onSuccess below.
-        const itemsPerPallet = previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
+        const itemsPerPallet = scanCtx?.plantPalletSize ?? previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
         const addedQty = payload.qty;
         const addedPallets = itemsPerPallet > 0 ? Math.floor(addedQty / itemsPerPallet) : addedQty;
         const addedLoose = itemsPerPallet > 0 ? addedQty % itemsPerPallet : 0;
@@ -599,6 +632,9 @@ export default function ScanOrderPage() {
     if (doesNotOvershoot) {
       setOsFlash("success");
       setTimeout(() => setOsFlash(null), 350);
+      // Give onMutate the matched item so it can optimistically bump qty + lastScannedAt (and
+      // thus reorder this item to the top) instantly, without waiting for the server.
+      osScanCtxRef.current = { matchedItem: match, plantPalletSize };
       // Lock stays held (set by the caller before this ran) until the mutation settles — this
       // is the only path that never opens a dialog, so it needs its own release point.
       osScanMutation.mutate(
@@ -686,6 +722,8 @@ export default function ScanOrderPage() {
     const itemAlreadyComplete = osPending.matchedItem
       ? (osPending.matchedItem.totalScannedQty ?? 0) >= (osPending.matchedItem.expectedQty ?? 1)
       : false;
+    // Mirror the auto-confirm path so onMutate has a uniform source for its optimistic bump.
+    osScanCtxRef.current = { matchedItem: osPending.matchedItem, plantPalletSize: osPending.plantPalletSize };
     osScanMutation.mutate({
       barcode: osPending.barcode,
       qty,
@@ -1109,6 +1147,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         )
       : osItems
     ).slice().sort((a, b) => {
+      // PRIMARY: whatever was scanned most recently THIS session floats to the very top —
+      // every scan bumps osScanSeqRef in onMutate, so the item just scanned always wins
+      // position 1 (a monotonic client counter, immune to the optimistic-vs-server timestamp
+      // skew that a lastScannedAt comparison suffers from). Items not scanned this session have
+      // seq 0 and fall through to the ordering below.
+      const seq = osScanSeqRef.current.byId;
+      const aSeq = seq.get(a.id) ?? 0;
+      const bSeq = seq.get(b.id) ?? 0;
+      if (aSeq !== bSeq) return bSeq - aSeq;
+      // SECONDARY: for items only scanned in a PRIOR page-load (all carry the server's own
+      // timestamp convention, so they're mutually consistent), most-recent first. Guard against
+      // an unparseable value (NaN) so it cleanly falls through to the status/id tiebreakers.
+      const parseAt = (v: string | null) => { const t = v ? new Date(v).getTime() : 0; return Number.isNaN(t) ? 0 : t; };
+      const aScannedAt = parseAt(a.lastScannedAt);
+      const bScannedAt = parseAt(b.lastScannedAt);
+      if (aScannedAt !== bScannedAt) return bScannedAt - aScannedAt;
       const rank = (s: string) => s === "complete" ? 0 : s === "partial" ? 1 : 2;
       const diff = rank(a.status) - rank(b.status);
       if (diff !== 0) return diff;
