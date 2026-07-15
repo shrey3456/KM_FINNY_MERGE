@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { Filter, X, FileDown, LayoutList, Columns3, Check, Factory } from "lucide-react";
+import { Filter, X, FileDown, LayoutList, Factory } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import PageHeader from "@/components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
+import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -55,8 +56,6 @@ const ALL_COLUMNS = [
   { key: "extraPallets", label: "Extra Pallets" },
   { key: "lastUpdated", label: "Last Updated" },
 ] as const;
-
-type ColKey = typeof ALL_COLUMNS[number]["key"];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -105,18 +104,21 @@ const PAGE_SIZE = 20;
 export default function OverallStock() {
   const [plantFilter, setPlantFilter] = useState(""); // "" = all plants the user may see
   const [search,      setSearch]      = useState("");
-  const [page,        setPage]        = useState(1);
-  const [visibleCols, setVisibleCols] = useState<Set<ColKey>>(new Set(ALL_COLUMNS.map((c) => c.key)));
-  const [colDropOpen, setColDropOpen] = useState(false);
+  const [pageIndex,   setPageIndex]   = useState(0);
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
+    () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
+  );
 
-  const toggleCol = (key: ColKey) =>
-    setVisibleCols((prev) => {
+  const toggleColumn = (key: string) =>
+    setVisibleColumnIds((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) { if (next.size > 1) next.delete(key); }
-      else next.add(key);
+      if (next.has(key)) {
+        // Keep at least one of the optional (ALL_COLUMNS) columns visible.
+        const remainingOptional = ALL_COLUMNS.filter((c) => c.key !== key && next.has(c.key));
+        if (remainingOptional.length > 0) next.delete(key);
+      } else next.add(key);
       return next;
     });
-  const show = (key: ColKey) => visibleCols.has(key);
 
   // All configured plants — used to populate the plant switcher for admins.
   const { data: allPlants = [] } = useQuery<{ id: number; name: string }[]>({
@@ -158,11 +160,6 @@ export default function OverallStock() {
     );
   }, [rows, search]);
 
-  // Pagination
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const safePage   = Math.min(page, totalPages);
-  const pageRows   = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-
   // Summary
   const totalStock = filtered.reduce((s, r) => s + r.inStock, 0);
   const totalExtra = filtered.reduce((s, r) => s + r.extraQty, 0);
@@ -178,6 +175,163 @@ export default function OverallStock() {
       r.extraPallets != null ? r.extraPallets.toFixed(2) : "",
       r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "",
     ]),
+  ];
+
+  const dash = <span className="text-gray-300">—</span>;
+  const cellBorder = "border-r border-gray-100";
+  const headerBorder = "border-r border-[#001d6e]/30";
+
+  const stockColumns: DataTableColumn<PlantStockRow>[] = [
+    {
+      id: "srNo",
+      header: "#",
+      hideable: false,
+      width: 44,
+      headerClassName: headerBorder,
+      cellClassName: `text-gray-400 tabular-nums ${cellBorder}`,
+      render: (_row, rowIndex) => rowIndex + 1,
+    },
+    {
+      id: "itemName",
+      header: "Item",
+      hideable: false,
+      width: 220,
+      sortable: true,
+      accessor: (row) => row.itemName,
+      headerClassName: headerBorder,
+      cellClassName: `font-medium text-gray-900 whitespace-normal break-words ${cellBorder}`,
+      render: (row) => row.itemName,
+    },
+    {
+      id: "barcode",
+      header: "Barcode / SKU",
+      width: 140,
+      sortable: true,
+      accessor: (row) => row.barcode,
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-600 ${cellBorder}`,
+      render: (row) => row.barcode ?? dash,
+    },
+    {
+      id: "sapCode",
+      header: "SAP Code",
+      width: 110,
+      sortable: true,
+      accessor: (row) => row.sapCode,
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-600 ${cellBorder}`,
+      render: (row) => row.sapCode ?? dash,
+    },
+    {
+      id: "category",
+      header: "Category",
+      width: 130,
+      sortable: true,
+      accessor: (row) => row.category,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.category ? (
+          <span className="inline-flex items-center rounded-full border border-gray-200 px-2 py-0.5 text-[11px] text-gray-700">
+            {row.category}
+          </span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "brand",
+      header: "Brand",
+      width: 110,
+      sortable: true,
+      accessor: (row) => row.brand,
+      headerClassName: headerBorder,
+      cellClassName: `text-gray-700 ${cellBorder}`,
+      render: (row) => row.brand ?? dash,
+    },
+    {
+      id: "plant",
+      header: "Plant",
+      hideable: false,
+      width: 100,
+      sortable: true,
+      accessor: (row) => row.plant,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) => (
+        <span className="inline-flex items-center rounded-full bg-[#001d6e]/10 px-2 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">
+          {row.plant}
+        </span>
+      ),
+    },
+    {
+      id: "stock",
+      header: "Stock (Boxes)",
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.inStock,
+      headerClassName: headerBorder,
+      cellClassName: `font-bold text-[#001d6e] tabular-nums ${cellBorder}`,
+      render: (row) => row.inStock.toLocaleString(),
+    },
+    {
+      id: "extra",
+      header: "Extra",
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.extraQty,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.extraQty > 0 ? (
+          <span className="font-semibold text-amber-600 tabular-nums">{row.extraQty.toLocaleString()}</span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "pallets",
+      header: "Pallets",
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.pallets,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.pallets != null && row.pallets > 0 ? (
+          <span className="font-semibold text-[#001d6e] tabular-nums">{row.pallets.toFixed(2)}</span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "extraPallets",
+      header: "Extra Pallets",
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.extraPallets,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.extraPallets != null && row.extraPallets > 0 ? (
+          <span className="font-semibold text-amber-600 tabular-nums">{row.extraPallets.toFixed(2)}</span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "lastUpdated",
+      header: "Last Updated",
+      width: 120,
+      sortable: true,
+      accessor: (row) => row.lastArrived,
+      cellClassName: "text-gray-500 whitespace-nowrap",
+      render: (row) => (row.lastArrived ? format(new Date(row.lastArrived), "MMM d, yyyy") : dash),
+    },
   ];
 
   return (
@@ -213,7 +367,7 @@ export default function OverallStock() {
           {/* Plant */}
           <div className="flex items-center gap-1.5">
             <Factory className="h-4 w-4 text-gray-400" />
-            <Select value={plantFilter || "_all_"} onValueChange={(v) => { setPlantFilter(v === "_all_" ? "" : v); setPage(1); }}>
+            <Select value={plantFilter || "_all_"} onValueChange={(v) => { setPlantFilter(v === "_all_" ? "" : v); setPageIndex(0); }}>
               <SelectTrigger className="h-9 w-[160px] text-sm">
                 <SelectValue placeholder="All plants" />
               </SelectTrigger>
@@ -231,40 +385,22 @@ export default function OverallStock() {
               className="pl-8 h-9 text-sm"
               placeholder="Item, barcode, SAP, category…"
               value={search}
-              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              onChange={(e) => { setSearch(e.target.value); setPageIndex(0); }}
             />
             {search && (
-              <button className="absolute right-2 top-1/2 -translate-y-1/2" onClick={() => { setSearch(""); setPage(1); }}>
+              <button className="absolute right-2 top-1/2 -translate-y-1/2" onClick={() => { setSearch(""); setPageIndex(0); }}>
                 <X className="h-4 w-4 text-gray-400" />
               </button>
             )}
           </div>
 
           {/* Column visibility */}
-          <div className="relative">
-            <Button variant="outline" size="sm" className="h-9 text-xs gap-1.5" onClick={() => setColDropOpen((o) => !o)}>
-              <Columns3 className="h-3.5 w-3.5" />Columns
-            </Button>
-            {colDropOpen && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setColDropOpen(false)} />
-                <div className="absolute right-0 top-10 z-20 w-48 rounded-lg border bg-white shadow-lg py-1">
-                  {ALL_COLUMNS.map((col) => (
-                    <button
-                      key={col.key}
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
-                      onClick={() => toggleCol(col.key)}
-                    >
-                      <span className={`flex h-4 w-4 items-center justify-center rounded border ${visibleCols.has(col.key) ? "bg-[#001d6e] border-[#001d6e]" : "border-gray-300"}`}>
-                        {visibleCols.has(col.key) && <Check className="h-2.5 w-2.5 text-white" />}
-                      </span>
-                      {col.label}
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
+          <DataTableColumnToggle
+            columns={stockColumns}
+            visibleColumnIds={visibleColumnIds}
+            onToggleColumn={toggleColumn}
+            onSetAll={(visible) => setVisibleColumnIds(visible ? new Set(stockColumns.map((c) => c.id)) : new Set())}
+          />
 
           {/* Export */}
           <div className="flex gap-2 ml-auto">
@@ -287,124 +423,25 @@ export default function OverallStock() {
 
         {/* Table */}
         <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse" style={{ minWidth: 760 }}>
-              <thead>
-                <tr className="bg-[#001d6e]">
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30 w-[44px]">#</th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30 min-w-[200px]">Item</th>
-                  {show("barcode")     && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Barcode / SKU</th>}
-                  {show("sapCode")     && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">SAP Code</th>}
-                  {show("category")    && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Category</th>}
-                  {show("brand")       && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Brand</th>}
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Plant</th>
-                  {show("stock")       && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Stock (Boxes)</th>}
-                  {show("extra")       && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Extra</th>}
-                  {show("pallets")     && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Pallets</th>}
-                  {show("extraPallets") && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Extra Pallets</th>}
-                  {show("lastUpdated") && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white">Last Updated</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 ? (
-                  <tr>
-                    <td colSpan={3 + visibleCols.size} className="py-16 text-center text-sm text-gray-400">
-                      No stock yet{plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.
-                    </td>
-                  </tr>
-                ) : (
-                  pageRows.map((row, idx) => {
-                    const rowBg = idx % 2 === 0 ? "bg-white" : "bg-slate-50";
-                    const cell = "border-r border-gray-100";
-                    return (
-                      <tr key={`${row.barcode}-${row.plant}`} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
-                        <td className={`px-3 py-3 text-gray-400 text-[11px] tabular-nums ${cell}`}>
-                          {(safePage - 1) * PAGE_SIZE + idx + 1}
-                        </td>
-                        <td className={`px-3 py-3 font-medium text-gray-900 min-w-[200px] max-w-[280px] whitespace-normal break-words ${cell}`}>
-                          {row.itemName}
-                        </td>
-                        {show("barcode") && (
-                          <td className={`px-3 py-3 font-mono text-[11px] text-gray-600 ${cell}`}>
-                            {row.barcode ?? <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                        {show("sapCode") && (
-                          <td className={`px-3 py-3 font-mono text-[11px] text-gray-600 ${cell}`}>
-                            {row.sapCode ?? <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                        {show("category") && (
-                          <td className={`px-3 py-3 ${cell}`}>
-                            {row.category
-                              ? <span className="inline-flex items-center rounded-full border border-gray-200 px-2 py-0.5 text-[11px] text-gray-700">{row.category}</span>
-                              : <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                        {show("brand") && (
-                          <td className={`px-3 py-3 text-[11px] text-gray-700 ${cell}`}>
-                            {row.brand ?? <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                        <td className={`px-3 py-3 ${cell}`}>
-                          <span className="inline-flex items-center rounded-full bg-[#001d6e]/10 px-2 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{row.plant}</span>
-                        </td>
-                        {show("stock") && (
-                          <td className={`px-3 py-3 text-right font-bold text-[#001d6e] tabular-nums ${cell}`}>
-                            {row.inStock.toLocaleString()}
-                          </td>
-                        )}
-                        {show("extra") && (
-                          <td className={`px-3 py-3 text-right tabular-nums ${cell}`}>
-                            {row.extraQty > 0 ? (
-                              <span className="font-semibold text-amber-600">{row.extraQty.toLocaleString()}</span>
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
-                          </td>
-                        )}
-                        {show("pallets") && (
-                          <td className={`px-3 py-3 text-right font-semibold text-[#001d6e] tabular-nums ${cell}`}>
-                            {row.pallets != null && row.pallets > 0
-                              ? row.pallets.toFixed(2)
-                              : <span className="text-gray-300 font-normal">—</span>}
-                          </td>
-                        )}
-                        {show("extraPallets") && (
-                          <td className={`px-3 py-3 text-right font-semibold text-amber-600 tabular-nums ${cell}`}>
-                            {row.extraPallets != null && row.extraPallets > 0
-                              ? row.extraPallets.toFixed(2)
-                              : <span className="text-gray-300 font-normal">—</span>}
-                          </td>
-                        )}
-                        {show("lastUpdated") && (
-                          <td className="px-3 py-3 text-[11px] text-gray-500 whitespace-nowrap">
-                            {row.lastArrived
-                              ? format(new Date(row.lastArrived), "MMM d, yyyy")
-                              : <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="flex items-center justify-between border-t px-4 py-2.5 text-xs text-gray-500">
-            <span>
-              {filtered.length > 0
-                ? `Showing ${(safePage - 1) * PAGE_SIZE + 1}–${Math.min(safePage * PAGE_SIZE, filtered.length)} of ${filtered.length} rows`
-                : "No rows"}
-            </span>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" disabled={safePage <= 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
-              <Button variant="outline" size="sm" disabled={safePage >= totalPages}
-                onClick={() => setPage((p) => p + 1)}>Next</Button>
-            </div>
-          </div>
+          <DataTable<PlantStockRow>
+            columns={stockColumns}
+            data={filtered}
+            getRowId={(row) => `${row.barcode}-${row.plant}`}
+            emptyState={`No stock yet${plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.`}
+            enableZebraStripes
+            sortMode="client"
+            paginationMode="client"
+            pageIndex={pageIndex}
+            onPageIndexChange={setPageIndex}
+            defaultPageSize={PAGE_SIZE}
+            pageSizeOptions={[20, 50, 100, 200]}
+            enableColumnResizing
+            enableColumnVisibility
+            columnVisibility={visibleColumnIds}
+            onColumnVisibilityChange={setVisibleColumnIds}
+            showMobileSwipeHint
+            headerClassName="bg-[#001d6e] text-white hover:bg-[#0a2b7e] hover:text-white"
+          />
         </div>
       </div>
     </div>
