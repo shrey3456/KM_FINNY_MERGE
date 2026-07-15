@@ -70,6 +70,14 @@ app.use((req, res, next) => {
       ALTER TABLE products
       ADD COLUMN IF NOT EXISTS product_image_hash TEXT
     `);
+    await pool.query(`
+      ALTER TABLE plants
+      ADD COLUMN IF NOT EXISTS is_auto_complete_enabled BOOLEAN DEFAULT false
+    `);
+    await pool.query(`
+      ALTER TABLE order_scan_events
+      ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0
+    `);
     console.log('Database migrations completed successfully');
   } catch (error) {
     console.error('Error running migrations:', error);
