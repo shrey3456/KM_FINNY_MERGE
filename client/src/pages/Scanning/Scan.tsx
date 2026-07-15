@@ -578,12 +578,14 @@ export default function ScanOrderPage() {
   };
 
   // Decides whether a resolved single-item match auto-confirms silently (this scan keeps the
-  // order/pallet under its expected qty) or needs the confirmation dialog (this scan would
-  // reach/exceed expected qty, or the barcode isn't on this part's CSV at all — there's no
-  // expected qty to project against for an extra, so those always need a look). This is the
-  // core of "no popup for the normal case, only when something needs attention": the dialog's
-  // own match/extra/already-complete branching (osItemIsComplete etc.) still runs unchanged
-  // whenever this DOES open it, so the popup content stays accurate either way.
+  // order/pallet at or under its expected qty — including landing exactly on it, e.g. a
+  // single full-pallet scan that exactly completes the order) or needs the confirmation
+  // dialog (this scan would OVERSHOOT expected qty, or the barcode isn't on this part's CSV
+  // at all — there's no expected qty to project against for an extra, so those always need a
+  // look). This is the core of "no popup for the normal case, only when something needs
+  // attention": the dialog's own match/extra/already-complete branching (osItemIsComplete
+  // etc.) still runs unchanged whenever this DOES open it, so the popup content stays
+  // accurate either way.
   const _resolveOsScan = (
     barcode: string,
     match: OsScanItem | null,
@@ -592,9 +594,9 @@ export default function ScanOrderPage() {
   ) => {
     const defaultQty = _defaultScanQty(match, plantPalletSize);
     const projectedTotal = (match?.totalScannedQty ?? 0) + defaultQty;
-    const staysUnderCapacity = !!match && projectedTotal < (match.expectedQty ?? 0);
+    const doesNotOvershoot = !!match && (match.expectedQty ?? 0) > 0 && projectedTotal <= (match.expectedQty ?? 0);
 
-    if (staysUnderCapacity) {
+    if (doesNotOvershoot) {
       setOsFlash("success");
       setTimeout(() => setOsFlash(null), 350);
       // Lock stays held (set by the caller before this ran) until the mutation settles — this
