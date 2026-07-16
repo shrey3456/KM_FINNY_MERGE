@@ -88,7 +88,8 @@ type MvFile = {
 type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
 type MvMergedItem = {
   barcode: string | null; itemName: string | null; sapCode: string | null;
-  quantity: number; scannedQty: number; expectedPallets: number | null;
+  quantity: number; scannedQty: number; extraQty: number; expectedPallets: number | null;
+  itemsPerPallet: number;
   _files: string[]; _isExtra: boolean;
 };
 type ImpSession = {
@@ -178,7 +179,7 @@ export default function ScanOrderPage() {
   const queryClient = useQueryClient();
 
   // ── Master View / Separate CSVs tab state ────────────────────────────────
-  const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("scan");
+  const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("master-view");
   const scanTodayStr = scanLocalISODate();
   const [mvSearch,    setMvSearch]    = useState("");
   const [mvShowFiles, setMvShowFiles] = useState(false); // toggle: show/hide source-file names in Master View
@@ -343,6 +344,19 @@ export default function ScanOrderPage() {
   const osCreditByBarcode = new Map(
     (osGroupCreditsQuery.data?.credits ?? []).map((c) => [normalize(c.barcode), c]),
   );
+
+  // Every part of the current FIFO group is scannable at once now (sequential cross-part
+  // search — see the server's /scan handler), so a physical scan can land on a sibling part
+  // instead of the one shown as "front" here. The WS effect below joins every id in this
+  // list so live updates from any part reach this device, not just the front one.
+  const osGroupSessionIdsQuery = useQuery<{ sessionIds: number[] }>({
+    queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "group-session-ids"],
+    queryFn: () =>
+      apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/group-session-ids`).then((r) => r.json()),
+    enabled: !!activeOrderScanSession,
+    staleTime: 30000,
+  });
+  const osGroupSessionIds = osGroupSessionIdsQuery.data?.sessionIds ?? (activeOrderScanSession ? [activeOrderScanSession.id] : []);
 
   type OsExtraRow = { barcode: string; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null };
   const osExtrasQuery = useQuery<OsExtraRow[]>({
@@ -556,6 +570,29 @@ export default function ScanOrderPage() {
     return Math.max(1, size || 1);
   };
 
+  // Same fallback chain as _computePlantPalletSize, but for Master View items (which have
+  // no OsScanItem/session-scoped itemsPerPallet snapshot to fall back on) — and returns 0
+  // rather than clamping to 1 when nothing is configured, so the UI can tell "no pallet
+  // data" apart from "genuinely 1 per pallet" (matching how OsScanItem.itemsPerPallet==0
+  // is already treated elsewhere in this file).
+  const _resolveMvPalletSize = (invProduct: Product | null, plant: string): number => {
+    if (!invProduct) return 0;
+    const plantLower = (plant ?? "").toLowerCase();
+    let fromInv = 0;
+    if (plantLower.includes("valsad") || plantLower.includes("val")) {
+      fromInv = Number(invProduct.valPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
+    } else if (plantLower.includes("indore") || plantLower.includes("ind")) {
+      fromInv = Number(invProduct.indPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
+    } else {
+      fromInv = Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
+    }
+    if (fromInv === 0 && invProduct.name) {
+      const m = String(invProduct.name).match(/\*(\d{1,5})/);
+      if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) fromInv = n; }
+    }
+    return fromInv;
+  };
+
   const _defaultScanQty = (match: OsScanItem | null, plantPalletSize: number): number => {
     if (!match) return plantPalletSize;
     const remaining = Math.max(0, (match.expectedQty ?? 0) - (match.totalScannedQty ?? 0));
@@ -665,10 +702,18 @@ export default function ScanOrderPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrderScanSession?.id, osScanMode]);
 
-  // Admin-triggered "complete this part now" — the ONLY way a part is completed. There is
-  // deliberately no auto-popup when all items are scanned: completion happens only when the
-  // admin explicitly clicks Complete (some items may still be covered by a later part).
+  // Admin-triggered "complete this part now". A part can also complete on its own when
+  // Auto Complete is enabled for the plant — see the WS 'part-completed' handling below,
+  // which covers both this manual path and the automatic one with the same banner.
   const [showForceComplete, setShowForceComplete] = useState(false);
+
+  // Shows a prominent "Part Complete" banner for 10s whenever a part finishes — whether via
+  // this manual button, Auto Complete firing mid-scan, or the stale-part sweep after a new
+  // CSV upload. Driven entirely by the WS 'part-completed' message (see the WS effect below)
+  // so all three trigger paths are handled uniformly, without needing separate client logic
+  // for "I just clicked Complete" vs "the server completed something on its own."
+  const [osPartCompleteBanner, setOsPartCompleteBanner] = useState<{ csvFileName: string; partIndex: number } | null>(null);
+  const osPartCompleteBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const osCompleteMutation = useMutation({
     mutationFn: () =>
@@ -681,10 +726,15 @@ export default function ScanOrderPage() {
     onError: (err: any) => toast({ title: "Failed to complete order", description: err?.message, variant: "destructive" }),
   });
 
-  // WebSocket subscription — receives push updates from every scan on this session
+  // WebSocket subscription — receives push updates from every scan across the current
+  // FIFO group, not just the "front" part shown here. A scan can land on a sibling part
+  // (see the sequential cross-part search + dual-logging in the server's /scan handler),
+  // so this device needs to hear about all of them to stay live.
+  const osGroupSessionIdsKey = osGroupSessionIds.join(',');
   useEffect(() => {
     if (!activeOrderScanSession) return;
     const sessionId = activeOrderScanSession.id;
+    const groupSessionIds = osGroupSessionIdsKey ? osGroupSessionIdsKey.split(',').map(Number) : [sessionId];
 
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -717,7 +767,7 @@ export default function ScanOrderPage() {
       ws.onopen = () => {
         lastMsgAt = Date.now();
         setWsConnected(true);
-        ws!.send(JSON.stringify({ type: 'join', sessionId }));
+        for (const sid of groupSessionIds) ws!.send(JSON.stringify({ type: 'join', sessionId: sid }));
         startDeadTimer();
       };
 
@@ -727,13 +777,27 @@ export default function ScanOrderPage() {
           const data = JSON.parse(e.data);
 
           if (data.type === 'joined' || data.type === 'ping') return;
+
+          if (data.type === 'part-completed') {
+            if (osPartCompleteBannerTimerRef.current) clearTimeout(osPartCompleteBannerTimerRef.current);
+            setOsPartCompleteBanner({ csvFileName: data.csvFileName, partIndex: data.partIndex });
+            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 10000);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
           if (data.type !== 'scan') return;
+
+          // The event's own sessionId (stamped server-side) tells us which part it actually
+          // belongs to — it may not be the "front" part this device has open, since a scan
+          // can land on a sibling part (dual-logging rule in the server's /scan handler).
+          const eventSessionId: number = data.sessionId ?? sessionId;
 
           // Patch cache directly — no HTTP refetch needed.
           // The WS message already carries the committed DB values for this item.
           if (data.item) {
             queryClient.setQueryData<OsScanItem[]>(
-              ["/api/order-scan/sessions", sessionId, "items"],
+              ["/api/order-scan/sessions", eventSessionId, "items"],
               (old = []) => old.map((i) => i.id === data.item.id ? { ...i, ...data.item } : i),
             );
           }
@@ -763,7 +827,7 @@ export default function ScanOrderPage() {
             }
             // Refresh extras for scans from other devices (this device refreshes via onSuccess)
             if (data.event.isExtra && !wasOptimistic) {
-              queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", sessionId, "extras"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", eventSessionId, "extras"] });
             }
           }
         } catch { /* ignore malformed frames */ }
@@ -789,7 +853,7 @@ export default function ScanOrderPage() {
       ws?.close();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeOrderScanSession?.id]);
+  }, [activeOrderScanSession?.id, osGroupSessionIdsKey]);
 
   // ── Master View / Separate CSVs queries ─────────────────────────────────
 
@@ -982,11 +1046,21 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
-          g = { barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode, quantity: 0, scannedQty: 0, expectedPallets: null, _files: [], _isExtra: true };
+          const invProduct = productLookup.get(normalize(item.barcode ?? item.itemName ?? "")) ?? null;
+          g = {
+            barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
+            quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
+            itemsPerPallet: _resolveMvPalletSize(invProduct, mvPlant),
+            _files: [], _isExtra: true,
+          };
           groups.set(key, g);
         }
         g.quantity += item.quantity ?? 0;
         g.scannedQty += item.scannedQty ?? 0;
+        // Extra scans come through as their own rows (quantity: 0, isExtra: true) — tracked
+        // separately from the regular scannedQty sum so Done/Extra can be shown as distinct
+        // columns instead of one blended total.
+        if (item.isExtra) g.extraQty += item.scannedQty ?? 0;
         if (item.expectedPallets != null) g.expectedPallets = (g.expectedPallets ?? 0) + item.expectedPallets;
         if (!g.itemName && item.itemName) g.itemName = item.itemName;
         if (!g.sapCode && item.sapCode) g.sapCode = item.sapCode;
@@ -1145,9 +1219,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     // Manage Scans (admin-only) / Extra Items, unified into one tabbed list — built once
     // here and reused as-is in both the mobile and desktop layouts below.
+    // "Manage" tab is hidden from the UI for now (backend void endpoint/queries are left
+    // untouched — a teammate is actively working on the void feature) — only ever show Extra.
     const osInfoOptions: { key: "manage" | "extra"; label: string; count: number }[] = [
       { key: "extra", label: "Extra", count: (osExtrasQuery.data ?? []).length },
-      ...(canCompletePart ? [{ key: "manage" as const, label: "Manage", count: (osEventsQuery.data ?? []).length }] : []),
     ];
     const activeInfoTab = osInfoTab === "manage" && !canCompletePart ? "extra" : osInfoTab;
     const sideInfoPanel = (
@@ -1220,6 +1295,29 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     return (
       <div className="flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6">
+
+        {/* ── "Part Complete" banner — fires for every way a part can finish (manual Complete
+            button, Auto Complete mid-scan, or the stale-part sweep after a new upload), driven
+            by the WS 'part-completed' message. Fixed/centered so it's visible regardless of
+            which tab or viewport is showing; auto-dismisses after 10s, or on click. ── */}
+        {osPartCompleteBanner && (
+          <div
+            className="fixed inset-x-0 top-3 z-[100] flex justify-center px-3 pointer-events-none"
+            role="status"
+          >
+            <button
+              type="button"
+              onClick={() => setOsPartCompleteBanner(null)}
+              className="pointer-events-auto flex items-center gap-2.5 rounded-full bg-emerald-600 pl-3 pr-4 py-2.5 text-white shadow-lg ring-1 ring-emerald-700/30 animate-in fade-in slide-in-from-top-2"
+            >
+              <CheckCircle2 className="h-5 w-5 shrink-0" />
+              <span className="text-sm font-semibold">
+                Part {osPartCompleteBanner.partIndex} Complete
+                <span className="ml-1.5 font-normal opacity-90">— {stripCsvExt(osPartCompleteBanner.csvFileName)}</span>
+              </span>
+            </button>
+          </div>
+        )}
 
         {/* ── Plant switcher — only appears when 2+ plants have a simultaneously active
             session (e.g. Valsad + Indore both scanning at once). New/additive: for a
@@ -1517,7 +1615,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             {/* ── Tab strip — scanner above stays put across tabs ── */}
             <div className="flex flex-wrap gap-1.5">
-              {(["scan", "master-view", "separate-csvs"] as const).map((t) => (
+              {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => setOsTab(t)}
@@ -1733,8 +1831,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         <p className="py-10 text-center text-sm text-gray-400">No items found</p>
                       ) : filtMvItems.map((item, idx) => {
                         const exp = item.quantity ?? 0;
-                        const done = item.scannedQty ?? 0;
+                        const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
                         const remain = Math.max(0, exp - done);
+                        const extra = item.extraQty ?? 0;
+                        const ipp = item.itemsPerPallet ?? 0;
                         const isExtraOnly = item._isExtra;
                         const isDone = done >= exp && exp > 0;
                         const isPartial = done > 0 && !isDone && !isExtraOnly;
@@ -1753,13 +1853,26 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             </span>
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-medium text-gray-900 leading-snug">{item.itemName ?? "—"}</p>
-                              <p className="text-[11px] text-gray-400 font-mono truncate">{item.barcode ?? "—"}</p>
+                              <p className="text-[11px] text-gray-400 font-mono truncate">
+                                {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                              </p>
                               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
                                 <span className="text-xs text-gray-500">
                                   <span className="font-bold text-gray-800">{done}</span>/{exp || "—"}
+                                  {ipp > 0 && (
+                                    <span className="text-gray-400"> ({(exp / ipp).toFixed(2)} plt)</span>
+                                  )}
                                 </span>
                                 {remain > 0 && (
-                                  <span className="text-xs font-semibold text-[#001d6e]">{remain} left</span>
+                                  <span className="text-xs font-semibold text-[#001d6e]">
+                                    {remain} left
+                                    {ipp > 0 && <span className="text-purple-600"> (≈{(remain / ipp).toFixed(2)} plt)</span>}
+                                  </span>
+                                )}
+                                {extra > 0 && (
+                                  <span className="text-xs font-semibold text-amber-600">
+                                    +{extra} extra{ipp > 0 && ` (${(extra / ipp).toFixed(2)} plt)`}
+                                  </span>
                                 )}
                                 {mvShowFiles && item._files.length > 0 && (
                                   <span className="text-[11px] text-gray-400" title={item._files.map(stripCsvExt).join(", ")}>
@@ -1910,7 +2023,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             {/* ── Tab strip ── */}
             <div className="flex flex-wrap gap-1.5">
-              {(["scan", "master-view", "separate-csvs"] as const).map((t) => (
+              {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => setOsTab(t)}
@@ -2169,21 +2282,28 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               <tr className="bg-[#001d6e]">
                                 <th className="px-3 py-2 w-8" />
                                 <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
-                                <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
+                                <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode / SAP</th>
                                 {mvShowFiles && <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Files</th>}
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp Qty</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp Plt</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done Qty</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done Plt</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain Qty</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain Plt</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Extra Qty</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Extra Plt</th>
                                 <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
                               </tr>
                             </thead>
                             <tbody>
                               {filtMvItems.length === 0 ? (
-                                <tr><td colSpan={mvShowFiles ? 8 : 7} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
+                                <tr><td colSpan={mvShowFiles ? 12 : 11} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
                               ) : filtMvItems.map((item, idx) => {
                                 const exp  = item.quantity ?? 0;
-                                const done = item.scannedQty ?? 0;
+                                const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
                                 const remain = Math.max(0, exp - done);
+                                const extra = item.extraQty ?? 0;
+                                const ipp = item.itemsPerPallet ?? 0;
                                 const isExtraOnly = item._isExtra;
                                 const isDone = done >= exp && exp > 0;
                                 const isPartial = done > 0 && !isDone && !isExtraOnly;
@@ -2200,18 +2320,36 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                         : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
                                     </td>
                                     <td className="px-3 py-2 font-medium text-gray-900 min-w-[200px]"><span className="block whitespace-normal break-words">{item.itemName ?? "—"}</span></td>
-                                    <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
+                                    <td className="px-3 py-2 font-mono text-gray-500">
+                                      <span className="block">{item.barcode ?? "—"}</span>
+                                      {item.sapCode && <span className="block text-[10px] text-gray-400">SAP: {item.sapCode}</span>}
+                                    </td>
                                     {mvShowFiles && (
                                       <td className="px-3 py-2 text-xs text-gray-400 max-w-[130px] truncate" title={item._files.map(stripCsvExt).join(", ")}>
                                         {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0])}
                                       </td>
                                     )}
                                     <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-gray-500">
+                                      {ipp > 0 ? (exp / ipp).toFixed(2) : <span className="text-gray-300">0.00</span>}
+                                    </td>
                                     <td className="px-3 py-2 text-right tabular-nums font-bold">
                                       <span className={isExtraOnly ? "text-orange-700" : isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
                                     </td>
+                                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
+                                      {done > 0 && ipp > 0 ? <span className="text-[#001d6e]">{(done / ipp).toFixed(2)}</span> : <span className="text-gray-300">0.00</span>}
+                                    </td>
                                     <td className="px-3 py-2 text-right tabular-nums font-bold">
                                       <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
+                                    </td>
+                                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
+                                      {remain > 0 && ipp > 0 ? <span className="text-purple-600">{(remain / ipp).toFixed(2)}</span> : <span className="text-gray-300">0.00</span>}
+                                    </td>
+                                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
+                                      {extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>}
+                                    </td>
+                                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
+                                      {extra > 0 && ipp > 0 ? <span className="text-amber-600">{(extra / ipp).toFixed(2)}</span> : <span className="text-gray-300">0.00</span>}
                                     </td>
                                     <td className="px-3 py-2 text-center">
                                       <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isExtraOnly ? "bg-orange-100 text-orange-700" : isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>

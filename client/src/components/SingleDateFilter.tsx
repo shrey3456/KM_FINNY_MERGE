@@ -31,17 +31,20 @@ interface SingleDateFilterProps {
   onDateChange?: (date: Date | null) => void;
   selectedDate?: Date | null;
   className?: string;
+  /** Extra classes merged onto the "Filter by date" / "Calendar" trigger buttons. */
+  buttonClassName?: string;
   size?: "sm" | "md" | "lg";
   children?: React.ReactNode;
   isLocked?: boolean; // Kept for backward compatibility but not used
   onLockChange?: (locked: boolean) => void; // Kept for backward compatibility but not used
 }
 
-export function SingleDateFilter({ 
+export function SingleDateFilter({
   pageKey,
-  onDateChange, 
-  selectedDate, 
+  onDateChange,
+  selectedDate,
   className,
+  buttonClassName,
   size = "md",
   children,
   isLocked: externalIsLocked, // Kept but ignored
@@ -150,7 +153,8 @@ export function SingleDateFilter({
             variant="outline"
             className={cn(
               "justify-start text-left font-normal",
-              !date && "text-muted-foreground"
+              !date && "text-muted-foreground",
+              buttonClassName,
             )}
           >
             <CalendarIcon className="mr-2 h-4 w-4" />
@@ -184,7 +188,8 @@ export function SingleDateFilter({
             variant="outline"
             className={cn(
               "justify-start text-left font-normal",
-              !date && "text-muted-foreground"
+              !date && "text-muted-foreground",
+              buttonClassName,
             )}
           >
             <span>Calendar</span>

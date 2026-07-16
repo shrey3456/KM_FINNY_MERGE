@@ -3,8 +3,8 @@ import { db, pool } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
 import { eq, desc, and, sql, inArray, asc } from 'drizzle-orm';
 import { addSseClient, removeSseClient, broadcastOrderImportUpdate } from '../lib/importEvents';
-import { seedAndActivateSession, getPlantFilter } from './order-scan';
-import { computeGroupReport, resolveGroupId, computePartReport } from '../lib/orderGroupReport';
+import { seedAndActivateSession, seedSessionItems, sweepStaleCompletions, getPlantFilter } from './order-scan';
+import { computeGroupReport, resolveGroupId, computePartReport, reconcileCredits } from '../lib/orderGroupReport';
 
 export { broadcastOrderImportUpdate };
 
@@ -178,6 +178,7 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     // and self-assigns its own id as the group id after insert).
     let effectiveGroupId: number | null = null;
     let computedPartIndex = 1;
+    let joinedExistingGroup = false;
     if (normOrderDate) {
       const existing = await db
         .select({ id: orderImportSessions.id, receivingSessionId: orderImportSessions.receivingSessionId, partIndex: orderImportSessions.partIndex })
@@ -191,6 +192,7 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
       if (existing.length > 0) {
         effectiveGroupId = existing[0].receivingSessionId ?? existing[0].id;
         computedPartIndex = Math.max(...existing.map((e) => e.partIndex ?? 0)) + 1;
+        joinedExistingGroup = true;
       }
     }
 
@@ -226,12 +228,54 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
 
     await db.insert(orderImportItems).values(rows);
 
+    // Seed order_scan_items immediately, regardless of activation state — every part in a
+    // FIFO group is scannable from the moment it's uploaded, since sequential cross-part
+    // search (Master View scanning) needs to be able to check every part's CSV, not just
+    // whichever one is currently flagged "active".
+    await seedSessionItems(session.id, plant);
+
+    // If this CSV just joined an EXISTING group, whichever part was previously "last" may
+    // have been fully scanned already but deliberately left open (Auto Complete's last-part
+    // rule) — and since it has nothing left to scan, nothing would ever re-check it again on
+    // its own. Sweep the group now that a new last part exists, so that old part completes
+    // immediately instead of sitting stuck. No-op if Auto Complete is off for this plant, or
+    // if nothing in the group actually qualifies.
+    if (joinedExistingGroup && effectiveGroupId) {
+      await sweepStaleCompletions(effectiveGroupId, plant, userCode);
+
+      // An earlier part may have already completed — and had its leftover extra checked for
+      // credit opportunities — BEFORE this new part existed. reconcileCredits only ever runs
+      // once, at the moment a part completes, so an already-completed part's un-consumed
+      // extra would otherwise never get a second chance to credit a part that didn't exist
+      // yet. Re-run it now against every already-completed part in the group so this new
+      // part is considered too.
+      const { rows: completedParts } = await pool.query(
+        `SELECT id FROM order_import_sessions
+         WHERE receiving_session_id = $1 AND is_deleted = false AND scan_status = 'completed'`,
+        [effectiveGroupId],
+      );
+      if (completedParts.length > 0) {
+        const creditClient = await pool.connect();
+        try {
+          await creditClient.query('BEGIN');
+          for (const p of completedParts) {
+            await reconcileCredits(creditClient, p.id, effectiveGroupId);
+          }
+          await creditClient.query('COMMIT');
+        } catch (e) {
+          await creditClient.query('ROLLBACK');
+          console.error('[order-import] credit reconciliation against new part failed:', e);
+        } finally {
+          creditClient.release();
+        }
+      }
+    }
+
     // ── Auto-activate ──────────────────────────────────────────────────────────
-    // Only auto-activate if NOTHING is currently active for this plant — this keeps at
-    // most one part scanning per plant at a time. So the first CSV of a date-group goes
-    // active immediately; later same-date parts stay 'available' and auto-advance (by
-    // partIndex, group-scoped) as each part completes. A different date's parts also wait
-    // until the plant is free.
+    // "Active" now only marks which part is shown as the primary/front one in the UI —
+    // it no longer gates whether a part's items exist or are scannable (see seeding above).
+    // The first CSV of a date-group goes active immediately; later same-date parts stay
+    // 'available' and auto-advance (by partIndex, group-scoped) as each part completes.
     let activated = false;
     const activeForPlant = await db.select({ id: orderImportSessions.id })
       .from(orderImportSessions)

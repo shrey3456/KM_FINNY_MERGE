@@ -17,9 +17,6 @@ import {
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import {
   Dialog,
@@ -61,6 +58,7 @@ import {
 } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { DataTable, DataTableColumnToggle, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -68,19 +66,19 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { 
-  MoreVertical, 
-  Plus, 
-  Pencil, 
-  Trash, 
-  ChevronDown, 
+  MoreVertical,
+  Plus,
+  Pencil,
+  Trash,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronFirst,
   ChevronLast,
-  Check, 
-  X, 
-  Save, 
-  Edit, 
+  Check,
+  X,
+  Save,
+  Edit,
   PlusCircle,
   FileEdit,
   Upload,
@@ -89,8 +87,6 @@ import {
   FileDown,
   Search,
   CheckCircle,
-  CheckSquare,
-  Square,
   Calendar as CalendarIcon,
   FilterX,
   FileText,
@@ -119,6 +115,9 @@ const proformaSlipFormSchema = z.object({
 });
 
 type ProformaSlipFormValues = z.infer<typeof proformaSlipFormSchema>;
+
+// Solid navy fill, matching the Notion Inventory action buttons (Import CSV / Export / Sync Notion).
+const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
 // Extend basic ProformaSlip type to include lock and audit fields loaded from API
 type LockedProformaSlip = ProformaSlip & {
@@ -178,6 +177,10 @@ export default function ProformaSlips() {
     column: 'orderNumber',
     direction: 'asc'
   });
+
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
+    () => new Set(['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'actions']),
+  );
   
   // Function to handle sorting by column
   const handleSort = (column: string) => {
@@ -1164,10 +1167,556 @@ export default function ProformaSlips() {
       }
     });
 
-    const startIndex = (currentPage - 1) * entriesLimit;
-    return sortedSlips.slice(startIndex, startIndex + entriesLimit);
+    return sortedSlips;
   };
-  
+
+  const renderOrderDate = (slip: LockedProformaSlip) => {
+    if (!slip.orderDate) return ' ';
+    try {
+      if (typeof slip.orderDate === 'string') {
+        if (slip.orderDate.includes('/')) {
+          const parts = slip.orderDate.split('/');
+          if (parts.length === 3) {
+            const day = parseInt(parts[0], 10);
+            const month = parseInt(parts[1], 10);
+            const year = parseInt(parts[2], 10);
+            if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+              return `${day.toString().padStart(2, '0')}/${month.toString().padStart(2, '0')}/${year}`;
+            }
+          }
+        }
+        if (slip.orderDate.includes('-')) {
+          const parts = slip.orderDate.split('-');
+          if (parts.length === 3) {
+            if (parts[0].length === 4) {
+              const year = parts[0];
+              const month = parts[1];
+              const day = parts[2];
+              return `${day}/${month}/${year}`;
+            } else {
+              const day = parts[0];
+              const month = parts[1];
+              const year = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
+              return `${day}/${month}/${year}`;
+            }
+          }
+        }
+        const date = new Date(slip.orderDate);
+        if (!isNaN(date.getTime())) {
+          return format(date, 'dd/MM/yyyy');
+        }
+        return slip.orderDate;
+      } else {
+        return format(new Date(slip.orderDate), 'dd/MM/yyyy');
+      }
+    } catch (error) {
+      return String(slip.orderDate);
+    }
+  };
+
+  const slipColumns: DataTableColumn<LockedProformaSlip>[] = [
+    {
+      id: 'orderDate',
+      header: 'Order Date',
+      sortable: true,
+      width: 110,
+      render: (slip) => <span className="whitespace-nowrap">{renderOrderDate(slip)}</span>,
+    },
+    {
+      id: 'orderNumber',
+      header: 'Order No.',
+      sortable: true,
+      width: 130,
+      render: (slip) => (
+        <div className="flex items-center gap-2 whitespace-nowrap">
+          <span>{slip.orderNumber}</span>
+          {slip.isPrintLocked ? (
+            <span title="Locked after print"><Lock className="h-3.5 w-3.5 text-red-600" /></span>
+          ) : (
+            <span title="Unlocked"><Unlock className="h-3.5 w-3.5 text-emerald-600 opacity-30" /></span>
+          )}
+        </div>
+      ),
+    },
+    {
+      id: 'partyName',
+      header: 'Party Name',
+      sortable: true,
+      width: 160,
+      render: (slip) => slip.partyName,
+    },
+    {
+      id: 'plant',
+      header: 'Plant',
+      sortable: true,
+      width: 110,
+      render: (slip) => <PlantBadge plant={slip.plant} />,
+    },
+    {
+      id: 'totalQuantity',
+      header: 'Total Qty',
+      sortable: true,
+      width: 100,
+      align: 'right',
+      render: (slip) => (slip.totalQuantity ?? 0),
+    },
+    {
+      id: 'totalVolume',
+      header: 'Total Volume',
+      width: 110,
+      render: (slip) => slip.totalVolume || ' ',
+    },
+    {
+      id: 'vehicleNumber',
+      header: 'Vehicle No.',
+      width: 120,
+      render: (slip) => slip.vehicleNumber || ' ',
+    },
+    {
+      id: 'driverName',
+      header: 'Driver',
+      width: 120,
+      render: (slip) => slip.driverName || ' ',
+    },
+    {
+      id: 'actions',
+      header: '',
+      width: 60,
+      hideable: false,
+      preventRowClick: true,
+      render: (slip) => (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" className="h-8 w-8 p-0">
+              <span className="sr-only">Open menu</span>
+              <MoreVertical className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuLabel>Actions</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+
+            {!slip.isPrintLocked && canLockUnlockSlips && (
+              <DropdownMenuItem
+                onClick={async () => {
+                  try {
+                    await lockSlip(slip.orderNumber, currentUserInfo?.userCode);
+                    queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
+                    toast({
+                      title: "Locked",
+                      description: `Slip #${slip.orderNumber} has been locked.`
+                    });
+                  } catch (err: any) {
+                    toast({
+                      title: "Error",
+                      description: err.message || "Failed to lock",
+                      variant: "destructive"
+                    });
+                  }
+                }}
+              >
+                <Lock className="mr-2 h-4 w-4" /> Lock Slip
+              </DropdownMenuItem>
+            )}
+
+            {slip.isPrintLocked && canLockUnlockSlips && (
+              <DropdownMenuItem
+                onClick={async () => {
+                  try {
+                    await unlockSlip(slip.orderNumber);
+                    queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
+                    toast({
+                      title: "Unlocked",
+                      description: `Slip #${slip.orderNumber} unlocked.`
+                    });
+                  } catch (err: any) {
+                    toast({
+                      title: "Error",
+                      description: err.message || "Failed to unlock",
+                      variant: "destructive"
+                    });
+                  }
+                }}
+              >
+                <Unlock className="mr-2 h-4 w-4" /> Unlock Slip
+              </DropdownMenuItem>
+            )}
+
+            {canEditSlips && (
+              <DropdownMenuItem onClick={() => openEditDialog(slip)}>
+                <FileEdit className="mr-2 h-4 w-4" /> Edit Details
+              </DropdownMenuItem>
+            )}
+
+            <DropdownMenuItem
+              onClick={() => toggleRowExpansion(slip)}
+            >
+              {canAddSlips ? (
+                <>
+                  <Edit className="mr-2 h-4 w-4" /> Manage Items
+                </>
+              ) : (
+                <>
+                  <FileText className="mr-2 h-4 w-4" /> View Items
+                </>
+              )}
+            </DropdownMenuItem>
+
+            <DropdownMenuItem
+              onClick={() => {
+                window.open(`/api/proforma-slips/export-csv/${slip.id}`, '_blank');
+                toast({
+                  title: "Export Started",
+                  description: `Exporting proforma slip #${slip.orderNumber}`,
+                });
+              }}
+            >
+              <FileDown className="mr-2 h-4 w-4" /> Export This Slip
+            </DropdownMenuItem>
+
+            {canEditSlips && (
+              <DropdownMenuItem
+                onClick={() => openDeleteDialog(slip)}
+                className="text-destructive focus:text-destructive"
+              >
+                <Trash className="mr-2 h-4 w-4" /> Delete
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ),
+    },
+  ];
+
+  const renderSlipExpandedRow = (rawSlip: ProformaSlip) => {
+    const slip = rawSlip as LockedProformaSlip;
+    return (
+      <div className="px-4 py-3 bg-muted/20">
+        {(slip.printedAt || slip.printedByCode) && (
+          <div className="mb-2 px-2 py-1 text-xs text-muted-foreground border-l-2 border-primary/20 pl-2">
+            {slip.printedAt && (
+              <>Last printed: {new Date(slip.printedAt as any).toLocaleString()}</>
+            )}
+            {slip.printedByCode && (
+              <> by <span className="font-medium">{slip.printedByCode}</span></>
+            )}
+            {typeof slip.printCount === 'number' && (
+              <> • Print count: {slip.printCount}</>
+            )}
+            {slip.isPrintLocked && (
+              <span className="ml-2 text-red-600 font-medium flex items-center inline-flex gap-1">
+                <Lock className="h-3 w-3" /> Locked
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-4 mb-3">
+          <div className="flex justify-between items-center">
+            <h3 className="text-lg font-medium">Inventory Items</h3>
+          </div>
+
+          {canAddSlips && (
+            <div className="rounded-lg border p-4 bg-white">
+              <h4 className="text-sm font-semibold mb-2">Add Items to Proforma Slip</h4>
+              <div className="relative">
+                <Input
+                  type="text"
+                  placeholder="Search items by name or Sr.No..."
+                  value={searchQuery}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    if (e.target.value.trim() !== '' && products) {
+                      const filtered = products.filter(product =>
+                        product.name?.toLowerCase().includes(e.target.value.toLowerCase()) ||
+                        product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
+                        product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
+                      );
+                      setFilteredProducts(filtered);
+                    } else if (searchFocused && products) {
+                      setFilteredProducts(products);
+                    } else {
+                      setFilteredProducts(null);
+                    }
+                  }}
+                  onFocus={() => {
+                    setSearchFocused(true);
+                    if (products) {
+                      setFilteredProducts(products);
+                    }
+                  }}
+                  onBlur={() => {
+                    setTimeout(() => {
+                      if (!searchQuery.trim()) {
+                        setSearchFocused(false);
+                        setFilteredProducts(null);
+                      }
+                    }, 200);
+                  }}
+                  className="w-full"
+                />
+
+                {((searchQuery.trim() !== '' || searchFocused) && filteredProducts && filteredProducts.length > 0) && (
+                  <div className="absolute z-10 w-full mt-1 bg-white rounded-md shadow-lg max-h-60 overflow-auto border border-gray-300">
+                    <div className="sticky top-0 bg-slate-100 px-3 py-2 text-sm font-semibold border-b border-gray-200">
+                      {searchQuery.trim() !== '' ? 'Search Results' : 'All Items'} - Click to select
+                    </div>
+                    <ul className="py-1">
+                      {filteredProducts.map(product => (
+                        <li
+                          key={product.id}
+                          className="px-3 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-100"
+                          onClick={() => {
+                            const itemsPerPallet = product?.itemsPerPallet || 1;
+                            const existingItem = slipItems[slip.id]?.find(item => item.productId === product.id);
+
+                            if (existingItem) {
+                              const newQuantity = (existingItem.quantity ?? 0) + itemsPerPallet;
+                              handleSaveItem(existingItem.id, { quantity: newQuantity });
+                              toast({
+                                title: "Item Updated",
+                                description: `Quantity updated for ${product.name}`,
+                              });
+                            } else {
+                              const newItemData = {
+                                productId: product.id,
+                                quantity: itemsPerPallet
+                              };
+                              handleAddItem(slip.id, newItemData);
+                            }
+                            setSearchQuery('');
+                            setFilteredProducts(null);
+                          }}
+                        >
+                          <div className="flex flex-col">
+                            <span className="font-medium">{product.name}</span>
+                            <span className="text-xs text-muted-foreground">
+                              Sr.No: {product.newSr || ' '} | Barcode: {product.barcode || ' '}
+                            </span>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {searchQuery.trim() !== '' && (!filteredProducts || filteredProducts.length === 0) && (
+                  <div className="absolute z-10 w-full mt-1 bg-white rounded-md shadow-lg border border-gray-300">
+                    <div className="sticky top-0 bg-slate-100 px-3 py-2 text-sm font-semibold border-b border-gray-200">
+                      Search Results
+                    </div>
+                    <div className="px-3 py-4 text-center text-gray-500">
+                      No products found matching your search.
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                Click on the search field to see all items or type to filter by name or Sr.No.
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-md border overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[10%]">Sr. No.</TableHead>
+                <TableHead className="w-[15%]">SKU</TableHead>
+                <TableHead className="w-[35%]">Product</TableHead>
+                <TableHead className="w-[20%] text-center">Quantity</TableHead>
+                <TableHead className="w-[10%]"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {slipItems[slip.id]?.map((item) => {
+                return (
+                  <TableRow key={item.id}>
+                    <TableCell>{item.srNo || ' '}</TableCell>
+                    <TableCell className="break-words">
+                      {item.barcode || ' '}
+                    </TableCell>
+                    <TableCell className="max-w-[300px] break-words">
+                      {item.itemName || `Product #${item.productId}`}
+                    </TableCell>
+                    <TableCell className="text-center">
+                      {canAddSlips ? (
+                        <div className="flex items-center justify-center">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 w-8 p-0"
+                            onClick={() => {
+                              const currentQuantity = item.quantity || 1;
+                              if (currentQuantity > 1) {
+                                handleSaveItem(item.id, { quantity: currentQuantity - 1 });
+                              }
+                            }}
+                          >
+                            <span>-</span>
+                          </Button>
+                          <span className="min-w-[3rem] text-center mx-1">
+                            {item.quantity ?? 0}
+                          </span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 w-8 p-0"
+                            onClick={() => {
+                              const currentQuantity = item.quantity || 1;
+                              handleSaveItem(item.id, { quantity: currentQuantity + 1 });
+                            }}
+                          >
+                            <span>+</span>
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="text-center">
+                          {item.quantity ?? 0}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {canAddSlips && (
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive"
+                            onClick={() => handleDeleteItem(item.id)}
+                          >
+                            <Trash className="h-4 w-4" />
+                            <span className="sr-only">Delete</span>
+                          </Button>
+                        </div>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+
+              {(!slipItems[slip.id] || slipItems[slip.id].length === 0) && (
+                <TableRow>
+                  <TableCell colSpan={5} className="h-24 text-center">
+                    {canAddSlips ? "No items in this slip. Use the search bar above to add items." : "No items in this slip."}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+
+          {slipItems[slip.id] && slipItems[slip.id].length > 0 && (
+            <div className="bg-muted px-4 py-3 border-t">
+              <div className="flex justify-between items-center">
+                <div className="text-sm font-medium">
+                  Total Items: <span className="text-primary font-semibold">{slipItems[slip.id].length}</span>
+                </div>
+                <div className="text-sm font-medium">
+                  Total Quantity: <span className="text-primary font-semibold">
+                    {slipItems[slip.id].reduce((sum, item) => sum + (item.quantity ?? 0), 0)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderSlipFooter = (ctx: DataTableFooterContext) => {
+    const filteredSlips = getFilteredSlips();
+    return (
+      <TableFooter className="bg-muted/30">
+        {filteredSlips.length > 0 && (
+          <TableRow className="font-medium border-t-2">
+            <TableCell className="font-bold text-center">Total</TableCell>
+            <TableCell></TableCell> {/* Order Date */}
+            <TableCell className="text-center">
+              {filteredSlips.length}
+            </TableCell>
+            <TableCell className="text-center">
+              {Array.from(new Set(filteredSlips.map(slip => slip.partyName))).length}
+            </TableCell>
+            <TableCell></TableCell> {/* Plant */}
+            <TableCell className="text-center">
+              {filteredSlips.reduce((sum, slip) => sum + (slip.totalQuantity || 0), 0)}
+            </TableCell>
+            <TableCell></TableCell> {/* Total Volume */}
+            <TableCell className="text-center">
+              {Array.from(new Set(filteredSlips.filter(slip => slip.vehicleNumber).map(slip => slip.vehicleNumber))).length}
+            </TableCell>
+            <TableCell></TableCell> {/* Driver */}
+            <TableCell>
+              <div className="flex items-center justify-end gap-1 ml-auto">
+                <span className="text-xs whitespace-nowrap">Show entries:</span>
+                <select
+                  className="h-6 text-xs border rounded px-1 bg-background"
+                  value={ctx.pageSize}
+                  onChange={(e) => ctx.setPageSize(Number(e.target.value))}
+                  aria-label="Number of entries to display"
+                >
+                  <option value={15}>15</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+              </div>
+            </TableCell>
+          </TableRow>
+        )}
+
+        <TableRow>
+          <TableCell colSpan={ctx.columnCount} className="text-center py-2">
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-muted-foreground">
+                Showing {ctx.totalRows > 0 ? ctx.pageIndex * ctx.pageSize + 1 : 0} to {Math.min((ctx.pageIndex + 1) * ctx.pageSize, ctx.totalRows)} of {ctx.totalRows} entries
+              </div>
+              <div className="flex items-center space-x-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => ctx.setPageIndex(0)}
+                  disabled={ctx.pageIndex === 0}
+                >
+                  <ChevronFirst className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => ctx.setPageIndex(Math.max(0, ctx.pageIndex - 1))}
+                  disabled={ctx.pageIndex === 0}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                <span className="text-sm text-muted-foreground px-2">
+                  Page {ctx.pageIndex + 1} of {ctx.pageCount}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => ctx.setPageIndex(Math.min(ctx.pageCount - 1, ctx.pageIndex + 1))}
+                  disabled={ctx.pageIndex >= ctx.pageCount - 1}
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => ctx.setPageIndex(ctx.pageCount - 1)}
+                  disabled={ctx.pageIndex >= ctx.pageCount - 1}
+                >
+                  <ChevronLast className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </TableCell>
+        </TableRow>
+      </TableFooter>
+    );
+  };
+
   return (
     <div className="container mx-auto py-6">
       <div className="flex justify-between items-center mb-6">
@@ -1279,50 +1828,92 @@ export default function ProformaSlips() {
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>All Proforma Slips</CardTitle>
-          <CardDescription>
-            View and manage all proforma slips. Click on a row to view details.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-col gap-4 mb-4">
-            <div className="relative w-full">
-              <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search slips by order number or party name"
-                className="pl-8"
-                value={slipSearchQuery}
-                onChange={(e) => setSlipSearchQuery(e.target.value)}
-              />
-            </div>
-            
-            <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-              <div className="flex flex-col md:flex-row gap-2 w-full">
-                <SingleDateFilter
-                  selectedDate={selectedDate}
-                  onDateChange={(date: Date | null) => {
-                    setSelectedDate(date);
-                    setIsDateFilterActive(!!date);
-                    if (date && !isLocked) {
-                      SingleDateFilterStorage.saveDateFilter('proforma-slips', date);
-                    }
-                  }}
-                  isLocked={isLocked}
-                  onLockChange={(locked: boolean) => setLocked(locked)}
-                  pageKey="proforma-slips"
-                />
-                <PlantFilter
-                  selectedPlants={selectedPlants}
-                  onPlantChange={setSelectedPlants}
-                  plantOptions={plantOptions}
-                />
+      <Card className="overflow-hidden">
+        {/* Header bar — title + search on top, filters directly beneath (matches Notion Inventory) */}
+        <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div className="flex items-center gap-3">
+              <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg bg-[#001d6e]/10">
+                <FileText className="h-4 w-4 sm:h-5 sm:w-5 text-[#001d6e]" />
+              </div>
+              <div>
+                <div className="text-lg sm:text-xl font-bold tracking-tight text-gray-900">Proforma Slips</div>
+                <div className="text-xs text-gray-400 leading-none mt-0.5">
+                  View and manage all proforma slips. Click on a row to view details.
+                </div>
               </div>
             </div>
-            
-            {selectedSlipIds.length > 0 && canEditSlips && (
-              <div className="flex items-center gap-2">
+            <div className="relative w-full sm:w-auto sm:shrink-0">
+              <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+              <input
+                value={slipSearchQuery}
+                onChange={(e) => setSlipSearchQuery(e.target.value)}
+                placeholder="Search slips by order number or party name…"
+                className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
+              />
+              {slipSearchQuery && (
+                <button onClick={() => setSlipSearchQuery("")} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Filters */}
+          <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
+            <SingleDateFilter
+              selectedDate={selectedDate}
+              onDateChange={(date: Date | null) => {
+                setSelectedDate(date);
+                setIsDateFilterActive(!!date);
+                if (date && !isLocked) {
+                  SingleDateFilterStorage.saveDateFilter('proforma-slips', date);
+                }
+              }}
+              isLocked={isLocked}
+              onLockChange={(locked: boolean) => setLocked(locked)}
+              pageKey="proforma-slips"
+              buttonClassName={FILTER_BTN_CLASS}
+            />
+            <PlantFilter
+              selectedPlants={selectedPlants}
+              onPlantChange={setSelectedPlants}
+              plantOptions={plantOptions}
+              buttonClassName={FILTER_BTN_CLASS}
+            />
+            <DataTableColumnToggle
+              columns={slipColumns}
+              visibleColumnIds={visibleColumnIds}
+              onToggleColumn={(id) =>
+                setVisibleColumnIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                })
+              }
+              onSetAll={(visible) =>
+                setVisibleColumnIds(visible ? new Set(slipColumns.map((c) => c.id)) : new Set())
+              }
+              buttonClassName={FILTER_BTN_CLASS}
+            />
+          </div>
+        </div>
+        <CardContent className="pt-4">
+          <DataTable<LockedProformaSlip>
+            columns={slipColumns}
+            data={getSortedSlips() as LockedProformaSlip[]}
+            getRowId={(slip) => String(slip.id)}
+            isLoading={isLoading}
+            emptyState="No proforma slips found. Create your first one!"
+            onRowClick={(slip) => toggleRowExpansion(slip)}
+            renderExpandedRow={renderSlipExpandedRow}
+            expandedRowId={selectedSlip ? String(selectedSlip.id) : null}
+            enableRowSelection={canEditSlips}
+            selectedRowIds={selectedSlipIds.map(String)}
+            onSelectedRowIdsChange={(ids) => setSelectedSlipIds(ids.map(Number))}
+            renderBulkActions={() => (
+              <>
                 <span className="text-sm text-muted-foreground">
                   {selectedSlipIds.length} selected
                 </span>
@@ -1334,643 +1925,26 @@ export default function ProformaSlips() {
                   <Trash className="h-4 w-4 mr-2" />
                   Delete Selected
                 </Button>
-              </div>
+              </>
             )}
-          </div>
-          {isLoading ? (
-            <div className="flex justify-center py-8">Loading...</div>
-          ) : proformaSlips && proformaSlips.length > 0 ? (
-            <div className="overflow-auto">
-              <Table className="min-w-full">
-                <TableHeader>
-                  <TableRow>
-                    {/* Checkbox column only for editors */}
-                    <TableHead className="whitespace-nowrap w-[40px]">
-                      <div className="flex items-center justify-center">
-                        {canEditSlips ? (
-                          <div 
-                            className="cursor-pointer hover:bg-muted p-1 rounded-sm"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const filteredSlips = getFilteredSlips();
-                              if (filteredSlips.length > 0) {
-                                const filteredIds = filteredSlips.map(slip => slip.id);
-                                const allFilteredSelected = filteredIds.every(id => selectedSlipIds.includes(id));
-                                if (allFilteredSelected) {
-                                  setSelectedSlipIds(selectedSlipIds.filter(id => !filteredIds.includes(id)));
-                                } else {
-                                  const currentSelected = new Set(selectedSlipIds);
-                                  filteredIds.forEach(id => currentSelected.add(id));
-                                  setSelectedSlipIds(Array.from(currentSelected));
-                                }
-                              }
-                            }}
-                          >
-                            {getFilteredSlips().length > 0 && selectedSlipIds.length === getFilteredSlips().length ? (
-                              <CheckSquare className="h-4 w-4" />
-                            ) : (
-                              <Square className="h-4 w-4" />
-                            )}
-                          </div>
-                        ) : null}
-                      </div>
-                    </TableHead>
-                    <TableHead 
-                      className="whitespace-nowrap w-[100px] cursor-pointer hover:bg-muted/50"
-                      onClick={() => handleSort('orderDate')}
-                    >
-                      Order Date
-                      {sortConfig.column === 'orderDate' && (
-                        <span className="ml-1">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>
-                      )}
-                    </TableHead>
-                    <TableHead 
-                      className="whitespace-nowrap w-[120px] cursor-pointer hover:bg-muted/50"
-                      onClick={() => handleSort('orderNumber')}
-                    >
-                      Order No.
-                      {sortConfig.column === 'orderNumber' && (
-                        <span className="ml-1">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>
-                      )}
-                    </TableHead>
-                    <TableHead 
-                      className="whitespace-nowrap cursor-pointer hover:bg-muted/50"
-                      onClick={() => handleSort('partyName')}
-                    >
-                      Party Name
-                      {sortConfig.column === 'partyName' && (
-                        <span className="ml-1">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>
-                      )}
-                    </TableHead>
-                    <TableHead 
-                      className="whitespace-nowrap cursor-pointer hover:bg-muted/50"
-                      onClick={() => handleSort('plant')}
-                    >
-                      Plant
-                      {sortConfig.column === 'plant' && (
-                        <span className="ml-1">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>
-                      )}
-                    </TableHead>
-                    <TableHead 
-                      className="whitespace-nowrap w-[100px] cursor-pointer hover:bg-muted/50"
-                      onClick={() => handleSort('totalQuantity')}
-                    >
-                      Total Qty
-                      {sortConfig.column === 'totalQuantity' && (
-                        <span className="ml-1">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>
-                      )}
-                    </TableHead>
-                    <TableHead className="whitespace-nowrap w-[100px]">Total Volume</TableHead>
-                    <TableHead className="whitespace-nowrap w-[120px]">Vehicle No.</TableHead>
-                    <TableHead className="whitespace-nowrap">Driver</TableHead>
-                    <TableHead className="whitespace-nowrap w-[70px]"></TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {getSortedSlips().map((rawSlip) => {
-                    const slip = rawSlip as LockedProformaSlip;
-                    return (
-                    <React.Fragment key={slip.id}>
-                      <TableRow 
-                        className="cursor-pointer hover:bg-muted/50"
-                        onClick={() => toggleRowExpansion(slip)}
-                      >
-                        <TableCell className="p-2" onClick={(e) => e.stopPropagation()}>
-                          <div className="flex items-center justify-center">
-                            {canEditSlips ? (
-                              <div 
-                                className="cursor-pointer hover:bg-muted p-1 rounded-sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (selectedSlipIds.includes(slip.id)) {
-                                    setSelectedSlipIds(selectedSlipIds.filter(id => id !== slip.id));
-                                  } else {
-                                    setSelectedSlipIds([...selectedSlipIds, slip.id]);
-                                  }
-                                }}
-                              >
-                                {selectedSlipIds.includes(slip.id) ? (
-                                  <CheckSquare className="h-4 w-4" />
-                                ) : (
-                                  <Square className="h-4 w-4" />
-                                )}
-                              </div>
-                            ) : null}
-                          </div>
-                        </TableCell>
-                        <TableCell className="whitespace-nowrap">
-                          {slip.orderDate ? (
-                            (() => {
-                              try {
-                                if (typeof slip.orderDate === 'string') {
-                                  if (slip.orderDate.includes('/')) {
-                                    const parts = slip.orderDate.split('/');
-                                    if (parts.length === 3) {
-                                      const day = parseInt(parts[0], 10);
-                                      const month = parseInt(parts[1], 10);
-                                      const year = parseInt(parts[2], 10);
-                                      if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-                                        return `${day.toString().padStart(2, '0')}/${month.toString().padStart(2, '0')}/${year}`;
-                                      }
-                                    }
-                                  }
-                                  if (slip.orderDate.includes('-')) {
-                                    const parts = slip.orderDate.split('-');
-                                    if (parts.length === 3) {
-                                      if (parts[0].length === 4) {
-                                        const year = parts[0];
-                                        const month = parts[1];
-                                        const day = parts[2];
-                                        return `${day}/${month}/${year}`;
-                                      } else {
-                                        const day = parts[0];
-                                        const month = parts[1];
-                                        const year = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
-                                        return `${day}/${month}/${year}`;
-                                      }
-                                    }
-                                  }
-                                  const date = new Date(slip.orderDate);
-                                  if (!isNaN(date.getTime())) {
-                                    return format(date, 'dd/MM/yyyy');
-                                  }
-                                  return slip.orderDate;
-                                } else {
-                                  return format(new Date(slip.orderDate), 'dd/MM/yyyy');
-                                }
-                              } catch (error) {
-                                return String(slip.orderDate);
-                              }
-                            })()
-                          ) : ' '}
-                        </TableCell>
-                        <TableCell className="whitespace-nowrap">
-                          <div className="flex items-center gap-2">
-                            <span>{slip.orderNumber}</span>
-                            {/* Lock Icon Logic */}
-                            {slip.isPrintLocked ? (
-                              <span title="Locked after print"><Lock className="h-3.5 w-3.5 text-red-600" /></span>
-                            ) : (
-                              <span title="Unlocked"><Unlock className="h-3.5 w-3.5 text-emerald-600 opacity-30" /></span>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell>{slip.partyName}</TableCell>
-                        <TableCell><PlantBadge plant={slip.plant} /></TableCell>
-                        <TableCell className="text-right">
-                          {slip.totalQuantity !== null && slip.totalQuantity !== undefined 
-                            ? slip.totalQuantity 
-                            : 0}
-                        </TableCell>
-                        <TableCell>{slip.totalVolume || ' '}</TableCell>
-                        <TableCell>{slip.vehicleNumber || ' '}</TableCell>
-                        <TableCell>{slip.driverName || ' '}</TableCell>
-                        <TableCell onClick={(e) => e.stopPropagation()}>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" className="h-8 w-8 p-0">
-                                <span className="sr-only">Open menu</span>
-                                <MoreVertical className="h-4 w-4" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                              <DropdownMenuSeparator />
-                              
-                              {/* Lock/Unlock Options First - Available to Admin, Super-Admin, IT, Management, Billing Head */}
-                              {!slip.isPrintLocked && canLockUnlockSlips && (
-                                <DropdownMenuItem 
-                                  onClick={async () => {
-                                    try {
-                                      await lockSlip(slip.orderNumber, currentUserInfo?.userCode);
-                                      queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
-                                      toast({ 
-                                        title: "Locked", 
-                                        description: `Slip #${slip.orderNumber} has been locked.` 
-                                      });
-                                    } catch (err: any) {
-                                      toast({ 
-                                        title: "Error", 
-                                        description: err.message || "Failed to lock", 
-                                        variant: "destructive" 
-                                      });
-                                    }
-                                  }}
-                                >
-                                  <Lock className="mr-2 h-4 w-4" /> Lock Slip
-                                </DropdownMenuItem>
-                              )}
-
-                              {/* Unlock Option - Available to Admin, Super-Admin, IT, Management, Billing Head */}
-                              {slip.isPrintLocked && canLockUnlockSlips && (
-                                <DropdownMenuItem 
-                                  onClick={async () => {
-                                    try {
-                                      await unlockSlip(slip.orderNumber);
-                                      queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
-                                      toast({ 
-                                        title: "Unlocked", 
-                                        description: `Slip #${slip.orderNumber} unlocked.` 
-                                      });
-                                    } catch (err: any) {
-                                      toast({ 
-                                        title: "Error", 
-                                        description: err.message || "Failed to unlock", 
-                                        variant: "destructive" 
-                                      });
-                                    }
-                                  }}
-                                >
-                                  <Unlock className="mr-2 h-4 w-4" /> Unlock Slip
-                                </DropdownMenuItem>
-                              )}
-
-                              {/* Edit Details - Admin/Super-Admin only */}
-                              {canEditSlips && (
-                                <DropdownMenuItem onClick={() => openEditDialog(slip)}>
-                                  <FileEdit className="mr-2 h-4 w-4" /> Edit Details
-                                </DropdownMenuItem>
-                              )}
-
-                              {/* Manage/View Items */}
-                              <DropdownMenuItem 
-                                onClick={() => toggleRowExpansion(slip)}
-                              >
-                                {canAddSlips ? (
-                                  <>
-                                    <Edit className="mr-2 h-4 w-4" /> Manage Items
-                                  </>
-                                ) : (
-                                  <>
-                                    <FileText className="mr-2 h-4 w-4" /> View Items
-                                  </>
-                                )}
-                              </DropdownMenuItem>
-
-                              {/* Export This Slip */}
-                              <DropdownMenuItem 
-                                onClick={() => {
-                                  window.open(`/api/proforma-slips/export-csv/${slip.id}`, '_blank');
-                                  toast({
-                                    title: "Export Started",
-                                    description: `Exporting proforma slip #${slip.orderNumber}`,
-                                  });
-                                }}
-                              >
-                                <FileDown className="mr-2 h-4 w-4" /> Export This Slip
-                              </DropdownMenuItem>
-                              
-                              {/* Delete - Admin/Super-Admin only */}
-                              {canEditSlips && (
-                                <DropdownMenuItem 
-                                  onClick={() => openDeleteDialog(slip)}
-                                  className="text-destructive focus:text-destructive"
-                                >
-                                  <Trash className="mr-2 h-4 w-4" /> Delete
-                                </DropdownMenuItem>
-                              )}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </TableCell>
-                      </TableRow>
-                      
-                      {/* Expanded row to show slip items */}
-                      {selectedSlip?.id === slip.id && (
-                        <TableRow>
-                          <TableCell colSpan={10} className="p-0">
-                            <div className="px-4 py-3 bg-muted/20">
-                              {/* Print Audit Info Header */}
-                              {(slip.printedAt || slip.printedByCode) && (
-                                <div className="mb-2 px-2 py-1 text-xs text-muted-foreground border-l-2 border-primary/20 pl-2">
-                                  {slip.printedAt && (
-                                    <>Last printed: {new Date(slip.printedAt as any).toLocaleString()}</>
-                                  )}
-                                  {slip.printedByCode && (
-                                    <> by <span className="font-medium">{slip.printedByCode}</span></>
-                                  )}
-                                  {typeof slip.printCount === 'number' && (
-                                    <> • Print count: {slip.printCount}</>
-                                  )}
-                                  {slip.isPrintLocked && (
-                                    <span className="ml-2 text-red-600 font-medium flex items-center inline-flex gap-1">
-                                      <Lock className="h-3 w-3" /> Locked
-                                    </span>
-                                  )}
-                                </div>
-                              )}
-
-                              <div className="grid grid-cols-1 gap-4 mb-3">
-                                <div className="flex justify-between items-center">
-                                  <h3 className="text-lg font-medium">Inventory Items</h3>
-                                </div>
-                                
-                                {canAddSlips && (
-                                  <div className="rounded-lg border p-4 bg-white">
-                                    <h4 className="text-sm font-semibold mb-2">Add Items to Proforma Slip</h4>
-                                    <div className="relative">
-                                      <Input 
-                                        type="text" 
-                                        placeholder="Search items by name or Sr.No..." 
-                                        value={searchQuery}
-                                        onChange={(e) => {
-                                          setSearchQuery(e.target.value);
-                                          if (e.target.value.trim() !== '' && products) {
-                                            const filtered = products.filter(product => 
-                                              product.name?.toLowerCase().includes(e.target.value.toLowerCase()) || 
-                                              product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
-                                              product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
-                                            );
-                                            setFilteredProducts(filtered);
-                                          } else if (searchFocused && products) {
-                                            setFilteredProducts(products);
-                                          } else {
-                                            setFilteredProducts(null);
-                                          }
-                                        }}
-                                        onFocus={() => {
-                                          setSearchFocused(true);
-                                          if (products) {
-                                            setFilteredProducts(products);
-                                          }
-                                        }}
-                                        onBlur={() => {
-                                          setTimeout(() => {
-                                            if (!searchQuery.trim()) {
-                                              setSearchFocused(false);
-                                              setFilteredProducts(null);
-                                            }
-                                          }, 200);
-                                        }}
-                                        className="w-full"
-                                      />
-                                      
-                                      {/* Searchable dropdown */}
-                                      {((searchQuery.trim() !== '' || searchFocused) && filteredProducts && filteredProducts.length > 0) && (
-                                        <div className="absolute z-10 w-full mt-1 bg-white rounded-md shadow-lg max-h-60 overflow-auto border border-gray-300">
-                                          <div className="sticky top-0 bg-slate-100 px-3 py-2 text-sm font-semibold border-b border-gray-200">
-                                            {searchQuery.trim() !== '' ? 'Search Results' : 'All Items'} - Click to select
-                                          </div>
-                                          <ul className="py-1">
-                                            {filteredProducts.map(product => (
-                                              <li 
-                                                key={product.id}
-                                                className="px-3 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-100"
-                                                onClick={() => {
-                                                  const itemsPerPallet = product?.itemsPerPallet || 1;
-                                                  const existingItem = slipItems[slip.id]?.find(item => item.productId === product.id);
-                                                  
-                                                  if (existingItem) {
-                                                    const newQuantity = (existingItem.quantity ?? 0) + itemsPerPallet;
-                                                    handleSaveItem(existingItem.id, { quantity: newQuantity });
-                                                    toast({
-                                                      title: "Item Updated",
-                                                      description: `Quantity updated for ${product.name}`,
-                                                    });
-                                                  } else {
-                                                    const newItemData = {
-                                                      productId: product.id,
-                                                      quantity: itemsPerPallet
-                                                    };
-                                                    handleAddItem(slip.id, newItemData);
-                                                  }
-                                                  setSearchQuery('');
-                                                  setFilteredProducts(null);
-                                                }}
-                                              >
-                                                <div className="flex flex-col">
-                                                  <span className="font-medium">{product.name}</span>
-                                                  <span className="text-xs text-muted-foreground">
-                                                    Sr.No: {product.newSr || ' '} | Barcode: {product.barcode || ' '}
-                                                  </span>
-                                                </div>
-                                              </li>
-                                            ))}
-                                          </ul>
-                                        </div>
-                                      )}
-                                      
-                                      {searchQuery.trim() !== '' && (!filteredProducts || filteredProducts.length === 0) && (
-                                        <div className="absolute z-10 w-full mt-1 bg-white rounded-md shadow-lg border border-gray-300">
-                                          <div className="sticky top-0 bg-slate-100 px-3 py-2 text-sm font-semibold border-b border-gray-200">
-                                            Search Results
-                                          </div>
-                                          <div className="px-3 py-4 text-center text-gray-500">
-                                            No products found matching your search.
-                                          </div>
-                                        </div>
-                                      )}
-                                    </div>
-                                    <div className="mt-2 text-xs text-muted-foreground">
-                                      Click on the search field to see all items or type to filter by name or Sr.No.
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                              
-                              <div className="rounded-md border overflow-hidden">
-                                <Table>
-                                  <TableHeader>
-                                    <TableRow>
-                                      <TableHead className="w-[10%]">Sr. No.</TableHead>
-                                      <TableHead className="w-[15%]">SKU</TableHead>
-                                      <TableHead className="w-[35%]">Product</TableHead>
-                                      <TableHead className="w-[20%] text-center">Quantity</TableHead>
-                                      <TableHead className="w-[10%]"></TableHead>
-                                    </TableRow>
-                                  </TableHeader>
-                                  <TableBody>
-                                    {slipItems[slip.id]?.map((item, index) => {
-                                      return (
-                                        <TableRow key={item.id}>
-                                          <TableCell>{item.srNo || ' '}</TableCell>
-                                          <TableCell className="break-words">
-                                            {item.barcode || ' '}
-                                          </TableCell>
-                                          <TableCell className="max-w-[300px] break-words">
-                                            {item.itemName || `Product #${item.productId}`}
-                                          </TableCell>
-                                          <TableCell className="text-center">
-                                            {canAddSlips ? (
-                                              <div className="flex items-center justify-center">
-                                                <Button
-                                                  variant="outline"
-                                                  size="sm"
-                                                  className="h-8 w-8 p-0"
-                                                  onClick={() => {
-                                                    const currentQuantity = item.quantity || 1;
-                                                    if (currentQuantity > 1) {
-                                                      handleSaveItem(item.id, { quantity: currentQuantity - 1 });
-                                                    }
-                                                  }}
-                                                >
-                                                  <span>-</span>
-                                                </Button>
-                                                <span className="min-w-[3rem] text-center mx-1">
-                                                  {item.quantity ?? 0}
-                                                </span>
-                                                <Button
-                                                  variant="outline"
-                                                  size="sm"
-                                                  className="h-8 w-8 p-0"
-                                                  onClick={() => {
-                                                    const currentQuantity = item.quantity || 1;
-                                                    handleSaveItem(item.id, { quantity: currentQuantity + 1 });
-                                                  }}
-                                                >
-                                                  <span>+</span>
-                                                </Button>
-                                              </div>
-                                            ) : (
-                                              <span className="text-center">
-                                                {item.quantity ?? 0}
-                                              </span>
-                                            )}
-                                          </TableCell>
-                                          <TableCell>
-                                            {canAddSlips && (
-                                              <div className="flex justify-end gap-2">
-                                                <Button
-                                                  variant="ghost"
-                                                  size="icon"
-                                                  className="text-destructive"
-                                                  onClick={() => handleDeleteItem(item.id)}
-                                                >
-                                                  <Trash className="h-4 w-4" />
-                                                  <span className="sr-only">Delete</span>
-                                                </Button>
-                                              </div>
-                                            )}
-                                          </TableCell>
-                                        </TableRow>
-                                      );
-                                    })}
-
-                                    {(!slipItems[slip.id] || slipItems[slip.id].length === 0) && (
-                                      <TableRow>
-                                        <TableCell colSpan={5} className="h-24 text-center">
-                                          {canAddSlips ? "No items in this slip. Use the search bar above to add items." : "No items in this slip."}
-                                        </TableCell>
-                                      </TableRow>
-                                    )}
-                                  </TableBody>
-                                </Table>
-                                
-                                {slipItems[slip.id] && slipItems[slip.id].length > 0 && (
-                                  <div className="bg-muted px-4 py-3 border-t">
-                                    <div className="flex justify-between items-center">
-                                      <div className="text-sm font-medium">
-                                        Total Items: <span className="text-primary font-semibold">{slipItems[slip.id].length}</span>
-                                      </div>
-                                      <div className="text-sm font-medium">
-                                        Total Quantity: <span className="text-primary font-semibold">
-                                          {slipItems[slip.id].reduce((sum, item) => sum + (item.quantity ?? 0), 0)}
-                                        </span>
-                                      </div>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      )}
-                    </React.Fragment>
-                  );
-                  })}
-                </TableBody>
-                <TableFooter className="bg-muted/30">
-                  {getFilteredSlips().length > 0 && (
-                    <TableRow className="font-medium border-t-2">
-                      <TableCell className="font-bold text-center">Total</TableCell>
-                      <TableCell></TableCell> {/* Order Date */}
-                      <TableCell className="text-center">
-                        {getFilteredSlips().length}
-                      </TableCell>
-                      <TableCell className="text-center">
-                        {Array.from(new Set(getFilteredSlips().map(slip => slip.partyName))).length}
-                      </TableCell>
-                      <TableCell></TableCell> {/* Plant */}
-                      <TableCell className="text-center">
-                        {getFilteredSlips().reduce((sum, slip) => sum + (slip.totalQuantity || 0), 0)}
-                      </TableCell>
-                      <TableCell></TableCell> {/* Total Volume */}
-                      <TableCell className="text-center">
-                        {Array.from(new Set(getFilteredSlips().filter(slip => slip.vehicleNumber).map(slip => slip.vehicleNumber))).length}
-                      </TableCell>
-                      <TableCell></TableCell> {/* Driver */}
-                      <TableCell>
-                        <div className="flex items-center justify-end gap-1 ml-auto">
-                          <span className="text-xs whitespace-nowrap">Show entries:</span>
-                          <select 
-                            className="h-6 text-xs border rounded px-1 bg-background"
-                            value={entriesLimit}
-                            onChange={(e) => setEntriesLimit(Number(e.target.value))}
-                            aria-label="Number of entries to display"
-                          >
-                            <option value={15}>15</option>
-                            <option value={25}>25</option>
-                            <option value={50}>50</option>
-                            <option value={100}>100</option>
-                          </select>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  )}
-                  
-                  <TableRow>
-                    <TableCell colSpan={10} className="text-center py-2">
-                      <div className="flex items-center justify-between">
-                        <div className="text-sm text-muted-foreground">
-                          Showing {getSortedSlips().length > 0 ? (currentPage - 1) * entriesLimit + 1 : 0} to {Math.min(currentPage * entriesLimit, getFilteredSlips().length)} of {getFilteredSlips().length} entries
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setCurrentPage(1)}
-                            disabled={currentPage === 1}
-                          >
-                            <ChevronFirst className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                            disabled={currentPage === 1}
-                          >
-                            <ChevronLeft className="h-4 w-4" />
-                          </Button>
-                          <span className="text-sm text-muted-foreground px-2">
-                            Page {currentPage} of {getTotalPages()}
-                          </span>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setCurrentPage(prev => Math.min(getTotalPages(), prev + 1))}
-                            disabled={currentPage === getTotalPages()}
-                          >
-                            <ChevronRight className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setCurrentPage(getTotalPages())}
-                            disabled={currentPage === getTotalPages()}
-                          >
-                            <ChevronLast className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                </TableFooter>
-              </Table>
-            </div>
-          ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              No proforma slips found. Create your first one!
-            </div>
-          )}
+            sortMode="external"
+            sortState={{ columnId: sortConfig.column, direction: sortConfig.direction }}
+            onSortColumnClick={handleSort}
+            paginationMode="client"
+            pageIndex={currentPage - 1}
+            onPageIndexChange={(idx) => setCurrentPage(idx + 1)}
+            pageSize={entriesLimit}
+            onPageSizeChange={setEntriesLimit}
+            pageSizeOptions={[15, 25, 50, 100]}
+            renderFooter={renderSlipFooter}
+            enableColumnResizing
+            enableColumnVisibility
+            columnVisibility={visibleColumnIds}
+            onColumnVisibilityChange={setVisibleColumnIds}
+            showMobileSwipeHint
+            enableZebraStripes
+            headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+          />
         </CardContent>
       </Card>
       

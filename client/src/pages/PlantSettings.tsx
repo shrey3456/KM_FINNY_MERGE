@@ -30,7 +30,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Trash2, Edit, Plus, Factory, Printer, Lock, Unlock, FileText, ScrollText, ChevronDown, ChevronRight, Tag } from "lucide-react";
+import { Trash2, Edit, Plus, Factory, Printer, Lock, Unlock, FileText, ScrollText, ChevronDown, ChevronRight, Tag, CheckCircle2, Hand } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Link } from "wouter";
@@ -44,6 +44,7 @@ const plantFormSchema = z.object({
   borderColor: z.string().min(1, "Border color is required"),
   isLockingEnabled: z.boolean().default(true),
   isSplitPagesEnabled: z.boolean().default(false),
+  isAutoCompleteEnabled: z.boolean().default(false),
 });
 
 type PlantFormValues = z.infer<typeof plantFormSchema>;
@@ -95,6 +96,7 @@ export default function PlantSettings() {
       borderColor: "#cccccc",
       isLockingEnabled: true,
       isSplitPagesEnabled: false,
+      isAutoCompleteEnabled: false,
     },
   });
 
@@ -404,6 +406,7 @@ export default function PlantSettings() {
       borderColor: plant.borderColor,
       isLockingEnabled: plant.isLockingEnabled !== undefined && plant.isLockingEnabled !== null ? plant.isLockingEnabled : true,
       isSplitPagesEnabled: plant.isSplitPagesEnabled !== undefined && plant.isSplitPagesEnabled !== null ? plant.isSplitPagesEnabled : false,
+      isAutoCompleteEnabled: plant.isAutoCompleteEnabled !== undefined && plant.isAutoCompleteEnabled !== null ? plant.isAutoCompleteEnabled : false,
     });
     setIsDialogOpen(true);
   };
@@ -417,6 +420,7 @@ export default function PlantSettings() {
         borderColor: "#cccccc",
         isLockingEnabled: true,
         isSplitPagesEnabled: false,
+        isAutoCompleteEnabled: false,
     });
     setIsDialogOpen(true);
   }
@@ -433,6 +437,7 @@ export default function PlantSettings() {
         borderColor: "#cccccc",
         isLockingEnabled: true,
         isSplitPagesEnabled: false,
+        isAutoCompleteEnabled: false,
       });
     }
   }
@@ -539,6 +544,27 @@ export default function PlantSettings() {
                     )}
                   />
 
+                  <FormField
+                    control={form.control}
+                    name="isAutoCompleteEnabled"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                        <div className="space-y-0.5">
+                          <FormLabel>✅ Auto Complete (Order Scan)</FormLabel>
+                          <div className="text-xs text-muted-foreground">
+                            {field.value
+                              ? "A part completes itself the instant every item is fully scanned — except the last part of a group, which always waits for the manual Complete button"
+                              : "Parts only complete when an admin clicks Complete (default)"}
+                          </div>
+                        </div>
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormItem>
+                    )}
+                  />
+
                   <div className="grid grid-cols-3 gap-4">
                       <FormField
                       control={form.control}
@@ -611,9 +637,14 @@ export default function PlantSettings() {
                                   : '⚠️ Unlimited prints'}
                               </div>
                               <div>
-                                {form.watch("isSplitPagesEnabled") 
-                                  ? '📄 Multi-page mode' 
+                                {form.watch("isSplitPagesEnabled")
+                                  ? '📄 Multi-page mode'
                                   : '📜 Continuous mode'}
+                              </div>
+                              <div>
+                                {form.watch("isAutoCompleteEnabled")
+                                  ? '✅ Auto Complete on'
+                                  : '🖐️ Manual Complete only'}
                               </div>
                           </div>
                       </div>
@@ -641,6 +672,7 @@ export default function PlantSettings() {
                 <TableHead>Name</TableHead>
                 <TableHead>Print Locking</TableHead>
                 <TableHead>Split Pages</TableHead>
+                <TableHead>Auto Complete</TableHead>
                 <TableHead>STVs</TableHead>
                 <TableHead>Background</TableHead>
                 <TableHead>Text</TableHead>
@@ -651,7 +683,7 @@ export default function PlantSettings() {
             </TableHeader>
             <TableBody>
               {isLoading ? (
-                <TableRow><TableCell colSpan={9} className="text-center">Loading...</TableCell></TableRow>
+                <TableRow><TableCell colSpan={10} className="text-center">Loading...</TableCell></TableRow>
               ) : plants?.map((plant: any) => (
                 <React.Fragment key={plant.id}>
                 <TableRow>
@@ -677,6 +709,17 @@ export default function PlantSettings() {
                     ) : (
                       <span className="text-gray-600 font-medium text-xs flex items-center gap-1">
                         <ScrollText className="h-3.5 w-3.5" /> <span>Continuous</span>
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {plant.isAutoCompleteEnabled ? (
+                      <span className="text-emerald-600 font-medium text-xs flex items-center gap-1">
+                        <CheckCircle2 className="h-3.5 w-3.5" /> <span>Auto</span>
+                      </span>
+                    ) : (
+                      <span className="text-gray-600 font-medium text-xs flex items-center gap-1">
+                        <Hand className="h-3.5 w-3.5" /> <span>Manual</span>
                       </span>
                     )}
                   </TableCell>
@@ -761,7 +804,7 @@ export default function PlantSettings() {
                 </TableRow>
                 {expandedPlantId === plant.id ? (
                   <TableRow>
-                    <TableCell colSpan={9}>
+                    <TableCell colSpan={10}>
                       <div className="rounded-xl border bg-white p-0 shadow-sm">
                         <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/40 px-5 py-3">
                           <div className="flex items-center gap-3">
