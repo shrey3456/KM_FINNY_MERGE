@@ -440,7 +440,7 @@ export default function OverallStock() {
             columnVisibility={visibleColumnIds}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
-            headerClassName="bg-[#001d6e] text-white hover:bg-[#0a2b7e] hover:text-white"
+            headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
           />
         </div>
       </div>

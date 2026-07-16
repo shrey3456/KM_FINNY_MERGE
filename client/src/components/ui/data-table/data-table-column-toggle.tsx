@@ -1,7 +1,8 @@
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Columns3 } from "lucide-react";
+import { ChevronDown, Columns2 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import type { DataTableColumn } from "./types";
 
 interface DataTableColumnToggleProps<TData> {
@@ -9,6 +10,8 @@ interface DataTableColumnToggleProps<TData> {
   visibleColumnIds: Set<string>;
   onToggleColumn: (id: string) => void;
   onSetAll: (visible: boolean) => void;
+  /** Extra classes merged onto the "Columns" trigger button. */
+  buttonClassName?: string;
 }
 
 export function DataTableColumnToggle<TData>({
@@ -16,15 +19,17 @@ export function DataTableColumnToggle<TData>({
   visibleColumnIds,
   onToggleColumn,
   onSetAll,
+  buttonClassName,
 }: DataTableColumnToggleProps<TData>) {
   const toggleableColumns = columns.filter((c) => c.hideable !== false);
 
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button variant="outline" size="sm">
-          <Columns3 className="mr-2 h-4 w-4" />
+        <Button variant="outline" size="sm" className={cn("h-8 text-xs", buttonClassName)}>
+          <Columns2 className="mr-1.5 h-3.5 w-3.5" />
           Columns
+          <ChevronDown className="ml-1 h-3 w-3" />
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-64 p-3">

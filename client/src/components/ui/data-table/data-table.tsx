@@ -182,7 +182,7 @@ export function DataTable<TData>({
 
   const visibleColumnIds = enableColumnVisibility
     ? new Set([
-        ...activeVisibleIds,
+        ...Array.from(activeVisibleIds),
         ...columns.filter((c) => c.hideable === false).map((c) => c.id),
       ])
     : new Set(columns.map((c) => c.id));
@@ -421,7 +421,7 @@ export function DataTable<TData>({
                   {enableRowSelection && (
                     <th
                       className={cn(
-                        "border-b bg-background px-2 py-2 align-middle sm:px-4 sm:py-3",
+                        "border-b border-r bg-background px-2 py-2 align-middle sm:px-2.5 sm:py-2.5",
                         isStickyHeader && "sticky top-0 z-20",
                         headerClassName,
                       )}
@@ -438,10 +438,10 @@ export function DataTable<TData>({
                       <th
                         key={col.id}
                         className={cn(
-                          "relative whitespace-nowrap border-b bg-background px-2 py-2 text-left align-middle text-xs font-medium text-muted-foreground sm:px-4 sm:py-3 sm:text-sm",
+                          "relative whitespace-nowrap border-b border-r bg-background px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:px-2.5 sm:py-2.5 sm:text-[11px]",
                           isStickyHeader && "sticky top-0 z-10 bg-background",
                           isPinned && "left-0 z-20 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]",
-                          col.sortable && "cursor-pointer select-none hover:bg-muted/50",
+                          col.sortable && "cursor-pointer select-none",
                           col.align === "right" && "text-right",
                           col.align === "center" && "text-center",
                           col.headerClassName,
@@ -468,7 +468,7 @@ export function DataTable<TData>({
                             onMouseDown={(e) => startResize(e, col)}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <span className="h-1/2 w-[3px] rounded-full bg-border transition-colors group-hover:bg-primary group-hover:w-1" />
+                            <span className="h-1/2 w-[3px] rounded-full bg-transparent transition-colors group-hover:bg-white/60" />
                           </span>
                         )}
                       </th>
@@ -492,7 +492,7 @@ export function DataTable<TData>({
                     <Fragment key={id}>
                       <tr
                         className={cn(
-                          "border-b transition-colors hover:bg-muted/50",
+                          "transition-colors hover:bg-[#001d6e]/[0.04]",
                           clickable && "cursor-pointer",
                           enableZebraStripes && (rowIndex % 2 === 1 ? "bg-slate-50" : "bg-white"),
                           selectedSet.has(id) && "bg-muted/50",
@@ -501,7 +501,7 @@ export function DataTable<TData>({
                       >
                         {enableRowSelection && (
                           <td
-                            className="px-2 py-2 align-middle sm:px-4 sm:py-3"
+                            className="border-b border-r border-gray-200 px-2 py-1.5 align-middle sm:px-2.5 sm:py-2"
                             onClick={(e) => e.stopPropagation()}
                           >
                             <div className="flex items-center justify-center">
@@ -522,7 +522,7 @@ export function DataTable<TData>({
                             <td
                               key={col.id}
                               className={cn(
-                                "px-2 py-2 align-middle text-xs sm:px-4 sm:py-3 sm:text-sm",
+                                "border-b border-r border-gray-200 px-2 py-1.5 align-middle text-[11px] sm:px-2.5 sm:py-2 sm:text-xs",
                                 isPinned &&
                                   "sticky left-0 z-[5] bg-background shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]",
                                 col.align === "right" && "text-right",

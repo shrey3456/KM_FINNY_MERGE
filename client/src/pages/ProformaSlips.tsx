@@ -17,9 +17,6 @@ import {
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import {
   Dialog,
@@ -118,6 +115,9 @@ const proformaSlipFormSchema = z.object({
 });
 
 type ProformaSlipFormValues = z.infer<typeof proformaSlipFormSchema>;
+
+// Solid navy fill, matching the Notion Inventory action buttons (Import CSV / Export / Sync Notion).
+const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
 // Extend basic ProformaSlip type to include lock and audit fields loaded from API
 type LockedProformaSlip = ProformaSlip & {
@@ -1828,64 +1828,78 @@ export default function ProformaSlips() {
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>All Proforma Slips</CardTitle>
-          <CardDescription>
-            View and manage all proforma slips. Click on a row to view details.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-col gap-4 mb-4">
-            <div className="relative w-full">
-              <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search slips by order number or party name"
-                className="pl-8"
-                value={slipSearchQuery}
-                onChange={(e) => setSlipSearchQuery(e.target.value)}
-              />
-            </div>
-            
-            <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-              <div className="flex flex-col md:flex-row gap-2 w-full">
-                <SingleDateFilter
-                  selectedDate={selectedDate}
-                  onDateChange={(date: Date | null) => {
-                    setSelectedDate(date);
-                    setIsDateFilterActive(!!date);
-                    if (date && !isLocked) {
-                      SingleDateFilterStorage.saveDateFilter('proforma-slips', date);
-                    }
-                  }}
-                  isLocked={isLocked}
-                  onLockChange={(locked: boolean) => setLocked(locked)}
-                  pageKey="proforma-slips"
-                />
-                <PlantFilter
-                  selectedPlants={selectedPlants}
-                  onPlantChange={setSelectedPlants}
-                  plantOptions={plantOptions}
-                />
-                <DataTableColumnToggle
-                  columns={slipColumns}
-                  visibleColumnIds={visibleColumnIds}
-                  onToggleColumn={(id) =>
-                    setVisibleColumnIds((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(id)) next.delete(id);
-                      else next.add(id);
-                      return next;
-                    })
-                  }
-                  onSetAll={(visible) =>
-                    setVisibleColumnIds(visible ? new Set(slipColumns.map((c) => c.id)) : new Set())
-                  }
-                />
+      <Card className="overflow-hidden">
+        {/* Header bar — title + search on top, filters directly beneath (matches Notion Inventory) */}
+        <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div className="flex items-center gap-3">
+              <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg bg-[#001d6e]/10">
+                <FileText className="h-4 w-4 sm:h-5 sm:w-5 text-[#001d6e]" />
+              </div>
+              <div>
+                <div className="text-lg sm:text-xl font-bold tracking-tight text-gray-900">Proforma Slips</div>
+                <div className="text-xs text-gray-400 leading-none mt-0.5">
+                  View and manage all proforma slips. Click on a row to view details.
+                </div>
               </div>
             </div>
-            
+            <div className="relative w-full sm:w-auto sm:shrink-0">
+              <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+              <input
+                value={slipSearchQuery}
+                onChange={(e) => setSlipSearchQuery(e.target.value)}
+                placeholder="Search slips by order number or party name…"
+                className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
+              />
+              {slipSearchQuery && (
+                <button onClick={() => setSlipSearchQuery("")} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
+
+          {/* Filters */}
+          <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
+            <SingleDateFilter
+              selectedDate={selectedDate}
+              onDateChange={(date: Date | null) => {
+                setSelectedDate(date);
+                setIsDateFilterActive(!!date);
+                if (date && !isLocked) {
+                  SingleDateFilterStorage.saveDateFilter('proforma-slips', date);
+                }
+              }}
+              isLocked={isLocked}
+              onLockChange={(locked: boolean) => setLocked(locked)}
+              pageKey="proforma-slips"
+              buttonClassName={FILTER_BTN_CLASS}
+            />
+            <PlantFilter
+              selectedPlants={selectedPlants}
+              onPlantChange={setSelectedPlants}
+              plantOptions={plantOptions}
+              buttonClassName={FILTER_BTN_CLASS}
+            />
+            <DataTableColumnToggle
+              columns={slipColumns}
+              visibleColumnIds={visibleColumnIds}
+              onToggleColumn={(id) =>
+                setVisibleColumnIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                })
+              }
+              onSetAll={(visible) =>
+                setVisibleColumnIds(visible ? new Set(slipColumns.map((c) => c.id)) : new Set())
+              }
+              buttonClassName={FILTER_BTN_CLASS}
+            />
+          </div>
+        </div>
+        <CardContent className="pt-4">
           <DataTable<LockedProformaSlip>
             columns={slipColumns}
             data={getSortedSlips() as LockedProformaSlip[]}
@@ -1928,7 +1942,8 @@ export default function ProformaSlips() {
             columnVisibility={visibleColumnIds}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
-            headerClassName="bg-[#001d6e] text-white hover:bg-[#0a2b7e] hover:text-white"
+            enableZebraStripes
+            headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
           />
         </CardContent>
       </Card>

@@ -3,22 +3,20 @@ import { apiRequest, queryClient } from '@/lib/queryClient';
 import {
   Card,
   CardContent,
-  CardHeader,
-  CardTitle
 } from '@/components/ui/card';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow
-} from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown } from 'lucide-react';
+import {
+  DataTable,
+  DataTableColumnToggle,
+  type DataTableColumn,
+} from '@/components/ui/data-table';
+import {
+  Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown,
+  UserPlus, UserCog, AlertTriangle, KeyRound, IdCard, ShieldCheck,
+} from 'lucide-react';
 import { useState } from 'react';
 import { User } from '@shared/schema';
 import {
@@ -57,6 +55,15 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 
+// Solid navy fill, matching the Notion Inventory action buttons.
+const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
+const PRIMARY_BTN_CLASS = "bg-[#001d6e] text-white hover:bg-[#001552]";
+
+// Full-bleed navy banner + scrollable body + pinned footer. The [&>button] rules recolor
+// Dialog's built-in close X, which would otherwise be dark-on-navy.
+const DIALOG_SHELL_CLASS =
+  "sm:max-w-[620px] max-h-[90vh] flex flex-col gap-0 overflow-hidden p-0 [&>button]:text-white [&>button]:opacity-80 [&>button:hover]:opacity-100";
+
 // Form schema
 const userFormSchema = z.object({
   userCode: z.string().optional(),
@@ -79,6 +86,60 @@ function parseJsonArray(val: string | null | undefined): string[] {
   try { return JSON.parse(val || "[]"); } catch { return []; }
 }
 
+// Navy banner used at the top of every user dialog, so all three read as one themed family.
+function DialogBanner({
+  icon: Icon,
+  title,
+  description,
+  tone = "navy",
+}: {
+  icon: typeof UserPlus;
+  title: string;
+  description: string;
+  tone?: "navy" | "danger";
+}) {
+  const bg = tone === "danger" ? "bg-red-600" : "bg-[#001d6e]";
+  return (
+    <DialogHeader className={`${bg} space-y-0 px-5 py-4 text-left`}>
+      <div className="flex items-center gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/15">
+          <Icon className="h-5 w-5 text-white" />
+        </div>
+        <div className="min-w-0">
+          <DialogTitle className="text-base font-bold tracking-tight text-white sm:text-lg">
+            {title}
+          </DialogTitle>
+          <DialogDescription className="mt-0.5 text-xs text-white/70">
+            {description}
+          </DialogDescription>
+        </div>
+      </div>
+    </DialogHeader>
+  );
+}
+
+// Groups related fields under a small navy rule, matching the table header treatment.
+function FormSection({
+  icon: Icon,
+  title,
+  children,
+}: {
+  icon: typeof UserPlus;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Icon className="h-3.5 w-3.5 shrink-0 text-[#001d6e]" />
+        <h4 className="text-[11px] font-bold uppercase tracking-wide text-[#001d6e]">{title}</h4>
+        <div className="h-px flex-1 bg-gray-200" />
+      </div>
+      {children}
+    </div>
+  );
+}
+
 // Multi-select popover for plants and pages
 function MultiSelectField({
   label,
@@ -89,7 +150,7 @@ function MultiSelectField({
   disabledNote,
 }: {
   label: string;
-  options: { key: string; label: string }[];
+  options: readonly { readonly key: string; readonly label: string }[];
   selected: string[];
   onChange: (val: string[]) => void;
   disabled?: boolean;
@@ -164,6 +225,10 @@ const Users = () => {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<Partial<User> | null>(null);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
+    () => new Set(['avatar', 'name', 'username', 'designation', 'role', 'plants', 'actions']),
+  );
   const { toast } = useToast();
 
   // Fetch users
@@ -363,51 +428,60 @@ const Users = () => {
     const isAdminRole = watchedRole === "admin" || watchedRole === "super-admin";
 
     return (
-      <div className="space-y-4 py-2">
-        <FormField control={form.control} name="userCode" render={({ field }) => (
-          <FormItem>
-            <FormLabel>User Code</FormLabel>
-            <FormControl>
-              <Input placeholder="Enter user code" {...field} />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        )} />
+      <div className="space-y-6">
+        <FormSection icon={IdCard} title="Account">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField control={form.control} name="userCode" render={({ field }) => (
+              <FormItem>
+                <FormLabel>User Code</FormLabel>
+                <FormControl>
+                  <Input placeholder="Enter user code" {...field} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )} />
 
-        <FormField control={form.control} name="username" render={({ field }) => (
-          <FormItem>
-            <FormLabel>Username</FormLabel>
-            <FormControl>
-              <Input placeholder="johndoe" {...field} />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        )} />
+            <FormField control={form.control} name="username" render={({ field }) => (
+              <FormItem>
+                <FormLabel>Username</FormLabel>
+                <FormControl>
+                  <Input placeholder="johndoe" {...field} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )} />
+          </div>
 
-        <FormField control={form.control} name="pin" render={({ field }) => (
-          <FormItem>
-            <FormLabel>PIN (4 digits)</FormLabel>
-            <FormControl>
-              <Input
-                type="text"
-                placeholder={isEdit ? "Leave blank to keep current PIN" : "1234"}
-                maxLength={4}
-                pattern="[0-9]{4}"
-                inputMode="numeric"
-                {...field}
-                value={field.value || ''}
-              />
-            </FormControl>
-            {isEdit && (
-              <FormDescription>Leave blank to keep the current PIN. Must be exactly 4 digits.</FormDescription>
-            )}
-            {!isEdit && (
-              <FormDescription>4-digit PIN code for authentication</FormDescription>
-            )}
-            <FormMessage />
-          </FormItem>
-        )} />
+          <FormField control={form.control} name="pin" render={({ field }) => (
+            <FormItem>
+              <FormLabel className="flex items-center gap-1.5">
+                <KeyRound className="h-3.5 w-3.5 text-gray-400" />
+                PIN (4 digits)
+              </FormLabel>
+              <FormControl>
+                <Input
+                  type="text"
+                  placeholder={isEdit ? "Leave blank to keep current PIN" : "1234"}
+                  maxLength={4}
+                  pattern="[0-9]{4}"
+                  inputMode="numeric"
+                  className="w-32 tracking-[0.4em] font-mono"
+                  {...field}
+                  value={field.value || ''}
+                />
+              </FormControl>
+              {isEdit && (
+                <FormDescription>Leave blank to keep the current PIN. Must be exactly 4 digits.</FormDescription>
+              )}
+              {!isEdit && (
+                <FormDescription>4-digit PIN code for authentication</FormDescription>
+              )}
+              <FormMessage />
+            </FormItem>
+          )} />
+        </FormSection>
 
+        <FormSection icon={UserCog} title="Profile">
         <FormField control={form.control} name="name" render={({ field }) => (
           <FormItem>
             <FormLabel>Display Name</FormLabel>
@@ -525,7 +599,9 @@ const Users = () => {
             <FormMessage />
           </FormItem>
         )} />
+        </FormSection>
 
+        <FormSection icon={ShieldCheck} title="Access">
         {/* Plants multi-select */}
         <FormField control={form.control} name="plants" render={({ field }) => (
           <FormItem>
@@ -597,9 +673,111 @@ const Users = () => {
             </FormItem>
           );
         }} />
+        </FormSection>
       </div>
     );
   };
+
+  const userColumns: DataTableColumn<User>[] = [
+    {
+      id: 'avatar',
+      header: 'User',
+      width: 70,
+      align: 'center',
+      render: (user) => (
+        <div className="flex justify-center">
+          <Avatar className="h-8 w-8">
+            <AvatarFallback className="bg-primary/10 text-primary text-[10px]">
+              {(user.name || user.username).substring(0, 2).toUpperCase()}
+            </AvatarFallback>
+          </Avatar>
+        </div>
+      ),
+    },
+    {
+      id: 'name',
+      header: 'Name',
+      width: 160,
+      sortable: true,
+      accessor: (user) => user.name,
+      cellClassName: 'font-medium text-gray-900',
+      render: (user) => user.name || '-',
+    },
+    {
+      id: 'username',
+      header: 'Username',
+      width: 160,
+      sortable: true,
+      accessor: (user) => user.username,
+      render: (user) => user.username,
+    },
+    {
+      id: 'designation',
+      header: 'Designation',
+      width: 140,
+      sortable: true,
+      accessor: (user) => user.designation,
+      render: (user) => user.designation || '-',
+    },
+    {
+      id: 'role',
+      header: 'Role',
+      width: 110,
+      sortable: true,
+      accessor: (user) => user.role,
+      render: (user) => (
+        <Badge
+          variant="outline"
+          className={
+            user.role === 'admin' || user.role === 'super-admin'
+              ? 'bg-blue-50 text-blue-700 border-blue-200'
+              : 'bg-green-50 text-green-700 border-green-200'
+          }
+        >
+          {user.role || 'User'}
+        </Badge>
+      ),
+    },
+    {
+      id: 'plants',
+      header: 'Plants',
+      width: 160,
+      render: (user) => {
+        const userPlants = parseJsonArray((user as any).plants);
+        return (
+          <div className="flex flex-wrap gap-1">
+            {userPlants.length === 0 ? (
+              <span className="text-gray-400">-</span>
+            ) : (
+              userPlants.map((p: string) => (
+                <Badge key={p} variant="secondary" className="text-[10px]">{p}</Badge>
+              ))
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      id: 'actions',
+      header: '',
+      width: 90,
+      align: 'right',
+      hideable: false,
+      preventRowClick: true,
+      render: (user) => (
+        <div className="flex justify-end gap-1">
+          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEditDialog(user)}>
+            <Edit className="h-3.5 w-3.5" />
+            <span className="sr-only">Edit</span>
+          </Button>
+          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openDeleteDialog(user)}>
+            <Trash className="h-3.5 w-3.5" />
+            <span className="sr-only">Delete</span>
+          </Button>
+        </div>
+      ),
+    },
+  ];
 
   return (
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
@@ -609,131 +787,117 @@ const Users = () => {
           <p className="text-gray-600">Manage user accounts and permissions</p>
         </div>
 
-        <Card>
-          <CardHeader className="pb-3">
-            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
-              <CardTitle>User Management</CardTitle>
-              <div className="flex gap-2">
-                <div className="relative">
-                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-gray-500" />
-                  <Input
-                    type="search"
-                    placeholder="Search users..."
-                    className="pl-8 w-full sm:w-[250px]"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                  />
+        <Card className="overflow-hidden">
+          {/* Header bar — title + search, filters directly beneath */}
+          <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg bg-[#001d6e]/10">
+                  <UsersIcon className="h-4 w-4 sm:h-5 sm:w-5 text-[#001d6e]" />
                 </div>
-                <Button
-                  className="flex items-center gap-1"
-                  onClick={() => setIsAddDialogOpen(true)}
-                  disabled={!isAdmin}
-                >
-                  <Plus className="h-4 w-4" />
-                  <span>Add User</span>
-                </Button>
+                <div>
+                  <div className="text-lg sm:text-xl font-bold tracking-tight text-gray-900">User Management</div>
+                  <div className="text-xs text-gray-400 leading-none mt-0.5">
+                    {searchTerm
+                      ? `${filteredUsers.length} of ${Array.isArray(users) ? users.length : 0} users`
+                      : `${Array.isArray(users) ? users.length : 0} users`}
+                  </div>
+                </div>
+              </div>
+              <div className="relative w-full sm:w-auto sm:shrink-0">
+                <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+                <input
+                  value={searchTerm}
+                  onChange={(e) => { setSearchTerm(e.target.value); setPageIndex(0); }}
+                  placeholder="Search users…"
+                  className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
+                />
+                {searchTerm && (
+                  <button onClick={() => { setSearchTerm(''); setPageIndex(0); }} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
             </div>
-          </CardHeader>
 
-          <CardContent>
-            <div className="overflow-x-auto mt-4">
-              {isLoading ? (
-                <div className="flex justify-center py-8">
-                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                </div>
-              ) : filteredUsers.length === 0 ? (
-                <div className="text-center py-8 text-gray-500">
-                  {searchTerm ? "No users found matching your search." : "No users have been added yet."}
-                </div>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-[60px]">User</TableHead>
-                      <TableHead>Name</TableHead>
-                      <TableHead>Username</TableHead>
-                      <TableHead>Designation</TableHead>
-                      <TableHead>Role</TableHead>
-                      <TableHead>Plants</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredUsers.map((user: User) => {
-                      const userPlants = parseJsonArray((user as any).plants);
-                      return (
-                        <TableRow key={user.userCode}>
-                          <TableCell>
-                            <Avatar>
-                              <AvatarFallback className="bg-primary/10 text-primary">
-                                {(user.name || user.username).substring(0, 2).toUpperCase()}
-                              </AvatarFallback>
-                            </Avatar>
-                          </TableCell>
-                          <TableCell className="font-medium">{user.name || "-"}</TableCell>
-                          <TableCell>{user.username}</TableCell>
-                          <TableCell>{user.designation || "-"}</TableCell>
-                          <TableCell>
-                            <Badge variant="outline" className={
-                              user.role === "admin" || user.role === "super-admin"
-                                ? "bg-blue-50 text-blue-700 border-blue-200"
-                                : "bg-green-50 text-green-700 border-green-200"
-                            }>
-                              {user.role || "User"}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex flex-wrap gap-1">
-                              {userPlants.length === 0
-                                ? <span className="text-gray-400 text-sm">-</span>
-                                : userPlants.map((p: string) => (
-                                    <Badge key={p} variant="secondary" className="text-xs">{p}</Badge>
-                                  ))
-                              }
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <div className="flex justify-end gap-2">
-                              <Button variant="ghost" size="icon" onClick={() => openEditDialog(user)}>
-                                <Edit className="h-4 w-4" />
-                                <span className="sr-only">Edit</span>
-                              </Button>
-                              <Button variant="ghost" size="icon" onClick={() => openDeleteDialog(user)}>
-                                <Trash className="h-4 w-4" />
-                                <span className="sr-only">Delete</span>
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              )}
+            {/* Filters */}
+            <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
+              <DataTableColumnToggle
+                columns={userColumns}
+                visibleColumnIds={visibleColumnIds}
+                onToggleColumn={(id) =>
+                  setVisibleColumnIds((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(id)) next.delete(id);
+                    else next.add(id);
+                    return next;
+                  })
+                }
+                onSetAll={(visible) =>
+                  setVisibleColumnIds(visible ? new Set(userColumns.map((c) => c.id)) : new Set())
+                }
+                buttonClassName={FILTER_BTN_CLASS}
+              />
+              <Button
+                className={`${FILTER_BTN_CLASS} flex items-center gap-1 md:ml-auto`}
+                onClick={() => setIsAddDialogOpen(true)}
+                disabled={!isAdmin}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Add User</span>
+              </Button>
             </div>
+          </div>
+
+          <CardContent className="pt-4">
+            <DataTable<User>
+              columns={userColumns}
+              data={filteredUsers}
+              getRowId={(user) => user.userCode}
+              isLoading={isLoading}
+              loadingLabel="Loading users…"
+              emptyState="No users have been added yet."
+              noResultsState="No users found matching your search."
+              hasActiveFilters={!!searchTerm}
+              sortMode="client"
+              paginationMode="client"
+              pageIndex={pageIndex}
+              onPageIndexChange={setPageIndex}
+              defaultPageSize={15}
+              pageSizeOptions={[15, 25, 50, 100]}
+              enableColumnResizing
+              enableColumnVisibility
+              columnVisibility={visibleColumnIds}
+              onColumnVisibilityChange={setVisibleColumnIds}
+              enableZebraStripes
+              showMobileSwipeHint
+              headerClassName="bg-[#001d6e] text-white hover:bg-[#0a2b7e] hover:text-white border-[#1a3a9c]"
+            />
           </CardContent>
         </Card>
       </div>
 
       {/* Add User Dialog */}
       <Dialog open={isAddDialogOpen} onOpenChange={handleAddDialogClose}>
-        <DialogContent className="sm:max-w-[580px] max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Add New User</DialogTitle>
-            <DialogDescription>
-              Create a new user account with appropriate permissions.
-            </DialogDescription>
-          </DialogHeader>
+        <DialogContent className={DIALOG_SHELL_CLASS}>
+          <DialogBanner
+            icon={UserPlus}
+            title="Add New User"
+            description="Create a new user account with appropriate permissions."
+          />
           <Form {...addUserForm}>
-            <form onSubmit={addUserForm.handleSubmit(handleAddUser)}>
-              {renderFormBody(addUserForm, false)}
-              <DialogFooter className="pt-4">
+            <form onSubmit={addUserForm.handleSubmit(handleAddUser)} className="flex min-h-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+                {renderFormBody(addUserForm, false)}
+              </div>
+              <DialogFooter className="shrink-0 gap-2 border-t bg-gray-50 px-5 py-3">
                 <Button type="button" variant="outline" onClick={() => handleAddDialogClose(false)}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={createUserMutation.isPending}>
-                  {createUserMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                <Button type="submit" className={PRIMARY_BTN_CLASS} disabled={createUserMutation.isPending}>
+                  {createUserMutation.isPending
+                    ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    : <UserPlus className="mr-2 h-4 w-4" />}
                   Create User
                 </Button>
               </DialogFooter>
@@ -744,22 +908,25 @@ const Users = () => {
 
       {/* Edit User Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-        <DialogContent className="sm:max-w-[580px] max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Edit User</DialogTitle>
-            <DialogDescription>
-              Update user information and permissions.
-            </DialogDescription>
-          </DialogHeader>
+        <DialogContent className={DIALOG_SHELL_CLASS}>
+          <DialogBanner
+            icon={UserCog}
+            title="Edit User"
+            description="Update user information and permissions."
+          />
           <Form {...editUserForm}>
-            <form onSubmit={editUserForm.handleSubmit(handleEditUser)}>
-              {renderFormBody(editUserForm, true)}
-              <DialogFooter className="pt-4">
+            <form onSubmit={editUserForm.handleSubmit(handleEditUser)} className="flex min-h-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+                {renderFormBody(editUserForm, true)}
+              </div>
+              <DialogFooter className="shrink-0 gap-2 border-t bg-gray-50 px-5 py-3">
                 <Button type="button" variant="outline" onClick={() => setIsEditDialogOpen(false)}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={updateUserMutation.isPending}>
-                  {updateUserMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                <Button type="submit" className={PRIMARY_BTN_CLASS} disabled={updateUserMutation.isPending}>
+                  {updateUserMutation.isPending
+                    ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    : <Check className="mr-2 h-4 w-4" />}
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -770,34 +937,39 @@ const Users = () => {
 
       {/* Delete User Confirmation Dialog */}
       <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
-        <DialogContent className="sm:max-w-[425px]">
-          <DialogHeader>
-            <DialogTitle>Delete User</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete this user? This action cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="py-4">
+        <DialogContent className="sm:max-w-[440px] gap-0 overflow-hidden p-0 [&>button]:text-white [&>button]:opacity-80 [&>button:hover]:opacity-100">
+          <DialogBanner
+            icon={AlertTriangle}
+            tone="danger"
+            title="Delete User"
+            description="This action cannot be undone."
+          />
+          <div className="px-5 py-5">
             {currentUser && (
-              <div className="flex items-center space-x-4">
+              <div className="flex items-center gap-3 rounded-lg border border-red-100 bg-red-50/60 p-3">
                 <Avatar>
-                  <AvatarFallback className="bg-primary/10 text-primary">
+                  <AvatarFallback className="bg-red-100 text-red-700">
                     {(currentUser.name || currentUser.username || "").substring(0, 2).toUpperCase()}
                   </AvatarFallback>
                 </Avatar>
-                <div>
-                  <p className="font-medium">{currentUser.name}</p>
-                  <p className="text-sm text-gray-500">{currentUser.username}</p>
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-gray-900">{currentUser.name}</p>
+                  <p className="truncate text-sm text-gray-500">{currentUser.username}</p>
                 </div>
               </div>
             )}
+            <p className="mt-3 text-sm text-gray-500">
+              Are you sure you want to permanently delete this user?
+            </p>
           </div>
-          <DialogFooter>
+          <DialogFooter className="gap-2 border-t bg-gray-50 px-5 py-3">
             <Button type="button" variant="outline" onClick={() => setIsDeleteDialogOpen(false)}>
               Cancel
             </Button>
             <Button type="button" variant="destructive" onClick={handleDeleteUser} disabled={deleteUserMutation.isPending}>
-              {deleteUserMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {deleteUserMutation.isPending
+                ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                : <Trash className="mr-2 h-4 w-4" />}
               Delete
             </Button>
           </DialogFooter>
