@@ -467,6 +467,7 @@ export async function sweepStaleCompletions(groupId: number, plant: string, user
     if (!rowCount) continue;
 
     console.log(`[order-scan] sweep auto-completed stale part ${s.id} (${s.csvFileName}) after it lost 'last part' status`);
+    broadcastScanEvent(s.id, { type: 'part-completed', csvFileName: s.csvFileName, partIndex: s.partIndex });
 
     // Make any "already covered by an earlier part" credit real now that this part is
     // actually completed — same reasoning as the manual /complete endpoint.
@@ -875,10 +876,17 @@ router.post('/order-scan/sessions/:id/complete', requirePageWrite('scan-order'),
       `UPDATE order_import_sessions
        SET scan_status = 'completed', scan_completed_at = $1
        WHERE id = $2
-       RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName"`,
+       RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName", part_index AS "partIndex"`,
       [new Date(), id],
     );
     const completed = completedRows[0];
+    if (completed) {
+      broadcastScanEvent(completed.id, {
+        type: 'part-completed',
+        csvFileName: completed.csvFileName,
+        partIndex: completed.partIndex,
+      });
+    }
 
     // Make any "already covered by an earlier part" credit real (writes to the later part's
     // actual total_scanned_qty/status), instead of leaving it as a display-only number that
@@ -1311,6 +1319,7 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     for (const sid of newlyCompleted) {
       const s = sessions.find((x: any) => x.id === sid);
       if (!s) continue;
+      broadcastScanEvent(sid, { type: 'part-completed', csvFileName: s.csvFileName, partIndex: s.partIndex });
       const activated = await autoActivateNextInScope(
         { id: sid, plant: s.plant, receivingSessionId: anchorSession.receivingSessionId, csvFileName: s.csvFileName },
         userCode,

@@ -702,10 +702,18 @@ export default function ScanOrderPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrderScanSession?.id, osScanMode]);
 
-  // Admin-triggered "complete this part now" — the ONLY way a part is completed. There is
-  // deliberately no auto-popup when all items are scanned: completion happens only when the
-  // admin explicitly clicks Complete (some items may still be covered by a later part).
+  // Admin-triggered "complete this part now". A part can also complete on its own when
+  // Auto Complete is enabled for the plant — see the WS 'part-completed' handling below,
+  // which covers both this manual path and the automatic one with the same banner.
   const [showForceComplete, setShowForceComplete] = useState(false);
+
+  // Shows a prominent "Part Complete" banner for 10s whenever a part finishes — whether via
+  // this manual button, Auto Complete firing mid-scan, or the stale-part sweep after a new
+  // CSV upload. Driven entirely by the WS 'part-completed' message (see the WS effect below)
+  // so all three trigger paths are handled uniformly, without needing separate client logic
+  // for "I just clicked Complete" vs "the server completed something on its own."
+  const [osPartCompleteBanner, setOsPartCompleteBanner] = useState<{ csvFileName: string; partIndex: number } | null>(null);
+  const osPartCompleteBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const osCompleteMutation = useMutation({
     mutationFn: () =>
@@ -769,6 +777,15 @@ export default function ScanOrderPage() {
           const data = JSON.parse(e.data);
 
           if (data.type === 'joined' || data.type === 'ping') return;
+
+          if (data.type === 'part-completed') {
+            if (osPartCompleteBannerTimerRef.current) clearTimeout(osPartCompleteBannerTimerRef.current);
+            setOsPartCompleteBanner({ csvFileName: data.csvFileName, partIndex: data.partIndex });
+            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 10000);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
           if (data.type !== 'scan') return;
 
           // The event's own sessionId (stamped server-side) tells us which part it actually
@@ -1278,6 +1295,29 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     return (
       <div className="flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6">
+
+        {/* ── "Part Complete" banner — fires for every way a part can finish (manual Complete
+            button, Auto Complete mid-scan, or the stale-part sweep after a new upload), driven
+            by the WS 'part-completed' message. Fixed/centered so it's visible regardless of
+            which tab or viewport is showing; auto-dismisses after 10s, or on click. ── */}
+        {osPartCompleteBanner && (
+          <div
+            className="fixed inset-x-0 top-3 z-[100] flex justify-center px-3 pointer-events-none"
+            role="status"
+          >
+            <button
+              type="button"
+              onClick={() => setOsPartCompleteBanner(null)}
+              className="pointer-events-auto flex items-center gap-2.5 rounded-full bg-emerald-600 pl-3 pr-4 py-2.5 text-white shadow-lg ring-1 ring-emerald-700/30 animate-in fade-in slide-in-from-top-2"
+            >
+              <CheckCircle2 className="h-5 w-5 shrink-0" />
+              <span className="text-sm font-semibold">
+                Part {osPartCompleteBanner.partIndex} Complete
+                <span className="ml-1.5 font-normal opacity-90">— {stripCsvExt(osPartCompleteBanner.csvFileName)}</span>
+              </span>
+            </button>
+          </div>
+        )}
 
         {/* ── Plant switcher — only appears when 2+ plants have a simultaneously active
             session (e.g. Valsad + Indore both scanning at once). New/additive: for a
