@@ -21,12 +21,15 @@ const PageHeader: React.FC<PageHeaderProps> = ({
   return (
     <div className="w-full mb-4">
       <div className="flex items-center gap-3 mb-1">
-        <Icon className={iconClassName || "w-7 h-7 text-[#001d6e]"} style={title === "Load Operations" ? {fill: "#4d7eff"} : title === "Stock Sheets" ? {fill: "#22c55e"} : undefined} />
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e] text-white">
+          <Icon className={iconClassName || "h-5 w-5"} />
+        </div>
         <h2 className="text-2xl font-bold text-[#001d6e]">{title}</h2>
         {children && <div className="inline-flex ml-2">{children}</div>}
       </div>
-      {subtitle && <div className="ml-10">{subtitle}</div>}
-      {description && <p className="text-gray-600 ml-10 mt-1">{description}</p>}
+      {/* ml-12 keeps subtitle/description flush with the title: badge (w-9) + gap-3 */}
+      {subtitle && <div className="ml-12">{subtitle}</div>}
+      {description && <p className="text-gray-600 ml-12 mt-1">{description}</p>}
     </div>
   );
 };

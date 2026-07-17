@@ -4,15 +4,16 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { Filter, X, FileDown, LayoutList, Factory } from "lucide-react";
+import { FileDown, LayoutList, Factory, Boxes, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import PageHeader from "@/components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
+import { StatsBar } from "@/components/ui/stats-bar";
+import { TableCard } from "@/components/ui/table-card";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -98,6 +99,9 @@ function downloadPdf(filename: string, rows: Array<Array<string | number>>) {
 }
 
 const PAGE_SIZE = 20;
+
+// Solid navy fill, matching the Notion Inventory action buttons.
+const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -344,90 +348,86 @@ export default function OverallStock() {
         />
 
         {/* Summary tiles */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-          <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-            <p className="text-xs uppercase tracking-wide text-gray-400">Total Stock</p>
-            <p className="text-2xl font-bold text-[#001d6e]">{totalStock.toLocaleString()}</p>
-            <p className="text-[11px] text-gray-400">boxes{plantFilter ? ` · ${plantFilter}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · all plants"}</p>
-          </div>
-          <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-            <p className="text-xs uppercase tracking-wide text-gray-400">Extra (of which)</p>
-            <p className="text-2xl font-bold text-amber-600">{totalExtra.toLocaleString()}</p>
-            <p className="text-[11px] text-gray-400">boxes over order · {totalExtraPallets.toFixed(2)} plt</p>
-          </div>
-          <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-            <p className="text-xs uppercase tracking-wide text-gray-400">Items</p>
-            <p className="text-2xl font-bold text-gray-900">{filtered.length.toLocaleString()}</p>
-            <p className="text-[11px] text-gray-400">item · plant rows</p>
-          </div>
-        </div>
+        <StatsBar
+          stats={[
+            {
+              icon: Boxes,
+              tone: "navy",
+              value: totalStock.toLocaleString(),
+              label: `boxes${plantFilter ? ` · ${plantFilter}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · all plants"}`,
+            },
+            {
+              icon: TrendingUp,
+              tone: "amber",
+              value: totalExtra.toLocaleString(),
+              label: `boxes over order · ${totalExtraPallets.toFixed(2)} plt`,
+            },
+            {
+              icon: LayoutList,
+              tone: "navy",
+              value: filtered.length.toLocaleString(),
+              label: "item · plant rows",
+            },
+          ]}
+          actions={
+            <>
+              <Select value={plantFilter || "_all_"} onValueChange={(v) => { setPlantFilter(v === "_all_" ? "" : v); setPageIndex(0); }}>
+                <SelectTrigger className={`w-[160px] gap-1.5 ${FILTER_BTN_CLASS}`}>
+                  <Factory className="h-3.5 w-3.5 shrink-0" />
+                  <SelectValue placeholder="All plants" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all_">{isAdmin ? "All plants" : "All my plants"}</SelectItem>
+                  {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+                </SelectContent>
+              </Select>
 
-        {/* Filters & actions */}
-        <div className="flex flex-wrap gap-2 items-center">
-          {/* Plant */}
-          <div className="flex items-center gap-1.5">
-            <Factory className="h-4 w-4 text-gray-400" />
-            <Select value={plantFilter || "_all_"} onValueChange={(v) => { setPlantFilter(v === "_all_" ? "" : v); setPageIndex(0); }}>
-              <SelectTrigger className="h-9 w-[160px] text-sm">
-                <SelectValue placeholder="All plants" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="_all_">{isAdmin ? "All plants" : "All my plants"}</SelectItem>
-                {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
+              <DataTableColumnToggle
+                columns={stockColumns}
+                visibleColumnIds={visibleColumnIds}
+                onToggleColumn={toggleColumn}
+                onSetAll={(visible) => setVisibleColumnIds(visible ? new Set(stockColumns.map((c) => c.id)) : new Set())}
+                buttonClassName={FILTER_BTN_CLASS}
+              />
 
-          {/* Search */}
-          <div className="relative min-w-[180px] flex-1 max-w-xs">
-            <Filter className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
-            <Input
-              className="pl-8 h-9 text-sm"
-              placeholder="Item, barcode, SAP, category…"
-              value={search}
-              onChange={(e) => { setSearch(e.target.value); setPageIndex(0); }}
-            />
-            {search && (
-              <button className="absolute right-2 top-1/2 -translate-y-1/2" onClick={() => { setSearch(""); setPageIndex(0); }}>
-                <X className="h-4 w-4 text-gray-400" />
-              </button>
-            )}
-          </div>
+              <div className="flex gap-2 ml-auto">
+                {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
+                  <Button key={fmt} variant="outline" size="sm" className={FILTER_BTN_CLASS}
+                    disabled={filtered.length === 0}
+                    onClick={() => {
+                      const exp = exportRows(filtered);
+                      const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                      if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
+                      if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
+                      if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
+                    }}
+                  >
+                    <FileDown className="h-3.5 w-3.5 mr-1" />{fmt}
+                  </Button>
+                ))}
+              </div>
+            </>
+          }
+        />
 
-          {/* Column visibility */}
-          <DataTableColumnToggle
-            columns={stockColumns}
-            visibleColumnIds={visibleColumnIds}
-            onToggleColumn={toggleColumn}
-            onSetAll={(visible) => setVisibleColumnIds(visible ? new Set(stockColumns.map((c) => c.id)) : new Set())}
-          />
-
-          {/* Export */}
-          <div className="flex gap-2 ml-auto">
-            {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
-              <Button key={fmt} variant="outline" size="sm" className="h-9 text-xs"
-                disabled={filtered.length === 0}
-                onClick={() => {
-                  const exp = exportRows(filtered);
-                  const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
-                  if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
-                  if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
-                  if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
-                }}
-              >
-                <FileDown className="h-3.5 w-3.5 mr-1" />{fmt}
-              </Button>
-            ))}
-          </div>
-        </div>
-
-        {/* Table */}
-        <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+        {/* Table card — title + search only; filters live in the stats card's action bar */}
+        <TableCard
+          icon={LayoutList}
+          title="Plant-wise Stock"
+          subtitle={search ? `${filtered.length} of ${rows.length} rows` : `${rows.length} item · plant rows`}
+          searchValue={search}
+          onSearchChange={(v) => { setSearch(v); setPageIndex(0); }}
+          searchPlaceholder="Item, barcode, SAP, category…"
+        >
           <DataTable<PlantStockRow>
+            className="space-y-0"
+            containerClassName="rounded-none border-0"
             columns={stockColumns}
             data={filtered}
             getRowId={(row) => `${row.barcode}-${row.plant}`}
             emptyState={`No stock yet${plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.`}
+            noResultsState="No stock rows match your search."
+            hasActiveFilters={!!search}
             enableZebraStripes
             sortMode="client"
             paginationMode="client"
@@ -442,7 +442,7 @@ export default function OverallStock() {
             showMobileSwipeHint
             headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
           />
-        </div>
+        </TableCard>
       </div>
     </div>
   );

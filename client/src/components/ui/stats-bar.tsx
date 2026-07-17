@@ -1,0 +1,101 @@
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
+import { cn } from "@/lib/utils";
+
+export type StatTone = "navy" | "emerald" | "amber" | "red" | "muted";
+
+const TONES: Record<StatTone, { badge: string; icon: string; value: string }> = {
+  navy: { badge: "bg-[#001d6e]/10", icon: "text-[#001d6e]", value: "text-gray-900" },
+  emerald: { badge: "bg-emerald-50", icon: "text-emerald-600", value: "text-emerald-600" },
+  amber: { badge: "bg-amber-50", icon: "text-amber-500", value: "text-amber-600" },
+  red: { badge: "bg-red-50", icon: "text-red-400", value: "text-red-500" },
+  muted: { badge: "bg-gray-50", icon: "text-gray-300", value: "text-gray-300" },
+};
+
+export interface StatItem {
+  icon: LucideIcon;
+  /** Big number / short status text. */
+  value: ReactNode;
+  /** Small caption under the value. */
+  label: ReactNode;
+  tone?: StatTone;
+  /** Use for short words ("Connected") rather than numbers, so they don't render oversized. */
+  isTextValue?: boolean;
+}
+
+// Static classes only — Tailwind can't see dynamically built class names at build time.
+const MD_COLS: Record<number, string> = {
+  1: "md:grid-cols-1",
+  2: "md:grid-cols-2",
+  3: "md:grid-cols-3",
+  4: "md:grid-cols-4",
+  5: "md:grid-cols-5",
+  6: "md:grid-cols-6",
+};
+
+interface StatsBarProps {
+  stats: StatItem[];
+  /** Buttons rendered in a bar beneath the tiles. Omit for a stats-only card. */
+  actions?: ReactNode;
+  /** Tiles per row on md+ screens. Defaults to the number of stats (capped at 6). */
+  columns?: number;
+  className?: string;
+}
+
+/**
+ * Stats tiles (+ optional action bar) in one bordered card — the Notion Inventory
+ * header treatment, reusable across modules.
+ */
+export function StatsBar({ stats, actions, columns, className }: StatsBarProps) {
+  const cols = Math.min(columns ?? stats.length, 6);
+
+  return (
+    <div className={cn("rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden", className)}>
+      <div
+        className={cn(
+          "grid grid-cols-2 divide-x divide-gray-100",
+          MD_COLS[cols] ?? "md:grid-cols-4",
+          actions && "border-b border-gray-100",
+        )}
+      >
+        {stats.map((stat, i) => {
+          const tone = TONES[stat.tone ?? "navy"];
+          const Icon = stat.icon;
+          return (
+            <div
+              key={i}
+              className="flex items-center gap-2 px-3 py-3 sm:gap-3 sm:px-5 sm:py-4"
+            >
+              <div
+                className={cn(
+                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg sm:h-10 sm:w-10",
+                  tone.badge,
+                )}
+              >
+                <Icon className={cn("h-4 w-4 sm:h-5 sm:w-5", tone.icon)} />
+              </div>
+              <div className="min-w-0">
+                <p
+                  className={cn(
+                    "font-extrabold leading-none",
+                    stat.isTextValue ? "text-xs sm:text-sm font-bold" : "text-xl sm:text-2xl",
+                    tone.value,
+                  )}
+                >
+                  {stat.value}
+                </p>
+                <p className="mt-0.5 truncate text-[10px] font-medium text-gray-500 sm:text-xs">
+                  {stat.label}
+                </p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {actions && (
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">{actions}</div>
+      )}
+    </div>
+  );
+}
