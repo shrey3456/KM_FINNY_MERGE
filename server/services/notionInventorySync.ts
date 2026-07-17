@@ -23,6 +23,27 @@ if (!fs.existsSync(PRODUCT_IMAGE_DIR)) {
   fs.mkdirSync(PRODUCT_IMAGE_DIR, { recursive: true });
 }
 
+// Runs an async task over each item with a bounded number in flight at once. The image
+// sync has to download every product's picture from Notion to hash-check it (Notion's file
+// URLs are presigned and rotate, so they can't be compared without downloading) — doing
+// that one-at-a-time serialised ~120 network round-trips on every startup/scheduled sync,
+// which was the real slowdown. Running a handful concurrently cuts the wall-clock time to
+// roughly (total / limit) without hammering Notion.
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  task: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      await task(items[idx]);
+    }
+  });
+  await Promise.all(workers);
+}
+
 // Downloads a product image from Notion, resizes it down (scan-dialog thumbnails don't
 // need full-resolution photography), and caches it to disk keyed by product id. Skips the
 // download's disk write when the content hash matches what's already cached, so repeat
@@ -38,10 +59,10 @@ async function syncProductImage(
   const original = Buffer.from(await response.arrayBuffer());
   const hash = crypto.createHash('sha256').update(original).digest('hex');
 
-  if (hash === existingHash) {
-    console.log(`[Notion Inventory Sync] Image unchanged for product ${productId} — skipped`);
-    return null;
-  }
+  // Unchanged — skip silently. (No per-product log: with ~120 products this floods the
+  // console with blocking synchronous stdout writes on every startup/scheduled sync. The
+  // caller logs a single summary line instead.)
+  if (hash === existingHash) return null;
 
   const resized = await sharp(original)
     .resize({ width: 600, height: 600, fit: 'inside', withoutEnlargement: true })
@@ -439,7 +460,7 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
 
 // ─── Detect-only (dry-run): stores pending, no DB writes ─────────────────────
 
-export async function detectChangesFromNotion(triggeredBy = 'system'): Promise<SyncReport> {
+export async function detectChangesFromNotion(triggeredBy = 'system', syncImages = true): Promise<SyncReport> {
   if (!NOTION_INVENTORY_DATABASE_ID) throw new Error('NOTION_INVENTORY_DATABASE_ID is not set');
   if (isSyncing) throw new Error('A sync is already in progress — please wait');
 
@@ -474,20 +495,30 @@ export async function detectChangesFromNotion(triggeredBy = 'system'): Promise<S
     // Apply button would never even become clickable. Cache images for EXISTING products
     // right here, regardless of whether they also have a field-level change to review.
     // New (not-yet-created) products still wait for Apply, since they need a real id first.
+    // Image caching downloads every product's picture from Notion to hash-check it, which is
+    // the slow part. Skipped entirely when syncImages is false — the automatic startup /
+    // 24-hour scheduled sync passes false so boot stays fast, since images rarely change and
+    // a manual "Check Sync" (syncImages=true, the default) still refreshes them on demand.
     let imagesSynced = 0;
-    for (const [productId, imageUrl] of imageUrlByProductId.entries()) {
-      try {
-        const current = allProducts.find((p) => p.id === productId);
-        const result = await syncProductImage(productId, imageUrl, current?.productImageHash);
-        if (result) {
-          await storage.updateProduct(productId, result);
-          imagesSynced++;
-        }
-      } catch (err) {
-        errors.push(`Image for product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    if (syncImages) {
+      await mapWithConcurrency(
+        [...imageUrlByProductId.entries()],
+        8,
+        async ([productId, imageUrl]) => {
+          try {
+            const current = allProducts.find((p) => p.id === productId);
+            const result = await syncProductImage(productId, imageUrl, current?.productImageHash);
+            if (result) {
+              await storage.updateProduct(productId, result);
+              imagesSynced++;
+            }
+          } catch (err) {
+            errors.push(`Image for product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        },
+      );
+      if (imagesSynced > 0) console.log(`[Notion Inventory Sync] Cached ${imagesSynced} product image(s) during detect`);
     }
-    if (imagesSynced > 0) console.log(`[Notion Inventory Sync] Cached ${imagesSynced} product image(s) during detect`);
 
     console.log(`[Notion Inventory Sync] Detected — new: ${toCreate.length}, changed: ${changedProducts.length}, unchanged: ${skipped}`);
     return report;

@@ -75,6 +75,10 @@ app.use((req, res, next) => {
       ADD COLUMN IF NOT EXISTS is_auto_complete_enabled BOOLEAN DEFAULT false
     `);
     await pool.query(`
+      ALTER TABLE plants
+      ADD COLUMN IF NOT EXISTS is_auto_scan_enabled BOOLEAN DEFAULT false
+    `);
+    await pool.query(`
       ALTER TABLE order_scan_events
       ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0
     `);
