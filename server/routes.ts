@@ -8627,15 +8627,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // otherwise detect changes AND automatically apply them to the database.
   if (process.env.NOTION_INVENTORY_DATABASE_ID) {
     const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
-    const runScheduledSync = async () => {
+    // syncImages: the boot-time run skips per-product image downloads so startup stays fast;
+    // the recurring 24-hour run includes them (parallelized in detectChangesFromNotion) so
+    // any new/changed Notion image — including a product that had none and just got one — is
+    // fetched and cached. A manual "Check Sync" always includes images too.
+    const runScheduledSync = async (syncImages: boolean) => {
       try {
         const allProducts = await storage.getAllProducts();
         if (allProducts.length === 0) {
           console.log('[Notion Inventory Sync] DB is empty — running full import from Notion...');
           await fullSyncFromNotion();
         } else {
-          console.log('[Notion Inventory Sync] Running scheduled 24-hour detect + apply...');
-          const detectReport = await detectChangesFromNotion();
+          console.log(`[Notion Inventory Sync] Running scheduled detect + apply (images: ${syncImages ? 'on' : 'off'})...`);
+          const detectReport = await detectChangesFromNotion('system', syncImages);
           const hasChanges = (detectReport.created ?? 0) + (detectReport.updated ?? 0) > 0;
           if (hasChanges) {
             console.log(`[Notion Inventory Sync] ${detectReport.created} new, ${detectReport.updated} changed — applying now...`);
@@ -8649,9 +8653,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.error('[Notion Inventory Sync] Scheduled sync failed:', err);
       }
     };
-    setInterval(runScheduledSync, SYNC_INTERVAL_MS);
-    // Also run once on startup after a short delay to handle empty-DB on first boot
-    setTimeout(runScheduledSync, 10000);
+    // Recurring 24-hour run includes images.
+    setInterval(() => runScheduledSync(true), SYNC_INTERVAL_MS);
+    // Boot-time run (10s after start) skips images to keep startup fast — handles empty-DB
+    // first boot and picks up field changes; images come on the next 24h run or a manual sync.
+    setTimeout(() => runScheduledSync(false), 10000);
     console.log('[Notion Inventory Sync] 24-hour auto sync+apply scheduler registered');
   }
 

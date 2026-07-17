@@ -257,6 +257,21 @@ export default function ScanOrderPage() {
     return orderScanNotif?.active ? orderScanNotif.session : null;
   })();
 
+  // Plant config (colors + the scan behavior toggles like Auto Scan). Small, cacheable list;
+  // we look up the active session's plant by name to read its per-plant flags. Auto Scan
+  // being off (or the plant not found) falls through to the classic always-confirm flow.
+  const { data: allPlants } = useQuery<any[]>({
+    queryKey: ["/api/plants"],
+    queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
+    staleTime: 60000,
+  });
+  const autoScanEnabled = (() => {
+    const plantName = (activeOrderScanSession?.plant ?? "").toLowerCase();
+    if (!plantName) return false;
+    const p = (allPlants ?? []).find((pl: any) => String(pl.name ?? "").toLowerCase() === plantName);
+    return p?.isAutoScanEnabled === true;
+  })();
+
   // Master View has no manual plant/date pickers — it always shows the currently active
   // session's own plant/date, derived from scanActivatedAt (stored as IST wall-clock, same
   // convention as createdAt, so its date portion matches the day that CSV was uploaded).
@@ -286,6 +301,28 @@ export default function ScanOrderPage() {
   const [osCameraError, setOsCameraError] = useState<string | null>(null);
   const [osPending, setOsPending] = useState<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osPendingRef = useRef<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
+  // Synchronous reentrancy lock for the auto-confirm path. osPendingRef/osMultiMatchRef only
+  // guard re-entry while a DIALOG is open — but an auto-confirmed scan never opens one, so
+  // without this a second gun trigger-pull (or an auto-repeating manual-entry Enter) landing
+  // before the first scan's optimistic totalScannedQty update reaches osItemsRef.current would
+  // read the same stale qty, independently decide "still under capacity", and double-log one
+  // physical scan while skipping the breach dialog it should have hit on the second qty.
+  const osScanLockRef = useRef(false);
+  // The matched CSV item + pallet size for the scan currently being submitted. Set by BOTH
+  // the auto-confirm path (_resolveOsScan) and the dialog-confirm path (handleOsConfirmScan)
+  // just before osScanMutation.mutate, so onMutate can apply its optimistic totalScannedQty/
+  // lastScannedAt bump uniformly. Previously onMutate read this only from osPendingRef, which
+  // is null for auto-confirmed (under-capacity) scans — so those scans skipped the optimistic
+  // reorder-to-top and only moved after the slower server round-trip, while full/breach scans
+  // (which open the dialog) reordered instantly. This ref closes that asymmetry.
+  const osScanCtxRef = useRef<{ matchedItem: OsScanItem | null; plantPalletSize: number } | null>(null);
+  // 5s non-blocking feedback shown after an Auto Scan auto-confirm — image + product details
+  // so the operator sees what was scanned without needing to confirm/close anything.
+  const [osAutoScanFeedback, setOsAutoScanFeedback] = useState<
+    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number } | null
+  >(null);
+  const osAutoScanFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (osAutoScanFeedbackTimerRef.current) clearTimeout(osAutoScanFeedbackTimerRef.current); }, []);
   const [osMultiMatch, setOsMultiMatch] = useState<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osMultiMatchRef = useRef<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const [osPallets, setOsPallets] = useState(1);
@@ -309,10 +346,25 @@ export default function ScanOrderPage() {
   // Barcodes we already added optimistically; WS handler skips the echo for these
   const osRecentScanSentRef = useRef<Set<string>>(new Set());
   const [wsConnected, setWsConnected] = useState(false);
+  // Brief full-screen tint on a silently auto-confirmed scan (no dialog shown) — the only
+  // feedback signal besides the beep for the fast/normal-case path. Cleared via setTimeout.
+  const [osFlash, setOsFlash] = useState<"success" | null>(null);
+  // Client-side "most recently scanned floats to top" ordering. A monotonic counter bumped on
+  // every scan (in onMutate), mapping item id → its scan sequence number. Used as the PRIMARY
+  // sort key for the CSV Items list instead of lastScannedAt, because lastScannedAt can't be
+  // compared reliably across items: a just-scanned item still carries its optimistic real-UTC
+  // toISOString() value, while items whose scan already round-tripped carry the server's
+  // IST-wall-clock-as-UTC convention (~5.5h ahead) — so the freshly-scanned item looks OLDER
+  // and wrongly sorts below an already-completed one. A pure client counter sidesteps all of
+  // that. Reset on session change. Held in a ref (not state) because every scan already
+  // triggers a re-render via the optimistic setQueryData/setOsRecentScans, so the sort re-runs
+  // and reads the fresh ref without needing its own state update.
+  const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
   useEffect(() => {
     setOsSelectedStv("");
+    osScanSeqRef.current = { seq: 0, byId: new Map() };
   }, [activeOrderScanSession?.id]);
 
   const osItemsQuery = useQuery<OsScanItem[]>({
@@ -433,14 +485,27 @@ export default function ScanOrderPage() {
       await queryClient.cancelQueries({ queryKey: osItemsKey });
       const previousItems = queryClient.getQueryData<OsScanItem[]>(osItemsKey);
       const previousPending = osPendingRef.current; // save before clearing
+      const scanCtx = osScanCtxRef.current; // set by both auto-confirm and dialog-confirm paths
 
-      // Only optimistically update if the barcode matched a CSV item (not an extra)
-      const matched = previousPending?.matchedItem;
+      // Only optimistically update if the barcode matched a CSV item (not an extra).
+      // Prefer scanCtx (populated for BOTH scan paths) over previousPending (dialog only) so
+      // auto-confirmed under-capacity scans also get the instant totalScannedQty/lastScannedAt
+      // bump — otherwise they wouldn't reorder-to-top until the server round-trip landed.
+      const matched = scanCtx?.matchedItem ?? previousPending?.matchedItem;
+      // Stamp this scan's sequence so the item floats to the very top of the list — for ANY
+      // scan on a real CSV row (partial, completing, or an extra logged onto an already-full
+      // row), not just completing ones. A "not in order" extra has no matched row, so nothing
+      // to reorder.
+      if (matched) {
+        const s = osScanSeqRef.current;
+        s.seq += 1;
+        s.byId.set(matched.id, s.seq);
+      }
       if (matched && !payload.isExtra) {
         // payload.qty is the authoritative box count — pallets/looseQty here are only a
         // display estimate using this client's best-known plant pallet size; the server
         // reconciles with the live-resolved value via onSuccess below.
-        const itemsPerPallet = previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
+        const itemsPerPallet = scanCtx?.plantPalletSize ?? previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
         const addedQty = payload.qty;
         const addedPallets = itemsPerPallet > 0 ? Math.floor(addedQty / itemsPerPallet) : addedQty;
         const addedLoose = itemsPerPallet > 0 ? addedQty % itemsPerPallet : 0;
@@ -601,8 +666,94 @@ export default function ScanOrderPage() {
     return remaining > 0 && remaining < plantPalletSize ? remaining : plantPalletSize;
   };
 
+  // Shows the 5s Auto Scan feedback popup (image + details) and (re)starts its dismiss timer.
+  // Rapid consecutive auto-scans just replace the content and reset the 5s window.
+  const showAutoScanFeedback = (
+    match: OsScanItem,
+    invProduct: Product | null,
+    scannedQty: number,
+    remaining: number,
+  ) => {
+    if (osAutoScanFeedbackTimerRef.current) clearTimeout(osAutoScanFeedbackTimerRef.current);
+    setOsAutoScanFeedback({
+      name: match.itemName ?? invProduct?.name ?? match.barcode ?? "—",
+      barcode: match.barcode ?? "",
+      sapCode: match.sapCode ?? null,
+      scannedQty,
+      remaining,
+    });
+    osAutoScanFeedbackTimerRef.current = setTimeout(() => setOsAutoScanFeedback(null), 5000);
+  };
+
+  // Decides whether a resolved single-item match auto-confirms silently or opens the confirm
+  // dialog, gated by the plant's Auto Scan setting:
+  //   • Auto Scan OFF (default) → EVERY scan opens the confirm dialog (fully manual).
+  //   • Auto Scan ON → a matched CSV item with a FULL pallet or more still remaining is
+  //     confirmed automatically (exactly ONE pallet per scan) with a 5s image feedback popup
+  //     and no dialog. A leftover "loose" amount (less than a full pallet), an extra, an
+  //     already-complete item, or an unmatched-but-in-inventory barcode all still open the
+  //     dialog — the dialog's own match/extra/already-complete branching stays unchanged.
+  const _resolveOsScan = (
+    barcode: string,
+    match: OsScanItem | null,
+    invProduct: Product | null,
+    plantPalletSize: number,
+  ) => {
+    const remaining = match ? Math.max(0, (match.expectedQty ?? 0) - (match.totalScannedQty ?? 0)) : 0;
+    // One full pallet (or more) of order qty still remaining → auto-scan exactly one pallet.
+    // Never overshoots: remaining >= plantPalletSize means scanned + one pallet <= expected.
+    const canAutoScan =
+      autoScanEnabled &&
+      !!match &&
+      (match.expectedQty ?? 0) > 0 &&
+      plantPalletSize >= 1 &&
+      remaining >= plantPalletSize;
+
+    if (canAutoScan) {
+      const qty = plantPalletSize; // exactly one full pallet per scan
+      setOsFlash("success");
+      setTimeout(() => setOsFlash(null), 350);
+      // 5s non-blocking feedback popup (image + details) so the operator can see what was
+      // auto-scanned without having to confirm anything.
+      showAutoScanFeedback(match!, invProduct, qty, Math.max(0, remaining - qty));
+      // Give onMutate the matched item so it can optimistically bump qty + lastScannedAt (and
+      // thus reorder this item to the top) instantly, without waiting for the server.
+      osScanCtxRef.current = { matchedItem: match, plantPalletSize };
+      // Lock stays held (set by the caller before this ran) until the mutation settles — this
+      // is the only path that never opens a dialog, so it needs its own release point.
+      osScanMutation.mutate(
+        { barcode, qty, isExtra: false, stv: osSelectedStv || null },
+        { onSettled: () => { osScanLockRef.current = false; } },
+      );
+      return;
+    }
+
+    // Opening the dialog now — osPendingRef takes over as the reentrancy guard from here.
+    const defaultQty = _defaultScanQty(match, plantPalletSize);
+    osScanLockRef.current = false;
+    setOsQty(defaultQty);
+    setOsPalletsInput(plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
+    setOsPallets(1);
+    setOsLooseQty(0);
+    setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize });
+  };
+
   const handleOsBarcode = (barcode: string) => {
-    if (osPendingRef.current || osMultiMatchRef.current) return;
+    if (osPendingRef.current || osMultiMatchRef.current || osScanLockRef.current) return;
+    // STV (when the plant has any configured) is picked once up front via the persistent
+    // selector above the scanner, not per scan — see osSelectedStv's own comment. Scanning
+    // is a no-op until it's chosen, so every auto-confirmed AND dialog-confirmed scan always
+    // has one, and the dialog no longer needs its own STV picker/validation.
+    const stvs = osStvsQuery.data ?? [];
+    if (stvs.length > 0 && !osSelectedStv) {
+      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      return;
+    }
+    // Held synchronously from here until either a dialog opens (osPendingRef/osMultiMatchRef
+    // take over) or an early return below — closes the gap where a second rapid scan (gun
+    // double-trigger, auto-repeating manual Enter) could read the same not-yet-updated
+    // osItemsRef snapshot as this one and double-process the same physical scan.
+    osScanLockRef.current = true;
     playScanBeep();
     const normBarcode = normalize(barcode);
     const matches = osItemsRef.current.filter((i) => normalize(i.barcode ?? "") === normBarcode);
@@ -612,6 +763,7 @@ export default function ScanOrderPage() {
     // legitimate "extra" (early arrival of a real item), it's a barcode the system has no
     // record of. Block it outright instead of letting it get logged as an extra.
     if (matches.length === 0 && !invProduct) {
+      osScanLockRef.current = false;
       toast({ title: "Barcode not in system", description: "This barcode isn't in the order or in Inventory — scanning it is not allowed.", variant: "destructive" });
       return;
     }
@@ -619,17 +771,17 @@ export default function ScanOrderPage() {
     const plantPalletSize = _computePlantPalletSize(matches[0] ?? null, invProduct);
 
     if (matches.length > 1) {
+      // osMultiMatchRef takes over as the reentrancy guard once the picker is open.
+      osScanLockRef.current = false;
       setOsMultiMatch({ barcode, matches, inventoryProduct: invProduct, plantPalletSize });
       return;
     }
 
     const match = matches[0] ?? null;
-    const defaultQty = _defaultScanQty(match, plantPalletSize);
-    setOsQty(defaultQty);
-    setOsPalletsInput(plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
-    setOsPallets(1);
-    setOsLooseQty(0);
-    setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize });
+    // Auto Scan ON → full-pallet matches auto-confirm (with the 5s image popup); loose/extra
+    // amounts open the dialog. Auto Scan OFF → always opens the dialog. All handled inside
+    // _resolveOsScan, which also manages the osScanLockRef release for each path.
+    _resolveOsScan(barcode, match, invProduct, plantPalletSize);
   };
 
   const handleOsMultiMatchSelect = (item: OsScanItem) => {
@@ -648,15 +800,24 @@ export default function ScanOrderPage() {
 
   const handleOsConfirmScan = () => {
     if (!osPending) return;
+    // Defense-in-depth: handleOsBarcode already blocks a scan from ever reaching this dialog
+    // without an STV selected (when the plant requires one), but osSelectedStv resets on a
+    // session change (see its own comment) — if that happens to fire while this dialog is
+    // still open, re-check here rather than silently submitting with stv: null.
     const stvs = osStvsQuery.data ?? [];
     if (stvs.length > 0 && !osSelectedStv) {
-      toast({ title: "Select an STV first", variant: "destructive" });
+      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      setOsPending(null);
+      osPendingRef.current = null;
+      resetOsConfirmation();
       return;
     }
     const qty = Math.max(1, osQty);
     const itemAlreadyComplete = osPending.matchedItem
       ? (osPending.matchedItem.totalScannedQty ?? 0) >= (osPending.matchedItem.expectedQty ?? 1)
       : false;
+    // Mirror the auto-confirm path so onMutate has a uniform source for its optimistic bump.
+    osScanCtxRef.current = { matchedItem: osPending.matchedItem, plantPalletSize: osPending.plantPalletSize };
     osScanMutation.mutate({
       barcode: osPending.barcode,
       qty,
@@ -1117,6 +1278,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         )
       : osItems
     ).slice().sort((a, b) => {
+      // PRIMARY: whatever was scanned most recently THIS session floats to the very top —
+      // every scan bumps osScanSeqRef in onMutate, so the item just scanned always wins
+      // position 1 (a monotonic client counter, immune to the optimistic-vs-server timestamp
+      // skew that a lastScannedAt comparison suffers from). Items not scanned this session have
+      // seq 0 and fall through to the ordering below.
+      const seq = osScanSeqRef.current.byId;
+      const aSeq = seq.get(a.id) ?? 0;
+      const bSeq = seq.get(b.id) ?? 0;
+      if (aSeq !== bSeq) return bSeq - aSeq;
+      // SECONDARY: for items only scanned in a PRIOR page-load (all carry the server's own
+      // timestamp convention, so they're mutually consistent), most-recent first. Guard against
+      // an unparseable value (NaN) so it cleanly falls through to the status/id tiebreakers.
+      const parseAt = (v: string | null) => { const t = v ? new Date(v).getTime() : 0; return Number.isNaN(t) ? 0 : t; };
+      const aScannedAt = parseAt(a.lastScannedAt);
+      const bScannedAt = parseAt(b.lastScannedAt);
+      if (aScannedAt !== bScannedAt) return bScannedAt - aScannedAt;
       const rank = (s: string) => s === "complete" ? 0 : s === "partial" ? 1 : 2;
       const diff = rank(a.status) - rank(b.status);
       if (diff !== 0) return diff;
@@ -1316,6 +1493,39 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <span className="ml-1.5 font-normal opacity-90">— {stripCsvExt(osPartCompleteBanner.csvFileName)}</span>
               </span>
             </button>
+          </div>
+        )}
+
+        {/* ── Auto Scan feedback popup — shows for 5s after an auto-confirmed (full-pallet)
+            scan: product image + name/barcode/SAP + how much was scanned and what remains.
+            Non-blocking (pointer-events-none) — the operator keeps scanning; no confirm
+            needed. Rapid scans replace it and reset the 5s timer (see showAutoScanFeedback). ── */}
+        {osAutoScanFeedback && (
+          <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-3 pointer-events-none" role="status">
+            <div className="flex items-center gap-3 rounded-xl bg-white px-3 py-2.5 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2 max-w-md">
+              <img
+                src={`/api/products/image-by-name?name=${encodeURIComponent(osAutoScanFeedback.name)}`}
+                alt=""
+                className="h-14 w-14 shrink-0 rounded-lg border border-gray-100 object-contain bg-gray-50"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+              />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <Zap className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                  <p className="truncate text-sm font-semibold text-gray-900">{osAutoScanFeedback.name}</p>
+                </div>
+                <p className="truncate text-[11px] font-mono text-gray-400">
+                  {osAutoScanFeedback.barcode}{osAutoScanFeedback.sapCode && ` · SAP: ${osAutoScanFeedback.sapCode}`}
+                </p>
+                <p className="mt-0.5 text-xs">
+                  <span className="font-bold text-emerald-600">+{osAutoScanFeedback.scannedQty}</span>
+                  <span className="text-gray-400"> scanned</span>
+                  {osAutoScanFeedback.remaining > 0 && (
+                    <span className="ml-1.5 font-semibold text-[#001d6e]">{osAutoScanFeedback.remaining} left</span>
+                  )}
+                </p>
+              </div>
+            </div>
           </div>
         )}
 
@@ -2679,6 +2889,15 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Auto-confirm flash — the only visual feedback for a silently-logged scan (paired
+            with playScanBeep) since there's no dialog to look at for that case. */}
+        {/* z-40, below Dialog's z-50 (client/src/components/ui/dialog.tsx) — a scan right after
+            this one can open the confirmation dialog while the flash is still fading, and the
+            dialog must render on top, not be washed out underneath it. */}
+        {osFlash === "success" && (
+          <div className="fixed inset-0 z-40 pointer-events-none bg-green-400/25" />
+        )}
 
         {/* Scan confirmation dialog */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>

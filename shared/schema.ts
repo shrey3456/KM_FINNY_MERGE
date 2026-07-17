@@ -634,12 +634,19 @@ export const plants = pgTable("plants", {
   // group (or a standalone import) never auto-completes — see the last-part check in
   // order-scan.ts's /scan handler.
   isAutoCompleteEnabled: boolean("is_auto_complete_enabled").default(false),
+  // Order Scan: when ON, a scan whose remaining order qty is a FULL pallet or more is
+  // confirmed automatically (one pallet per scan) with a 5s image feedback popup and no
+  // dialog; only a leftover "loose" amount (less than a full pallet) opens the confirm
+  // dialog. OFF by default → every scan opens the confirm dialog. See _resolveOsScan in
+  // client/src/pages/Scanning/Scan.tsx.
+  isAutoScanEnabled: boolean("is_auto_scan_enabled").default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const insertPlantSchema = createInsertSchema(plants).pick({
   name: true, bgColor: true, textColor: true, borderColor: true,
   isLockingEnabled: true, isSplitPagesEnabled: true, isAutoCompleteEnabled: true,
+  isAutoScanEnabled: true,
 });
 
 // STV codes associated with a plant (e.g. for truck/dispatch routing)
