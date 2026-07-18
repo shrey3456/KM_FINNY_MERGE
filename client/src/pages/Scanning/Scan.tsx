@@ -1058,6 +1058,23 @@ export default function ScanOrderPage() {
             queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
             return;
           }
+          if (data.type === 'session-deleted') {
+            // Admin deleted the CSV we're actively scanning against (delete-with-rollback).
+            // Nothing else auto-activates until a corrected CSV is uploaded for this plant/
+            // date, at which point the active-session polls below will pick it up on their
+            // own — no explicit navigation needed, this component already renders a "no
+            // active session" fallback whenever activeOrderScanSession is null.
+            toast({
+              title: "Session removed",
+              description: "This CSV was deleted by an admin. If a corrected CSV is uploaded for the same plant/date, it will appear here automatically.",
+              variant: "destructive",
+            });
+            setOsSelectedSessionId(null);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
           if (data.type !== 'scan') return;
 
           // The event's own sessionId (stamped server-side) tells us which part it actually

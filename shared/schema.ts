@@ -779,6 +779,14 @@ export const orderImportSessions = pgTable("order_import_sessions", {
   // Soft-delete: keeps scan_items/scan_events intact so history/reports survive
   isDeleted: boolean("is_deleted").default(false).notNull(),
   deletedAt: timestamp("deleted_at"),
+  deletedByCode: text("deleted_by_code").references(() => users.userCode),
+  // Delete-with-rollback replacement flow: a deleted session's scan history is never
+  // discarded — it waits to be carried forward onto whichever CSV next fills the same
+  // (plant, orderDate) slot. remappedToSessionId/remappedAt are set on THIS (deleted)
+  // session once that happens; replacesSessionId is set on the NEW session, pointing back.
+  remappedToSessionId: integer("remapped_to_session_id"),
+  remappedAt: timestamp("remapped_at"),
+  replacesSessionId: integer("replaces_session_id"),
 });
 
 export const orderImportItems = pgTable("order_import_items", {
