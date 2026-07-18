@@ -383,3 +383,143 @@ export async function applySessionStock(client: import('pg').PoolClient, session
   );
   return received.length;
 }
+
+// Applies ONE physical scan's stock delta immediately, instead of waiting for the session
+// to complete. Called once per scan request with the real order/extra split determined by
+// the sequential cross-part resolver in order-scan.ts's /scan handler — never once per
+// bookkeeping event. That distinction matters because a single scan can now generate TWO
+// report-level events (an Extra logged against the current "front" part plus a Scanned
+// logged against whichever later part actually matched, per the dual-logging rule); both
+// describe the same physical box, so stock must only move once for it. `sessionId` here is
+// only used as the stock_movements ledger's reference column, not as an aggregation scope.
+export async function applyLiveScanStock(
+  client: import('pg').PoolClient,
+  plant: string,
+  barcode: string,
+  orderQty: number,
+  extraQty: number,
+  sessionId: number,
+): Promise<void> {
+  const totalQty = orderQty + extraQty;
+  if (totalQty <= 0) return;
+
+  await client.query(
+    `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2)`,
+    [totalQty, barcode],
+  );
+
+  await client.query(
+    `INSERT INTO product_plant_stock (barcode, plant, in_stock, extra_qty, updated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (barcode, plant) DO UPDATE
+       SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
+           extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
+           updated_at = NOW()`,
+    [barcode, plant, totalQty, extraQty],
+  );
+
+  await client.query(
+    `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
+     VALUES ($1, $2, $3, $4, 'receive', 'Order scan', $5, NOW())`,
+    [barcode, plant, totalQty, extraQty, sessionId],
+  );
+}
+
+// Makes the "already covered by an earlier part" credit REAL instead of a display-only
+// number. Previously, the Scan tab computed `totalScannedQty + creditQty` purely client-side
+// to decide what to show — nothing was ever written back, so Master View and Auto Complete
+// (which both read the real order_scan_items.status) never agreed with what the Scan tab
+// displayed, and a part containing a "credited" item could never satisfy Auto Complete's
+// "all items scanned" check since its real status stayed 'partial' forever.
+//
+// Called once, right when a part is marked completed (manual Complete, auto-complete-on-
+// scan, or the stale-part sweep) — the same moment computeGroupReport's read-time netting
+// already considers this part's extra "available" to credit later parts. For every
+// un-consumed extra event on the just-completed part, walks forward through later
+// (higher-partIndex, not-yet-completed) parts in the same group and, for any real shortfall
+// on the same barcode, writes the credit for real: bumps the later part's total_scanned_qty
+// and status, and logs a distinctly-tagged scan event there for visibility in history.
+// Never touches stock — the physical stock for these boxes was already added when the
+// original extra was scanned. `credited_qty` on the source event is incremented so the same
+// physical boxes can never be handed out as a credit twice.
+export async function reconcileCredits(
+  client: import('pg').PoolClient,
+  completedSessionId: number,
+  groupId: number,
+): Promise<void> {
+  const { rows: parts } = await client.query(
+    `SELECT id, part_index AS "partIndex", scan_status AS "scanStatus"
+     FROM order_import_sessions
+     WHERE (receiving_session_id = $1 OR id = $1) AND is_deleted = false
+     ORDER BY part_index ASC, id ASC`,
+    [groupId],
+  );
+  const completedPart = parts.find((p: any) => p.id === completedSessionId);
+  if (!completedPart) return;
+
+  const laterParts = parts.filter(
+    (p: any) => (p.partIndex ?? 0) > (completedPart.partIndex ?? 0) && p.scanStatus !== 'completed',
+  );
+  if (laterParts.length === 0) return;
+
+  // Un-consumed extra events on the just-completed part, oldest first (FIFO), locked so a
+  // concurrent reconciliation run can never hand out the same boxes twice.
+  const { rows: extraEvents } = await client.query(
+    `SELECT id, barcode, item_name, total_qty, credited_qty
+     FROM order_scan_events
+     WHERE session_id = $1 AND is_extra = true AND voided IS NOT TRUE
+       AND total_qty > COALESCE(credited_qty, 0)
+     ORDER BY scanned_at ASC, id ASC
+     FOR UPDATE`,
+    [completedSessionId],
+  );
+  if (extraEvents.length === 0) return;
+
+  for (const ev of extraEvents) {
+    let remaining = Number(ev.total_qty) - Number(ev.credited_qty ?? 0);
+    if (remaining <= 0) continue;
+
+    for (const part of laterParts) {
+      if (remaining <= 0) break;
+
+      const { rows: itemRows } = await client.query(
+        `SELECT * FROM order_scan_items WHERE session_id = $1 AND barcode = $2 FOR UPDATE`,
+        [part.id, ev.barcode],
+      );
+      const item = itemRows[0];
+      if (!item) continue; // this later part doesn't expect this barcode at all
+      const shortfall = Math.max(0, Number(item.expected_qty ?? 0) - Number(item.total_scanned_qty ?? 0));
+      if (shortfall <= 0) continue;
+
+      const take = Math.min(remaining, shortfall);
+
+      await client.query(
+        `UPDATE order_scan_items
+         SET total_scanned_qty = COALESCE(total_scanned_qty, 0) + $1,
+             status = CASE
+               WHEN COALESCE(total_scanned_qty, 0) + $1 >= expected_qty THEN 'complete'
+               WHEN COALESCE(total_scanned_qty, 0) + $1 > 0             THEN 'partial'
+               ELSE 'pending'
+             END,
+             last_scanned_at = NOW()
+         WHERE id = $2`,
+        [take, item.id],
+      );
+
+      await client.query(
+        `INSERT INTO order_scan_events
+           (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+            items_per_pallet, is_extra, scanned_by_name)
+         VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6)`,
+        [part.id, item.id, ev.barcode, ev.item_name, take, `System (credited from Part ${completedPart.partIndex})`],
+      );
+
+      await client.query(
+        `UPDATE order_scan_events SET credited_qty = COALESCE(credited_qty, 0) + $1 WHERE id = $2`,
+        [take, ev.id],
+      );
+
+      remaining -= take;
+    }
+  }
+}

@@ -9,7 +9,7 @@ import {
 import { eq, and, or, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
-import { computeGroupReport, resolveGroupId, applySessionStock } from '../lib/orderGroupReport';
+import { computeGroupReport, resolveGroupId, applyLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
 import { requirePageWrite } from '../lib/pageAccess';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
@@ -36,7 +36,11 @@ function broadcastScanEvent(sessionId: number, payload: object) {
   const clients = wsClients.get(sessionId);
   console.log(`[WS] broadcast session=${sessionId} clients=${clients?.size ?? 0}`);
   if (!clients || clients.size === 0) return;
-  const frame = JSON.stringify(payload);
+  // sessionId is stamped onto every broadcast so a client joined to several sessions at
+  // once (see the multi-join support below) can tell which one an event actually belongs
+  // to — needed now that a single scan can write to a different part than the one
+  // currently shown as "front" (see the dual-logging rule in the /scan handler).
+  const frame = JSON.stringify({ ...payload, sessionId });
   clients.forEach((ws) => {
     if (ws.readyState === WebSocket.OPEN) {
       try { ws.send(frame); } catch { /* client disconnected mid-send */ }
@@ -96,23 +100,30 @@ export function initOrderScanWs(httpServer: HttpServer) {
     ws._isAlive = true;
     ws.on('pong', () => { ws._isAlive = true; });
 
-    let joinedSessionId: number | null = null;
+    // A client now joins every session in the current FIFO group (not just the one shown
+    // as "front"), since a scan can write to a different part than the one displayed —
+    // see the dual-logging rule in the /scan handler. Each 'join' message ADDS a room
+    // instead of replacing the previous one, so Scan.tsx can join all of a group's parts
+    // on one connection.
+    const joinedSessionIds = new Set<number>();
     let joinedImport = false;
 
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
         if (msg.type === 'join' && typeof msg.sessionId === 'number') {
-          // Leave previous session if client re-joins
-          if (joinedSessionId !== null) {
-            wsClients.get(joinedSessionId)?.delete(ws);
-          }
-          joinedSessionId = msg.sessionId as number;
-          if (!wsClients.has(joinedSessionId)) wsClients.set(joinedSessionId, new Set());
-          wsClients.get(joinedSessionId)!.add(ws);
-          const roomSize = wsClients.get(joinedSessionId)!.size;
-          console.log(`[WS] Client joined session ${joinedSessionId} — ${roomSize} device(s) connected`);
-          ws.send(JSON.stringify({ type: 'joined', sessionId: joinedSessionId }));
+          const sid = msg.sessionId as number;
+          joinedSessionIds.add(sid);
+          if (!wsClients.has(sid)) wsClients.set(sid, new Set());
+          wsClients.get(sid)!.add(ws);
+          const roomSize = wsClients.get(sid)!.size;
+          console.log(`[WS] Client joined session ${sid} — ${roomSize} device(s) connected`);
+          ws.send(JSON.stringify({ type: 'joined', sessionId: sid }));
+        } else if (msg.type === 'leave' && typeof msg.sessionId === 'number') {
+          const sid = msg.sessionId as number;
+          joinedSessionIds.delete(sid);
+          const set = wsClients.get(sid);
+          if (set) { set.delete(ws); if (set.size === 0) wsClients.delete(sid); }
         } else if (msg.type === 'join-import') {
           // OrderImport page subscribes to global import events
           if (!joinedImport) {
@@ -126,10 +137,11 @@ export function initOrderScanWs(httpServer: HttpServer) {
     });
 
     const cleanup = () => {
-      if (joinedSessionId !== null) {
-        const set = wsClients.get(joinedSessionId);
-        if (set) { set.delete(ws); if (set.size === 0) wsClients.delete(joinedSessionId); }
+      for (const sid of joinedSessionIds) {
+        const set = wsClients.get(sid);
+        if (set) { set.delete(ws); if (set.size === 0) wsClients.delete(sid); }
       }
+      joinedSessionIds.clear();
       if (joinedImport) {
         removeWsAdminClient(ws);
         joinedImport = false;
@@ -228,15 +240,83 @@ function resolveFullPalletSize(
   return size;
 }
 
-// Marks a session active AND seeds order_scan_items from order_import_items (with
-// product/pallet lookups) if they don't exist yet — all in one locked transaction.
-// Shared by the activate route and the auto-activation paths (upload + completion
-// progression) so every activation produces scannable items. Without the seeding,
-// the scan page reads zero items and shows "Loading items…" forever.
-// Returns true if this call actually activated the session, false if it was skipped
-// (not found, or another session is already active for the plant). Safe to call from
-// multiple concurrent contexts (upload auto-activate, complete auto-advance) for the
-// same plant — the advisory lock below serializes them so only one can win.
+// Seeds order_scan_items from order_import_items (with product/pallet lookups) for a
+// single session, if they don't exist yet. Decoupled from scan_status/activation — every
+// part of a FIFO group is scannable from the moment it's uploaded (sequential cross-part
+// search resolves which part a barcode actually belongs to), so seeding can't wait for an
+// "active" flip anymore. Safe to call from an already-open client/transaction (pass one in)
+// or standalone (a pool client is grabbed and released internally).
+async function seedSessionItemsWithClient(client: any, id: number, plant: string): Promise<void> {
+  const existingResult = await client.query(
+    'SELECT id FROM order_scan_items WHERE session_id = $1 LIMIT 1',
+    [id],
+  );
+  if (existingResult.rows.length > 0) return;
+
+  const importItemsResult = await client.query(
+    'SELECT * FROM order_import_items WHERE session_id = $1',
+    [id],
+  );
+  const importItems = importItemsResult.rows;
+  if (importItems.length === 0) return;
+
+  const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
+  const productMap = new Map<string, any>();
+  if (barcodes.length > 0) {
+    const prodResult = await client.query(
+      `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
+       FROM products WHERE barcode = ANY($1)`,
+      [barcodes],
+    );
+    prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
+  }
+
+  const vals: any[] = [];
+  const placeholders: string[] = [];
+  let pi = 1;
+  for (const item of importItems) {
+    const prod = item.barcode ? productMap.get(item.barcode) : null;
+    const prodObj = prod
+      ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
+      : null;
+    const palletSize = prodObj ? resolveFullPalletSize(prodObj, plant) : 0;
+    vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
+    placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
+    pi += 7;
+  }
+
+  await client.query(
+    `INSERT INTO order_scan_items
+       (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+     VALUES ${placeholders.join(',')}`,
+    vals,
+  );
+}
+
+// Standalone entry point for seeding a session's items outside of any other transaction —
+// used right after a CSV upload so every part in a group has scannable items immediately,
+// not just the one that happens to auto-activate.
+export async function seedSessionItems(id: number, plant: string): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM order_import_sessions WHERE id = $1 FOR UPDATE', [id]);
+    await seedSessionItemsWithClient(client, id, plant);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Marks a session active (the "front" part shown as primary in the UI) and makes sure its
+// items are seeded. Shared by the activate route and the auto-activation paths (upload +
+// completion progression). Returns true if this call actually activated the session, false
+// if it was skipped (not found, or another session is already active for the plant). Safe
+// to call from multiple concurrent contexts for the same plant — the advisory lock below
+// serializes them so only one can win.
 export async function seedAndActivateSession(id: number, userCode: string | null): Promise<boolean> {
   const client = await pool.connect();
   try {
@@ -268,52 +348,7 @@ export async function seedAndActivateSession(id: number, userCode: string | null
       [userCode, new Date(), id],
     );
 
-    const existingResult = await client.query(
-      'SELECT id FROM order_scan_items WHERE session_id = $1 LIMIT 1',
-      [id],
-    );
-
-    if (existingResult.rows.length === 0) {
-      const importItemsResult = await client.query(
-        'SELECT * FROM order_import_items WHERE session_id = $1',
-        [id],
-      );
-      const importItems = importItemsResult.rows;
-
-      if (importItems.length > 0) {
-        const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
-        const productMap = new Map<string, any>();
-        if (barcodes.length > 0) {
-          const prodResult = await client.query(
-            `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
-             FROM products WHERE barcode = ANY($1)`,
-            [barcodes],
-          );
-          prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
-        }
-
-        const vals: any[] = [];
-        const placeholders: string[] = [];
-        let pi = 1;
-        for (const item of importItems) {
-          const prod = item.barcode ? productMap.get(item.barcode) : null;
-          const prodObj = prod
-            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
-            : null;
-          const palletSize = prodObj ? resolveFullPalletSize(prodObj, session.plant) : 0;
-          vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
-          placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
-          pi += 7;
-        }
-
-        await client.query(
-          `INSERT INTO order_scan_items
-             (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
-           VALUES ${placeholders.join(',')}`,
-          vals,
-        );
-      }
-    }
+    await seedSessionItemsWithClient(client, id, session.plant);
 
     await client.query('COMMIT');
     return true;
@@ -322,6 +357,136 @@ export async function seedAndActivateSession(id: number, userCode: string | null
     throw err;
   } finally {
     client.release();
+  }
+}
+
+// After a part finishes (manually via /complete, or automatically the moment its items are
+// all scanned — see the derived-completion check in the /scan handler), find the next
+// not-yet-scanned part and mark it 'active' so the UI's "front" session tracking
+// (/active-sessions, which filters on scan_status='active') has something to point at.
+// Scanning itself no longer depends on this — every part is already seeded and scannable
+// via the sequential cross-part search regardless of scan_status — but the client still
+// needs ONE session flagged 'active' per plant to know what to show as primary. If this
+// part belongs to a FIFO batch (receivingSessionId set), scope strictly to that batch —
+// ordered by partIndex — so an unrelated 'available' session for the same plant can never
+// jump the queue. Otherwise fall back to plant-wide behaviour. Either way, only proceed if
+// nothing else in that scope is already active (avoid stealing an active lock).
+async function autoActivateNextInScope(
+  completed: { id: number; plant: string; receivingSessionId: number | null; csvFileName: string },
+  userCode: string | null,
+): Promise<number | null> {
+  const scopeConditions = completed.receivingSessionId
+    ? [eq(orderImportSessions.receivingSessionId, completed.receivingSessionId)]
+    : [sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`];
+
+  const activeInScope = await db.select({ id: orderImportSessions.id })
+    .from(orderImportSessions)
+    .where(and(
+      ...scopeConditions,
+      eq(orderImportSessions.scanStatus, 'active'),
+      eq(orderImportSessions.isDeleted, false),
+    ))
+    .limit(1);
+
+  if (activeInScope.length > 0) {
+    console.log(`[order-scan] another session already active in scope; skip auto-progress`);
+    return null;
+  }
+
+  const orderBy = completed.receivingSessionId
+    ? [asc(orderImportSessions.partIndex), asc(orderImportSessions.id)]
+    : [asc(orderImportSessions.createdAt), asc(orderImportSessions.id)];
+
+  const [next] = await db.select()
+    .from(orderImportSessions)
+    .where(and(
+      ...scopeConditions,
+      eq(orderImportSessions.scanStatus, 'available'),
+      eq(orderImportSessions.isDeleted, false),
+    ))
+    .orderBy(...orderBy)
+    .limit(1);
+
+  if (!next) {
+    console.log(`[order-scan] no more 'available' sessions in scope after completing ${completed.id}`);
+    return null;
+  }
+
+  const activatedNext = await seedAndActivateSession(next.id, userCode);
+  if (!activatedNext) {
+    console.log(`[order-scan] auto-activate of ${next.id} lost the race (another activation won) after completing ${completed.id}`);
+    return null;
+  }
+  console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${completed.id}`);
+  return next.id;
+}
+
+// Auto Complete's derived-completion check only ever runs inside a /scan request, when a
+// barcode scan touches a specific session — so a part that's fully scanned while it's still
+// the LAST part in its group (deliberately skipped, per the last-part rule) never gets
+// re-evaluated once it stops being last, because nothing will ever scan against it again
+// (it has nothing left to scan). This sweep closes that gap: call it right after a new CSV
+// joins an EXISTING group, so whichever part just lost "last part" status gets completed
+// immediately instead of sitting fully-scanned-but-open forever. No-op if Auto Complete is
+// off for the plant, or if nothing in the group is both non-last and fully scanned.
+export async function sweepStaleCompletions(groupId: number, plant: string, userCode: string | null): Promise<void> {
+  const { rows: plantRows } = await pool.query(
+    `SELECT is_auto_complete_enabled AS "isAutoCompleteEnabled" FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+    [plant],
+  );
+  if (plantRows[0]?.isAutoCompleteEnabled !== true) return;
+
+  const { rows: groupSessions } = await pool.query(
+    `SELECT id, plant, part_index AS "partIndex", csv_file_name AS "csvFileName", scan_status AS "scanStatus"
+     FROM order_import_sessions
+     WHERE (receiving_session_id = $1 OR id = $1) AND is_deleted = false
+     ORDER BY part_index ASC, id ASC`,
+    [groupId],
+  );
+  if (groupSessions.length < 2) return; // nothing can be "stuck as last" with only one part
+
+  const lastPartId = groupSessions.reduce(
+    (max: any, s: any) => ((s.partIndex ?? 0) > (max?.partIndex ?? -1) ? s : max),
+    null as any,
+  )?.id;
+
+  for (const s of groupSessions) {
+    if (s.id === lastPartId || s.scanStatus === 'completed') continue;
+
+    const { rows: remainRows } = await pool.query(
+      `SELECT COUNT(*) FILTER (WHERE status <> 'complete')::int AS remaining FROM order_scan_items WHERE session_id = $1`,
+      [s.id],
+    );
+    if ((remainRows[0]?.remaining ?? 1) !== 0) continue; // not fully scanned yet — leave it
+
+    const { rowCount } = await pool.query(
+      `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW()
+       WHERE id = $1 AND scan_status <> 'completed'`,
+      [s.id],
+    );
+    if (!rowCount) continue;
+
+    console.log(`[order-scan] sweep auto-completed stale part ${s.id} (${s.csvFileName}) after it lost 'last part' status`);
+    broadcastScanEvent(s.id, { type: 'part-completed', csvFileName: s.csvFileName, partIndex: s.partIndex });
+
+    // Make any "already covered by an earlier part" credit real now that this part is
+    // actually completed — same reasoning as the manual /complete endpoint.
+    const creditClient = await pool.connect();
+    try {
+      await creditClient.query('BEGIN');
+      await reconcileCredits(creditClient, s.id, groupId);
+      await creditClient.query('COMMIT');
+    } catch (e) {
+      await creditClient.query('ROLLBACK');
+      console.error('[order-scan] credit reconciliation failed during sweep:', e);
+    } finally {
+      creditClient.release();
+    }
+
+    await autoActivateNextInScope(
+      { id: s.id, plant: s.plant, receivingSessionId: groupId, csvFileName: s.csvFileName },
+      userCode,
+    );
   }
 }
 
@@ -711,105 +876,47 @@ router.post('/order-scan/sessions/:id/complete', requirePageWrite('scan-order'),
       `UPDATE order_import_sessions
        SET scan_status = 'completed', scan_completed_at = $1
        WHERE id = $2
-       RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName"`,
+       RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName", part_index AS "partIndex"`,
       [new Date(), id],
     );
     const completed = completedRows[0];
-
-    // ── Auto-progress ─────────────────────────────────────────────────────────
-    // After a CSV finishes, find the next not-yet-scanned CSV and activate it
-    // automatically, so scanning continues without anyone having to pick the next
-    // file. If this part belongs to a FIFO batch (receivingSessionId set), scope
-    // strictly to that batch — ordered by partIndex — so an unrelated 'available'
-    // session for the same plant can never jump the queue. Otherwise fall back to
-    // the original plant-wide behaviour. Either way, only proceed if nothing else
-    // in that scope is already active (avoid stealing an active lock).
-    let nextSessionId: number | null = null;
     if (completed) {
-      const scopeConditions = completed.receivingSessionId
-        ? [eq(orderImportSessions.receivingSessionId, completed.receivingSessionId)]
-        : [sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`];
-
-      const activeInScope = await db.select({ id: orderImportSessions.id })
-        .from(orderImportSessions)
-        .where(and(
-          ...scopeConditions,
-          eq(orderImportSessions.scanStatus, 'active'),
-          eq(orderImportSessions.isDeleted, false),
-        ))
-        .limit(1);
-
-      if (activeInScope.length === 0) {
-        const orderBy = completed.receivingSessionId
-          ? [asc(orderImportSessions.partIndex), asc(orderImportSessions.id)]
-          : [asc(orderImportSessions.createdAt), asc(orderImportSessions.id)];
-
-        const [next] = await db.select()
-          .from(orderImportSessions)
-          .where(and(
-            ...scopeConditions,
-            eq(orderImportSessions.scanStatus, 'available'),
-            eq(orderImportSessions.isDeleted, false),
-          ))
-          .orderBy(...orderBy)
-          .limit(1);
-
-        if (next) {
-          const userCode = (req.user as any)?.userCode ?? null;
-          const activatedNext = await seedAndActivateSession(next.id, userCode);
-          if (activatedNext) {
-            nextSessionId = next.id;
-            console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${id}`);
-          } else {
-            console.log(`[order-scan] auto-activate of ${next.id} lost the race (another activation won) after completing ${id}`);
-          }
-        } else {
-          console.log(`[order-scan] no more 'available' sessions in scope after completing ${id}`);
-        }
-      } else {
-        console.log(`[order-scan] another session already active in scope; skip auto-progress`);
-      }
+      broadcastScanEvent(completed.id, {
+        type: 'part-completed',
+        csvFileName: completed.csvFileName,
+        partIndex: completed.partIndex,
+      });
     }
 
-    // ── Stock application (Option C) ─────────────────────────────────────────────
-    // Add received boxes to products.in_stock on TERMINAL completion only:
-    //   • standalone session → on its own completion
-    //   • FIFO group → only once the LAST part completes (whole group done), so the
-    //     cross-part extras/shortfalls are all final first
-    // applySessionStock is idempotent per session (stock_applied_at guard + row lock),
-    // so a retried /complete can never double-count. Best-effort: a failure here is
-    // logged but does not fail the completion (which is already committed above).
+    // Make any "already covered by an earlier part" credit real (writes to the later part's
+    // actual total_scanned_qty/status), instead of leaving it as a display-only number that
+    // Master View and Auto Complete would never agree with. See reconcileCredits for why.
     if (completed) {
-      const stockClient = await pool.connect();
+      const groupId = completed.receivingSessionId ?? completed.id;
+      const creditClient = await pool.connect();
       try {
-        await stockClient.query('BEGIN');
-        if (!completed.receivingSessionId) {
-          const n = await applySessionStock(stockClient, id);
-          if (n > 0) console.log(`[order-scan] stock applied for standalone session ${id} → ${n} product(s)`);
-        } else {
-          const remaining = await stockClient.query(
-            `SELECT 1 FROM order_import_sessions
-             WHERE receiving_session_id = $1 AND is_deleted = false AND scan_status <> 'completed' LIMIT 1`,
-            [completed.receivingSessionId],
-          );
-          if (remaining.rows.length === 0) {
-            const partsRes = await stockClient.query(
-              `SELECT id FROM order_import_sessions WHERE receiving_session_id = $1 AND is_deleted = false`,
-              [completed.receivingSessionId],
-            );
-            let total = 0;
-            for (const row of partsRes.rows) total += await applySessionStock(stockClient, row.id);
-            console.log(`[order-scan] FIFO group ${completed.receivingSessionId} complete → stock applied to ${total} product row(s)`);
-          }
-        }
-        await stockClient.query('COMMIT');
+        await creditClient.query('BEGIN');
+        await reconcileCredits(creditClient, completed.id, groupId);
+        await creditClient.query('COMMIT');
       } catch (e) {
-        await stockClient.query('ROLLBACK');
-        console.error('[order-scan] stock application failed:', e);
+        await creditClient.query('ROLLBACK');
+        console.error('[order-scan] credit reconciliation failed:', e);
       } finally {
-        stockClient.release();
+        creditClient.release();
       }
     }
+
+    const nextSessionId = completed
+      ? await autoActivateNextInScope(completed, (req.user as any)?.userCode ?? null)
+      : null;
+
+    // Stock is no longer applied here. Every scan now applies its own stock delta
+    // immediately (see applyLiveScanStock in the /scan handler above), so by the time a
+    // part reaches 'completed' — whether via this manual endpoint or the automatic
+    // derived-completion check in /scan — its stock has already been live for a while.
+    // Re-running a batch apply at this point would double-count every box in the session.
+    // applySessionStock is kept as a standalone reconciliation tool (not called from any
+    // route) for manually fixing stock drift if it's ever needed, not as part of this flow.
 
     res.json({ success: true, nextSessionId });
     broadcastOrderImportUpdate();
@@ -895,12 +1002,123 @@ router.get('/order-scan/sessions/:id/group-credits', async (req: Request, res: R
   }
 });
 
+// ── GET /api/order-scan/sessions/:id/group-session-ids ───────────────────────
+// Cheap, purpose-built lookup (no report computation) for the client to know which
+// sibling session ids belong to the same FIFO group, so it can join all of their
+// WebSocket rooms at once — a scan can now land on a different part than the one
+// currently shown as "front" (see the dual-logging rule in the /scan handler), and the
+// client needs to hear about it live regardless of which part it displays.
+router.get('/order-scan/sessions/:id/group-session-ids', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT id FROM order_import_sessions
+       WHERE is_deleted = false AND (
+         id = $1 OR receiving_session_id = (SELECT COALESCE(receiving_session_id, id) FROM order_import_sessions WHERE id = $1)
+       )
+       ORDER BY part_index ASC, id ASC`,
+      [id],
+    );
+    res.json({ sessionIds: rows.map((r: any) => r.id) });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to resolve group session ids' });
+  }
+});
+
+// Inserts the regular/extra event(s) for one (session, item) pair and, if a regular
+// portion was written, updates that session's order_scan_items row. `forceAllExtra` skips
+// consuming any remaining order capacity — used for the "front part didn't have this
+// barcode" leg of the dual-logging rule, where the whole qty is bookkeeping-only Extra
+// against the front part regardless of whether it happens to have a (already-full) item row.
+async function writeScanEvents(
+  client: any,
+  params: {
+    sessionId: number;
+    scanItem: any | null;
+    totalQty: number;
+    itemsPerPallet: number;
+    barcode: string;
+    resolvedItemName: string | null;
+    stv: string | null;
+    userCode: string | null;
+    userName: string | null;
+    forceAllExtra: boolean;
+  },
+): Promise<{ events: any[]; updatedItem: any; orderQty: number; extraQty: number }> {
+  const { sessionId, scanItem, totalQty, itemsPerPallet, barcode, resolvedItemName, stv, userCode, userName, forceAllExtra } = params;
+  const splitPallets = (q: number) => ({
+    pallets: itemsPerPallet > 0 ? Math.floor(q / itemsPerPallet) : q,
+    looseQty: itemsPerPallet > 0 ? q % itemsPerPallet : 0,
+  });
+
+  const remainingForOrder = (!forceAllExtra && scanItem)
+    ? Math.max(0, Number(scanItem.expected_qty ?? 0) - Number(scanItem.total_scanned_qty ?? 0))
+    : 0;
+  const orderQty = Math.min(totalQty, remainingForOrder);
+  const extraQty = totalQty - orderQty;
+
+  const events: any[] = [];
+  let updatedItem: any = scanItem;
+
+  if (orderQty > 0) {
+    const part = splitPallets(orderQty);
+    const orderEventResult = await client.query(
+      `INSERT INTO order_scan_events
+         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+          items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING *`,
+      [sessionId, scanItem.id, barcode, resolvedItemName,
+       part.pallets, part.looseQty, orderQty, itemsPerPallet, false,
+       stv ?? null, userCode, userName],
+    );
+    events.push(orderEventResult.rows[0]);
+
+    const updateResult = await client.query(
+      `UPDATE order_scan_items
+       SET scanned_pallets    = COALESCE(scanned_pallets,   0) + $1,
+           scanned_loose_qty  = COALESCE(scanned_loose_qty, 0) + $2,
+           total_scanned_qty  = COALESCE(total_scanned_qty, 0) + $3,
+           status             = CASE
+             WHEN COALESCE(total_scanned_qty, 0) + $3 >= expected_qty THEN 'complete'
+             WHEN COALESCE(total_scanned_qty, 0) + $3 > 0             THEN 'partial'
+             ELSE 'pending'
+           END,
+           last_scanned_at    = NOW()
+       WHERE id = $4
+       RETURNING *`,
+      [part.pallets, part.looseQty, orderQty, scanItem.id],
+    );
+    updatedItem = updateResult.rows[0];
+  }
+
+  // extraQty is recorded purely as an event — it must NOT also be added to
+  // order_scan_items, since that row already feeds the "Regular" report total.
+  if (extraQty > 0) {
+    const part = splitPallets(extraQty);
+    const extraEventResult = await client.query(
+      `INSERT INTO order_scan_events
+         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+          items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING *`,
+      [sessionId, scanItem?.id ?? null, barcode, resolvedItemName,
+       part.pallets, part.looseQty, extraQty, itemsPerPallet, true,
+       stv ?? null, userCode, userName],
+    );
+    events.push(extraEventResult.rows[0]);
+  }
+
+  return { events, updatedItem, orderQty, extraQty };
+}
+
 // ── POST /api/order-scan/sessions/:id/scan ───────────────────────────────────
-// Records a scan event inside a serialised transaction.
-// The server determines isExtra from the LOCKED current DB state — the client
-// hint is ignored — so concurrent scans by different users never race on the
-// order-vs-extra decision. UPDATE...RETURNING eliminates the stale read-after-
-// write that previously caused SSE broadcasts to carry an old snapshot.
+// Records a scan event inside a serialised transaction, resolved across every part of the
+// scanned session's FIFO group (not just the one session in the URL) — see the "Sequential
+// search" block below. The server determines the order/extra split from the LOCKED current
+// DB state — the client hint is ignored — so concurrent scans by different users never race
+// on that decision.
 router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
   const sessionId = parseInt(req.params.id);
   if (isNaN(sessionId)) return res.status(400).json({ message: 'Invalid session ID' });
@@ -919,40 +1137,72 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
   try {
     await client.query('BEGIN');
 
-    // Verify session exists (no lock needed — session row isn't mutated here)
     const sessResult = await client.query(
-      'SELECT id, plant FROM order_import_sessions WHERE id = $1',
+      'SELECT id, plant, receiving_session_id AS "receivingSessionId" FROM order_import_sessions WHERE id = $1',
       [sessionId],
     );
     if (!sessResult.rows[0]) {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Session not found' });
     }
+    const anchorSession = sessResult.rows[0];
+    const groupId = anchorSession.receivingSessionId ?? anchorSession.id;
 
-    // Lock the scan-item row for this barcode so concurrent scans on the same
-    // item are serialised and each sees the previous scan's committed qty.
-    const itemResult = await client.query(
-      `SELECT * FROM order_scan_items
-       WHERE session_id = $1 AND barcode = $2
-       FOR UPDATE`,
-      [sessionId, barcode],
+    // Every part of the same FIFO group is scannable at once — this scan is resolved by
+    // searching the WHOLE group in partIndex order, not just the one session the client
+    // happened to POST against.
+    const { rows: groupSessions } = await client.query(
+      `SELECT id, plant, part_index AS "partIndex", csv_file_name AS "csvFileName"
+       FROM order_import_sessions
+       WHERE (receiving_session_id = $1 OR id = $1) AND is_deleted = false
+       ORDER BY part_index ASC, id ASC`,
+      [groupId],
     );
-    const scanItem = itemResult.rows[0] ?? null;
+    const sessions = groupSessions.length > 0 ? groupSessions : [anchorSession];
+
+    // Lock this barcode's row (if any) in every part, always in the same ascending
+    // partIndex order, so concurrent scans acquire locks in a consistent order and never
+    // deadlock against each other.
+    const itemRowsBySession = new Map<number, any | null>();
+    for (const s of sessions) {
+      const { rows } = await client.query(
+        `SELECT * FROM order_scan_items WHERE session_id = $1 AND barcode = $2 FOR UPDATE`,
+        [s.id, barcode],
+      );
+      itemRowsBySession.set(s.id, rows[0] ?? null);
+    }
+
+    // "Front" = earliest part (by partIndex) that still has an item not yet fully scanned.
+    // Once every item in a part is complete, the front moves to the next part automatically
+    // on the very next scan — no admin action needed for that to take effect.
+    const { rows: incompleteCounts } = await client.query(
+      `SELECT session_id AS "sessionId", COUNT(*) FILTER (WHERE status <> 'complete')::int AS "incomplete"
+       FROM order_scan_items WHERE session_id = ANY($1::int[]) GROUP BY session_id`,
+      [sessions.map((s: any) => s.id)],
+    );
+    const incompleteBySession = new Map(incompleteCounts.map((r: any) => [r.sessionId, r.incomplete]));
+    const frontSession = sessions.find((s: any) => (incompleteBySession.get(s.id) ?? 0) > 0) ?? sessions[sessions.length - 1];
+
+    // Sequential search: front part first, then the next, then the next — the first part
+    // whose CSV still has room left for this barcode wins the "Scanned" credit.
+    let matchedSession: any = null;
+    let matchedItem: any = null;
+    for (const s of sessions) {
+      const item = itemRowsBySession.get(s.id);
+      if (item && Number(item.expected_qty ?? 0) - Number(item.total_scanned_qty ?? 0) > 0) {
+        matchedSession = s; matchedItem = item; break;
+      }
+    }
 
     // Always look up name AND plant-specific pallet size fresh from live inventory —
     // even when the barcode matches a CSV item. order_scan_items.items_per_pallet is only
-    // a one-time snapshot taken when the session was activated (see populatePartScanItems /
-    // seedAndActivateSession); if the product's pallet config (items_per_pallet / val_plt /
-    // ind_plt) was blank at that moment and got filled in on the Products page afterward,
-    // every scan against that CSV item would silently keep using the stale 0 forever,
-    // recording 1 box = 1 "pallet". Resolving live here (same fallback chain the old
-    // classic-scan flow used) means pallet math is always correct regardless of when the
-    // product's config was set relative to session activation.
-    // Must fetch val_plt/ind_plt too — getPalletSize picks the right one for the session's plant.
-    // Fallback: parse *NNN from the product name (e.g. "16GM*192 ..." → 192) just like the old
-    // flow's extractPalletSize did, for products where the DB columns are still 0.
-    let resolvedItemName: string | null = scanItem?.item_name ?? null;
-    let resolvedIpp = Number(scanItem?.items_per_pallet ?? 0);
+    // a one-time snapshot taken when the session was seeded; if the product's pallet config
+    // was blank at that moment and got filled in on the Products page afterward, every scan
+    // against that CSV item would silently keep using the stale 0 forever, recording 1 box =
+    // 1 "pallet". Resolving live here means pallet math is always correct regardless of when
+    // the product's config was set relative to seeding.
+    let resolvedItemName: string | null = (matchedItem ?? itemRowsBySession.get(frontSession.id))?.item_name ?? null;
+    let resolvedIpp = Number((matchedItem ?? itemRowsBySession.get(frontSession.id))?.items_per_pallet ?? 0);
     const prodResult = await client.query(
       `SELECT name, items_per_pallet, pallets, val_plt, ind_plt
        FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
@@ -963,99 +1213,127 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
       resolvedItemName = resolvedItemName ?? p.name ?? null;
       const liveIpp = resolveFullPalletSize(
         { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt, pallets: p.pallets, name: p.name },
-        sessResult.rows[0]?.plant ?? '',
+        anchorSession.plant ?? '',
       );
-      // Live inventory data always wins over the stale activation-time snapshot.
       if (liveIpp > 0) resolvedIpp = liveIpp;
     }
-
     const itemsPerPallet = resolvedIpp;
+
     const totalQty = qty != null
       ? Math.max(1, Math.round(qty))
       : Math.round(pallets * Math.max(1, itemsPerPallet)) + looseQty;
     const userCode = (req.user as any)?.userCode ?? null;
     const userName  = (req.user as any)?.name ?? null;
 
-    // Split this scan at the expected-qty boundary instead of an all-or-nothing
-    // isExtra check. A single scan that both finishes the order AND overshoots it
-    // (e.g. 20 remaining, 30 boxes scanned) used to be logged entirely as
-    // "regular", letting total_scanned_qty run past expected_qty with nothing
-    // flagged as extra. And once an item was already complete, a later scan's
-    // full qty was logged as an extra EVENT while total_scanned_qty (read by the
-    // "Regular" report) was *also* bumped by that same qty — double-counting the
-    // same boxes as both regular and extra in the Overall Stock Report. Only the
-    // portion beyond what's still needed for the order is ever extra; the order
-    // portion is capped so total_scanned_qty never exceeds expected_qty.
-    const remainingForOrder = scanItem
-      ? Math.max(0, Number(scanItem.expected_qty ?? 0) - Number(scanItem.total_scanned_qty ?? 0))
-      : 0;
-    const orderQty = Math.min(totalQty, remainingForOrder);
-    const extraQty = totalQty - orderQty;
-    const splitPallets = (qty: number) => ({
-      pallets: itemsPerPallet > 0 ? Math.floor(qty / itemsPerPallet) : qty,
-      looseQty: itemsPerPallet > 0 ? qty % itemsPerPallet : 0,
-    });
+    const baseParams = { totalQty, itemsPerPallet, barcode, resolvedItemName, stv, userCode, userName };
+    const events: Array<any & { __sessionId: number }> = [];
+    let updatedItem: any = null;
+    let stockOrderQty = 0;
+    let stockExtraQty = 0;
+    let stockLedgerSessionId = frontSession.id;
+    const touchedSessions = new Set<number>([frontSession.id]);
 
-    const events: any[] = [];
-    let updatedItem: any = scanItem;
+    if (matchedSession && matchedSession.id === frontSession.id) {
+      // Found in the front part — the simple case, same as a single-part scan.
+      const r = await writeScanEvents(client, { ...baseParams, sessionId: matchedSession.id, scanItem: matchedItem, forceAllExtra: false });
+      events.push(...r.events.map((e: any) => ({ ...e, __sessionId: matchedSession.id })));
+      updatedItem = r.updatedItem;
+      stockOrderQty = r.orderQty; stockExtraQty = r.extraQty; stockLedgerSessionId = matchedSession.id;
+    } else if (matchedSession) {
+      // Not on the front part's CSV, but found further down the sequence — dual-log per the
+      // spec: Extra against the front part's report AND Scanned against the part that
+      // actually matched. Same physical box, two bookkeeping entries; stock (below) is only
+      // ever applied once, from the matched part's real split.
+      const frontItem = itemRowsBySession.get(frontSession.id) ?? null;
+      const rFront = await writeScanEvents(client, { ...baseParams, sessionId: frontSession.id, scanItem: frontItem, forceAllExtra: true });
+      events.push(...rFront.events.map((e: any) => ({ ...e, __sessionId: frontSession.id })));
 
-    if (orderQty > 0) {
-      const part = splitPallets(orderQty);
-      const orderEventResult = await client.query(
-        `INSERT INTO order_scan_events
-           (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-            items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-         RETURNING *`,
-        [sessionId, scanItem.id, barcode, resolvedItemName,
-         part.pallets, part.looseQty, orderQty, itemsPerPallet, false,
-         stv ?? null, userCode, userName],
-      );
-      events.push(orderEventResult.rows[0]);
-
-      const updateResult = await client.query(
-        `UPDATE order_scan_items
-         SET scanned_pallets    = COALESCE(scanned_pallets,   0) + $1,
-             scanned_loose_qty  = COALESCE(scanned_loose_qty, 0) + $2,
-             total_scanned_qty  = COALESCE(total_scanned_qty, 0) + $3,
-             status             = CASE
-               WHEN COALESCE(total_scanned_qty, 0) + $3 >= expected_qty THEN 'complete'
-               WHEN COALESCE(total_scanned_qty, 0) + $3 > 0             THEN 'partial'
-               ELSE 'pending'
-             END,
-             last_scanned_at    = NOW()
-         WHERE id = $4
-         RETURNING *`,
-        [part.pallets, part.looseQty, orderQty, scanItem.id],
-      );
-      updatedItem = updateResult.rows[0];
+      const rMatch = await writeScanEvents(client, { ...baseParams, sessionId: matchedSession.id, scanItem: matchedItem, forceAllExtra: false });
+      events.push(...rMatch.events.map((e: any) => ({ ...e, __sessionId: matchedSession.id })));
+      updatedItem = rMatch.updatedItem;
+      touchedSessions.add(matchedSession.id);
+      stockOrderQty = rMatch.orderQty; stockExtraQty = rMatch.extraQty; stockLedgerSessionId = matchedSession.id;
+    } else {
+      // Not found anywhere in the group — pure Extra against the front part.
+      const frontItem = itemRowsBySession.get(frontSession.id) ?? null;
+      const rFront = await writeScanEvents(client, { ...baseParams, sessionId: frontSession.id, scanItem: frontItem, forceAllExtra: true });
+      events.push(...rFront.events.map((e: any) => ({ ...e, __sessionId: frontSession.id })));
+      updatedItem = rFront.updatedItem;
+      stockOrderQty = rFront.orderQty; stockExtraQty = rFront.extraQty; stockLedgerSessionId = frontSession.id;
     }
 
-    // extraQty is recorded purely as an event — it must NOT also be added to
-    // order_scan_items, since that row already feeds the "Regular" report total.
-    if (extraQty > 0) {
-      const part = splitPallets(extraQty);
-      const extraEventResult = await client.query(
-        `INSERT INTO order_scan_events
-           (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-            items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-         RETURNING *`,
-        [sessionId, scanItem?.id ?? null, barcode, resolvedItemName,
-         part.pallets, part.looseQty, extraQty, itemsPerPallet, true,
-         stv ?? null, userCode, userName],
-      );
-      events.push(extraEventResult.rows[0]);
+    // Live stock — applied exactly once per physical scan, from the real order/extra split
+    // above, never once per bookkeeping event. This is what keeps the dual-logging rule from
+    // ever double-counting real inventory.
+    await applyLiveScanStock(client, anchorSession.plant, barcode, stockOrderQty, stockExtraQty, stockLedgerSessionId);
+
+    // Derived auto-completion — gated by the plant's "Auto Complete" setting (Plant
+    // Settings page). OFF (default): skip entirely, every part stays manual-only. ON: any
+    // touched session whose items are now all 'complete' flips to scan_status='completed'
+    // automatically, EXCEPT the last part of the group (or the only session in a standalone
+    // import) — that one always waits for the manual Complete button, regardless of the
+    // setting, so there's always a deliberate final review before an order fully closes out.
+    const { rows: plantRows } = await client.query(
+      `SELECT is_auto_complete_enabled AS "isAutoCompleteEnabled" FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+      [anchorSession.plant],
+    );
+    const autoCompleteEnabled = plantRows[0]?.isAutoCompleteEnabled === true;
+    const lastPartId = sessions.reduce(
+      (max: any, s: any) => ((s.partIndex ?? 0) > (max?.partIndex ?? -1) ? s : max),
+      null as any,
+    )?.id;
+
+    const newlyCompleted: number[] = [];
+    if (autoCompleteEnabled) {
+      for (const sid of touchedSessions) {
+        if (sid === lastPartId) continue; // last part: always manual, never auto
+        const { rows: remainRows } = await client.query(
+          `SELECT COUNT(*) FILTER (WHERE status <> 'complete')::int AS remaining FROM order_scan_items WHERE session_id = $1`,
+          [sid],
+        );
+        if ((remainRows[0]?.remaining ?? 1) === 0) {
+          const { rowCount } = await client.query(
+            `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW()
+             WHERE id = $1 AND scan_status <> 'completed'`,
+            [sid],
+          );
+          if (rowCount) newlyCompleted.push(sid);
+        }
+      }
+    }
+
+    // Make any "already covered by an earlier part" credit real for each part that just
+    // completed — same reasoning as the manual /complete endpoint (see reconcileCredits).
+    for (const sid of newlyCompleted) {
+      await reconcileCredits(client, sid, groupId);
     }
 
     await client.query('COMMIT');
 
-    // Broadcast after commit so subscribers always see the committed state.
-    // One message per split portion so recent-scans feeds show both parts.
+    // Promote the next part to 'active' for each part that just auto-completed, so the
+    // UI's /active-sessions lookup (which only ever shows scan_status='active' sessions)
+    // still has a "front" to display — scanning itself doesn't need this (every part is
+    // already seeded and scannable), but the client's session picker does. Must run in its
+    // own connection/transaction AFTER the commit above (seedAndActivateSession takes its
+    // own row lock on the next session).
+    for (const sid of newlyCompleted) {
+      const s = sessions.find((x: any) => x.id === sid);
+      if (!s) continue;
+      broadcastScanEvent(sid, { type: 'part-completed', csvFileName: s.csvFileName, partIndex: s.partIndex });
+      const activated = await autoActivateNextInScope(
+        { id: sid, plant: s.plant, receivingSessionId: anchorSession.receivingSessionId, csvFileName: s.csvFileName },
+        userCode,
+      );
+      if (activated) broadcastOrderImportUpdate();
+    }
+
+    // Broadcast after commit so subscribers always see the committed state — routed to
+    // whichever session(s) each event actually belongs to.
     for (const event of events) {
-      broadcastScanEvent(sessionId, {
+      const isForUpdatedItem = updatedItem && event.scan_item_id === updatedItem.id && !event.is_extra;
+      broadcastScanEvent(event.__sessionId, {
         type: 'scan',
-        item: updatedItem ? {
+        item: isForUpdatedItem ? {
           id:              updatedItem.id,
           barcode:         updatedItem.barcode,
           totalScannedQty: updatedItem.total_scanned_qty,

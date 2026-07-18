@@ -23,6 +23,8 @@ import {
   Zap,
   Eye,
   EyeOff,
+  RotateCw,
+  ChevronUp,
 } from "lucide-react";
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
@@ -90,7 +92,8 @@ type MvFile = {
 type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
 type MvMergedItem = {
   barcode: string | null; itemName: string | null; sapCode: string | null;
-  quantity: number; scannedQty: number; expectedPallets: number | null;
+  quantity: number; scannedQty: number; extraQty: number; expectedPallets: number | null;
+  itemsPerPallet: number;
   _files: string[]; _isExtra: boolean;
 };
 type ImpSession = {
@@ -196,7 +199,7 @@ export default function ScanOrderPage() {
   const queryClient = useQueryClient();
 
   // ── Master View / Separate CSVs tab state ────────────────────────────────
-  const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("scan");
+  const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("master-view");
   const scanTodayStr = scanLocalISODate();
   const [mvSearch,    setMvSearch]    = useState("");
   const [mvShowFiles, setMvShowFiles] = useState(false); // toggle: show/hide source-file names in Master View
@@ -229,6 +232,56 @@ export default function ScanOrderPage() {
 
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
+
+  // ── Kiosk rotation — for a screen mounted in portrait. Remembered across reloads
+  // (localStorage) since a mounted kiosk screen stays in the same physical orientation
+  // indefinitely. See .kiosk-rotate-90 in index.css for the actual rotate mechanics.
+  const [osRotated, setOsRotated] = useState(() => localStorage.getItem("scanOrderRotated") === "true");
+  useEffect(() => {
+    localStorage.setItem("scanOrderRotated", String(osRotated));
+  }, [osRotated]);
+  const RotateToggleButton = () => (
+    <button
+      onClick={() => setOsRotated((r) => !r)}
+      className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+      title={osRotated ? "Rotate back to normal" : "Rotate for a portrait-mounted screen"}
+    >
+      <RotateCw className="h-5 w-5" />
+      <span className="hidden text-xs font-semibold sm:inline">{osRotated ? "Un-rotate" : "Rotate"}</span>
+    </button>
+  );
+
+  // ── Rotated-view scroll fix ──────────────────────────────────────────────
+  // A 90°-rotated container's native scroll (mouse wheel, trackpad, touch swipe) moves content
+  // SIDEWAYS on screen, not up/down — a rigid rotation swaps which axis is "vertical", but this
+  // page's lists are still laid out as normal top-to-bottom content, so the only real scrollable
+  // axis maps to sideways motion once rotated (confirmed via direct on-screen measurement).
+  // Rather than rebuild these lists to scroll on the other axis (invasive — most rows are
+  // variable-height, incompatible with the fixed-width-per-item layout that would need), we
+  // disable native scroll on these containers when rotated and replace it with discrete Up/Down
+  // buttons — a button press doesn't carry the same "gesture went one way, screen went another"
+  // mismatch that makes continuous swipe/wheel scrolling feel disorienting.
+  const osTabBodyScrollRef = useRef<HTMLDivElement>(null);
+  const osCsvListScrollRef = useRef<HTMLDivElement>(null);
+  const osManageExtraScrollRef = useRef<HTMLDivElement>(null);
+
+  function ScrollNudgeButtons({ targetRef, amount = 240, className = "" }: {
+    targetRef: React.RefObject<HTMLElement>; amount?: number; className?: string;
+  }) {
+    const nudge = (dir: 1 | -1) => targetRef.current?.scrollBy({ top: dir * amount });
+    return (
+      <div className={`flex items-center gap-1 ${className}`}>
+        <button type="button" onClick={() => nudge(-1)} aria-label="Scroll up" title="Scroll up"
+          className="rounded-full bg-black/10 p-1.5 text-current hover:bg-black/20">
+          <ChevronUp className="h-4 w-4" />
+        </button>
+        <button type="button" onClick={() => nudge(1)} aria-label="Scroll down" title="Scroll down"
+          className="rounded-full bg-black/10 p-1.5 text-current hover:bg-black/20">
+          <ChevronDown className="h-4 w-4" />
+        </button>
+      </div>
+    );
+  }
 
   // ── Queries ──────────────────────────────────────────────────────────────
 
@@ -296,6 +349,21 @@ export default function ScanOrderPage() {
     return orderScanNotif?.active ? orderScanNotif.session : null;
   })();
 
+  // Plant config (colors + the scan behavior toggles like Auto Scan). Small, cacheable list;
+  // we look up the active session's plant by name to read its per-plant flags. Auto Scan
+  // being off (or the plant not found) falls through to the classic always-confirm flow.
+  const { data: allPlants } = useQuery<any[]>({
+    queryKey: ["/api/plants"],
+    queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
+    staleTime: 60000,
+  });
+  const autoScanEnabled = (() => {
+    const plantName = (activeOrderScanSession?.plant ?? "").toLowerCase();
+    if (!plantName) return false;
+    const p = (allPlants ?? []).find((pl: any) => String(pl.name ?? "").toLowerCase() === plantName);
+    return p?.isAutoScanEnabled === true;
+  })();
+
   // Master View has no manual plant/date pickers — it always shows the currently active
   // session's own plant/date, derived from scanActivatedAt (stored as IST wall-clock, same
   // convention as createdAt, so its date portion matches the day that CSV was uploaded).
@@ -325,6 +393,28 @@ export default function ScanOrderPage() {
   const [osCameraError, setOsCameraError] = useState<string | null>(null);
   const [osPending, setOsPending] = useState<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osPendingRef = useRef<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
+  // Synchronous reentrancy lock for the auto-confirm path. osPendingRef/osMultiMatchRef only
+  // guard re-entry while a DIALOG is open — but an auto-confirmed scan never opens one, so
+  // without this a second gun trigger-pull (or an auto-repeating manual-entry Enter) landing
+  // before the first scan's optimistic totalScannedQty update reaches osItemsRef.current would
+  // read the same stale qty, independently decide "still under capacity", and double-log one
+  // physical scan while skipping the breach dialog it should have hit on the second qty.
+  const osScanLockRef = useRef(false);
+  // The matched CSV item + pallet size for the scan currently being submitted. Set by BOTH
+  // the auto-confirm path (_resolveOsScan) and the dialog-confirm path (handleOsConfirmScan)
+  // just before osScanMutation.mutate, so onMutate can apply its optimistic totalScannedQty/
+  // lastScannedAt bump uniformly. Previously onMutate read this only from osPendingRef, which
+  // is null for auto-confirmed (under-capacity) scans — so those scans skipped the optimistic
+  // reorder-to-top and only moved after the slower server round-trip, while full/breach scans
+  // (which open the dialog) reordered instantly. This ref closes that asymmetry.
+  const osScanCtxRef = useRef<{ matchedItem: OsScanItem | null; plantPalletSize: number } | null>(null);
+  // 5s non-blocking feedback shown after an Auto Scan auto-confirm — image + product details
+  // so the operator sees what was scanned without needing to confirm/close anything.
+  const [osAutoScanFeedback, setOsAutoScanFeedback] = useState<
+    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number } | null
+  >(null);
+  const osAutoScanFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (osAutoScanFeedbackTimerRef.current) clearTimeout(osAutoScanFeedbackTimerRef.current); }, []);
   const [osMultiMatch, setOsMultiMatch] = useState<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osMultiMatchRef = useRef<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const [osPallets, setOsPallets] = useState(1);
@@ -348,10 +438,25 @@ export default function ScanOrderPage() {
   // Barcodes we already added optimistically; WS handler skips the echo for these
   const osRecentScanSentRef = useRef<Set<string>>(new Set());
   const [wsConnected, setWsConnected] = useState(false);
+  // Brief full-screen tint on a silently auto-confirmed scan (no dialog shown) — the only
+  // feedback signal besides the beep for the fast/normal-case path. Cleared via setTimeout.
+  const [osFlash, setOsFlash] = useState<"success" | null>(null);
+  // Client-side "most recently scanned floats to top" ordering. A monotonic counter bumped on
+  // every scan (in onMutate), mapping item id → its scan sequence number. Used as the PRIMARY
+  // sort key for the CSV Items list instead of lastScannedAt, because lastScannedAt can't be
+  // compared reliably across items: a just-scanned item still carries its optimistic real-UTC
+  // toISOString() value, while items whose scan already round-tripped carry the server's
+  // IST-wall-clock-as-UTC convention (~5.5h ahead) — so the freshly-scanned item looks OLDER
+  // and wrongly sorts below an already-completed one. A pure client counter sidesteps all of
+  // that. Reset on session change. Held in a ref (not state) because every scan already
+  // triggers a re-render via the optimistic setQueryData/setOsRecentScans, so the sort re-runs
+  // and reads the fresh ref without needing its own state update.
+  const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
   useEffect(() => {
     setOsSelectedStv("");
+    osScanSeqRef.current = { seq: 0, byId: new Map() };
   }, [activeOrderScanSession?.id]);
 
   const osItemsQuery = useQuery<OsScanItem[]>({
@@ -383,6 +488,19 @@ export default function ScanOrderPage() {
   const osCreditByBarcode = new Map(
     (osGroupCreditsQuery.data?.credits ?? []).map((c) => [normalize(c.barcode), c]),
   );
+
+  // Every part of the current FIFO group is scannable at once now (sequential cross-part
+  // search — see the server's /scan handler), so a physical scan can land on a sibling part
+  // instead of the one shown as "front" here. The WS effect below joins every id in this
+  // list so live updates from any part reach this device, not just the front one.
+  const osGroupSessionIdsQuery = useQuery<{ sessionIds: number[] }>({
+    queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "group-session-ids"],
+    queryFn: () =>
+      apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/group-session-ids`).then((r) => r.json()),
+    enabled: !!activeOrderScanSession,
+    staleTime: 30000,
+  });
+  const osGroupSessionIds = osGroupSessionIdsQuery.data?.sessionIds ?? (activeOrderScanSession ? [activeOrderScanSession.id] : []);
 
   type OsExtraRow = { barcode: string; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null };
   const osExtrasQuery = useQuery<OsExtraRow[]>({
@@ -459,14 +577,27 @@ export default function ScanOrderPage() {
       await queryClient.cancelQueries({ queryKey: osItemsKey });
       const previousItems = queryClient.getQueryData<OsScanItem[]>(osItemsKey);
       const previousPending = osPendingRef.current; // save before clearing
+      const scanCtx = osScanCtxRef.current; // set by both auto-confirm and dialog-confirm paths
 
-      // Only optimistically update if the barcode matched a CSV item (not an extra)
-      const matched = previousPending?.matchedItem;
+      // Only optimistically update if the barcode matched a CSV item (not an extra).
+      // Prefer scanCtx (populated for BOTH scan paths) over previousPending (dialog only) so
+      // auto-confirmed under-capacity scans also get the instant totalScannedQty/lastScannedAt
+      // bump — otherwise they wouldn't reorder-to-top until the server round-trip landed.
+      const matched = scanCtx?.matchedItem ?? previousPending?.matchedItem;
+      // Stamp this scan's sequence so the item floats to the very top of the list — for ANY
+      // scan on a real CSV row (partial, completing, or an extra logged onto an already-full
+      // row), not just completing ones. A "not in order" extra has no matched row, so nothing
+      // to reorder.
+      if (matched) {
+        const s = osScanSeqRef.current;
+        s.seq += 1;
+        s.byId.set(matched.id, s.seq);
+      }
       if (matched && !payload.isExtra) {
         // payload.qty is the authoritative box count — pallets/looseQty here are only a
         // display estimate using this client's best-known plant pallet size; the server
         // reconciles with the live-resolved value via onSuccess below.
-        const itemsPerPallet = previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
+        const itemsPerPallet = scanCtx?.plantPalletSize ?? previousPending?.plantPalletSize ?? matched.itemsPerPallet ?? 1;
         const addedQty = payload.qty;
         const addedPallets = itemsPerPallet > 0 ? Math.floor(addedQty / itemsPerPallet) : addedQty;
         const addedLoose = itemsPerPallet > 0 ? addedQty % itemsPerPallet : 0;
@@ -596,6 +727,29 @@ export default function ScanOrderPage() {
     return Math.max(1, size || 1);
   };
 
+  // Same fallback chain as _computePlantPalletSize, but for Master View items (which have
+  // no OsScanItem/session-scoped itemsPerPallet snapshot to fall back on) — and returns 0
+  // rather than clamping to 1 when nothing is configured, so the UI can tell "no pallet
+  // data" apart from "genuinely 1 per pallet" (matching how OsScanItem.itemsPerPallet==0
+  // is already treated elsewhere in this file).
+  const _resolveMvPalletSize = (invProduct: Product | null, plant: string): number => {
+    if (!invProduct) return 0;
+    const plantLower = (plant ?? "").toLowerCase();
+    let fromInv = 0;
+    if (plantLower.includes("valsad") || plantLower.includes("val")) {
+      fromInv = Number(invProduct.valPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
+    } else if (plantLower.includes("indore") || plantLower.includes("ind")) {
+      fromInv = Number(invProduct.indPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
+    } else {
+      fromInv = Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
+    }
+    if (fromInv === 0 && invProduct.name) {
+      const m = String(invProduct.name).match(/\*(\d{1,5})/);
+      if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) fromInv = n; }
+    }
+    return fromInv;
+  };
+
   const _defaultScanQty = (match: OsScanItem | null, plantPalletSize: number): number => {
     if (!match) return plantPalletSize;
     const remaining = Math.max(0, (match.expectedQty ?? 0) - (match.totalScannedQty ?? 0));
@@ -604,8 +758,94 @@ export default function ScanOrderPage() {
     return remaining > 0 && remaining < plantPalletSize ? remaining : plantPalletSize;
   };
 
+  // Shows the 5s Auto Scan feedback popup (image + details) and (re)starts its dismiss timer.
+  // Rapid consecutive auto-scans just replace the content and reset the 5s window.
+  const showAutoScanFeedback = (
+    match: OsScanItem,
+    invProduct: Product | null,
+    scannedQty: number,
+    remaining: number,
+  ) => {
+    if (osAutoScanFeedbackTimerRef.current) clearTimeout(osAutoScanFeedbackTimerRef.current);
+    setOsAutoScanFeedback({
+      name: match.itemName ?? invProduct?.name ?? match.barcode ?? "—",
+      barcode: match.barcode ?? "",
+      sapCode: match.sapCode ?? null,
+      scannedQty,
+      remaining,
+    });
+    osAutoScanFeedbackTimerRef.current = setTimeout(() => setOsAutoScanFeedback(null), 5000);
+  };
+
+  // Decides whether a resolved single-item match auto-confirms silently or opens the confirm
+  // dialog, gated by the plant's Auto Scan setting:
+  //   • Auto Scan OFF (default) → EVERY scan opens the confirm dialog (fully manual).
+  //   • Auto Scan ON → a matched CSV item with a FULL pallet or more still remaining is
+  //     confirmed automatically (exactly ONE pallet per scan) with a 5s image feedback popup
+  //     and no dialog. A leftover "loose" amount (less than a full pallet), an extra, an
+  //     already-complete item, or an unmatched-but-in-inventory barcode all still open the
+  //     dialog — the dialog's own match/extra/already-complete branching stays unchanged.
+  const _resolveOsScan = (
+    barcode: string,
+    match: OsScanItem | null,
+    invProduct: Product | null,
+    plantPalletSize: number,
+  ) => {
+    const remaining = match ? Math.max(0, (match.expectedQty ?? 0) - (match.totalScannedQty ?? 0)) : 0;
+    // One full pallet (or more) of order qty still remaining → auto-scan exactly one pallet.
+    // Never overshoots: remaining >= plantPalletSize means scanned + one pallet <= expected.
+    const canAutoScan =
+      autoScanEnabled &&
+      !!match &&
+      (match.expectedQty ?? 0) > 0 &&
+      plantPalletSize >= 1 &&
+      remaining >= plantPalletSize;
+
+    if (canAutoScan) {
+      const qty = plantPalletSize; // exactly one full pallet per scan
+      setOsFlash("success");
+      setTimeout(() => setOsFlash(null), 350);
+      // 5s non-blocking feedback popup (image + details) so the operator can see what was
+      // auto-scanned without having to confirm anything.
+      showAutoScanFeedback(match!, invProduct, qty, Math.max(0, remaining - qty));
+      // Give onMutate the matched item so it can optimistically bump qty + lastScannedAt (and
+      // thus reorder this item to the top) instantly, without waiting for the server.
+      osScanCtxRef.current = { matchedItem: match, plantPalletSize };
+      // Lock stays held (set by the caller before this ran) until the mutation settles — this
+      // is the only path that never opens a dialog, so it needs its own release point.
+      osScanMutation.mutate(
+        { barcode, qty, isExtra: false, stv: osSelectedStv || null },
+        { onSettled: () => { osScanLockRef.current = false; } },
+      );
+      return;
+    }
+
+    // Opening the dialog now — osPendingRef takes over as the reentrancy guard from here.
+    const defaultQty = _defaultScanQty(match, plantPalletSize);
+    osScanLockRef.current = false;
+    setOsQty(defaultQty);
+    setOsPalletsInput(plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
+    setOsPallets(1);
+    setOsLooseQty(0);
+    setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize });
+  };
+
   const handleOsBarcode = (barcode: string) => {
-    if (osPendingRef.current || osMultiMatchRef.current) return;
+    if (osPendingRef.current || osMultiMatchRef.current || osScanLockRef.current) return;
+    // STV (when the plant has any configured) is picked once up front via the persistent
+    // selector above the scanner, not per scan — see osSelectedStv's own comment. Scanning
+    // is a no-op until it's chosen, so every auto-confirmed AND dialog-confirmed scan always
+    // has one, and the dialog no longer needs its own STV picker/validation.
+    const stvs = osStvsQuery.data ?? [];
+    if (stvs.length > 0 && !osSelectedStv) {
+      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      return;
+    }
+    // Held synchronously from here until either a dialog opens (osPendingRef/osMultiMatchRef
+    // take over) or an early return below — closes the gap where a second rapid scan (gun
+    // double-trigger, auto-repeating manual Enter) could read the same not-yet-updated
+    // osItemsRef snapshot as this one and double-process the same physical scan.
+    osScanLockRef.current = true;
     playScanBeep();
     const normBarcode = normalize(barcode);
     const matches = osItemsRef.current.filter((i) => normalize(i.barcode ?? "") === normBarcode);
@@ -615,6 +855,7 @@ export default function ScanOrderPage() {
     // legitimate "extra" (early arrival of a real item), it's a barcode the system has no
     // record of. Block it outright instead of letting it get logged as an extra.
     if (matches.length === 0 && !invProduct) {
+      osScanLockRef.current = false;
       toast({ title: "Barcode not in system", description: "This barcode isn't in the order or in Inventory — scanning it is not allowed.", variant: "destructive" });
       return;
     }
@@ -622,17 +863,17 @@ export default function ScanOrderPage() {
     const plantPalletSize = _computePlantPalletSize(matches[0] ?? null, invProduct);
 
     if (matches.length > 1) {
+      // osMultiMatchRef takes over as the reentrancy guard once the picker is open.
+      osScanLockRef.current = false;
       setOsMultiMatch({ barcode, matches, inventoryProduct: invProduct, plantPalletSize });
       return;
     }
 
     const match = matches[0] ?? null;
-    const defaultQty = _defaultScanQty(match, plantPalletSize);
-    setOsQty(defaultQty);
-    setOsPalletsInput(plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
-    setOsPallets(1);
-    setOsLooseQty(0);
-    setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize });
+    // Auto Scan ON → full-pallet matches auto-confirm (with the 5s image popup); loose/extra
+    // amounts open the dialog. Auto Scan OFF → always opens the dialog. All handled inside
+    // _resolveOsScan, which also manages the osScanLockRef release for each path.
+    _resolveOsScan(barcode, match, invProduct, plantPalletSize);
   };
 
   const handleOsMultiMatchSelect = (item: OsScanItem) => {
@@ -651,15 +892,24 @@ export default function ScanOrderPage() {
 
   const handleOsConfirmScan = () => {
     if (!osPending) return;
+    // Defense-in-depth: handleOsBarcode already blocks a scan from ever reaching this dialog
+    // without an STV selected (when the plant requires one), but osSelectedStv resets on a
+    // session change (see its own comment) — if that happens to fire while this dialog is
+    // still open, re-check here rather than silently submitting with stv: null.
     const stvs = osStvsQuery.data ?? [];
     if (stvs.length > 0 && !osSelectedStv) {
-      toast({ title: "Select an STV first", variant: "destructive" });
+      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      setOsPending(null);
+      osPendingRef.current = null;
+      resetOsConfirmation();
       return;
     }
     const qty = Math.max(1, osQty);
     const itemAlreadyComplete = osPending.matchedItem
       ? (osPending.matchedItem.totalScannedQty ?? 0) >= (osPending.matchedItem.expectedQty ?? 1)
       : false;
+    // Mirror the auto-confirm path so onMutate has a uniform source for its optimistic bump.
+    osScanCtxRef.current = { matchedItem: osPending.matchedItem, plantPalletSize: osPending.plantPalletSize };
     osScanMutation.mutate({
       barcode: osPending.barcode,
       qty,
@@ -705,10 +955,18 @@ export default function ScanOrderPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrderScanSession?.id, osScanMode]);
 
-  // Admin-triggered "complete this part now" — the ONLY way a part is completed. There is
-  // deliberately no auto-popup when all items are scanned: completion happens only when the
-  // admin explicitly clicks Complete (some items may still be covered by a later part).
+  // Admin-triggered "complete this part now". A part can also complete on its own when
+  // Auto Complete is enabled for the plant — see the WS 'part-completed' handling below,
+  // which covers both this manual path and the automatic one with the same banner.
   const [showForceComplete, setShowForceComplete] = useState(false);
+
+  // Shows a prominent "Part Complete" banner for 10s whenever a part finishes — whether via
+  // this manual button, Auto Complete firing mid-scan, or the stale-part sweep after a new
+  // CSV upload. Driven entirely by the WS 'part-completed' message (see the WS effect below)
+  // so all three trigger paths are handled uniformly, without needing separate client logic
+  // for "I just clicked Complete" vs "the server completed something on its own."
+  const [osPartCompleteBanner, setOsPartCompleteBanner] = useState<{ csvFileName: string; partIndex: number } | null>(null);
+  const osPartCompleteBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const osCompleteMutation = useMutation({
     mutationFn: () =>
@@ -721,10 +979,15 @@ export default function ScanOrderPage() {
     onError: (err: any) => toast({ title: "Failed to complete order", description: err?.message, variant: "destructive" }),
   });
 
-  // WebSocket subscription — receives push updates from every scan on this session
+  // WebSocket subscription — receives push updates from every scan across the current
+  // FIFO group, not just the "front" part shown here. A scan can land on a sibling part
+  // (see the sequential cross-part search + dual-logging in the server's /scan handler),
+  // so this device needs to hear about all of them to stay live.
+  const osGroupSessionIdsKey = osGroupSessionIds.join(',');
   useEffect(() => {
     if (!activeOrderScanSession) return;
     const sessionId = activeOrderScanSession.id;
+    const groupSessionIds = osGroupSessionIdsKey ? osGroupSessionIdsKey.split(',').map(Number) : [sessionId];
 
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -757,7 +1020,7 @@ export default function ScanOrderPage() {
       ws.onopen = () => {
         lastMsgAt = Date.now();
         setWsConnected(true);
-        ws!.send(JSON.stringify({ type: 'join', sessionId }));
+        for (const sid of groupSessionIds) ws!.send(JSON.stringify({ type: 'join', sessionId: sid }));
         startDeadTimer();
       };
 
@@ -767,13 +1030,27 @@ export default function ScanOrderPage() {
           const data = JSON.parse(e.data);
 
           if (data.type === 'joined' || data.type === 'ping') return;
+
+          if (data.type === 'part-completed') {
+            if (osPartCompleteBannerTimerRef.current) clearTimeout(osPartCompleteBannerTimerRef.current);
+            setOsPartCompleteBanner({ csvFileName: data.csvFileName, partIndex: data.partIndex });
+            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 10000);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
           if (data.type !== 'scan') return;
+
+          // The event's own sessionId (stamped server-side) tells us which part it actually
+          // belongs to — it may not be the "front" part this device has open, since a scan
+          // can land on a sibling part (dual-logging rule in the server's /scan handler).
+          const eventSessionId: number = data.sessionId ?? sessionId;
 
           // Patch cache directly — no HTTP refetch needed.
           // The WS message already carries the committed DB values for this item.
           if (data.item) {
             queryClient.setQueryData<OsScanItem[]>(
-              ["/api/order-scan/sessions", sessionId, "items"],
+              ["/api/order-scan/sessions", eventSessionId, "items"],
               (old = []) => old.map((i) => i.id === data.item.id ? { ...i, ...data.item } : i),
             );
           }
@@ -803,7 +1080,7 @@ export default function ScanOrderPage() {
             }
             // Refresh extras for scans from other devices (this device refreshes via onSuccess)
             if (data.event.isExtra && !wasOptimistic) {
-              queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", sessionId, "extras"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", eventSessionId, "extras"] });
             }
           }
         } catch { /* ignore malformed frames */ }
@@ -829,7 +1106,7 @@ export default function ScanOrderPage() {
       ws?.close();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeOrderScanSession?.id]);
+  }, [activeOrderScanSession?.id, osGroupSessionIdsKey]);
 
   // ── Master View / Separate CSVs queries ─────────────────────────────────
 
@@ -1022,11 +1299,21 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
-          g = { barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode, quantity: 0, scannedQty: 0, expectedPallets: null, _files: [], _isExtra: true };
+          const invProduct = productLookup.get(normalize(item.barcode ?? item.itemName ?? "")) ?? null;
+          g = {
+            barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
+            quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
+            itemsPerPallet: _resolveMvPalletSize(invProduct, mvPlant),
+            _files: [], _isExtra: true,
+          };
           groups.set(key, g);
         }
         g.quantity += item.quantity ?? 0;
         g.scannedQty += item.scannedQty ?? 0;
+        // Extra scans come through as their own rows (quantity: 0, isExtra: true) — tracked
+        // separately from the regular scannedQty sum so Done/Extra can be shown as distinct
+        // columns instead of one blended total.
+        if (item.isExtra) g.extraQty += item.scannedQty ?? 0;
         if (item.expectedPallets != null) g.expectedPallets = (g.expectedPallets ?? 0) + item.expectedPallets;
         if (!g.itemName && item.itemName) g.itemName = item.itemName;
         if (!g.sapCode && item.sapCode) g.sapCode = item.sapCode;
@@ -1209,6 +1496,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         )
       : osItems
     ).slice().sort((a, b) => {
+      // PRIMARY: whatever was scanned most recently THIS session floats to the very top —
+      // every scan bumps osScanSeqRef in onMutate, so the item just scanned always wins
+      // position 1 (a monotonic client counter, immune to the optimistic-vs-server timestamp
+      // skew that a lastScannedAt comparison suffers from). Items not scanned this session have
+      // seq 0 and fall through to the ordering below.
+      const seq = osScanSeqRef.current.byId;
+      const aSeq = seq.get(a.id) ?? 0;
+      const bSeq = seq.get(b.id) ?? 0;
+      if (aSeq !== bSeq) return bSeq - aSeq;
+      // SECONDARY: for items only scanned in a PRIOR page-load (all carry the server's own
+      // timestamp convention, so they're mutually consistent), most-recent first. Guard against
+      // an unparseable value (NaN) so it cleanly falls through to the status/id tiebreakers.
+      const parseAt = (v: string | null) => { const t = v ? new Date(v).getTime() : 0; return Number.isNaN(t) ? 0 : t; };
+      const aScannedAt = parseAt(a.lastScannedAt);
+      const bScannedAt = parseAt(b.lastScannedAt);
+      if (aScannedAt !== bScannedAt) return bScannedAt - aScannedAt;
       const rank = (s: string) => s === "complete" ? 0 : s === "partial" ? 1 : 2;
       const diff = rank(a.status) - rank(b.status);
       if (diff !== 0) return diff;
@@ -1509,27 +1812,31 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     // Manage Scans (admin-only) / Extra Items, unified into one tabbed list — built once
     // here and reused as-is in both the mobile and desktop layouts below.
+    // "Manage" tab is hidden from the UI for now (backend void endpoint/queries are left
+    // untouched — a teammate is actively working on the void feature) — only ever show Extra.
     const osInfoOptions: { key: "manage" | "extra"; label: string; count: number }[] = [
       { key: "extra", label: "Extra", count: (osExtrasQuery.data ?? []).length },
-      ...(canCompletePart ? [{ key: "manage" as const, label: "Manage", count: (osEventsQuery.data ?? []).length }] : []),
     ];
     const activeInfoTab = osInfoTab === "manage" && !canCompletePart ? "extra" : osInfoTab;
     const sideInfoPanel = (
       <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
-        <div className="flex border-b bg-gray-50">
-          {osInfoOptions.map((opt) => (
-            <button
-              key={opt.key}
-              onClick={() => setOsInfoTab(opt.key)}
-              className={`flex-1 px-3 py-2 text-xs font-semibold transition-colors ${
-                activeInfoTab === opt.key ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-100"
-              }`}
-            >
-              {opt.label}{opt.count > 0 ? ` (${opt.count})` : ""}
-            </button>
-          ))}
+        <div className="flex items-center border-b bg-gray-50">
+          <div className="flex flex-1">
+            {osInfoOptions.map((opt) => (
+              <button
+                key={opt.key}
+                onClick={() => setOsInfoTab(opt.key)}
+                className={`flex-1 px-3 py-2 text-xs font-semibold transition-colors ${
+                  activeInfoTab === opt.key ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-100"
+                }`}
+              >
+                {opt.label}{opt.count > 0 ? ` (${opt.count})` : ""}
+              </button>
+            ))}
+          </div>
+          {osRotated && <ScrollNudgeButtons targetRef={osManageExtraScrollRef} className="px-2 text-gray-500" />}
         </div>
-        <div className="max-h-[420px] overflow-y-auto divide-y divide-gray-100">
+        <div ref={osManageExtraScrollRef} className={`max-h-[420px] divide-y divide-gray-100 ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
           {activeInfoTab === "manage" && canCompletePart && (
             (osEventsQuery.data ?? []).length > 0 ? (osEventsQuery.data ?? []).map((e) => (
               <div key={e.id} className={`flex items-center gap-3 px-4 py-2.5 text-xs ${e.voided ? "opacity-50" : ""}`}>
@@ -1583,7 +1890,69 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     );
 
     return (
-      <div className="flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6">
+      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+        <RotateToggleButton />
+        {osRotated && (
+          <div className="fixed bottom-4 left-4 z-[60] rounded-full bg-[#001d6e] px-2 py-1.5 text-white shadow-lg">
+            <ScrollNudgeButtons targetRef={osTabBodyScrollRef} />
+          </div>
+        )}
+
+        {/* ── "Part Complete" banner — fires for every way a part can finish (manual Complete
+            button, Auto Complete mid-scan, or the stale-part sweep after a new upload), driven
+            by the WS 'part-completed' message. Fixed/centered so it's visible regardless of
+            which tab or viewport is showing; auto-dismisses after 10s, or on click. ── */}
+        {osPartCompleteBanner && (
+          <div
+            className="fixed inset-x-0 top-3 z-[100] flex justify-center px-3 pointer-events-none"
+            role="status"
+          >
+            <button
+              type="button"
+              onClick={() => setOsPartCompleteBanner(null)}
+              className="pointer-events-auto flex items-center gap-2.5 rounded-full bg-emerald-600 pl-3 pr-4 py-2.5 text-white shadow-lg ring-1 ring-emerald-700/30 animate-in fade-in slide-in-from-top-2"
+            >
+              <CheckCircle2 className="h-5 w-5 shrink-0" />
+              <span className="text-sm font-semibold">
+                Part {osPartCompleteBanner.partIndex} Complete
+                <span className="ml-1.5 font-normal opacity-90">— {stripCsvExt(osPartCompleteBanner.csvFileName)}</span>
+              </span>
+            </button>
+          </div>
+        )}
+
+        {/* ── Auto Scan feedback popup — shows for 5s after an auto-confirmed (full-pallet)
+            scan: product image + name/barcode/SAP + how much was scanned and what remains.
+            Non-blocking (pointer-events-none) — the operator keeps scanning; no confirm
+            needed. Rapid scans replace it and reset the 5s timer (see showAutoScanFeedback). ── */}
+        {osAutoScanFeedback && (
+          <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-3 pointer-events-none" role="status">
+            <div className="flex items-center gap-3 rounded-xl bg-white px-3 py-2.5 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2 max-w-md">
+              <img
+                src={`/api/products/image-by-name?name=${encodeURIComponent(osAutoScanFeedback.name)}`}
+                alt=""
+                className="h-14 w-14 shrink-0 rounded-lg border border-gray-100 object-contain bg-gray-50"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+              />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <Zap className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                  <p className="truncate text-sm font-semibold text-gray-900">{osAutoScanFeedback.name}</p>
+                </div>
+                <p className="truncate text-[11px] font-mono text-gray-400">
+                  {osAutoScanFeedback.barcode}{osAutoScanFeedback.sapCode && ` · SAP: ${osAutoScanFeedback.sapCode}`}
+                </p>
+                <p className="mt-0.5 text-xs">
+                  <span className="font-bold text-emerald-600">+{osAutoScanFeedback.scannedQty}</span>
+                  <span className="text-gray-400"> scanned</span>
+                  {osAutoScanFeedback.remaining > 0 && (
+                    <span className="ml-1.5 font-semibold text-[#001d6e]">{osAutoScanFeedback.remaining} left</span>
+                  )}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Plant switcher — only appears when 2+ plants have a simultaneously active
             session (e.g. Valsad + Indore both scanning at once). New/additive: for a
@@ -1613,12 +1982,18 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         )}
 
         {/* ══════════════════════════════════════════════════
-            MOBILE LAYOUT  (hidden on sm+)
+            MOBILE LAYOUT  (hidden on sm+, or forced on when rotated)
             - Sticky header strip with session info + progress
             - Sticky scanner (Camera toggle + feed / manual)
             - Natural-scroll items list below
+            When rotated for a portrait-mounted screen, the DESKTOP layout's multi-column
+            grid ignores our CSS rotate trick (Tailwind's sm:/lg: prefixes key off the
+            actual (unrotated) window width, not the rotated container's effective size),
+            so it kept rendering cramped. Forcing this single-column mobile layout on
+            whenever osRotated is true — regardless of real viewport width — is what
+            actually makes the rotated view usable.
         ════════════════════════════════════════════════════ */}
-        <div className="flex flex-col sm:hidden h-full overflow-y-auto">
+        <div className={`flex-col h-full overflow-y-auto ${osRotated ? "flex" : "flex sm:hidden"}`}>
 
           {/* ── Sticky header + scanner ── */}
           <div className="sticky top-0 z-20 bg-white shadow-sm">
@@ -1693,7 +2068,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <SelectTrigger className="h-6 w-40 text-xs justify-center text-center border-[#001d6e]/30 text-[#001d6e]">
                       <SelectValue placeholder="Select STV…" />
                     </SelectTrigger>
-                    <SelectContent>
+                    {/* Radix portals this dropdown to document.body, outside the .kiosk-rotate-90
+                        subtree, so it doesn't inherit the page rotation on its own — it renders
+                        upright while everything else is rotated. Radix positions it via an inline
+                        transform:translate(...) on its OWN wrapper (a different element from this
+                        one), so adding our rotation directly here composes cleanly with no
+                        conflict. origin-top-left matches Radix's actual side="bottom" align="start"
+                        anchor for this trigger, keeping the dropdown attached to the same corner. */}
+                    <SelectContent className={osRotated ? "origin-top-left rotate-90" : undefined}>
                       <SelectItem value={NO_STV}>— Select STV —</SelectItem>
                       {stvs.map((s) => (
                         <SelectItem key={s} value={s}>{s}</SelectItem>
@@ -1877,11 +2259,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
 
           {/* ── Scrollable content below sticky scanner ── */}
-          <div className="flex-1 px-4 py-3 space-y-3 overflow-y-auto">
+          <div ref={osTabBodyScrollRef} className={`flex-1 px-4 py-3 space-y-3 ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
 
             {/* ── Tab strip — scanner above stays put across tabs ── */}
             <div className="flex flex-wrap gap-1.5">
-              {(["scan", "master-view", "separate-csvs"] as const).map((t) => (
+              {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => setOsTab(t)}
@@ -1932,6 +2314,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <p className="text-xs font-semibold text-white">CSV Items</p>
                 <div className="flex items-center gap-3">
                   <span className="text-xs text-blue-200">{osDoneCount}/{osTotalCount} done</span>
+                  {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-white" />}
                   <button
                     onClick={() => setOsSearchOpen((v) => !v)}
                     className="text-white/80 hover:text-white"
@@ -1968,7 +2351,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
               ) : (
-                <div className="divide-y max-h-[420px] overflow-y-auto">
+                <div ref={osCsvListScrollRef} className={`divide-y max-h-[420px] ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
                   {osFiltered.map((item) => {
                     const credit    = osCreditByBarcode.get(normalize(item.barcode));
                     const creditQty = credit?.creditedQty ?? 0;
@@ -2097,8 +2480,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         <p className="py-10 text-center text-sm text-gray-400">No items found</p>
                       ) : filtMvItems.map((item, idx) => {
                         const exp = item.quantity ?? 0;
-                        const done = item.scannedQty ?? 0;
+                        const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
                         const remain = Math.max(0, exp - done);
+                        const extra = item.extraQty ?? 0;
+                        const ipp = item.itemsPerPallet ?? 0;
                         const isExtraOnly = item._isExtra;
                         const isDone = done >= exp && exp > 0;
                         const isPartial = done > 0 && !isDone && !isExtraOnly;
@@ -2117,13 +2502,26 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             </span>
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-medium text-gray-900 leading-snug">{item.itemName ?? "—"}</p>
-                              <p className="text-[11px] text-gray-400 font-mono truncate">{item.barcode ?? "—"}</p>
+                              <p className="text-[11px] text-gray-400 font-mono truncate">
+                                {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                              </p>
                               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
                                 <span className="text-xs text-gray-500">
                                   <span className="font-bold text-gray-800">{done}</span>/{exp || "—"}
+                                  {ipp > 0 && (
+                                    <span className="text-gray-400"> ({(exp / ipp).toFixed(2)} plt)</span>
+                                  )}
                                 </span>
                                 {remain > 0 && (
-                                  <span className="text-xs font-semibold text-[#001d6e]">{remain} left</span>
+                                  <span className="text-xs font-semibold text-[#001d6e]">
+                                    {remain} left
+                                    {ipp > 0 && <span className="text-purple-600"> (≈{(remain / ipp).toFixed(2)} plt)</span>}
+                                  </span>
+                                )}
+                                {extra > 0 && (
+                                  <span className="text-xs font-semibold text-amber-600">
+                                    +{extra} extra{ipp > 0 && ` (${(extra / ipp).toFixed(2)} plt)`}
+                                  </span>
                                 )}
                                 {mvShowFiles && item._files.length > 0 && (
                                   <span className="text-[11px] text-gray-400" title={item._files.map(stripCsvExt).join(", ")}>
@@ -2235,9 +2633,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         </div>
 
         {/* ══════════════════════════════════════════════════
-            DESKTOP LAYOUT  (hidden on mobile)
+            DESKTOP LAYOUT  (hidden on mobile, or when rotated — see MOBILE LAYOUT note above)
         ════════════════════════════════════════════════════ */}
-        <div className="hidden sm:block">
+        <div className={osRotated ? "hidden" : "hidden sm:block"}>
           <div className="mx-auto max-w-7xl space-y-4">
 
             {/* Header row */}
@@ -2274,7 +2672,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             {/* ── Tab strip ── */}
             <div className="flex flex-wrap gap-1.5">
-              {(["scan", "master-view", "separate-csvs"] as const).map((t) => (
+              {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => setOsTab(t)}
@@ -2750,6 +3148,15 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </DialogContent>
         </Dialog>
 
+        {/* Auto-confirm flash — the only visual feedback for a silently-logged scan (paired
+            with playScanBeep) since there's no dialog to look at for that case. */}
+        {/* z-40, below Dialog's z-50 (client/src/components/ui/dialog.tsx) — a scan right after
+            this one can open the confirmation dialog while the flash is still fading, and the
+            dialog must render on top, not be washed out underneath it. */}
+        {osFlash === "success" && (
+          <div className="fixed inset-0 z-40 pointer-events-none bg-green-400/25" />
+        )}
+
         {/* Scan confirmation dialog */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>
           <DialogContent className="w-[calc(100%-2rem)] max-w-md sm:max-w-xl">
@@ -3002,7 +3409,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   }
 
   return (
-    <div className="flex-1 overflow-y-auto bg-white p-4 lg:p-6">
+    <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+      <RotateToggleButton />
       <div className="mx-auto max-w-7xl space-y-4">
         <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
 

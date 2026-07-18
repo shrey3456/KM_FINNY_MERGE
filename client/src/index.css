@@ -30,6 +30,26 @@ input[type="number"]::-webkit-outer-spin-button {
 input[type="number"] {
   -moz-appearance: textfield; /* Firefox */
 }
+
+/* Kiosk rotation — for a screen physically mounted in portrait while the browser
+   viewport itself stays landscape (or vice versa). Takes the element out of flow
+   (position: fixed escapes any parent's overflow/flex sizing) and swaps its box to
+   100vh x 100vw before rotating, so the rotated content exactly fills the real
+   viewport instead of being clipped or scaled. transform also makes this element the
+   containing block for any `position: fixed` descendant (e.g. the rotate toggle
+   button), so controls placed inside rotate along with the content and stay put in
+   a natural on-screen corner from the viewer's (rotated) perspective. */
+.kiosk-rotate-90 {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vh;
+  height: 100vw;
+  transform: rotate(90deg) translateY(-100%);
+  transform-origin: top left;
+  overflow-y: auto;
+  z-index: 30;
+}
   .scrollbar-none::-webkit-scrollbar {
     display: none;
   }

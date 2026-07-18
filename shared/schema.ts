@@ -628,12 +628,25 @@ export const plants = pgTable("plants", {
   borderColor: text("border_color").notNull(),
   isLockingEnabled: boolean("is_locking_enabled").default(true),      // lock proforma after first print
   isSplitPagesEnabled: boolean("is_split_pages_enabled").default(false), // split print across pages
+  // Order Scan: auto-complete a part the instant every item on it is fully scanned, instead
+  // of requiring an admin to click Complete. OFF by default so existing plants keep today's
+  // fully-manual behavior until an admin opts in. Even when ON, the LAST part of a FIFO
+  // group (or a standalone import) never auto-completes — see the last-part check in
+  // order-scan.ts's /scan handler.
+  isAutoCompleteEnabled: boolean("is_auto_complete_enabled").default(false),
+  // Order Scan: when ON, a scan whose remaining order qty is a FULL pallet or more is
+  // confirmed automatically (one pallet per scan) with a 5s image feedback popup and no
+  // dialog; only a leftover "loose" amount (less than a full pallet) opens the confirm
+  // dialog. OFF by default → every scan opens the confirm dialog. See _resolveOsScan in
+  // client/src/pages/Scanning/Scan.tsx.
+  isAutoScanEnabled: boolean("is_auto_scan_enabled").default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const insertPlantSchema = createInsertSchema(plants).pick({
   name: true, bgColor: true, textColor: true, borderColor: true,
-  isLockingEnabled: true, isSplitPagesEnabled: true,
+  isLockingEnabled: true, isSplitPagesEnabled: true, isAutoCompleteEnabled: true,
+  isAutoScanEnabled: true,
 });
 
 // STV codes associated with a plant (e.g. for truck/dispatch routing)
@@ -856,6 +869,12 @@ export const orderScanEvents = pgTable("order_scan_events", {
   voidedByCode: text("voided_by_code").references(() => users.userCode),
   voidedAt: timestamp("voided_at"),
   voidReason: text("void_reason"),
+  // How much of THIS extra event's qty has already been handed over to a later part's
+  // shortfall for the same barcode, via the credit-reconciliation step that runs when a
+  // part completes (see reconcileCredits in server/lib/orderGroupReport.ts). Only ever
+  // set on is_extra=true rows; caps the amount available to credit anything else so the
+  // same physical boxes can't be credited twice. 0 for ordinary (non-extra) events.
+  creditedQty: integer("credited_qty").default(0),
 });
 
 export const insertOrderScanItemSchema = createInsertSchema(orderScanItems).pick({
