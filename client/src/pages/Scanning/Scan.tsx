@@ -131,6 +131,10 @@ const stripCsvExt = (name?: string | null) => (name ?? "").replace(/\.csv$/i, ""
 // is required at all. One AudioContext is reused across calls (re-creating one per scan is wasteful
 // and browsers cap how many can be created).
 const CUSTOM_SCAN_SOUND_URL = "/sounds/scan-beep.mp3";
+
+// Remembers the operator's STV pick across page navigations (the Scan page unmounts when you
+// leave it, which would otherwise clear the selection and re-trigger "Select an STV").
+const OS_STV_STORAGE_KEY = "km-finny.scan.selectedStv";
 let customScanSoundBroken = false; // set once the custom file is confirmed missing/unplayable
 let scanBeepCtx: AudioContext | null = null;
 
@@ -387,7 +391,20 @@ export default function ScanOrderPage() {
   // point that forgot the re-apply step (or the Escape/backdrop-close path, which cleared
   // it directly) silently broke the "remember my last STV" behavior. Not clearing it at all
   // removes that whole class of bug — the field just keeps showing what you last picked.
-  const [osSelectedStv, setOsSelectedStv] = useState("");
+  // Seeded from (and mirrored to) localStorage: this is component state, so navigating away
+  // from Scan and back unmounts it and would otherwise reset the pick to empty — the operator
+  // then hits "Select an STV before scanning" again despite having chosen one earlier.
+  // Validated against the plant's real STV list once that loads (see the effect below), so a
+  // remembered value from a different plant can't linger.
+  const [osSelectedStv, setOsSelectedStv] = useState(() => {
+    try { return localStorage.getItem(OS_STV_STORAGE_KEY) ?? ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    try {
+      if (osSelectedStv) localStorage.setItem(OS_STV_STORAGE_KEY, osSelectedStv);
+      else localStorage.removeItem(OS_STV_STORAGE_KEY);
+    } catch { /* storage unavailable (private mode) — in-memory state still works */ }
+  }, [osSelectedStv]);
   const [osSearch, setOsSearch] = useState("");
   // Mobile CSV Items search — collapsed by default (just a button); tapping it reveals the field.
   const [osSearchOpen, setOsSearchOpen] = useState(false);
@@ -414,8 +431,16 @@ export default function ScanOrderPage() {
   const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
+  // Clearing the STV is meant for "the active session actually switched" (new CSV = probably
+  // a new vehicle/delivery). It must NOT fire on the initial resolve (undefined → id), which
+  // happens on every page load/remount — that was wiping the STV restored from localStorage
+  // before the operator ever saw it, so returning to Scan always demanded a re-pick.
+  const osPrevSessionIdRef = useRef<number | null>(null);
   useEffect(() => {
-    setOsSelectedStv("");
+    const id = activeOrderScanSession?.id ?? null;
+    const prev = osPrevSessionIdRef.current;
+    osPrevSessionIdRef.current = id;
+    if (prev !== null && id !== null && prev !== id) setOsSelectedStv("");
     osScanSeqRef.current = { seq: 0, byId: new Map() };
   }, [activeOrderScanSession?.id]);
 
@@ -525,6 +550,15 @@ export default function ScanOrderPage() {
       apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(activeOrderScanSession!.plant)}`).then((r) => r.json()),
     enabled: !!activeOrderScanSession?.plant,
   });
+
+  // Drop a remembered STV that doesn't belong to this plant's list (e.g. it was picked while
+  // scanning a different plant, then restored from localStorage here). Only runs once the
+  // list has actually loaded, so a slow fetch never wipes a valid pick.
+  useEffect(() => {
+    const stvs = osStvsQuery.data;
+    if (!stvs || stvs.length === 0) return;
+    if (osSelectedStv && !stvs.includes(osSelectedStv)) setOsSelectedStv("");
+  }, [osStvsQuery.data, osSelectedStv]);
 
   const osItemsKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] as const;
 
@@ -836,6 +870,17 @@ export default function ScanOrderPage() {
     _resolveOsScan(barcode, match, invProduct, plantPalletSize);
   };
 
+  // The camera-scanner and barcode-gun listeners below are bound inside effects keyed on the
+  // active session, so the handleOsBarcode closure they capture freezes whatever state existed
+  // when that effect last ran. React Query's structural sharing keeps activeOrderScanSession's
+  // identity stable, so those effects can go a long time without re-running — leaving the
+  // captured closure reading an empty osSelectedStv forever and reporting "Select an STV" on
+  // every scan even after one was picked (same staleness would hit the Auto Scan flag and the
+  // product lookup). Routing those two call sites through this ref always runs the CURRENT
+  // handler with current state, without re-binding the listeners on every render.
+  const handleOsBarcodeRef = useRef(handleOsBarcode);
+  useEffect(() => { handleOsBarcodeRef.current = handleOsBarcode; });
+
   const handleOsMultiMatchSelect = (item: OsScanItem) => {
     if (!osMultiMatch) return;
     const barcode = osMultiMatch.barcode;
@@ -891,7 +936,7 @@ export default function ScanOrderPage() {
       const scanner = new BarcodeScanner({
         onDetected: (result: Result) => {
           const code = result.getText();
-          if (code && !osPendingRef.current && !osMultiMatchRef.current) handleOsBarcode(code);
+          if (code && !osPendingRef.current && !osMultiMatchRef.current) handleOsBarcodeRef.current(code);
         },
         onError: (err: Error) => {
           if (!cancelled) { setOsCameraError(err.message); setOsScanMode("manual"); }
@@ -1153,7 +1198,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     const process = (code: string) => {
       if (code.length < MIN_BARCODE_LENGTH) return;
-      if (activeOrderScanSession) handleOsBarcode(code);
+      if (activeOrderScanSession) handleOsBarcodeRef.current(code);
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -2104,7 +2149,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </button>
                   )}
                 </div>
-                {mvQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
+                {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
                 {mvData && (
                   <div className="bg-white rounded-xl border overflow-hidden">
                     <div className="flex items-center justify-between px-4 py-2.5 border-b bg-[#001d6e]">
@@ -2181,7 +2226,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </div>
                   </div>
                 )}
-                {!mvQuery.isFetching && !mvData && <p className="text-sm text-gray-400 py-4 text-center">No active session — load a CSV to see its Master View.</p>}
+                {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400 py-4 text-center">No active session — load a CSV to see its Master View.</p>}
               </div>
             )}
 
@@ -2543,7 +2588,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </button>
                     )}
                   </div>
-                  {mvQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
+                  {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
                   {mvData && (
                     <>
                       {mvShowFiles && (
@@ -2650,7 +2695,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </div>
                     </>
                   )}
-                  {!mvQuery.isFetching && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
+                  {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
                 </div>
               )}
               </div>
