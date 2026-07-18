@@ -417,12 +417,16 @@ export default function ScanOrderPage() {
   // that. Reset on session change. Held in a ref (not state) because every scan already
   // triggers a re-render via the optimistic setQueryData/setOsRecentScans, so the sort re-runs
   // and reads the fresh ref without needing its own state update.
-  const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
+  // byId keys the Scan tab (rows are CSV items with a real id); byBarcode keys Master View,
+  // whose rows are merged across files and so have no id of their own.
+  const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number>; byBarcode: Map<string, number> }>(
+    { seq: 0, byId: new Map(), byBarcode: new Map() },
+  );
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
   useEffect(() => {
     setOsSelectedStv("");
-    osScanSeqRef.current = { seq: 0, byId: new Map() };
+    osScanSeqRef.current = { seq: 0, byId: new Map(), byBarcode: new Map() };
   }, [activeOrderScanSession?.id]);
 
   const osItemsQuery = useQuery<OsScanItem[]>({
@@ -558,6 +562,7 @@ export default function ScanOrderPage() {
         const s = osScanSeqRef.current;
         s.seq += 1;
         s.byId.set(matched.id, s.seq);
+        if (matched.barcode) s.byBarcode.set(normalize(matched.barcode), s.seq);
       }
       if (matched && !payload.isExtra) {
         // payload.qty is the authoritative box count — pallets/looseQty here are only a
@@ -1296,7 +1301,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     ? allMvItems.filter((i) =>
         [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
       )
-    : allMvItems;
+    : allMvItems.slice().sort((a, b) => {
+        // Whatever was scanned most recently THIS page-load floats to the very top, mirroring the
+        // Scan tab's behavior so the operator can see what they just scanned without hunting for
+        // it. Everything not scanned this session has seq 0 and keeps its original merge order
+        // (Array.prototype.sort is stable, so equal keys don't get shuffled).
+        const seq = osScanSeqRef.current.byBarcode;
+        const aSeq = seq.get(normalize(a.barcode)) ?? 0;
+        const bSeq = seq.get(normalize(b.barcode)) ?? 0;
+        return bSeq - aSeq;
+      });
 
   // The existing Eye toggle drives the Files column's visibility.
   const mvVisibleColumnIds = new Set(
