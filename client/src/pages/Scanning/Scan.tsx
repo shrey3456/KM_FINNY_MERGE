@@ -429,6 +429,11 @@ export default function ScanOrderPage() {
   // triggers a re-render via the optimistic setQueryData/setOsRecentScans, so the sort re-runs
   // and reads the fresh ref without needing its own state update.
   const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
+  // Same idea as osScanSeqRef, but keyed by NORMALIZED BARCODE instead of order_scan_items.id
+  // — Master View merges rows across every session/part and keys them by barcode, so the
+  // scan-item ids above don't line up with its rows. Lets the just-scanned product float to
+  // the top of Master View too, including pure extras (which have no CSV row to key off).
+  const osMvScanSeqRef = useRef<{ seq: number; byBarcode: Map<string, number> }>({ seq: 0, byBarcode: new Map() });
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
   // Clearing the STV is meant for "the active session actually switched" (new CSV = probably
@@ -442,6 +447,7 @@ export default function ScanOrderPage() {
     osPrevSessionIdRef.current = id;
     if (prev !== null && id !== null && prev !== id) setOsSelectedStv("");
     osScanSeqRef.current = { seq: 0, byId: new Map() };
+    osMvScanSeqRef.current = { seq: 0, byBarcode: new Map() };
   }, [activeOrderScanSession?.id]);
 
   const osItemsQuery = useQuery<OsScanItem[]>({
@@ -586,6 +592,14 @@ export default function ScanOrderPage() {
         const s = osScanSeqRef.current;
         s.seq += 1;
         s.byId.set(matched.id, s.seq);
+      }
+      // Master View's own recency stamp — keyed by barcode so it works for merged rows across
+      // parts, and unlike the id-keyed one above it also covers a "not in order" extra (which
+      // has no matched row but DOES show as a row in Master View).
+      {
+        const mv = osMvScanSeqRef.current;
+        mv.seq += 1;
+        mv.byBarcode.set(normalize(payload.barcode), mv.seq);
       }
       if (matched && !payload.isExtra) {
         // payload.qty is the authoritative box count — pallets/looseQty here are only a
@@ -1331,11 +1345,21 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     });
     return Array.from(groups.values());
   })();
-  const filtMvItems = mvSearch
+  const filtMvItems = (mvSearch
     ? allMvItems.filter((i) =>
         [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
       )
-    : allMvItems;
+    : allMvItems
+  ).slice().sort((a, b) => {
+    // Whatever was scanned most recently THIS page-load floats to the very top, mirroring the
+    // Scan tab's behavior so the operator can see what they just scanned without hunting for
+    // it. Everything not scanned this session has seq 0 and keeps its original merge order
+    // (Array.prototype.sort is stable, so equal keys don't get shuffled).
+    const seq = osMvScanSeqRef.current.byBarcode;
+    const aSeq = seq.get(normalize(a.barcode)) ?? 0;
+    const bSeq = seq.get(normalize(b.barcode)) ?? 0;
+    return bSeq - aSeq;
+  });
   const csvSessions = csvSessQuery.data?.sessions ?? [];
   const csvImpItems = csvItemsQuery2.data ?? [];
   const filtCsvItems = csvSearch
@@ -1607,29 +1631,36 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             Non-blocking (pointer-events-none) — the operator keeps scanning; no confirm
             needed. Rapid scans replace it and reset the 5s timer (see showAutoScanFeedback). ── */}
         {osAutoScanFeedback && (
-          <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-3 pointer-events-none" role="status">
-            <div className="flex items-center gap-3 rounded-xl bg-white px-3 py-2.5 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2 max-w-md">
-              <img
-                src={`/api/products/image-by-name?name=${encodeURIComponent(osAutoScanFeedback.name)}`}
-                alt=""
-                className="h-14 w-14 shrink-0 rounded-lg border border-gray-100 object-contain bg-gray-50"
-                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-              />
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <Zap className="h-3.5 w-3.5 shrink-0 text-amber-500" />
-                  <p className="truncate text-sm font-semibold text-gray-900">{osAutoScanFeedback.name}</p>
+          <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-4 pointer-events-none" role="status">
+            {/* Width matches the confirm dialog exactly (w-[calc(100%-2rem)] max-w-md
+                sm:max-w-xl). The dialog's height is content-driven (notices + button row), so
+                min-h here approximates it — without it this card would sit noticeably shorter,
+                since it has no footer buttons. */}
+            <div className="w-[calc(100%-2rem)] max-w-md sm:max-w-xl min-h-[15rem] flex flex-col rounded-lg bg-white p-6 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2">
+              <div className="flex items-center gap-2 text-emerald-700">
+                <Zap className="h-5 w-5 shrink-0" />
+                <span className="text-lg font-semibold">Auto scanned</span>
+              </div>
+              <div className="flex flex-1 gap-3 items-start pt-2">
+                <img
+                  src={`/api/products/image-by-name?name=${encodeURIComponent(osAutoScanFeedback.name)}`}
+                  alt=""
+                  className="h-40 w-40 shrink-0 object-contain rounded-md bg-gray-50 border border-gray-100"
+                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                />
+                <div className="flex-1 min-w-0 text-sm">
+                  <p className="font-semibold text-gray-900 break-words">{osAutoScanFeedback.name}</p>
+                  <p className="mt-0.5 font-mono text-xs text-gray-400 break-all">
+                    {osAutoScanFeedback.barcode}{osAutoScanFeedback.sapCode && ` · SAP: ${osAutoScanFeedback.sapCode}`}
+                  </p>
+                  <p className="mt-2 text-base">
+                    <span className="font-bold text-emerald-600">+{osAutoScanFeedback.scannedQty}</span>
+                    <span className="text-gray-500"> scanned</span>
+                    {osAutoScanFeedback.remaining > 0 && (
+                      <span className="ml-2 font-semibold text-[#001d6e]">{osAutoScanFeedback.remaining} left</span>
+                    )}
+                  </p>
                 </div>
-                <p className="truncate text-[11px] font-mono text-gray-400">
-                  {osAutoScanFeedback.barcode}{osAutoScanFeedback.sapCode && ` · SAP: ${osAutoScanFeedback.sapCode}`}
-                </p>
-                <p className="mt-0.5 text-xs">
-                  <span className="font-bold text-emerald-600">+{osAutoScanFeedback.scannedQty}</span>
-                  <span className="text-gray-400"> scanned</span>
-                  {osAutoScanFeedback.remaining > 0 && (
-                    <span className="ml-1.5 font-semibold text-[#001d6e]">{osAutoScanFeedback.remaining} left</span>
-                  )}
-                </p>
               </div>
             </div>
           </div>
