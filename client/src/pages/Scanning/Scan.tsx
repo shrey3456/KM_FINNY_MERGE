@@ -121,22 +121,6 @@ function scanFmtIST(dt: string | null | undefined): string {
   return d.toLocaleString("en-IN", { timeZone: "UTC" });
 }
 
-// Tracks Tailwind's `lg` breakpoint, so JS-driven layout (the resizable scanner
-// column) only kicks in where the two-column split actually exists.
-function useIsLgUp() {
-  const query = "(min-width: 1024px)";
-  const [isLgUp, setIsLgUp] = useState(
-    () => typeof window !== "undefined" && window.matchMedia(query).matches,
-  );
-  useEffect(() => {
-    const mq = window.matchMedia(query);
-    const onChange = () => setIsLgUp(mq.matches);
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-  return isLgUp;
-}
-
 const normalize = (value?: string | number | null) =>
   String(value ?? "").trim().toLowerCase();
 
@@ -208,27 +192,9 @@ export default function ScanOrderPage() {
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
 
-  // Width of the scanner column in the Scan-tab split. Drag its left edge to trade
-  // space with the items table. Only applied from `lg` up, where the split exists.
-  const [scannerWidth, setScannerWidth] = useState(300);
-  const isLgUp = useIsLgUp();
-
-  const startScannerResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = scannerWidth;
-    const onMove = (moveEvent: MouseEvent) => {
-      // Dragging left widens the scanner (and shrinks the table).
-      const delta = startX - moveEvent.clientX;
-      setScannerWidth(Math.min(560, Math.max(240, startWidth + delta)));
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  };
+  // Scanner sits in a collapsible panel above the full-width table. Closed on load so the
+  // table gets the whole viewport; the operator opens it when they need to scan.
+  const [osScannerOpen, setOsScannerOpen] = useState(false);
 
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
@@ -1613,6 +1579,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </>
         ),
       },
+      // All Qty columns first (Exp → Remain → Done → Extra), then the matching Plt columns
+      // in the same order, so the two unit groups read as separate blocks.
       {
         id: "expQty",
         header: "Exp Qty",
@@ -1624,14 +1592,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         render: (i) => i.expectedQty,
       },
       {
-        id: "expPlt",
-        header: "Exp Plt",
-        width: 80,
+        id: "remainQty",
+        header: "Remain Qty",
+        width: 100,
         align: "right",
-        cellClassName: "tabular-nums text-gray-500",
+        sortable: true,
+        accessor: (i) => osRowState(i).rem,
+        cellClassName: "tabular-nums font-bold",
         render: (i) => {
-          const { exp, ipp } = osRowState(i);
-          return pltCell(exp, ipp, "text-gray-500");
+          const { rem } = osRowState(i);
+          return rem > 0 ? <span className="text-[#001d6e]">{rem}</span> : <span className="text-gray-300">0</span>;
         },
       },
       {
@@ -1655,27 +1625,27 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         },
       },
       {
-        id: "donePlt",
-        header: "Done Plt",
+        id: "extraQty",
+        header: "Extra Qty",
         width: 90,
         align: "right",
+        sortable: true,
+        accessor: (i) => osRowState(i).extra,
         cellClassName: "tabular-nums font-semibold",
         render: (i) => {
-          const { doneQty, ipp } = osRowState(i);
-          return pltCell(doneQty, ipp, "text-[#001d6e]");
+          const { extra } = osRowState(i);
+          return extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>;
         },
       },
       {
-        id: "remainQty",
-        header: "Remain Qty",
-        width: 100,
+        id: "expPlt",
+        header: "Exp Plt",
+        width: 80,
         align: "right",
-        sortable: true,
-        accessor: (i) => osRowState(i).rem,
-        cellClassName: "tabular-nums font-bold",
+        cellClassName: "tabular-nums text-gray-500",
         render: (i) => {
-          const { rem } = osRowState(i);
-          return rem > 0 ? <span className="text-[#001d6e]">{rem}</span> : <span className="text-gray-300">0</span>;
+          const { exp, ipp } = osRowState(i);
+          return pltCell(exp, ipp, "text-gray-500");
         },
       },
       {
@@ -1690,16 +1660,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         },
       },
       {
-        id: "extraQty",
-        header: "Extra Qty",
+        id: "donePlt",
+        header: "Done Plt",
         width: 90,
         align: "right",
-        sortable: true,
-        accessor: (i) => osRowState(i).extra,
         cellClassName: "tabular-nums font-semibold",
         render: (i) => {
-          const { extra } = osRowState(i);
-          return extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>;
+          const { doneQty, ipp } = osRowState(i);
+          return pltCell(doneQty, ipp, "text-[#001d6e]");
         },
       },
       {
@@ -2659,13 +2627,33 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <Progress value={osPct} className="w-28 h-2" />
-                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
-                {canCompletePart && (
-                  <Button size="sm" className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
-                    Complete
-                  </Button>
+              <div className="flex flex-col items-stretch gap-1.5 shrink-0 sm:items-end">
+                <div className="flex items-center gap-2">
+                  <Progress value={osPct} className="w-28 h-2" />
+                  <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
+                  {canCompletePart && (
+                    <Button size="sm" className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
+                      Complete
+                    </Button>
+                  )}
+                </div>
+                {/* STV selector — sits under Complete so it reads as part of the order header,
+                    not the scanner. Still sets the default STV for the next scan confirmation. */}
+                {stvs.length > 0 && (
+                  <Select
+                    value={osSelectedStv || NO_STV}
+                    onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}
+                  >
+                    <SelectTrigger className="h-7 w-full text-xs border-[#001d6e]/30 text-[#001d6e] sm:w-44">
+                      <SelectValue placeholder="Select STV…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                      {stvs.map((s) => (
+                        <SelectItem key={s} value={s}>{s}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 )}
               </div>
             </div>
@@ -2715,15 +2703,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             )}
 
             <div className="space-y-4">
-            <div
-              className="grid gap-4 lg:grid-cols-[1fr_300px]"
-              style={isLgUp ? { gridTemplateColumns: `minmax(0,1fr) ${scannerWidth}px` } : undefined}
-            >
+            <div className="flex flex-col gap-4">
 
-              {/* Left column: CSV Items table (Scan tab) or Master View (Master View tab).
-                  The scanner panel on the right is shared/persistent across both tabs so the
-                  camera never remounts (and drops its stream) when switching between them. */}
-              <div className="order-2 lg:order-1 space-y-4 min-w-0">
+              {/* Single full-width column: the scanner collapsible sits above the table (order-1)
+                  and the table spans the whole width below it (order-2). The scanner panel is
+                  shared/persistent across both tabs so the camera never remounts (and drops its
+                  stream) when switching between them. */}
+              <div className="order-2 space-y-4 min-w-0">
               {osTab === "scan" && (
                 <TableCard
                   icon={ScanLine}
@@ -2750,6 +2736,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       return done ? "bg-emerald-50/40" : partial ? "bg-amber-50/30" : undefined;
                     }}
                     sortMode="client"
+                    paginationMode="client"
+                    defaultPageSize={10}
+                    pageSizeOptions={[10, 25, 50, 100]}
                     enableColumnResizing
                     isStickyHeader
                     maxHeight="560px"
@@ -2816,6 +2805,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               : undefined;
                           }}
                           sortMode="client"
+                          paginationMode="client"
+                          defaultPageSize={10}
+                          pageSizeOptions={[10, 25, 50, 100]}
                           enableColumnVisibility
                           columnVisibility={mvVisibleColumnIds}
                           enableColumnResizing
@@ -2830,19 +2822,49 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
               </div>
 
-              {/* Scanner panel — persistent across Scan / Master View tabs so the camera keeps running when
-                  switching between them; hidden on Separate CSVs (no scanning happens there) */}
+              {/* Scanner panel — persistent across Scan / Master View tabs so the camera keeps running
+                  when switching between them; hidden on Separate CSVs (no scanning happens there).
+                  Collapsible above the table and closed on load so the table gets the full viewport.
+                  One bordered box wraps both the toggle row and the body, so the border encloses the
+                  whole component when open. Contents stay mounted while collapsed (hidden via
+                  `hidden`, i.e. display:none) so the camera ref/stream survives toggling. */}
               {osTab !== "separate-csvs" && (
-              <div className="relative order-1 lg:order-2 space-y-3">
-                {/* Drag left/right to trade width between the items table and this panel. */}
-                <div
-                  onMouseDown={startScannerResize}
-                  title="Drag to resize"
-                  className="group absolute -left-4 top-0 z-20 hidden h-full w-3 cursor-col-resize touch-none lg:flex lg:items-center lg:justify-center"
+              <div className="order-1 rounded-xl border border-gray-200 bg-white shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setOsScannerOpen((v) => !v)}
+                  aria-expanded={osScannerOpen}
+                  className={`group flex w-full items-center justify-between gap-3 bg-gradient-to-r from-[#001d6e] to-[#0a2b7e] px-3 py-2.5 text-left transition-colors hover:from-[#00154b] hover:to-[#001d6e] sm:px-4 ${osScannerOpen ? "rounded-t-xl" : "rounded-xl"}`}
                 >
-                  <span className="h-16 w-[3px] rounded-full bg-gray-200 transition-colors group-hover:bg-[#001d6e]" />
-                </div>
-                <p className="flex items-center gap-1.5 text-[11px] text-gray-400"><Plug className="h-3 w-3" />Barcode gun: plug in and scan</p>
+                  <span className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white/15 text-white ring-1 ring-inset ring-white/20">
+                      <ScanLine className="h-4 w-4" />
+                    </span>
+                    <span className="flex min-w-0 flex-col">
+                      <span className="text-sm font-semibold leading-tight text-white">Scanner</span>
+                      <span className="flex items-center gap-1.5 text-[11px] leading-tight text-white/60">
+                        <Plug className="h-3 w-3 shrink-0" />
+                        <span className="truncate">Barcode gun: plug in and scan</span>
+                      </span>
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    {/* Mode pill — tells the operator which input is live without opening the panel. */}
+                    <span className="hidden items-center gap-1.5 rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white ring-1 ring-inset ring-white/20 sm:inline-flex">
+                      {osScanMode === "camera" ? <Camera className="h-3 w-3" /> : <Keyboard className="h-3 w-3" />}
+                      {osScanMode === "camera" ? "Camera" : "Manual"}
+                    </span>
+                    <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 text-white/80 transition-colors group-hover:bg-white/20 group-hover:text-white">
+                      <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${osScannerOpen ? "rotate-180" : ""}`} />
+                    </span>
+                  </span>
+                </button>
+
+                {/* Body toggles with `hidden` (display:none) rather than an animated height: it keeps
+                    the contents mounted so the camera ref/stream survives, and avoids the
+                    `overflow-hidden` an height animation needs — which would clip the manual
+                    input's absolutely-positioned autocomplete list. */}
+                <div className={osScannerOpen ? "space-y-3 rounded-b-xl border-t border-gray-200 bg-gray-50/60 p-3" : "hidden"}>
                 <div className="flex gap-2">
                   <Button size="sm"
                     variant={osScanMode === "camera" ? "default" : "outline"}
@@ -2857,29 +2879,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <Keyboard className="mr-1.5 h-3.5 w-3.5" /> Manual
                   </Button>
                 </div>
-
-                {/* Main STV selector — sets the default for the next scan confirmation too */}
-                {stvs.length > 0 && (
-                  <div className="flex items-center">
-                    <Select
-                      value={osSelectedStv || NO_STV}
-                      onValueChange={(v) => {
-                        const nextValue = v === NO_STV ? "" : v;
-                        setOsSelectedStv(nextValue);
-                      }}
-                    >
-                      <SelectTrigger className="h-6 flex-1 text-xs justify-center text-center border-[#001d6e]/30 text-[#001d6e]">
-                        <SelectValue placeholder="Select STV…" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value={NO_STV}>— Select STV —</SelectItem>
-                        {stvs.map((s) => (
-                          <SelectItem key={s} value={s}>{s}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
 
                 {/* Camera card — always in DOM so ref stays set; hidden via display:none when not in camera mode */}
                 <Card className="rounded-xl shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
@@ -2987,6 +2986,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 )}
 
                 {sideInfoPanel}
+                </div>
               </div>
               )}
             </div>
