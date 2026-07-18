@@ -23,6 +23,8 @@ import {
   Zap,
   Eye,
   EyeOff,
+  RotateCw,
+  ChevronUp,
 } from "lucide-react";
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
@@ -190,6 +192,56 @@ export default function ScanOrderPage() {
 
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
+
+  // ── Kiosk rotation — for a screen mounted in portrait. Remembered across reloads
+  // (localStorage) since a mounted kiosk screen stays in the same physical orientation
+  // indefinitely. See .kiosk-rotate-90 in index.css for the actual rotate mechanics.
+  const [osRotated, setOsRotated] = useState(() => localStorage.getItem("scanOrderRotated") === "true");
+  useEffect(() => {
+    localStorage.setItem("scanOrderRotated", String(osRotated));
+  }, [osRotated]);
+  const RotateToggleButton = () => (
+    <button
+      onClick={() => setOsRotated((r) => !r)}
+      className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+      title={osRotated ? "Rotate back to normal" : "Rotate for a portrait-mounted screen"}
+    >
+      <RotateCw className="h-5 w-5" />
+      <span className="hidden text-xs font-semibold sm:inline">{osRotated ? "Un-rotate" : "Rotate"}</span>
+    </button>
+  );
+
+  // ── Rotated-view scroll fix ──────────────────────────────────────────────
+  // A 90°-rotated container's native scroll (mouse wheel, trackpad, touch swipe) moves content
+  // SIDEWAYS on screen, not up/down — a rigid rotation swaps which axis is "vertical", but this
+  // page's lists are still laid out as normal top-to-bottom content, so the only real scrollable
+  // axis maps to sideways motion once rotated (confirmed via direct on-screen measurement).
+  // Rather than rebuild these lists to scroll on the other axis (invasive — most rows are
+  // variable-height, incompatible with the fixed-width-per-item layout that would need), we
+  // disable native scroll on these containers when rotated and replace it with discrete Up/Down
+  // buttons — a button press doesn't carry the same "gesture went one way, screen went another"
+  // mismatch that makes continuous swipe/wheel scrolling feel disorienting.
+  const osTabBodyScrollRef = useRef<HTMLDivElement>(null);
+  const osCsvListScrollRef = useRef<HTMLDivElement>(null);
+  const osManageExtraScrollRef = useRef<HTMLDivElement>(null);
+
+  function ScrollNudgeButtons({ targetRef, amount = 240, className = "" }: {
+    targetRef: React.RefObject<HTMLElement>; amount?: number; className?: string;
+  }) {
+    const nudge = (dir: 1 | -1) => targetRef.current?.scrollBy({ top: dir * amount });
+    return (
+      <div className={`flex items-center gap-1 ${className}`}>
+        <button type="button" onClick={() => nudge(-1)} aria-label="Scroll up" title="Scroll up"
+          className="rounded-full bg-black/10 p-1.5 text-current hover:bg-black/20">
+          <ChevronUp className="h-4 w-4" />
+        </button>
+        <button type="button" onClick={() => nudge(1)} aria-label="Scroll down" title="Scroll down"
+          className="rounded-full bg-black/10 p-1.5 text-current hover:bg-black/20">
+          <ChevronDown className="h-4 w-4" />
+        </button>
+      </div>
+    );
+  }
 
   // ── Queries ──────────────────────────────────────────────────────────────
 
@@ -1227,20 +1279,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const activeInfoTab = osInfoTab === "manage" && !canCompletePart ? "extra" : osInfoTab;
     const sideInfoPanel = (
       <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
-        <div className="flex border-b bg-gray-50">
-          {osInfoOptions.map((opt) => (
-            <button
-              key={opt.key}
-              onClick={() => setOsInfoTab(opt.key)}
-              className={`flex-1 px-3 py-2 text-xs font-semibold transition-colors ${
-                activeInfoTab === opt.key ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-100"
-              }`}
-            >
-              {opt.label}{opt.count > 0 ? ` (${opt.count})` : ""}
-            </button>
-          ))}
+        <div className="flex items-center border-b bg-gray-50">
+          <div className="flex flex-1">
+            {osInfoOptions.map((opt) => (
+              <button
+                key={opt.key}
+                onClick={() => setOsInfoTab(opt.key)}
+                className={`flex-1 px-3 py-2 text-xs font-semibold transition-colors ${
+                  activeInfoTab === opt.key ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-100"
+                }`}
+              >
+                {opt.label}{opt.count > 0 ? ` (${opt.count})` : ""}
+              </button>
+            ))}
+          </div>
+          {osRotated && <ScrollNudgeButtons targetRef={osManageExtraScrollRef} className="px-2 text-gray-500" />}
         </div>
-        <div className="max-h-[420px] overflow-y-auto divide-y divide-gray-100">
+        <div ref={osManageExtraScrollRef} className={`max-h-[420px] divide-y divide-gray-100 ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
           {activeInfoTab === "manage" && canCompletePart && (
             (osEventsQuery.data ?? []).length > 0 ? (osEventsQuery.data ?? []).map((e) => (
               <div key={e.id} className={`flex items-center gap-3 px-4 py-2.5 text-xs ${e.voided ? "opacity-50" : ""}`}>
@@ -1294,7 +1349,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     );
 
     return (
-      <div className="flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6">
+      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+        <RotateToggleButton />
+        {osRotated && (
+          <div className="fixed bottom-4 left-4 z-[60] rounded-full bg-[#001d6e] px-2 py-1.5 text-white shadow-lg">
+            <ScrollNudgeButtons targetRef={osTabBodyScrollRef} />
+          </div>
+        )}
 
         {/* ── "Part Complete" banner — fires for every way a part can finish (manual Complete
             button, Auto Complete mid-scan, or the stale-part sweep after a new upload), driven
@@ -1347,12 +1408,18 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         )}
 
         {/* ══════════════════════════════════════════════════
-            MOBILE LAYOUT  (hidden on sm+)
+            MOBILE LAYOUT  (hidden on sm+, or forced on when rotated)
             - Sticky header strip with session info + progress
             - Sticky scanner (Camera toggle + feed / manual)
             - Natural-scroll items list below
+            When rotated for a portrait-mounted screen, the DESKTOP layout's multi-column
+            grid ignores our CSS rotate trick (Tailwind's sm:/lg: prefixes key off the
+            actual (unrotated) window width, not the rotated container's effective size),
+            so it kept rendering cramped. Forcing this single-column mobile layout on
+            whenever osRotated is true — regardless of real viewport width — is what
+            actually makes the rotated view usable.
         ════════════════════════════════════════════════════ */}
-        <div className="flex flex-col sm:hidden h-full overflow-y-auto">
+        <div className={`flex-col h-full overflow-y-auto ${osRotated ? "flex" : "flex sm:hidden"}`}>
 
           {/* ── Sticky header + scanner ── */}
           <div className="sticky top-0 z-20 bg-white shadow-sm">
@@ -1427,7 +1494,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <SelectTrigger className="h-6 w-40 text-xs justify-center text-center border-[#001d6e]/30 text-[#001d6e]">
                       <SelectValue placeholder="Select STV…" />
                     </SelectTrigger>
-                    <SelectContent>
+                    {/* Radix portals this dropdown to document.body, outside the .kiosk-rotate-90
+                        subtree, so it doesn't inherit the page rotation on its own — it renders
+                        upright while everything else is rotated. Radix positions it via an inline
+                        transform:translate(...) on its OWN wrapper (a different element from this
+                        one), so adding our rotation directly here composes cleanly with no
+                        conflict. origin-top-left matches Radix's actual side="bottom" align="start"
+                        anchor for this trigger, keeping the dropdown attached to the same corner. */}
+                    <SelectContent className={osRotated ? "origin-top-left rotate-90" : undefined}>
                       <SelectItem value={NO_STV}>— Select STV —</SelectItem>
                       {stvs.map((s) => (
                         <SelectItem key={s} value={s}>{s}</SelectItem>
@@ -1611,7 +1685,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
 
           {/* ── Scrollable content below sticky scanner ── */}
-          <div className="flex-1 px-4 py-3 space-y-3 overflow-y-auto">
+          <div ref={osTabBodyScrollRef} className={`flex-1 px-4 py-3 space-y-3 ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
 
             {/* ── Tab strip — scanner above stays put across tabs ── */}
             <div className="flex flex-wrap gap-1.5">
@@ -1666,6 +1740,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <p className="text-xs font-semibold text-white">CSV Items</p>
                 <div className="flex items-center gap-3">
                   <span className="text-xs text-blue-200">{osDoneCount}/{osTotalCount} done</span>
+                  {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-white" />}
                   <button
                     onClick={() => setOsSearchOpen((v) => !v)}
                     className="text-white/80 hover:text-white"
@@ -1702,7 +1777,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
               ) : (
-                <div className="divide-y max-h-[420px] overflow-y-auto">
+                <div ref={osCsvListScrollRef} className={`divide-y max-h-[420px] ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
                   {osFiltered.map((item) => {
                     const credit    = osCreditByBarcode.get(normalize(item.barcode));
                     const creditQty = credit?.creditedQty ?? 0;
@@ -1984,9 +2059,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         </div>
 
         {/* ══════════════════════════════════════════════════
-            DESKTOP LAYOUT  (hidden on mobile)
+            DESKTOP LAYOUT  (hidden on mobile, or when rotated — see MOBILE LAYOUT note above)
         ════════════════════════════════════════════════════ */}
-        <div className="hidden sm:block">
+        <div className={osRotated ? "hidden" : "hidden sm:block"}>
           <div className="mx-auto max-w-7xl space-y-4">
 
             {/* Header row */}
@@ -2932,7 +3007,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   }
 
   return (
-    <div className="flex-1 overflow-y-auto bg-white p-4 lg:p-6">
+    <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+      <RotateToggleButton />
       <div className="mx-auto max-w-7xl space-y-4">
         <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
 
