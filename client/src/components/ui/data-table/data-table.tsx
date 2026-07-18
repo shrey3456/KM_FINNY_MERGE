@@ -106,8 +106,12 @@ interface DataTableProps<TData> {
   headerClassName?: string;
   showMobileSwipeHint?: boolean;
   enableZebraStripes?: boolean;
+  /** Per-row classes (e.g. status tints). Wins over enableZebraStripes for rows it styles. */
+  rowClassName?: (row: TData, rowIndex: number) => string | undefined;
 
   className?: string;
+  /** Classes for the bordered box wrapping the table + pagination. Pass e.g. "border-0 rounded-none" to sit flush inside a Card. */
+  containerClassName?: string;
 }
 
 export function DataTable<TData>({
@@ -156,7 +160,9 @@ export function DataTable<TData>({
   headerClassName,
   showMobileSwipeHint,
   enableZebraStripes = false,
+  rowClassName,
   className,
+  containerClassName,
 }: DataTableProps<TData>) {
   const [internalSearch, setInternalSearch] = useState("");
   const [internalSort, setInternalSort] = useState<DataTableSortState | null>(null);
@@ -390,7 +396,7 @@ export function DataTable<TData>({
           computedHasActiveFilters ? "No results match your filters." : "No data found.",
         )
       ) : (
-        <div className="rounded-md border">
+        <div className={cn("rounded-md border", containerClassName)}>
           {computedShowSwipeHint && (
             <div className="flex items-center justify-center gap-1.5 border-b bg-muted/40 py-1 sm:hidden">
               <span className="text-[10px] font-medium text-muted-foreground">
@@ -495,6 +501,7 @@ export function DataTable<TData>({
                           "transition-colors hover:bg-[#001d6e]/[0.04]",
                           clickable && "cursor-pointer",
                           enableZebraStripes && (rowIndex % 2 === 1 ? "bg-slate-50" : "bg-white"),
+                          rowClassName?.(row, globalRowIndex),
                           selectedSet.has(id) && "bg-muted/50",
                         )}
                         onClick={() => clickable && onRowClick?.(row)}

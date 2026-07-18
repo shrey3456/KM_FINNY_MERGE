@@ -786,6 +786,12 @@ export default function OrderImport() {
       toast({ title: "Select a plant first", variant: "destructive" });
       return;
     }
+    // Order Date drives FIFO grouping (plant + orderDate) and now Master View's scoping too,
+    // so an import without one can't be placed in a group at all — require it up front.
+    if (!orderDate.trim()) {
+      toast({ title: "Select an Order Date first", description: "The Order Date decides which CSVs merge together as parts of one order.", variant: "destructive" });
+      return;
+    }
     if (selectedFiles.length === 0) {
       toast({ title: "Select a CSV file first", variant: "destructive" });
       return;
@@ -973,6 +979,9 @@ export default function OrderImport() {
               {/* Date */}
               <div className="grid gap-1">
                 <Label className="text-xs text-gray-500">Order Date</Label>
+                {/* No min= here on purpose: a past date must stay selectable so a LATE PART can
+                    still be added to an order that already exists for that date. The server
+                    allows exactly that and rejects only brand-new past-dated orders. */}
                 <Input type="date" className="h-9 text-sm w-[150px]" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
               </div>
               {/* File */}

@@ -36,6 +36,8 @@ import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { TableCard } from "@/components/ui/table-card";
 import {
   Dialog,
   DialogContent,
@@ -194,6 +196,10 @@ export default function ScanOrderPage() {
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
 
+  // Scanner sits in a collapsible panel above the full-width table. Closed on load so the
+  // table gets the whole viewport; the operator opens it when they need to scan.
+  const [osScannerOpen, setOsScannerOpen] = useState(false);
+
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
 
@@ -328,12 +334,14 @@ export default function ScanOrderPage() {
     return p?.isAutoScanEnabled === true;
   })();
 
-  // Master View has no manual plant/date pickers — it always shows the currently active
-  // session's own plant/date, derived from scanActivatedAt (stored as IST wall-clock, same
-  // convention as createdAt, so its date portion matches the day that CSV was uploaded).
+  // Master View has no manual plant/date pickers — it always follows the currently active
+  // session. Scoped by that session's ORDER DATE (the value chosen at upload, which is also
+  // what FIFO grouping keys on) so every part of the order shows together no matter which day
+  // each CSV was actually uploaded. Previously this used scanActivatedAt (≈ the upload/scan
+  // day), which split a group whenever its parts arrived on different days.
   const mvPlant = activeOrderScanSession?.plant ?? "";
-  const mvDate = activeOrderScanSession?.scanActivatedAt
-    ? String(activeOrderScanSession.scanActivatedAt).slice(0, 10)
+  const mvDate = activeOrderScanSession?.orderDate
+    ? String(activeOrderScanSession.orderDate).slice(0, 10)
     : "";
 
   // ── Embedded order-scan state (admin-loaded CSV) ───────────────────────────
@@ -391,20 +399,7 @@ export default function ScanOrderPage() {
   // point that forgot the re-apply step (or the Escape/backdrop-close path, which cleared
   // it directly) silently broke the "remember my last STV" behavior. Not clearing it at all
   // removes that whole class of bug — the field just keeps showing what you last picked.
-  // Seeded from (and mirrored to) localStorage: this is component state, so navigating away
-  // from Scan and back unmounts it and would otherwise reset the pick to empty — the operator
-  // then hits "Select an STV before scanning" again despite having chosen one earlier.
-  // Validated against the plant's real STV list once that loads (see the effect below), so a
-  // remembered value from a different plant can't linger.
-  const [osSelectedStv, setOsSelectedStv] = useState(() => {
-    try { return localStorage.getItem(OS_STV_STORAGE_KEY) ?? ""; } catch { return ""; }
-  });
-  useEffect(() => {
-    try {
-      if (osSelectedStv) localStorage.setItem(OS_STV_STORAGE_KEY, osSelectedStv);
-      else localStorage.removeItem(OS_STV_STORAGE_KEY);
-    } catch { /* storage unavailable (private mode) — in-memory state still works */ }
-  }, [osSelectedStv]);
+  const [osSelectedStv, setOsSelectedStv] = useState("");
   const [osSearch, setOsSearch] = useState("");
   // Mobile CSV Items search — collapsed by default (just a button); tapping it reveals the field.
   const [osSearchOpen, setOsSearchOpen] = useState(false);
@@ -429,18 +424,8 @@ export default function ScanOrderPage() {
   // triggers a re-render via the optimistic setQueryData/setOsRecentScans, so the sort re-runs
   // and reads the fresh ref without needing its own state update.
   const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
-  // Same idea as osScanSeqRef, but keyed by NORMALIZED BARCODE instead of order_scan_items.id
-  // — Master View merges rows across every session/part and keys them by barcode, so the
-  // scan-item ids above don't line up with its rows. Lets the just-scanned product float to
-  // the top of Master View too, including pure extras (which have no CSV row to key off).
-  const osMvScanSeqRef = useRef<{ seq: number; byBarcode: Map<string, number> }>({ seq: 0, byBarcode: new Map() });
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
-  // Clearing the STV is meant for "the active session actually switched" (new CSV = probably
-  // a new vehicle/delivery). It must NOT fire on the initial resolve (undefined → id), which
-  // happens on every page load/remount — that was wiping the STV restored from localStorage
-  // before the operator ever saw it, so returning to Scan always demanded a re-pick.
-  const osPrevSessionIdRef = useRef<number | null>(null);
   useEffect(() => {
     const id = activeOrderScanSession?.id ?? null;
     const prev = osPrevSessionIdRef.current;

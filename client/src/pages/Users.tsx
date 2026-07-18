@@ -131,8 +131,8 @@ function FormSection({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <Icon className="h-3.5 w-3.5 shrink-0 text-[#001d6e]" />
-        <h4 className="text-[11px] font-bold uppercase tracking-wide text-[#001d6e]">{title}</h4>
+        <Icon className="h-4 w-4 shrink-0 text-[#001d6e]" />
+        <h4 className="text-sm font-bold uppercase tracking-wide text-[#001d6e]">{title}</h4>
         <div className="h-px flex-1 bg-gray-200" />
       </div>
       {children}
@@ -792,8 +792,8 @@ const Users = () => {
           <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
               <div className="flex items-center gap-3">
-                <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg bg-[#001d6e]/10">
-                  <UsersIcon className="h-4 w-4 sm:h-5 sm:w-5 text-[#001d6e]" />
+                <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg bg-[#001d6e] text-white">
+                  <UsersIcon className="h-4 w-4 sm:h-5 sm:w-5" />
                 </div>
                 <div>
                   <div className="text-lg sm:text-xl font-bold tracking-tight text-gray-900">User Management</div>
@@ -849,8 +849,10 @@ const Users = () => {
             </div>
           </div>
 
-          <CardContent className="pt-4">
+          <CardContent className="p-0">
             <DataTable<User>
+              className="space-y-0"
+              containerClassName="rounded-none border-0"
               columns={userColumns}
               data={filteredUsers}
               getRowId={(user) => user.userCode}
