@@ -98,8 +98,12 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
     const page     = Math.max(1, parseInt(String(req.query.page     ?? '1')));
     const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? '10'))));
 
+    // Filters on the ORDER DATE (what the CSV was uploaded FOR) rather than created_at (when
+    // it happened to be uploaded). Those differ whenever a late part is added to an earlier
+    // order, and the order date is the value users actually think in — it's also what FIFO
+    // grouping and Master View key on, so all three now agree.
     const dateCondition = req.query.date
-      ? sql`(${orderImportSessions.createdAt})::date = ${String(req.query.date)}::date`
+      ? eq(orderImportSessions.orderDate, String(req.query.date))
       : null;
 
     const forcedPlant = (req as any).importViewPlant as string | null;
@@ -131,6 +135,9 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
         importedByCode: orderImportSessions.importedByCode,
         importedByName: users.name,
         createdAt:      orderImportSessions.createdAt,
+        // The date this CSV was uploaded FOR (chosen at upload). Distinct from createdAt, and
+        // what every date filter/display on the Order Import page now uses.
+        orderDate:      orderImportSessions.orderDate,
         scanStatus:     orderImportSessions.scanStatus,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex:      orderImportSessions.partIndex,

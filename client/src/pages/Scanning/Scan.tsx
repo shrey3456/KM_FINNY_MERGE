@@ -399,7 +399,20 @@ export default function ScanOrderPage() {
   // point that forgot the re-apply step (or the Escape/backdrop-close path, which cleared
   // it directly) silently broke the "remember my last STV" behavior. Not clearing it at all
   // removes that whole class of bug — the field just keeps showing what you last picked.
-  const [osSelectedStv, setOsSelectedStv] = useState("");
+  // Seeded from (and mirrored to) localStorage: this is component state, so navigating away
+  // from Scan and back unmounts it and would otherwise reset the pick to empty — the operator
+  // then hits "Select an STV before scanning" again despite having chosen one earlier.
+  // Validated against the plant's real STV list once that loads (see the effect below), so a
+  // remembered value from a different plant can't linger.
+  const [osSelectedStv, setOsSelectedStv] = useState(() => {
+    try { return localStorage.getItem(OS_STV_STORAGE_KEY) ?? ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    try {
+      if (osSelectedStv) localStorage.setItem(OS_STV_STORAGE_KEY, osSelectedStv);
+      else localStorage.removeItem(OS_STV_STORAGE_KEY);
+    } catch { /* storage unavailable (private mode) — in-memory state still works */ }
+  }, [osSelectedStv]);
   const [osSearch, setOsSearch] = useState("");
   // Mobile CSV Items search — collapsed by default (just a button); tapping it reveals the field.
   const [osSearchOpen, setOsSearchOpen] = useState(false);
@@ -424,8 +437,18 @@ export default function ScanOrderPage() {
   // triggers a re-render via the optimistic setQueryData/setOsRecentScans, so the sort re-runs
   // and reads the fresh ref without needing its own state update.
   const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
+  // Same idea as osScanSeqRef, but keyed by NORMALIZED BARCODE instead of order_scan_items.id
+  // — Master View merges rows across every session/part and keys them by barcode, so the
+  // scan-item ids above don't line up with its rows. Lets the just-scanned product float to
+  // the top of Master View too, including pure extras (which have no CSV row to key off).
+  const osMvScanSeqRef = useRef<{ seq: number; byBarcode: Map<string, number> }>({ seq: 0, byBarcode: new Map() });
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
+  // Clearing the STV is meant for "the active session actually switched" (new CSV = probably
+  // a new vehicle/delivery). It must NOT fire on the initial resolve (undefined → id), which
+  // happens on every page load/remount — that would wipe the STV restored from localStorage
+  // before the operator ever saw it, so returning to Scan would always demand a re-pick.
+  const osPrevSessionIdRef = useRef<number | null>(null);
   useEffect(() => {
     const id = activeOrderScanSession?.id ?? null;
     const prev = osPrevSessionIdRef.current;
@@ -1781,6 +1804,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </Select>
                 </div>
               )}
+              {/* No STVs configured for this plant — say so instead of rendering nothing, which
+                  looked like a missing/broken control (notably on production, where the plant's
+                  STV list hadn't been set up). */}
+              {!osStvsQuery.isLoading && stvs.length === 0 && (
+                <div className="flex items-center">
+                  <span className="rounded border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                    No STV — create one in Plant Settings
+                  </span>
+                </div>
+              )}
 
               {/* Camera feed — always in DOM so ref is set before scanner starts */}
               <div
@@ -2756,6 +2789,15 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         ))}
                       </SelectContent>
                     </Select>
+                  </div>
+                )}
+                {/* See the matching note on the other layout: surface "no STVs configured"
+                    rather than rendering nothing at all. */}
+                {!osStvsQuery.isLoading && stvs.length === 0 && (
+                  <div className="flex items-center">
+                    <span className="w-full rounded border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-center text-[11px] text-amber-700">
+                      No STV — create one in Plant Settings
+                    </span>
                   </div>
                 )}
 
