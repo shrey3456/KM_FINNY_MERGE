@@ -84,7 +84,7 @@ export function StatsBar({ stats, actions, columns, className }: StatsBarProps) 
                 >
                   {stat.value}
                 </p>
-                <p className="mt-0.5 truncate text-[10px] font-medium text-gray-500 sm:text-xs">
+                <p className="mt-0.5 truncate text-base font-medium text-gray-500 sm:text-lg">
                   {stat.label}
                 </p>
               </div>

@@ -127,6 +127,13 @@ const normalize = (value?: string | number | null) =>
 // Display-only: strips a trailing ".csv" from a file name so it reads cleanly in the UI.
 const stripCsvExt = (name?: string | null) => (name ?? "").replace(/\.csv$/i, "");
 
+// Pallet-count cell: qty ÷ items-per-pallet, or a muted 0.00 when not applicable. Shared by the
+// Scan tab's CSV Items table and Master View so both render pallet figures identically.
+const pltCell = (qty: number, ipp: number, className: string) =>
+  qty > 0 && ipp > 0
+    ? <span className={className}>{(qty / ipp).toFixed(2)}</span>
+    : <span className="text-gray-300">0.00</span>;
+
 // Sound played on every barcode detection. Drop an mp3/wav at client/public/sounds/scan-beep.mp3
 // to use a custom sound — it's tried first and used automatically. If that file is missing (or
 // playback fails), falls back to a short tone generated via the Web Audio API, so no audio asset
@@ -196,9 +203,6 @@ export default function ScanOrderPage() {
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
 
-  // Scanner sits in a collapsible panel above the full-width table. Closed on load so the
-  // table gets the whole viewport; the operator opens it when they need to scan.
-  const [osScannerOpen, setOsScannerOpen] = useState(false);
 
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
@@ -1339,7 +1343,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     });
     return Array.from(groups.values());
   })();
-  const filtMvItems = (mvSearch
+  const filtMvItems = mvSearch
     ? allMvItems.filter((i) =>
         [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
       )
@@ -1356,18 +1360,29 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
   // The existing Eye toggle drives the Files column's visibility.
   const mvVisibleColumnIds = new Set(
-    ["state", "itemName", "barcode", "exp", "done", "remain", "status", ...(mvShowFiles ? ["files"] : [])],
+    [
+      "state", "itemName", "barcode",
+      "expQty", "remainQty", "doneQty", "extraQty",
+      "expPlt", "remainPlt", "donePlt", "extraPlt",
+      "status",
+      ...(mvShowFiles ? ["files"] : []),
+    ],
   );
 
   // Master View row state — drives both the status column and the row tint.
   const mvRowState = (item: MvMergedItem) => {
     const exp = item.quantity ?? 0;
-    const done = item.scannedQty ?? 0;
+    const extra = item.extraQty ?? 0;
+    // scannedQty includes over-scans, so subtract them to get real progress against the CSV —
+    // otherwise a row's Done would double-count what the Extra column already reports.
+    const done = Math.max(0, (item.scannedQty ?? 0) - extra);
     const isExtraOnly = item._isExtra;
     const isDone = done >= exp && exp > 0;
     return {
       exp,
       done,
+      extra,
+      ipp: item.itemsPerPallet ?? 0,
       remain: Math.max(0, exp - done),
       isExtraOnly,
       isDone,
@@ -1420,23 +1435,38 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         </span>
       ),
     },
+    // Mirrors the Scan tab's CSV Items table: all Qty columns (Exp → Remain → Done → Extra),
+    // then the matching Plt columns in the same order.
     {
-      id: "exp",
-      header: "Exp",
-      width: 70,
+      id: "expQty",
+      header: "Exp Qty",
+      width: 80,
       align: "right",
       sortable: true,
       accessor: (i) => i.quantity ?? 0,
-      cellClassName: "text-gray-600 tabular-nums",
+      cellClassName: "text-gray-600 font-medium tabular-nums",
       render: (i) => mvRowState(i).exp || "—",
     },
     {
-      id: "done",
-      header: "Done",
-      width: 70,
+      id: "remainQty",
+      header: "Remain Qty",
+      width: 100,
       align: "right",
       sortable: true,
-      accessor: (i) => i.scannedQty ?? 0,
+      accessor: (i) => mvRowState(i).remain,
+      cellClassName: "tabular-nums font-bold",
+      render: (i) => {
+        const { remain } = mvRowState(i);
+        return remain > 0 ? <span className="text-[#001d6e]">{remain}</span> : <span className="text-gray-300">0</span>;
+      },
+    },
+    {
+      id: "doneQty",
+      header: "Done Qty",
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (i) => mvRowState(i).done,
       cellClassName: "tabular-nums font-bold",
       render: (i) => {
         const { done, isExtraOnly, isDone, isPartial } = mvRowState(i);
@@ -1448,16 +1478,60 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       },
     },
     {
-      id: "remain",
-      header: "Remain",
-      width: 80,
+      id: "extraQty",
+      header: "Extra Qty",
+      width: 90,
       align: "right",
       sortable: true,
-      accessor: (i) => mvRowState(i).remain,
-      cellClassName: "tabular-nums font-bold",
+      accessor: (i) => mvRowState(i).extra,
+      cellClassName: "tabular-nums font-semibold",
       render: (i) => {
-        const { remain } = mvRowState(i);
-        return <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>;
+        const { extra } = mvRowState(i);
+        return extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>;
+      },
+    },
+    {
+      id: "expPlt",
+      header: "Exp Plt",
+      width: 80,
+      align: "right",
+      cellClassName: "tabular-nums text-gray-500",
+      render: (i) => {
+        const { exp, ipp } = mvRowState(i);
+        return pltCell(exp, ipp, "text-gray-500");
+      },
+    },
+    {
+      id: "remainPlt",
+      header: "Remain Plt",
+      width: 100,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      render: (i) => {
+        const { remain, ipp } = mvRowState(i);
+        return pltCell(remain, ipp, "text-purple-600");
+      },
+    },
+    {
+      id: "donePlt",
+      header: "Done Plt",
+      width: 90,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      render: (i) => {
+        const { done, ipp } = mvRowState(i);
+        return pltCell(done, ipp, "text-[#001d6e]");
+      },
+    },
+    {
+      id: "extraPlt",
+      header: "Extra Plt",
+      width: 90,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      render: (i) => {
+        const { extra, ipp } = mvRowState(i);
+        return pltCell(extra, ipp, "text-amber-600");
       },
     },
     {
@@ -1576,12 +1650,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         partial: !done && effScanned > 0,
       };
     };
-
-    // Pallet-count cell: qty ÷ items-per-pallet, or a muted 0.00 when not applicable.
-    const pltCell = (qty: number, ipp: number, className: string) =>
-      qty > 0 && ipp > 0
-        ? <span className={className}>{(qty / ipp).toFixed(2)}</span>
-        : <span className="text-gray-300">0.00</span>;
 
     const osColumns: DataTableColumn<OsScanItem>[] = [
       {
@@ -2700,14 +2768,20 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </Button>
                   )}
                 </div>
-                {/* STV selector — sits under Complete so it reads as part of the order header,
-                    not the scanner. Still sets the default STV for the next scan confirmation. */}
+                {/* STV selector — sits under Complete as part of the order header. Highlighted so
+                    the operator notices it's unset before scanning. */}
                 {stvs.length > 0 && (
                   <Select
                     value={osSelectedStv || NO_STV}
                     onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}
                   >
-                    <SelectTrigger className="h-7 w-full text-xs border-[#001d6e]/30 text-[#001d6e] sm:w-44">
+                    <SelectTrigger
+                      className={`h-9 w-full text-xs font-semibold sm:w-52 ${
+                        osSelectedStv
+                          ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
+                          : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+                      }`}
+                    >
                       <SelectValue placeholder="Select STV…" />
                     </SelectTrigger>
                     <SelectContent>
@@ -2741,26 +2815,179 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             {/* ── Order totals — persistent across Scan / Master View, hidden on Separate CSVs ── */}
             {osTab !== "separate-csvs" && (
-            <div className="grid grid-cols-4 gap-3">
-              <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Total</p>
-                <p className="text-2xl font-bold text-gray-900">{displayTotals.expected}</p>
-                <p className="text-sm font-medium text-gray-500">{displayTotals.palletsExpected.toFixed(2)} plt</p>
+            <div className="grid items-start gap-3 lg:grid-cols-[7fr_3fr]">
+              {/* Totals live in one card rather than four free-floating boxes, so the block reads as
+                  a single unit. items-start on the row keeps this card at its natural height rather
+                  than stretching to match the taller scanner column. */}
+              <div className="flex flex-col gap-2 rounded-xl border bg-white p-3 shadow-sm">
+                <div className="flex items-baseline justify-between">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
+                  <p className="text-[11px] font-medium text-gray-400">
+                    {displayTotals.expected > 0
+                      ? `${Math.round((displayTotals.done / displayTotals.expected) * 100)}% complete`
+                      : "—"}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                    { label: "Done", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                    { label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-[#001d6e]", text: "text-[#001d6e]" },
+                    { label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-amber-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                  ] as const).map((s) => (
+                    <div key={s.label} className="rounded-lg border border-gray-100 bg-gray-50/70 px-3 py-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                      </div>
+                      <p className={`text-xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                      <p className="text-lg font-semibold text-gray-500">{s.plt.toFixed(2)} plt</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-1">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                      style={{ width: `${displayTotals.expected > 0 ? Math.min(100, (displayTotals.done / displayTotals.expected) * 100) : 0}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[10px] font-medium text-gray-400">
+                    <span>{displayTotals.done} done</span>
+                    <span>{displayTotals.remaining} remaining</span>
+                  </div>
+                </div>
               </div>
-              <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Done</p>
-                <p className="text-2xl font-bold text-emerald-600">{displayTotals.done}</p>
-                <p className="text-sm font-medium text-gray-500">{displayTotals.palletsDone.toFixed(2)} plt</p>
-              </div>
-              <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Remaining</p>
-                <p className="text-2xl font-bold text-[#001d6e]">{displayTotals.remaining}</p>
-                <p className="text-sm font-medium text-gray-500">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
-              </div>
-              <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Extra</p>
-                <p className={`text-2xl font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{displayTotals.extra}</p>
-                <p className="text-sm font-medium text-gray-500">{displayTotals.palletsExtra.toFixed(2)} plt</p>
+
+              {/* Scanner controls sit beside the totals: STV picker, then the mode buttons under it. */}
+              <div className="flex flex-col gap-2 rounded-xl border bg-white p-3 shadow-sm">
+                {/* Equal-width halves via grid-cols-2; both share one height so they read as a pair. */}
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    variant={osScanMode === "camera" ? "default" : "outline"}
+                    className={`h-9 w-full text-xs font-semibold ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    onClick={() => setOsScanMode("camera")}>
+                    <Camera className="mr-1.5 h-4 w-4" /> Camera
+                  </Button>
+                  <Button
+                    variant={osScanMode === "manual" ? "default" : "outline"}
+                    className={`h-9 w-full text-xs font-semibold ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}>
+                    <Keyboard className="mr-1.5 h-4 w-4" /> Manual
+                  </Button>
+                </div>
+                <p className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <Plug className="h-3 w-3 shrink-0" />
+                  Barcode gun: plug in and scan
+                </p>
+                {/* Camera card — always in DOM so ref stays set; hidden via display:none when not in camera mode */}
+                <Card className="rounded-xl shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
+                  <div className="relative bg-black" style={{ height: "230px" }}>
+                    <video
+                      ref={osVideoDesktopRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                        transform: "translateZ(0)",
+                        WebkitTransform: "translateZ(0)",
+                        display: "block",
+                      }}
+                    />
+                    {osScanMode === "camera" && !osCameraReady && !osCameraError && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
+                        <Loader2 className="h-8 w-8 animate-spin" />
+                        <p className="text-sm">Starting camera…</p>
+                      </div>
+                    )}
+                    {osScanMode === "camera" && osCameraReady && (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                        <div className="h-16 w-48 rounded border-2 border-white/70" />
+                      </div>
+                    )}
+                  </div>
+                  {osScanMode === "camera" && osCameraError && (
+                    <div className="flex items-center gap-2 bg-red-50 p-3 text-xs text-red-700">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      {osCameraError}
+                    </div>
+                  )}
+                </Card>
+
+                {osScanMode === "manual" && (
+                  <Card className="rounded-xl shadow-sm">
+                    <CardContent className="p-4 space-y-2">
+                      <Label className="text-sm font-medium">Enter item name or barcode</Label>
+                      <div className="relative flex gap-2">
+                        <div className="relative flex-1 min-w-0">
+                          <Input
+                            value={osManualCode}
+                            onChange={(e) => { setOsManualCode(e.target.value); setOsSuggIdx(-1); }}
+                            onFocus={() => setOsManualFocused(true)}
+                            onBlur={() => setTimeout(() => setOsManualFocused(false), 150)}
+                            onKeyDown={(e) => {
+                              if (osManualFocused && osSuggestions.length > 0) {
+                                if (e.key === "ArrowDown") { e.preventDefault(); setOsSuggIdx((i) => Math.min(i + 1, osSuggestions.length - 1)); return; }
+                                if (e.key === "ArrowUp") { e.preventDefault(); setOsSuggIdx((i) => Math.max(i - 1, -1)); return; }
+                                if (e.key === "Escape") { setOsManualFocused(false); return; }
+                                if (e.key === "Enter" && osSuggIdx >= 0) {
+                                  e.preventDefault();
+                                  const item = osSuggestions[osSuggIdx];
+                                  if (item.barcode) { handleOsBarcode(item.barcode); setOsManualCode(""); setOsSuggIdx(-1); }
+                                  return;
+                                }
+                              }
+                              if (e.key === "Enter" && osManualCode.trim() && osSuggIdx < 0) {
+                                handleOsBarcode(osManualCode.trim());
+                                setOsManualCode("");
+                              }
+                            }}
+                            placeholder="Type item name or barcode…"
+                            disabled={!!osPending}
+                            className="font-mono text-xs h-8 w-full"
+                            autoFocus
+                          />
+                          {osManualFocused && osSuggestions.length > 0 && (
+                            <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                              {osSuggestions.map((item, idx) => (
+                                <button
+                                  key={item.id}
+                                  type="button"
+                                  onMouseDown={(e) => { e.preventDefault(); if (item.barcode) { handleOsBarcode(item.barcode); setOsManualCode(""); setOsSuggIdx(-1); } }}
+                                  className={`w-full text-left px-3 py-2 flex items-center gap-2 text-sm border-b last:border-0 ${idx === osSuggIdx ? "bg-[#001d6e] text-white" : "hover:bg-gray-50"}`}
+                                >
+                                  <ScanLine className={`h-3.5 w-3.5 shrink-0 ${idx === osSuggIdx ? "text-white/70" : "text-gray-400"}`} />
+                                  <span className="flex-1 min-w-0 truncate font-medium">{item.itemName || item.barcode}</span>
+                                  {item.barcode && <span className={`font-mono text-xs shrink-0 ${idx === osSuggIdx ? "text-white/60" : "text-gray-400"}`}>{item.barcode}</span>}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <Button size="sm"
+                          disabled={!osManualCode.trim() || !!osPending}
+                          onClick={() => {
+                            if (osSuggIdx >= 0 && osSuggestions[osSuggIdx]?.barcode) {
+                              handleOsBarcode(osSuggestions[osSuggIdx].barcode!);
+                            } else if (osManualCode.trim()) {
+                              handleOsBarcode(osManualCode.trim());
+                            }
+                            setOsManualCode(""); setOsSuggIdx(-1);
+                          }}
+                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 h-8 w-8 p-0">
+                          <ScanLine className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {sideInfoPanel}
               </div>
             </div>
             )}
@@ -2885,173 +3112,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
               </div>
 
-              {/* Scanner panel — persistent across Scan / Master View tabs so the camera keeps running
-                  when switching between them; hidden on Separate CSVs (no scanning happens there).
-                  Collapsible above the table and closed on load so the table gets the full viewport.
-                  One bordered box wraps both the toggle row and the body, so the border encloses the
-                  whole component when open. Contents stay mounted while collapsed (hidden via
-                  `hidden`, i.e. display:none) so the camera ref/stream survives toggling. */}
-              {osTab !== "separate-csvs" && (
-              <div className="order-1 rounded-xl border border-gray-200 bg-white shadow-sm">
-                <button
-                  type="button"
-                  onClick={() => setOsScannerOpen((v) => !v)}
-                  aria-expanded={osScannerOpen}
-                  className={`group flex w-full items-center justify-between gap-3 bg-gradient-to-r from-[#001d6e] to-[#0a2b7e] px-3 py-2.5 text-left transition-colors hover:from-[#00154b] hover:to-[#001d6e] sm:px-4 ${osScannerOpen ? "rounded-t-xl" : "rounded-xl"}`}
-                >
-                  <span className="flex min-w-0 items-center gap-3">
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white/15 text-white ring-1 ring-inset ring-white/20">
-                      <ScanLine className="h-4 w-4" />
-                    </span>
-                    <span className="flex min-w-0 flex-col">
-                      <span className="text-sm font-semibold leading-tight text-white">Scanner</span>
-                      <span className="flex items-center gap-1.5 text-[11px] leading-tight text-white/60">
-                        <Plug className="h-3 w-3 shrink-0" />
-                        <span className="truncate">Barcode gun: plug in and scan</span>
-                      </span>
-                    </span>
-                  </span>
-                  <span className="flex shrink-0 items-center gap-2">
-                    {/* Mode pill — tells the operator which input is live without opening the panel. */}
-                    <span className="hidden items-center gap-1.5 rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white ring-1 ring-inset ring-white/20 sm:inline-flex">
-                      {osScanMode === "camera" ? <Camera className="h-3 w-3" /> : <Keyboard className="h-3 w-3" />}
-                      {osScanMode === "camera" ? "Camera" : "Manual"}
-                    </span>
-                    <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 text-white/80 transition-colors group-hover:bg-white/20 group-hover:text-white">
-                      <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${osScannerOpen ? "rotate-180" : ""}`} />
-                    </span>
-                  </span>
-                </button>
-
-                {/* Body toggles with `hidden` (display:none) rather than an animated height: it keeps
-                    the contents mounted so the camera ref/stream survives, and avoids the
-                    `overflow-hidden` an height animation needs — which would clip the manual
-                    input's absolutely-positioned autocomplete list. */}
-                <div className={osScannerOpen ? "space-y-3 rounded-b-xl border-t border-gray-200 bg-gray-50/60 p-3" : "hidden"}>
-                <div className="flex gap-2">
-                  <Button size="sm"
-                    variant={osScanMode === "camera" ? "default" : "outline"}
-                    className={`flex-1 h-8 text-xs ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
-                    onClick={() => setOsScanMode("camera")}>
-                    <Camera className="mr-1.5 h-3.5 w-3.5" /> Camera
-                  </Button>
-                  <Button size="sm"
-                    variant={osScanMode === "manual" ? "default" : "outline"}
-                    className={`flex-1 h-8 text-xs ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
-                    onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}>
-                    <Keyboard className="mr-1.5 h-3.5 w-3.5" /> Manual
-                  </Button>
-                </div>
-
-                {/* Camera card — always in DOM so ref stays set; hidden via display:none when not in camera mode */}
-                <Card className="rounded-xl shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
-                  <div className="relative bg-black" style={{ height: "230px" }}>
-                    <video
-                      ref={osVideoDesktopRef}
-                      autoPlay
-                      muted
-                      playsInline
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                        transform: "translateZ(0)",
-                        WebkitTransform: "translateZ(0)",
-                        display: "block",
-                      }}
-                    />
-                    {osScanMode === "camera" && !osCameraReady && !osCameraError && (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-2">
-                        <Loader2 className="h-8 w-8 animate-spin" />
-                        <p className="text-sm">Starting camera…</p>
-                      </div>
-                    )}
-                    {osScanMode === "camera" && osCameraReady && (
-                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                        <div className="h-16 w-48 rounded border-2 border-white/70" />
-                      </div>
-                    )}
-                  </div>
-                  {osScanMode === "camera" && osCameraError && (
-                    <div className="flex items-center gap-2 bg-red-50 p-3 text-xs text-red-700">
-                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                      {osCameraError}
-                    </div>
-                  )}
-                </Card>
-
-                {osScanMode === "manual" && (
-                  <Card className="rounded-xl shadow-sm">
-                    <CardContent className="p-4 space-y-2">
-                      <Label className="text-sm font-medium">Enter item name or barcode</Label>
-                      <div className="relative flex gap-2">
-                        <div className="relative flex-1 min-w-0">
-                          <Input
-                            value={osManualCode}
-                            onChange={(e) => { setOsManualCode(e.target.value); setOsSuggIdx(-1); }}
-                            onFocus={() => setOsManualFocused(true)}
-                            onBlur={() => setTimeout(() => setOsManualFocused(false), 150)}
-                            onKeyDown={(e) => {
-                              if (osManualFocused && osSuggestions.length > 0) {
-                                if (e.key === "ArrowDown") { e.preventDefault(); setOsSuggIdx((i) => Math.min(i + 1, osSuggestions.length - 1)); return; }
-                                if (e.key === "ArrowUp") { e.preventDefault(); setOsSuggIdx((i) => Math.max(i - 1, -1)); return; }
-                                if (e.key === "Escape") { setOsManualFocused(false); return; }
-                                if (e.key === "Enter" && osSuggIdx >= 0) {
-                                  e.preventDefault();
-                                  const item = osSuggestions[osSuggIdx];
-                                  if (item.barcode) { handleOsBarcode(item.barcode); setOsManualCode(""); setOsSuggIdx(-1); }
-                                  return;
-                                }
-                              }
-                              if (e.key === "Enter" && osManualCode.trim() && osSuggIdx < 0) {
-                                handleOsBarcode(osManualCode.trim());
-                                setOsManualCode("");
-                              }
-                            }}
-                            placeholder="Type item name or barcode…"
-                            disabled={!!osPending}
-                            className="font-mono text-xs h-8 w-full"
-                            autoFocus
-                          />
-                          {osManualFocused && osSuggestions.length > 0 && (
-                            <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
-                              {osSuggestions.map((item, idx) => (
-                                <button
-                                  key={item.id}
-                                  type="button"
-                                  onMouseDown={(e) => { e.preventDefault(); if (item.barcode) { handleOsBarcode(item.barcode); setOsManualCode(""); setOsSuggIdx(-1); } }}
-                                  className={`w-full text-left px-3 py-2 flex items-center gap-2 text-sm border-b last:border-0 ${idx === osSuggIdx ? "bg-[#001d6e] text-white" : "hover:bg-gray-50"}`}
-                                >
-                                  <ScanLine className={`h-3.5 w-3.5 shrink-0 ${idx === osSuggIdx ? "text-white/70" : "text-gray-400"}`} />
-                                  <span className="flex-1 min-w-0 truncate font-medium">{item.itemName || item.barcode}</span>
-                                  {item.barcode && <span className={`font-mono text-xs shrink-0 ${idx === osSuggIdx ? "text-white/60" : "text-gray-400"}`}>{item.barcode}</span>}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        <Button size="sm"
-                          disabled={!osManualCode.trim() || !!osPending}
-                          onClick={() => {
-                            if (osSuggIdx >= 0 && osSuggestions[osSuggIdx]?.barcode) {
-                              handleOsBarcode(osSuggestions[osSuggIdx].barcode!);
-                            } else if (osManualCode.trim()) {
-                              handleOsBarcode(osManualCode.trim());
-                            }
-                            setOsManualCode(""); setOsSuggIdx(-1);
-                          }}
-                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 h-8 w-8 p-0">
-                          <ScanLine className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
-
-                {sideInfoPanel}
-                </div>
-              </div>
-              )}
             </div>
 
             </div>
