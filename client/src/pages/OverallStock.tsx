@@ -4,14 +4,16 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { Filter, X, FileDown, LayoutList, Columns3, Check, Factory } from "lucide-react";
+import { FileDown, LayoutList, Factory, Boxes, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import PageHeader from "@/components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
+import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
+import { StatsBar } from "@/components/ui/stats-bar";
+import { TableCard } from "@/components/ui/table-card";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,6 +42,11 @@ type PlantStockResponse = {
   total: number;
   // null = admin/super-admin (all plants). Array = the plant(s) this user is limited to.
   plants: string[] | null;
+  // true when a from/to range was applied — quantities then mean "received in that window"
+  // (sourced from the stock_movements ledger), not current totals.
+  dateMode?: boolean;
+  from?: string | null;
+  to?: string | null;
 };
 
 // ─── Column config ────────────────────────────────────────────────────────────
@@ -55,8 +62,6 @@ const ALL_COLUMNS = [
   { key: "extraPallets", label: "Extra Pallets" },
   { key: "lastUpdated", label: "Last Updated" },
 ] as const;
-
-type ColKey = typeof ALL_COLUMNS[number]["key"];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -100,23 +105,36 @@ function downloadPdf(filename: string, rows: Array<Array<string | number>>) {
 
 const PAGE_SIZE = 20;
 
+// Solid navy fill, matching the Notion Inventory action buttons.
+const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function OverallStock() {
   const [plantFilter, setPlantFilter] = useState(""); // "" = all plants the user may see
   const [search,      setSearch]      = useState("");
-  const [page,        setPage]        = useState(1);
-  const [visibleCols, setVisibleCols] = useState<Set<ColKey>>(new Set(ALL_COLUMNS.map((c) => c.key)));
-  const [colDropOpen, setColDropOpen] = useState(false);
+  const [pageIndex,   setPageIndex]   = useState(0);
+  // Date range → the server switches from current running totals to the dated movements
+  // ledger, showing ONLY what was received inside the window (earlier stock is not carried
+  // in). Both empty = today's behavior, current totals.
+  const [fromDate,    setFromDate]    = useState("");
+  const [toDate,      setToDate]      = useState("");
+  const [extrasOnly,  setExtrasOnly]  = useState(false);
+  const [sortBy,      setSortBy]      = useState<"" | "stock" | "extra">("");
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
+    () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
+  );
 
-  const toggleCol = (key: ColKey) =>
-    setVisibleCols((prev) => {
+  const toggleColumn = (key: string) =>
+    setVisibleColumnIds((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) { if (next.size > 1) next.delete(key); }
-      else next.add(key);
+      if (next.has(key)) {
+        // Keep at least one of the optional (ALL_COLUMNS) columns visible.
+        const remainingOptional = ALL_COLUMNS.filter((c) => c.key !== key && next.has(c.key));
+        if (remainingOptional.length > 0) next.delete(key);
+      } else next.add(key);
       return next;
     });
-  const show = (key: ColKey) => visibleCols.has(key);
 
   // All configured plants — used to populate the plant switcher for admins.
   const { data: allPlants = [] } = useQuery<{ id: number; name: string }[]>({
@@ -127,12 +145,19 @@ export default function OverallStock() {
   // Plant-wise stock. Server enforces access: admins get every plant, others only theirs.
   const stockUrl = buildUrl("/api/scan-sessions/reports/plant-stock", {
     plant: plantFilter || undefined,
+    from: fromDate || undefined,
+    to: toDate || undefined,
+    extrasOnly: extrasOnly ? "1" : undefined,
+    sort: sortBy || undefined,
   });
   const { data: stockData } = useQuery<PlantStockResponse>({
-    queryKey: ["/api/scan-sessions/reports/plant-stock", plantFilter],
+    queryKey: ["/api/scan-sessions/reports/plant-stock", plantFilter, fromDate, toDate, extrasOnly, sortBy],
     queryFn: () => apiRequest("GET", stockUrl, undefined, false, true),
     refetchInterval: 30000,
   });
+  // True when a date range is active: the Stock/Extra numbers then mean "received in this
+  // window" rather than "total on hand", so the UI labels them differently.
+  const dateMode = stockData?.dateMode ?? false;
 
   const rows = stockData?.items ?? [];
   // null = admin (may pick any plant). Array = restricted user → lock the switcher to these.
@@ -158,11 +183,6 @@ export default function OverallStock() {
     );
   }, [rows, search]);
 
-  // Pagination
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const safePage   = Math.min(page, totalPages);
-  const pageRows   = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-
   // Summary
   const totalStock = filtered.reduce((s, r) => s + r.inStock, 0);
   const totalExtra = filtered.reduce((s, r) => s + r.extraQty, 0);
@@ -180,6 +200,163 @@ export default function OverallStock() {
     ]),
   ];
 
+  const dash = <span className="text-gray-300">—</span>;
+  const cellBorder = "border-r border-gray-100";
+  const headerBorder = "border-r border-[#001d6e]/30";
+
+  const stockColumns: DataTableColumn<PlantStockRow>[] = [
+    {
+      id: "srNo",
+      header: "#",
+      hideable: false,
+      width: 44,
+      headerClassName: headerBorder,
+      cellClassName: `text-gray-400 tabular-nums ${cellBorder}`,
+      render: (_row, rowIndex) => rowIndex + 1,
+    },
+    {
+      id: "itemName",
+      header: "Item",
+      hideable: false,
+      width: 220,
+      sortable: true,
+      accessor: (row) => row.itemName,
+      headerClassName: headerBorder,
+      cellClassName: `font-medium text-gray-900 whitespace-normal break-words ${cellBorder}`,
+      render: (row) => row.itemName,
+    },
+    {
+      id: "barcode",
+      header: "Barcode / SKU",
+      width: 140,
+      sortable: true,
+      accessor: (row) => row.barcode,
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-600 ${cellBorder}`,
+      render: (row) => row.barcode ?? dash,
+    },
+    {
+      id: "sapCode",
+      header: "SAP Code",
+      width: 110,
+      sortable: true,
+      accessor: (row) => row.sapCode,
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-600 ${cellBorder}`,
+      render: (row) => row.sapCode ?? dash,
+    },
+    {
+      id: "category",
+      header: "Category",
+      width: 130,
+      sortable: true,
+      accessor: (row) => row.category,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.category ? (
+          <span className="inline-flex items-center rounded-full border border-gray-200 px-2 py-0.5 text-[11px] text-gray-700">
+            {row.category}
+          </span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "brand",
+      header: "Brand",
+      width: 110,
+      sortable: true,
+      accessor: (row) => row.brand,
+      headerClassName: headerBorder,
+      cellClassName: `text-gray-700 ${cellBorder}`,
+      render: (row) => row.brand ?? dash,
+    },
+    {
+      id: "plant",
+      header: "Plant",
+      hideable: false,
+      width: 100,
+      sortable: true,
+      accessor: (row) => row.plant,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) => (
+        <span className="inline-flex items-center rounded-full bg-[#001d6e]/10 px-2 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">
+          {row.plant}
+        </span>
+      ),
+    },
+    {
+      id: "stock",
+      header: "Stock (Boxes)",
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.inStock,
+      headerClassName: headerBorder,
+      cellClassName: `font-bold text-[#001d6e] tabular-nums ${cellBorder}`,
+      render: (row) => row.inStock.toLocaleString(),
+    },
+    {
+      id: "extra",
+      header: "Extra",
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.extraQty,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.extraQty > 0 ? (
+          <span className="font-semibold text-amber-600 tabular-nums">{row.extraQty.toLocaleString()}</span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "pallets",
+      header: "Pallets",
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.pallets,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.pallets != null && row.pallets > 0 ? (
+          <span className="font-semibold text-[#001d6e] tabular-nums">{row.pallets.toFixed(2)}</span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "extraPallets",
+      header: "Extra Pallets",
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.extraPallets,
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.extraPallets != null && row.extraPallets > 0 ? (
+          <span className="font-semibold text-amber-600 tabular-nums">{row.extraPallets.toFixed(2)}</span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "lastUpdated",
+      header: "Last Updated",
+      width: 120,
+      sortable: true,
+      accessor: (row) => row.lastArrived,
+      cellClassName: "text-gray-500 whitespace-nowrap",
+      render: (row) => (row.lastArrived ? format(new Date(row.lastArrived), "MMM d, yyyy") : dash),
+    },
+  ];
+
   return (
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
       <div className="max-w-7xl mx-auto space-y-4">
@@ -190,222 +367,181 @@ export default function OverallStock() {
         />
 
         {/* Summary tiles */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-          <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-            <p className="text-xs uppercase tracking-wide text-gray-400">Total Stock</p>
-            <p className="text-2xl font-bold text-[#001d6e]">{totalStock.toLocaleString()}</p>
-            <p className="text-[11px] text-gray-400">boxes{plantFilter ? ` · ${plantFilter}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · all plants"}</p>
-          </div>
-          <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-            <p className="text-xs uppercase tracking-wide text-gray-400">Extra (of which)</p>
-            <p className="text-2xl font-bold text-amber-600">{totalExtra.toLocaleString()}</p>
-            <p className="text-[11px] text-gray-400">boxes over order · {totalExtraPallets.toFixed(2)} plt</p>
-          </div>
-          <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-            <p className="text-xs uppercase tracking-wide text-gray-400">Items</p>
-            <p className="text-2xl font-bold text-gray-900">{filtered.length.toLocaleString()}</p>
-            <p className="text-[11px] text-gray-400">item · plant rows</p>
-          </div>
-        </div>
+        <StatsBar
+          stats={[
+            {
+              icon: Boxes,
+              tone: "navy",
+              value: totalStock.toLocaleString(),
+              // In date mode this is what ARRIVED in the window, not what's on hand — say so
+              // explicitly, otherwise the number reads as a (much smaller) total stock figure.
+              label: `${dateMode ? "boxes received in range" : "boxes"}${plantFilter ? ` · ${plantFilter}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · all plants"}`,
+            },
+            {
+              icon: TrendingUp,
+              tone: "amber",
+              value: totalExtra.toLocaleString(),
+              label: `boxes over order · ${totalExtraPallets.toFixed(2)} plt`,
+            },
+            {
+              icon: LayoutList,
+              tone: "navy",
+              value: filtered.length.toLocaleString(),
+              label: "item · plant rows",
+            },
+          ]}
+          actions={
+            <>
+              <Select value={plantFilter || "_all_"} onValueChange={(v) => { setPlantFilter(v === "_all_" ? "" : v); setPageIndex(0); }}>
+                <SelectTrigger className={`w-[160px] gap-1.5 ${FILTER_BTN_CLASS}`}>
+                  <Factory className="h-3.5 w-3.5 shrink-0" />
+                  <SelectValue placeholder="All plants" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all_">{isAdmin ? "All plants" : "All my plants"}</SelectItem>
+                  {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+                </SelectContent>
+              </Select>
 
-        {/* Filters & actions */}
-        <div className="flex flex-wrap gap-2 items-center">
-          {/* Plant */}
-          <div className="flex items-center gap-1.5">
-            <Factory className="h-4 w-4 text-gray-400" />
-            <Select value={plantFilter || "_all_"} onValueChange={(v) => { setPlantFilter(v === "_all_" ? "" : v); setPage(1); }}>
-              <SelectTrigger className="h-9 w-[160px] text-sm">
-                <SelectValue placeholder="All plants" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="_all_">{isAdmin ? "All plants" : "All my plants"}</SelectItem>
-                {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
+              {/* Date range — when set, the numbers become "received in this window" (from the
+                  movements ledger) instead of current totals. Both empty = totals, as before. */}
+              <div className="flex items-center gap-1">
+                <input
+                  type="date"
+                  value={fromDate}
+                  onChange={(e) => { setFromDate(e.target.value); setPageIndex(0); }}
+                  className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs"
+                  aria-label="From date"
+                />
+                <span className="text-xs text-gray-400">→</span>
+                <input
+                  type="date"
+                  value={toDate}
+                  onChange={(e) => { setToDate(e.target.value); setPageIndex(0); }}
+                  className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs"
+                  aria-label="To date"
+                />
+              </div>
 
-          {/* Search */}
-          <div className="relative min-w-[180px] flex-1 max-w-xs">
-            <Filter className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
-            <Input
-              className="pl-8 h-9 text-sm"
-              placeholder="Item, barcode, SAP, category…"
-              value={search}
-              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            />
-            {search && (
-              <button className="absolute right-2 top-1/2 -translate-y-1/2" onClick={() => { setSearch(""); setPage(1); }}>
-                <X className="h-4 w-4 text-gray-400" />
-              </button>
-            )}
-          </div>
+              {/* Quick presets */}
+              {([
+                { key: "today",  label: "Today" },
+                { key: "yday",   label: "Yesterday" },
+                { key: "week",   label: "This week" },
+                { key: "month",  label: "This month" },
+              ] as const).map((p) => (
+                <Button
+                  key={p.key}
+                  size="sm"
+                  variant="outline"
+                  className={FILTER_BTN_CLASS}
+                  onClick={() => {
+                    const d = new Date();
+                    const iso = (x: Date) => format(x, "yyyy-MM-dd");
+                    let f = "", t = iso(d);
+                    if (p.key === "today") f = iso(d);
+                    if (p.key === "yday")  { const y = new Date(d); y.setDate(y.getDate() - 1); f = iso(y); t = iso(y); }
+                    if (p.key === "week")  { const w = new Date(d); w.setDate(w.getDate() - 6); f = iso(w); }
+                    if (p.key === "month") { f = iso(new Date(d.getFullYear(), d.getMonth(), 1)); }
+                    setFromDate(f); setToDate(t); setPageIndex(0);
+                  }}
+                >
+                  {p.label}
+                </Button>
+              ))}
 
-          {/* Column visibility */}
-          <div className="relative">
-            <Button variant="outline" size="sm" className="h-9 text-xs gap-1.5" onClick={() => setColDropOpen((o) => !o)}>
-              <Columns3 className="h-3.5 w-3.5" />Columns
-            </Button>
-            {colDropOpen && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setColDropOpen(false)} />
-                <div className="absolute right-0 top-10 z-20 w-48 rounded-lg border bg-white shadow-lg py-1">
-                  {ALL_COLUMNS.map((col) => (
-                    <button
-                      key={col.key}
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
-                      onClick={() => toggleCol(col.key)}
-                    >
-                      <span className={`flex h-4 w-4 items-center justify-center rounded border ${visibleCols.has(col.key) ? "bg-[#001d6e] border-[#001d6e]" : "border-gray-300"}`}>
-                        {visibleCols.has(col.key) && <Check className="h-2.5 w-2.5 text-white" />}
-                      </span>
-                      {col.label}
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
+              {(fromDate || toDate || extrasOnly || sortBy) && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className={FILTER_BTN_CLASS}
+                  onClick={() => { setFromDate(""); setToDate(""); setExtrasOnly(false); setSortBy(""); setPageIndex(0); }}
+                >
+                  Clear
+                </Button>
+              )}
 
-          {/* Export */}
-          <div className="flex gap-2 ml-auto">
-            {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
-              <Button key={fmt} variant="outline" size="sm" className="h-9 text-xs"
-                disabled={filtered.length === 0}
-                onClick={() => {
-                  const exp = exportRows(filtered);
-                  const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
-                  if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
-                  if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
-                  if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
-                }}
+              <Button
+                size="sm"
+                variant="outline"
+                className={`${FILTER_BTN_CLASS} ${extrasOnly ? "ring-2 ring-amber-400" : ""}`}
+                onClick={() => { setExtrasOnly((v) => !v); setPageIndex(0); }}
               >
-                <FileDown className="h-3.5 w-3.5 mr-1" />{fmt}
+                Extras only
               </Button>
-            ))}
-          </div>
-        </div>
 
-        {/* Table */}
-        <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse" style={{ minWidth: 760 }}>
-              <thead>
-                <tr className="bg-[#001d6e]">
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30 w-[44px]">#</th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30 min-w-[200px]">Item</th>
-                  {show("barcode")     && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Barcode / SKU</th>}
-                  {show("sapCode")     && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">SAP Code</th>}
-                  {show("category")    && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Category</th>}
-                  {show("brand")       && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Brand</th>}
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Plant</th>
-                  {show("stock")       && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Stock (Boxes)</th>}
-                  {show("extra")       && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Extra</th>}
-                  {show("pallets")     && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Pallets</th>}
-                  {show("extraPallets") && <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#001d6e]/30">Extra Pallets</th>}
-                  {show("lastUpdated") && <th className="px-3 py-3 text-left  text-[11px] font-semibold uppercase tracking-wide text-white">Last Updated</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 ? (
-                  <tr>
-                    <td colSpan={3 + visibleCols.size} className="py-16 text-center text-sm text-gray-400">
-                      No stock yet{plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.
-                    </td>
-                  </tr>
-                ) : (
-                  pageRows.map((row, idx) => {
-                    const rowBg = idx % 2 === 0 ? "bg-white" : "bg-slate-50";
-                    const cell = "border-r border-gray-100";
-                    return (
-                      <tr key={`${row.barcode}-${row.plant}`} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
-                        <td className={`px-3 py-3 text-gray-400 text-[11px] tabular-nums ${cell}`}>
-                          {(safePage - 1) * PAGE_SIZE + idx + 1}
-                        </td>
-                        <td className={`px-3 py-3 font-medium text-gray-900 min-w-[200px] max-w-[280px] whitespace-normal break-words ${cell}`}>
-                          {row.itemName}
-                        </td>
-                        {show("barcode") && (
-                          <td className={`px-3 py-3 font-mono text-[11px] text-gray-600 ${cell}`}>
-                            {row.barcode ?? <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                        {show("sapCode") && (
-                          <td className={`px-3 py-3 font-mono text-[11px] text-gray-600 ${cell}`}>
-                            {row.sapCode ?? <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                        {show("category") && (
-                          <td className={`px-3 py-3 ${cell}`}>
-                            {row.category
-                              ? <span className="inline-flex items-center rounded-full border border-gray-200 px-2 py-0.5 text-[11px] text-gray-700">{row.category}</span>
-                              : <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                        {show("brand") && (
-                          <td className={`px-3 py-3 text-[11px] text-gray-700 ${cell}`}>
-                            {row.brand ?? <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                        <td className={`px-3 py-3 ${cell}`}>
-                          <span className="inline-flex items-center rounded-full bg-[#001d6e]/10 px-2 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{row.plant}</span>
-                        </td>
-                        {show("stock") && (
-                          <td className={`px-3 py-3 text-right font-bold text-[#001d6e] tabular-nums ${cell}`}>
-                            {row.inStock.toLocaleString()}
-                          </td>
-                        )}
-                        {show("extra") && (
-                          <td className={`px-3 py-3 text-right tabular-nums ${cell}`}>
-                            {row.extraQty > 0 ? (
-                              <span className="font-semibold text-amber-600">{row.extraQty.toLocaleString()}</span>
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
-                          </td>
-                        )}
-                        {show("pallets") && (
-                          <td className={`px-3 py-3 text-right font-semibold text-[#001d6e] tabular-nums ${cell}`}>
-                            {row.pallets != null && row.pallets > 0
-                              ? row.pallets.toFixed(2)
-                              : <span className="text-gray-300 font-normal">—</span>}
-                          </td>
-                        )}
-                        {show("extraPallets") && (
-                          <td className={`px-3 py-3 text-right font-semibold text-amber-600 tabular-nums ${cell}`}>
-                            {row.extraPallets != null && row.extraPallets > 0
-                              ? row.extraPallets.toFixed(2)
-                              : <span className="text-gray-300 font-normal">—</span>}
-                          </td>
-                        )}
-                        {show("lastUpdated") && (
-                          <td className="px-3 py-3 text-[11px] text-gray-500 whitespace-nowrap">
-                            {row.lastArrived
-                              ? format(new Date(row.lastArrived), "MMM d, yyyy")
-                              : <span className="text-gray-300">—</span>}
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+              <Select value={sortBy || "_none_"} onValueChange={(v) => { setSortBy(v === "_none_" ? "" : (v as "stock" | "extra")); setPageIndex(0); }}>
+                <SelectTrigger className={`w-[150px] gap-1.5 ${FILTER_BTN_CLASS}`}>
+                  <SelectValue placeholder="Sort" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_none_">Sort: Name</SelectItem>
+                  <SelectItem value="stock">Sort: Stock ↓</SelectItem>
+                  <SelectItem value="extra">Sort: Extra ↓</SelectItem>
+                </SelectContent>
+              </Select>
 
-          <div className="flex items-center justify-between border-t px-4 py-2.5 text-xs text-gray-500">
-            <span>
-              {filtered.length > 0
-                ? `Showing ${(safePage - 1) * PAGE_SIZE + 1}–${Math.min(safePage * PAGE_SIZE, filtered.length)} of ${filtered.length} rows`
-                : "No rows"}
-            </span>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" disabled={safePage <= 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
-              <Button variant="outline" size="sm" disabled={safePage >= totalPages}
-                onClick={() => setPage((p) => p + 1)}>Next</Button>
-            </div>
-          </div>
-        </div>
+              <DataTableColumnToggle
+                columns={stockColumns}
+                visibleColumnIds={visibleColumnIds}
+                onToggleColumn={toggleColumn}
+                onSetAll={(visible) => setVisibleColumnIds(visible ? new Set(stockColumns.map((c) => c.id)) : new Set())}
+                buttonClassName={FILTER_BTN_CLASS}
+              />
+
+              <div className="flex gap-2 ml-auto">
+                {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
+                  <Button key={fmt} variant="outline" size="sm" className={FILTER_BTN_CLASS}
+                    disabled={filtered.length === 0}
+                    onClick={() => {
+                      const exp = exportRows(filtered);
+                      const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                      if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
+                      if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
+                      if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
+                    }}
+                  >
+                    <FileDown className="h-3.5 w-3.5 mr-1" />{fmt}
+                  </Button>
+                ))}
+              </div>
+            </>
+          }
+        />
+
+        {/* Table card — title + search only; filters live in the stats card's action bar */}
+        <TableCard
+          icon={LayoutList}
+          title="Plant-wise Stock"
+          subtitle={search ? `${filtered.length} of ${rows.length} rows` : `${rows.length} item · plant rows`}
+          searchValue={search}
+          onSearchChange={(v) => { setSearch(v); setPageIndex(0); }}
+          searchPlaceholder="Item, barcode, SAP, category…"
+        >
+          <DataTable<PlantStockRow>
+            className="space-y-0"
+            containerClassName="rounded-none border-0"
+            columns={stockColumns}
+            data={filtered}
+            getRowId={(row) => `${row.barcode}-${row.plant}`}
+            emptyState={`No stock yet${plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.`}
+            noResultsState="No stock rows match your search."
+            hasActiveFilters={!!search}
+            enableZebraStripes
+            sortMode="client"
+            paginationMode="client"
+            pageIndex={pageIndex}
+            onPageIndexChange={setPageIndex}
+            defaultPageSize={PAGE_SIZE}
+            pageSizeOptions={[20, 50, 100, 200]}
+            enableColumnResizing
+            enableColumnVisibility
+            columnVisibility={visibleColumnIds}
+            onColumnVisibilityChange={setVisibleColumnIds}
+            showMobileSwipeHint
+            headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+          />
+        </TableCard>
       </div>
     </div>
   );

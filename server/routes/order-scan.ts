@@ -159,6 +159,27 @@ function requireScanRole(req: Request, res: Response, next: NextFunction) {
   next(); // any logged-in user may access scan routes; plant filtering handles the rest
 }
 
+// Mirrors the client's canCompletePart gate (Scan.tsx) — Complete Part and Manage Scans
+// (void a scan) are restricted to: admin/super-admin, or a user who BOTH has "scan-order"
+// granted via Allowed Pages AND has the Supervisor designation — either alone is not enough.
+function canCompleteOrVoidScan(user: any): boolean {
+  const role = (user?.role ?? '').toLowerCase().trim();
+  if (['admin', 'super-admin'].includes(role)) return true;
+  const designation = (user?.designation ?? '').toLowerCase().trim();
+  if (designation !== 'supervisor') return false;
+  let allowedPages: string[] = [];
+  try { allowedPages = JSON.parse(user?.allowedPages || '[]'); } catch { /* default [] */ }
+  return allowedPages.includes('scan-order');
+}
+
+function requireCompleteOrVoidAccess(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  if (!canCompleteOrVoidScan(req.user)) {
+    return res.status(403).json({ message: 'You do not have permission to complete or void scans.' });
+  }
+  next();
+}
+
 
 // Extract plant filter for dispatch users (fully case-insensitive).
 // All inputs are lowercased; DB comparisons use LOWER() via plantEq().
@@ -375,40 +396,56 @@ async function autoActivateNextInScope(
   completed: { id: number; plant: string; receivingSessionId: number | null; csvFileName: string },
   userCode: string | null,
 ): Promise<number | null> {
-  const scopeConditions = completed.receivingSessionId
-    ? [eq(orderImportSessions.receivingSessionId, completed.receivingSessionId)]
-    : [sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`];
-
-  const activeInScope = await db.select({ id: orderImportSessions.id })
+  // Only one session may be active per plant, so check plant-wide (not just within the group)
+  // before promoting anything — otherwise we'd try to activate while another order is mid-scan.
+  const activeForPlant = await db.select({ id: orderImportSessions.id })
     .from(orderImportSessions)
     .where(and(
-      ...scopeConditions,
+      sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`,
       eq(orderImportSessions.scanStatus, 'active'),
       eq(orderImportSessions.isDeleted, false),
     ))
     .limit(1);
 
-  if (activeInScope.length > 0) {
-    console.log(`[order-scan] another session already active in scope; skip auto-progress`);
+  if (activeForPlant.length > 0) {
+    console.log(`[order-scan] another session already active for plant ${completed.plant}; skip auto-progress`);
     return null;
   }
 
-  const orderBy = completed.receivingSessionId
-    ? [asc(orderImportSessions.partIndex), asc(orderImportSessions.id)]
-    : [asc(orderImportSessions.createdAt), asc(orderImportSessions.id)];
+  // 1) Prefer the next part of the SAME order (FIFO within the group, by partIndex).
+  let next = completed.receivingSessionId
+    ? (await db.select()
+        .from(orderImportSessions)
+        .where(and(
+          eq(orderImportSessions.receivingSessionId, completed.receivingSessionId),
+          eq(orderImportSessions.scanStatus, 'available'),
+          eq(orderImportSessions.isDeleted, false),
+        ))
+        .orderBy(asc(orderImportSessions.partIndex), asc(orderImportSessions.id))
+        .limit(1))[0]
+    : undefined;
 
-  const [next] = await db.select()
-    .from(orderImportSessions)
-    .where(and(
-      ...scopeConditions,
-      eq(orderImportSessions.scanStatus, 'available'),
-      eq(orderImportSessions.isDeleted, false),
-    ))
-    .orderBy(...orderBy)
-    .limit(1);
+  // 2) Group exhausted (or this was a standalone session) → move on to the next ORDER for this
+  //    plant, earliest order date first. This is what makes "admin completes the last part of
+  //    the 18th" roll straight on to the 19th's CSV instead of leaving the plant idle.
+  if (!next) {
+    [next] = await db.select()
+      .from(orderImportSessions)
+      .where(and(
+        sql`LOWER(${orderImportSessions.plant}) = LOWER(${completed.plant})`,
+        eq(orderImportSessions.scanStatus, 'available'),
+        eq(orderImportSessions.isDeleted, false),
+      ))
+      .orderBy(
+        asc(orderImportSessions.orderDate),   // 'YYYY-MM-DD' text sorts chronologically
+        asc(orderImportSessions.partIndex),
+        asc(orderImportSessions.id),
+      )
+      .limit(1);
+  }
 
   if (!next) {
-    console.log(`[order-scan] no more 'available' sessions in scope after completing ${completed.id}`);
+    console.log(`[order-scan] no more 'available' sessions for plant ${completed.plant} after completing ${completed.id}`);
     return null;
   }
 
@@ -522,6 +559,9 @@ router.get('/order-scan/notification', async (req: Request, res: Response) => {
         rowCount:    orderImportSessions.rowCount,
         importedByName: importedBy.name,
         scanActivatedAt: orderImportSessions.scanActivatedAt,
+        // Master View scopes by the ACTIVE session's order date (not the upload day), so the
+        // client needs it here — see mvDate in Scan.tsx.
+        orderDate: orderImportSessions.orderDate,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex: orderImportSessions.partIndex,
       })
@@ -564,6 +604,9 @@ router.get('/order-scan/active-sessions', async (req: Request, res: Response) =>
         rowCount:    orderImportSessions.rowCount,
         importedByName: importedBy.name,
         scanActivatedAt: orderImportSessions.scanActivatedAt,
+        // Master View scopes by the ACTIVE session's order date (not the upload day), so the
+        // client needs it here — see mvDate in Scan.tsx.
+        orderDate: orderImportSessions.orderDate,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex: orderImportSessions.partIndex,
       })
@@ -680,6 +723,9 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
         importedByCode:       orderImportSessions.importedByCode,
         importedByName:       importedBy.name,
         createdAt:            orderImportSessions.createdAt,
+        // The date the CSV was uploaded FOR — the Order Import tabs filter and display on this
+        // rather than createdAt, since the two diverge whenever a late part is added.
+        orderDate:            orderImportSessions.orderDate,
         scanStatus:           orderImportSessions.scanStatus,
         scanActivatedByCode:  orderImportSessions.scanActivatedByCode,
         scanActivatedByName:  activatedBy.name,
@@ -863,7 +909,7 @@ router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('scan-order'
 });
 
 // ── POST /api/order-scan/sessions/:id/complete ───────────────────────────────
-router.post('/order-scan/sessions/:id/complete', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
@@ -1411,14 +1457,9 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
 // already been finalized from these numbers, so voiding is blocked at that point.
 // This is purely additive: it doesn't touch the /scan endpoint or any other
 // existing read path — everything that already worked keeps working unchanged.
-router.post('/order-scan/events/:id/void', async (req: Request, res: Response) => {
+router.post('/order-scan/events/:id/void', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
-
-  const role = ((req.user as any)?.role ?? '').toLowerCase().trim();
-  if (!ADMIN_ROLES.includes(role)) {
-    return res.status(403).json({ message: 'Admin access required' });
-  }
 
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : null;
   const userCode = (req.user as any)?.userCode ?? null;

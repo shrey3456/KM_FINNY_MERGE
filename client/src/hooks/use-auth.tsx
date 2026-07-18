@@ -19,6 +19,7 @@ function syncCurrentUserToLocalStorage(user: SelectUser) {
     name: user.name,
     role: user.role,
     department: user.department,
+    designation: (user as any).designation ?? null,
     plants: (user as any).plants ?? '[]',
     allowedPages: (user as any).allowedPages ?? '[]',
     pageWriteAccess: (user as any).pageWriteAccess ?? '[]',

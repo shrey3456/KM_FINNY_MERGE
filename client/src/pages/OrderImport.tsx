@@ -135,6 +135,9 @@ function autoMatch(headers: string[]): Mapping {
 type ScanSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
   scanStatus: string; importedByName: string | null; createdAt: string | null;
+  // The date this CSV was uploaded FOR (chosen at upload) — distinct from createdAt (when it
+  // was uploaded). All date filters/labels on this page use orderDate.
+  orderDate: string | null;
   scanActivatedByName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null;
   scanActivatedByCode:string | null;
 };
@@ -171,9 +174,14 @@ export default function OrderImport() {
   const role = ((user as any)?.role ?? "").toLowerCase();
   const department = ((user as any)?.department ?? "").toLowerCase();
   const userPermissions = getCurrentUserPermissions();
+  let allowedPagesList: string[] = [];
+  try { allowedPagesList = JSON.parse((user as any)?.allowedPages || "[]"); } catch { allowedPagesList = []; }
+  // Write access (below) implies read access, so it's included here too.
   const isImportRole = ["admin", "super-admin"].includes(role)
     || department === "billing"
-    || userPermissions.canAccessOrderManagement;
+    || userPermissions.canAccessOrderManagement
+    || allowedPagesList.includes("order-import")
+    || hasPageWriteAccess("order-import");
   // Separate from page VISIBILITY (isImportRole above) — this controls whether the
   // currently-visible page's own write actions (Upload, Map & Import, Delete) are enabled.
   // Admin/super-admin/billing always have write access (unchanged); anyone else needs
@@ -251,7 +259,7 @@ export default function OrderImport() {
 
   // ── Queries ────────────────────────────────────────────────────────────────
   type SessionsResponse = {
-    sessions: (OrderImportSession & { importedByName: string | null; scanStatus: string })[];
+    sessions: (OrderImportSession & { importedByName: string | null; scanStatus: string; orderDate: string | null })[];
     total: number;
     page: number;
     pageSize: number;
@@ -459,7 +467,7 @@ export default function OrderImport() {
         );
 
         qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
-          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: data.session.scanStatus ?? "available", importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null }, ...old] : [],
+          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: data.session.scanStatus ?? "available", importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), orderDate: data.session.orderDate ?? orderDate ?? null, scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null }, ...old] : [],
         );
       }
 
@@ -786,6 +794,12 @@ export default function OrderImport() {
       toast({ title: "Select a plant first", variant: "destructive" });
       return;
     }
+    // Order Date drives FIFO grouping (plant + orderDate) and now Master View's scoping too,
+    // so an import without one can't be placed in a group at all — require it up front.
+    if (!orderDate.trim()) {
+      toast({ title: "Select an Order Date first", description: "The Order Date decides which CSVs merge together as parts of one order.", variant: "destructive" });
+      return;
+    }
     if (selectedFiles.length === 0) {
       toast({ title: "Select a CSV file first", variant: "destructive" });
       return;
@@ -894,20 +908,23 @@ export default function OrderImport() {
   // Client-side filters — empty string means "all". Status filter ensures a session
   // removed via completeMutation disappears from Currently Active immediately (cache
   // patch sets scanStatus → "completed" before the background refetch arrives).
+  // Date filters match the ORDER DATE (what the CSV is FOR), not createdAt (when it was
+  // uploaded) — those diverge whenever a late part is added to an earlier order, and the
+  // order date is what users think in. Same value FIFO grouping and Master View key on.
   const availableScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "available" &&
     (!scanPlant    || (s.plant ?? "").toLowerCase() === scanPlant.toLowerCase()) &&
-    (!scanDate     || (s.createdAt ?? "").slice(0, 10) === scanDate)
+    (!scanDate     || (s.orderDate ?? "").slice(0, 10) === scanDate)
   );
   const activeScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "active" &&
     (!activePlant  || (s.plant ?? "").toLowerCase() === activePlant.toLowerCase()) &&
-    (!activeDate   || (s.createdAt ?? "").slice(0, 10) === activeDate)
+    (!activeDate   || (s.orderDate ?? "").slice(0, 10) === activeDate)
   );
   const completedScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "completed" &&
     (!completedPlant || (s.plant ?? "").toLowerCase() === completedPlant.toLowerCase()) &&
-    (!completedDate  || (s.createdAt ?? "").slice(0, 10) === completedDate)
+    (!completedDate  || (s.orderDate ?? "").slice(0, 10) === completedDate)
   );
   const activeId = activeSessionQuery.data?.id ?? null;
 
@@ -973,6 +990,9 @@ export default function OrderImport() {
               {/* Date */}
               <div className="grid gap-1">
                 <Label className="text-xs text-gray-500">Order Date</Label>
+                {/* No min= here on purpose: a past date must stay selectable so a LATE PART can
+                    still be added to an order that already exists for that date. The server
+                    allows exactly that and rejects only brand-new past-dated orders. */}
                 <Input type="date" className="h-9 text-sm w-[150px]" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
               </div>
               {/* File */}
@@ -1134,7 +1154,11 @@ export default function OrderImport() {
                 </Button>
               </div>
               {/* Content */}
-              {scanSessionsQuery.isFetching && availableScanSessions.length === 0 ? (
+              {/* isLoading (first load), NOT isFetching: this list polls every 2.5–8s, and with
+                  isFetching an empty/filtered result flipped to a spinner on every poll — the
+                  whole panel appeared to reload constantly. Background refetches now update the
+                  data silently and leave the rendered list in place. */}
+              {scanSessionsQuery.isLoading && availableScanSessions.length === 0 ? (
                 <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
@@ -1172,7 +1196,14 @@ export default function OrderImport() {
                               <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                               <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
-                                <span className="text-xs text-gray-400">{fmtIST(s.createdAt)}</span>
+                                {/* The date this CSV is FOR — what grouping/filters key on. Shown
+                                    ahead of the upload timestamp since it's the meaningful one. */}
+                                {s.orderDate && (
+                                  <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
+                                    For {s.orderDate}
+                                  </span>
+                                )}
+                                <span className="text-xs text-gray-400" title="Uploaded at">{fmtIST(s.createdAt)}</span>
                                 {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
                                 {plantBusy && (
                                   <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700" title="Another session is already active for this plant">
@@ -1283,6 +1314,11 @@ export default function OrderImport() {
                           <p className="truncate text-sm font-bold text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                             <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 uppercase">{s.plant}</span>
+                            {s.orderDate && (
+                              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
+                                For {s.orderDate}
+                              </span>
+                            )}
                             <span className="text-xs text-gray-500">{s.rowCount} rows</span>
                             {s.importedByName && <span className="text-xs text-gray-500">· {s.importedByName}</span>}
                           </div>
@@ -1380,7 +1416,8 @@ export default function OrderImport() {
                 </Button>
               </div>
               {/* Content */}
-              {scanSessionsQuery.isFetching && completedScanSessions.length === 0 ? (
+              {/* isLoading not isFetching — same polling-flicker reason as the Available tab. */}
+              {scanSessionsQuery.isLoading && completedScanSessions.length === 0 ? (
                 <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-green-600" />
                 </div>
@@ -1399,6 +1436,11 @@ export default function OrderImport() {
                           <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                             <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700 uppercase">{s.plant}</span>
+                            {s.orderDate && (
+                              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
+                                For {s.orderDate}
+                              </span>
+                            )}
                             {s.scanCompletedAt && <span className="text-xs text-green-700 font-medium">Done {fmtIST(s.scanCompletedAt)}</span>}
                             {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
                             {s.scanActivatedByName && <span className="text-xs text-gray-400">· Scanned by {s.scanActivatedByName}</span>}
@@ -1463,7 +1505,9 @@ export default function OrderImport() {
                     <SelectItem value="50">50</SelectItem>
                   </SelectContent>
                 </Select>
-                {sessionsQuery.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
+                {/* Only on first load — this query polls, so an isFetching spinner blinked every
+                    few seconds and read as the page constantly reloading. */}
+                {sessionsQuery.isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
               </div>
               {/* Content */}
               {sessionsQuery.isLoading ? (
@@ -1501,7 +1545,14 @@ export default function OrderImport() {
                                 <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(session.csvFileName)}</p>
                                 <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                   <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{session.plant}</span>
-                                  <span className="text-xs text-gray-400">{fmtIST(session.createdAt)}</span>
+                                  {/* See the note on the other list: Order Date is the meaningful
+                                      one (what grouping/filters use); createdAt is just when it landed. */}
+                                  {(session as any).orderDate && (
+                                    <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
+                                      For {(session as any).orderDate}
+                                    </span>
+                                  )}
+                                  <span className="text-xs text-gray-400" title="Uploaded at">{fmtIST(session.createdAt)}</span>
                                   <span className="inline-flex items-center gap-1 text-xs text-gray-500">
                                     <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                       <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
