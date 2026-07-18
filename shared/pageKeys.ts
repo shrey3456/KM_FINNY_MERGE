@@ -9,13 +9,11 @@ export const CONTROLLABLE_PAGES = [
   { key: "scan-order", label: "Scan Order" },
   { key: "overall-stock", label: "Overall Stock" },
   { key: "scan-history", label: "Scan History" },
-  { key: "order-import", label: "Order Import" },
+  { key: "order-import", label: "Order Management" },
+  { key: "order-reports", label: "Order Reports"},
   { key: "notion-inventory", label: "Inventory" },
   { key: "purchases", label: "Purchases" },
-  { key: "plant-management", label: "Plant Management" },
-  // "user-management", "settings", and "activities" are deliberately NOT in this
-  // list — all three pages stay strictly admin-only and can never be granted to a
-  // non-admin via Allowed Pages / Write Access.
+  { key: "plant-management", label: "Plant Management" }
 ] as const;
 
 export type PageKey = (typeof CONTROLLABLE_PAGES)[number]["key"];

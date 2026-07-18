@@ -174,9 +174,14 @@ export default function OrderImport() {
   const role = ((user as any)?.role ?? "").toLowerCase();
   const department = ((user as any)?.department ?? "").toLowerCase();
   const userPermissions = getCurrentUserPermissions();
+  let allowedPagesList: string[] = [];
+  try { allowedPagesList = JSON.parse((user as any)?.allowedPages || "[]"); } catch { allowedPagesList = []; }
+  // Write access (below) implies read access, so it's included here too.
   const isImportRole = ["admin", "super-admin"].includes(role)
     || department === "billing"
-    || userPermissions.canAccessOrderManagement;
+    || userPermissions.canAccessOrderManagement
+    || allowedPagesList.includes("order-import")
+    || hasPageWriteAccess("order-import");
   // Separate from page VISIBILITY (isImportRole above) — this controls whether the
   // currently-visible page's own write actions (Upload, Map & Import, Delete) are enabled.
   // Admin/super-admin/billing always have write access (unchanged); anyone else needs

@@ -14,4 +14,4 @@ vite.config.ts.*
 deploy.bat
 migrations/
 web.config
-.cluade/
+.claude/

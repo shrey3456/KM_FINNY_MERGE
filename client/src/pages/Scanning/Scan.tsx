@@ -180,10 +180,16 @@ export default function ScanOrderPage() {
   const { user: currentUser } = useUser();
   const [, navigate] = useLocation();
   const isDispatchUser = (currentUser?.department ?? '').toLowerCase().includes('dispatch');
-  // Force-completing a part (even with items still short) is admin-only for now — the
+  // Force-completing a part (even with items still short) is admin-only by default — the
   // shortage can be picked up by a later part and reconciled via the combined-report
   // FIFO adjustment logic, so dispatch scanners shouldn't be the ones deciding to close it.
-  const canCompletePart = ["admin", "super-admin"].includes(((currentUser as any)?.role ?? "").toLowerCase());
+  // Also allowed for: a user who BOTH has "scan-order" granted via Allowed Pages AND has
+  // the Supervisor designation — either alone is not enough.
+  const userDesignation = String((currentUser as any)?.designation || "").toLowerCase().trim();
+  let osAllowedPagesList: string[] = [];
+  try { osAllowedPagesList = JSON.parse((currentUser as any)?.allowedPages || "[]"); } catch { osAllowedPagesList = []; }
+  const canCompletePart = ["admin", "super-admin"].includes(((currentUser as any)?.role ?? "").toLowerCase())
+    || (osAllowedPagesList.includes("scan-order") && userDesignation === "supervisor");
   const queryClient = useQueryClient();
 
   // ── Master View / Separate CSVs tab state ────────────────────────────────
@@ -1486,27 +1492,31 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       if (ipp > 0) osTotals.palletsExtra += qty / ipp;
     });
 
-    // Master View doesn't carry a per-item pallet-size field the way the Scan tab's CSV
-    // items do — only the CSV's own expected-pallets total per item — so Done/Remain
-    // pallets here are a proportional split of that total rather than an exact per-item
-    // division. Expected pallets itself is exact (summed straight from the CSV).
+    // Computed the same way every Master View row already displays its own pallet figures
+    // (quantity / itemsPerPallet — see the "Exp Plt"/"Done Plt"/etc. table cells and the
+    // mobile list below) rather than the CSV's raw "Expected Pallets" column, which has no
+    // guaranteed relationship to itemsPerPallet and previously made this total disagree
+    // with what every row underneath it actually shows.
     const mvTotals = allMvItems.reduce((acc, item) => {
       const exp = item.quantity ?? 0;
       const done = item.scannedQty ?? 0;
-      const expPlt = item.expectedPallets ?? 0;
+      const ipp = item.itemsPerPallet ?? 0;
       if (item._isExtra) {
         acc.extra += done;
+        if (ipp > 0) acc.palletsExtra += done / ipp;
       } else {
         const doneCapped = Math.min(done, exp);
         const remaining = Math.max(0, exp - done);
+        const overage = Math.max(0, done - exp);
         acc.expected  += exp;
         acc.done      += doneCapped;
         acc.remaining += remaining;
-        acc.extra     += Math.max(0, done - exp);
-        acc.palletsExpected += expPlt;
-        if (exp > 0) {
-          acc.palletsDone      += expPlt * (doneCapped / exp);
-          acc.palletsRemaining += expPlt * (remaining / exp);
+        acc.extra     += overage;
+        if (ipp > 0) {
+          acc.palletsExpected  += exp / ipp;
+          acc.palletsDone      += doneCapped / ipp;
+          acc.palletsRemaining += remaining / ipp;
+          if (overage > 0) acc.palletsExtra += overage / ipp;
         }
       }
       return acc;

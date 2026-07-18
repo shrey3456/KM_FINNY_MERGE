@@ -159,6 +159,27 @@ function requireScanRole(req: Request, res: Response, next: NextFunction) {
   next(); // any logged-in user may access scan routes; plant filtering handles the rest
 }
 
+// Mirrors the client's canCompletePart gate (Scan.tsx) — Complete Part and Manage Scans
+// (void a scan) are restricted to: admin/super-admin, or a user who BOTH has "scan-order"
+// granted via Allowed Pages AND has the Supervisor designation — either alone is not enough.
+function canCompleteOrVoidScan(user: any): boolean {
+  const role = (user?.role ?? '').toLowerCase().trim();
+  if (['admin', 'super-admin'].includes(role)) return true;
+  const designation = (user?.designation ?? '').toLowerCase().trim();
+  if (designation !== 'supervisor') return false;
+  let allowedPages: string[] = [];
+  try { allowedPages = JSON.parse(user?.allowedPages || '[]'); } catch { /* default [] */ }
+  return allowedPages.includes('scan-order');
+}
+
+function requireCompleteOrVoidAccess(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  if (!canCompleteOrVoidScan(req.user)) {
+    return res.status(403).json({ message: 'You do not have permission to complete or void scans.' });
+  }
+  next();
+}
+
 
 // Extract plant filter for dispatch users (fully case-insensitive).
 // All inputs are lowercased; DB comparisons use LOWER() via plantEq().
@@ -888,7 +909,7 @@ router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('scan-order'
 });
 
 // ── POST /api/order-scan/sessions/:id/complete ───────────────────────────────
-router.post('/order-scan/sessions/:id/complete', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
@@ -1436,14 +1457,9 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
 // already been finalized from these numbers, so voiding is blocked at that point.
 // This is purely additive: it doesn't touch the /scan endpoint or any other
 // existing read path — everything that already worked keeps working unchanged.
-router.post('/order-scan/events/:id/void', async (req: Request, res: Response) => {
+router.post('/order-scan/events/:id/void', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
-
-  const role = ((req.user as any)?.role ?? '').toLowerCase().trim();
-  if (!ADMIN_ROLES.includes(role)) {
-    return res.status(403).json({ message: 'Admin access required' });
-  }
 
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : null;
   const userCode = (req.user as any)?.userCode ?? null;
