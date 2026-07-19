@@ -231,6 +231,9 @@ export default function OrderImport() {
   const [currentPage, setCurrentPage] = useState(1);
   const [filterDate, setFilterDate] = useState("");
   const [filterPlant, setFilterPlant] = useState("");
+  // Plant tab row under the status tabs. "" = All. Tabs are derived from the sessions actually
+  // present in the current status tab, so they appear and disappear with the data.
+  const [plantTab, setPlantTab] = useState("");
 
   // Load CSV for Scan — plant and date filters (default empty = server last-48h window)
   const [scanPlant, setScanPlant] = useState("");
@@ -914,21 +917,47 @@ export default function OrderImport() {
   const availableScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "available" &&
     (!scanPlant    || (s.plant ?? "").toLowerCase() === scanPlant.toLowerCase()) &&
+    (!plantTab     || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!scanDate     || (s.orderDate ?? "").slice(0, 10) === scanDate)
   );
   const activeScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "active" &&
     (!activePlant  || (s.plant ?? "").toLowerCase() === activePlant.toLowerCase()) &&
+    (!plantTab     || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!activeDate   || (s.orderDate ?? "").slice(0, 10) === activeDate)
   );
   const completedScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "completed" &&
     (!completedPlant || (s.plant ?? "").toLowerCase() === completedPlant.toLowerCase()) &&
+    (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!completedDate  || (s.orderDate ?? "").slice(0, 10) === completedDate)
   );
   const activeId = activeSessionQuery.data?.id ?? null;
 
   const [activeTab, setActiveTab] = useState<"available" | "active" | "completed" | "history">("available");
+
+  // Plant tabs come from the sessions in the current status tab (ignoring the plant selection
+  // itself, so picking a plant never empties the row). History pages server-side, so it falls back
+  // to every known session. A plant appears only once it actually has sessions.
+  const plantTabSource = _allScanSessions.filter((s) =>
+    activeTab === "history" ? true : s.scanStatus === activeTab,
+  );
+  const plantTabs = Array.from(
+    new Set(plantTabSource.map((s) => (s.plant ?? "").trim()).filter(Boolean)),
+  ).sort((a, b) => a.localeCompare(b));
+
+  // Switching status tabs clears the plant selection — it may not exist under the new status.
+  const selectStatusTab = (key: "available" | "active" | "completed" | "history") => {
+    setActiveTab(key);
+    setPlantTab("");
+    setFilterPlant("");
+  };
+
+  // History filters server-side via filterPlant; the other tabs use plantTab client-side.
+  const selectPlantTab = (name: string) => {
+    setPlantTab(name);
+    if (activeTab === "history") { setFilterPlant(name); setCurrentPage(1); }
+  };
 
   return (
     <main className="flex-1 overflow-y-auto bg-gray-50">
@@ -1095,7 +1124,7 @@ export default function OrderImport() {
               ).map((tab) => (
                 <button
                   key={tab.key}
-                  onClick={() => setActiveTab(tab.key)}
+                  onClick={() => selectStatusTab(tab.key)}
                   className={
                     activeTab === tab.key
                       ? "bg-[#001d6e] text-white rounded-full px-4 py-1.5 text-sm font-medium"
@@ -1113,6 +1142,39 @@ export default function OrderImport() {
                 </button>
               ))}
             </div>
+
+            {/* Plant tabs — built from the sessions present in the tab above, so they track the
+                data rather than a hard-coded list. Shown on all four status tabs. */}
+            {plantTabs.length > 0 && (
+              <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3">
+                <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Plant
+                </span>
+                <button
+                  onClick={() => selectPlantTab("")}
+                  className={
+                    plantTab === ""
+                      ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
+                      : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  }
+                >
+                  All
+                </button>
+                {plantTabs.map((name) => (
+                  <button
+                    key={name}
+                    onClick={() => selectPlantTab(name)}
+                    className={
+                      plantTab.toLowerCase() === name.toLowerCase()
+                        ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
+                        : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                    }
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* ── Tab: Available ── */}
@@ -1120,20 +1182,6 @@ export default function OrderImport() {
             <div>
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                {plantOptions.length > 0 ? (
-                  <Select value={scanPlant || "_all_"} onValueChange={(v) => { setScanPlant(v === "_all_" ? "" : v); setScanExpandedId(null); }}>
-                    <SelectTrigger className="h-8 w-[130px] text-xs">
-                      <SelectValue placeholder="All plants" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_all_">All plants</SelectItem>
-                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input value={scanPlant} onChange={(e) => { setScanPlant(e.target.value); setScanExpandedId(null); }}
-                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
-                )}
                 <Input type="date" value={scanDate} onChange={(e) => { setScanDate(e.target.value); setScanExpandedId(null); }}
                   className="h-8 w-[140px] text-xs" />
                 {scanDate !== todayStr && (
@@ -1382,20 +1430,6 @@ export default function OrderImport() {
             <div>
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                {plantOptions.length > 0 ? (
-                  <Select value={completedPlant || "_all_"} onValueChange={(v) => setCompletedPlant(v === "_all_" ? "" : v)}>
-                    <SelectTrigger className="h-8 w-[130px] text-xs">
-                      <SelectValue placeholder="All plants" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_all_">All plants</SelectItem>
-                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input value={completedPlant} onChange={(e) => setCompletedPlant(e.target.value)}
-                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
-                )}
                 <Input type="date" value={completedDate} onChange={(e) => setCompletedDate(e.target.value)}
                   className="h-8 w-[140px] text-xs" />
                 {completedDate !== todayStr && (
@@ -1467,20 +1501,6 @@ export default function OrderImport() {
             <div>
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                {plantOptions.length > 0 ? (
-                  <Select value={filterPlant || "_all_"} onValueChange={(v) => { setFilterPlant(v === "_all_" ? "" : v); setCurrentPage(1); }}>
-                    <SelectTrigger className="h-8 w-[130px] text-xs">
-                      <SelectValue placeholder="All plants" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_all_">All plants</SelectItem>
-                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input value={filterPlant} onChange={(e) => { setFilterPlant(e.target.value); setCurrentPage(1); }}
-                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
-                )}
                 <Input type="date" value={filterDate} onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
                   className="h-8 w-[140px] text-xs" />
                 {filterDate !== todayStr && (
