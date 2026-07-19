@@ -432,7 +432,7 @@ router.get('/order-import/sessions/:id/part-report', requireImportViewAccess, as
         return res.status(403).json({ message: 'Access required' });
       }
     }
-
+    // Compute the report for the specified session ID.
     const report = await computePartReport(id);
     if (!report) return res.status(404).json({ message: 'Session not found' });
 
