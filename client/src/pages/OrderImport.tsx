@@ -885,6 +885,13 @@ export default function OrderImport() {
 
   const sessions        = sessionsQuery.data?.sessions  ?? [];
   const totalSessions   = sessionsQuery.data?.total     ?? 0;
+  // History is server-paged and its total reflects whatever plant filter is applied, so remember
+  // the unfiltered figure and show that on the tab badge — matching the other three, which ignore
+  // the plant row too.
+  const [historyTotalAll, setHistoryTotalAll] = useState(0);
+  useEffect(() => {
+    if (!filterPlant) setHistoryTotalAll(totalSessions);
+  }, [filterPlant, totalSessions]);
   const totalPages      = sessionsQuery.data?.totalPages ?? 1;
   const safePage        = currentPage;
 
@@ -932,6 +939,17 @@ export default function OrderImport() {
     (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!completedDate  || (s.orderDate ?? "").slice(0, 10) === completedDate)
   );
+  // Tab badge counts deliberately ignore the plant row, so each status always advertises its full
+  // total. Without this, picking a plant on one tab silently shrinks every other tab's count and
+  // you lose sight of what's waiting elsewhere. The per-tab date filters still apply.
+  const countByStatus = (status: string, date: string) =>
+    _allScanSessions.filter((s) =>
+      s.scanStatus === status && (!date || (s.orderDate ?? "").slice(0, 10) === date),
+    ).length;
+  const availableCount = countByStatus("available", scanDate);
+  const activeCount    = countByStatus("active", activeDate);
+  const completedCount = countByStatus("completed", completedDate);
+
   const activeId = activeSessionQuery.data?.id ?? null;
 
   const [activeTab, setActiveTab] = useState<"available" | "active" | "completed" | "history">("available");
@@ -943,20 +961,29 @@ export default function OrderImport() {
     activeTab === "history" ? true : s.scanStatus === activeTab,
   );
   const plantTabs = Array.from(
-    new Set(plantTabSource.map((s) => (s.plant ?? "").trim()).filter(Boolean)),
+    // The selected plant is kept in the list even with no sessions in this status, so the active
+    // pill doesn't disappear out from under the selection when switching tabs.
+    new Set(
+      [...plantTabSource.map((s) => (s.plant ?? "").trim()), plantTab.trim()].filter(Boolean),
+    ),
   ).sort((a, b) => a.localeCompare(b));
 
-  // Switching status tabs clears the plant selection — it may not exist under the new status.
+  // Switching status tabs always resets the plant row back to All, so each tab opens showing
+  // everything rather than inheriting a plant picked on a previous tab.
   const selectStatusTab = (key: "available" | "active" | "completed" | "history") => {
     setActiveTab(key);
     setPlantTab("");
     setFilterPlant("");
+    setCurrentPage(1);
   };
 
-  // History filters server-side via filterPlant; the other tabs use plantTab client-side.
+  // Setting filterPlant too keeps the server-paged History query — and therefore the History tab's
+  // count — on the same plant as the client-side tabs, so every status count reflects the
+  // selected plant rather than only the tab you happen to be looking at.
   const selectPlantTab = (name: string) => {
     setPlantTab(name);
-    if (activeTab === "history") { setFilterPlant(name); setCurrentPage(1); }
+    setFilterPlant(name);
+    setCurrentPage(1);
   };
 
   return (
@@ -1116,10 +1143,10 @@ export default function OrderImport() {
             <div className="flex gap-1 flex-wrap">
               {(
                 [
-                  { key: "available", label: "Available", count: availableScanSessions.length },
-                  { key: "active",    label: "Active",    count: activeScanSessions.length },
-                  { key: "completed", label: "Completed", count: completedScanSessions.length },
-                  { key: "history",   label: "History",   count: totalSessions },
+                  { key: "available", label: "Available", count: availableCount },
+                  { key: "active",    label: "Active",    count: activeCount },
+                  { key: "completed", label: "Completed", count: completedCount },
+                  { key: "history",   label: "History",   count: filterPlant ? historyTotalAll : totalSessions },
                 ] as { key: "available" | "active" | "completed" | "history"; label: string; count: number }[]
               ).map((tab) => (
                 <button
