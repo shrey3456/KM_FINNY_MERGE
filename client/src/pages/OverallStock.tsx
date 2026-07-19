@@ -4,8 +4,14 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Factory, Boxes, TrendingUp } from "lucide-react";
+import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown, CalendarDays, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -108,6 +114,15 @@ const PAGE_SIZE = 20;
 // Solid navy fill, matching the Notion Inventory action buttons.
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
+// Date-range presets. Declared once so the dropdown items and the trigger's active label
+// (and thus the "which filter is selected" state) can't drift apart.
+const QUICK_FILTERS = [
+  { key: "today", label: "Today" },
+  { key: "yday",  label: "Yesterday" },
+  { key: "week",  label: "This week" },
+  { key: "month", label: "This month" },
+] as const;
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function OverallStock() {
@@ -121,6 +136,10 @@ export default function OverallStock() {
   const [toDate,      setToDate]      = useState("");
   const [extrasOnly,  setExtrasOnly]  = useState(false);
   const [sortBy,      setSortBy]      = useState<"" | "stock" | "extra">("");
+  // Which quick-filter preset produced the current date range, so the trigger can name it and
+  // Clear can undo just that. Reset to "" whenever the dates are edited by hand, since the range
+  // then no longer corresponds to a preset.
+  const [quickFilter, setQuickFilter] = useState<"" | "today" | "yday" | "week" | "month">("");
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
   );
@@ -231,6 +250,7 @@ export default function OverallStock() {
       width: 140,
       sortable: true,
       accessor: (row) => row.barcode,
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `font-mono text-gray-600 ${cellBorder}`,
       render: (row) => row.barcode ?? dash,
@@ -241,6 +261,7 @@ export default function OverallStock() {
       width: 110,
       sortable: true,
       accessor: (row) => row.sapCode,
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `font-mono text-gray-600 ${cellBorder}`,
       render: (row) => row.sapCode ?? dash,
@@ -321,6 +342,7 @@ export default function OverallStock() {
       align: "right",
       sortable: true,
       accessor: (row) => row.pallets,
+      total: (rows) => rows.reduce((sum, r) => sum + (r.pallets ?? 0), 0).toFixed(2),
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) =>
@@ -337,6 +359,7 @@ export default function OverallStock() {
       align: "right",
       sortable: true,
       accessor: (row) => row.extraPallets,
+      total: (rows) => rows.reduce((sum, r) => sum + (r.extraPallets ?? 0), 0).toFixed(2),
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) =>
@@ -393,7 +416,7 @@ export default function OverallStock() {
           actions={
             <>
               <Select value={plantFilter || "_all_"} onValueChange={(v) => { setPlantFilter(v === "_all_" ? "" : v); setPageIndex(0); }}>
-                <SelectTrigger className={`w-[160px] gap-1.5 ${FILTER_BTN_CLASS}`}>
+                <SelectTrigger className={`w-[132px] gap-1.5 ${FILTER_BTN_CLASS}`}>
                   <Factory className="h-3.5 w-3.5 shrink-0" />
                   <SelectValue placeholder="All plants" />
                 </SelectTrigger>
@@ -409,7 +432,7 @@ export default function OverallStock() {
                 <input
                   type="date"
                   value={fromDate}
-                  onChange={(e) => { setFromDate(e.target.value); setPageIndex(0); }}
+                  onChange={(e) => { setFromDate(e.target.value); setQuickFilter(""); setPageIndex(0); }}
                   className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs"
                   aria-label="From date"
                 />
@@ -417,48 +440,55 @@ export default function OverallStock() {
                 <input
                   type="date"
                   value={toDate}
-                  onChange={(e) => { setToDate(e.target.value); setPageIndex(0); }}
+                  onChange={(e) => { setToDate(e.target.value); setQuickFilter(""); setPageIndex(0); }}
                   className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs"
                   aria-label="To date"
                 />
               </div>
 
-              {/* Quick presets */}
-              {([
-                { key: "today",  label: "Today" },
-                { key: "yday",   label: "Yesterday" },
-                { key: "week",   label: "This week" },
-                { key: "month",  label: "This month" },
-              ] as const).map((p) => (
-                <Button
-                  key={p.key}
-                  size="sm"
-                  variant="outline"
-                  className={FILTER_BTN_CLASS}
-                  onClick={() => {
-                    const d = new Date();
-                    const iso = (x: Date) => format(x, "yyyy-MM-dd");
-                    let f = "", t = iso(d);
-                    if (p.key === "today") f = iso(d);
-                    if (p.key === "yday")  { const y = new Date(d); y.setDate(y.getDate() - 1); f = iso(y); t = iso(y); }
-                    if (p.key === "week")  { const w = new Date(d); w.setDate(w.getDate() - 6); f = iso(w); }
-                    if (p.key === "month") { f = iso(new Date(d.getFullYear(), d.getMonth(), 1)); }
-                    setFromDate(f); setToDate(t); setPageIndex(0);
-                  }}
-                >
-                  {p.label}
-                </Button>
-              ))}
+              {/* Quick presets — collapsed into one dropdown so the filter row stays compact. The
+                  trigger names the active preset so the selection is visible while closed. */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
+                    <CalendarDays className="h-3.5 w-3.5 mr-1" />
+                    {QUICK_FILTERS.find((p) => p.key === quickFilter)?.label ?? "Quick filter"}
+                    <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-70" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-40">
+                  {QUICK_FILTERS.map((p) => (
+                    <DropdownMenuItem
+                      key={p.key}
+                      onSelect={() => {
+                        const d = new Date();
+                        const iso = (x: Date) => format(x, "yyyy-MM-dd");
+                        let f = "", t = iso(d);
+                        if (p.key === "today") f = iso(d);
+                        if (p.key === "yday")  { const y = new Date(d); y.setDate(y.getDate() - 1); f = iso(y); t = iso(y); }
+                        if (p.key === "week")  { const w = new Date(d); w.setDate(w.getDate() - 6); f = iso(w); }
+                        if (p.key === "month") { f = iso(new Date(d.getFullYear(), d.getMonth(), 1)); }
+                        setFromDate(f); setToDate(t); setQuickFilter(p.key); setPageIndex(0);
+                      }}
+                    >
+                      <span className="flex-1">{p.label}</span>
+                      {quickFilter === p.key && <Check className="h-3.5 w-3.5 text-[#001d6e]" />}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
 
-              {(fromDate || toDate || extrasOnly || sortBy) && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className={FILTER_BTN_CLASS}
-                  onClick={() => { setFromDate(""); setToDate(""); setExtrasOnly(false); setSortBy(""); setPageIndex(0); }}
-                >
-                  Clear
-                </Button>
+              {/* Only shown while a quick filter is active, and clears only that — the plant, sort
+                  and Extras-only filters are left untouched. */}
+              {quickFilter && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 border-gray-300 bg-white text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                onClick={() => { setFromDate(""); setToDate(""); setQuickFilter(""); setPageIndex(0); }}
+              >
+                Clear
+              </Button>
               )}
 
               <Button
@@ -471,7 +501,7 @@ export default function OverallStock() {
               </Button>
 
               <Select value={sortBy || "_none_"} onValueChange={(v) => { setSortBy(v === "_none_" ? "" : (v as "stock" | "extra")); setPageIndex(0); }}>
-                <SelectTrigger className={`w-[150px] gap-1.5 ${FILTER_BTN_CLASS}`}>
+                <SelectTrigger className={`w-[124px] gap-1.5 ${FILTER_BTN_CLASS}`}>
                   <SelectValue placeholder="Sort" />
                 </SelectTrigger>
                 <SelectContent>
@@ -489,21 +519,34 @@ export default function OverallStock() {
                 buttonClassName={FILTER_BTN_CLASS}
               />
 
-              <div className="flex gap-2 ml-auto">
-                {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
-                  <Button key={fmt} variant="outline" size="sm" className={FILTER_BTN_CLASS}
-                    disabled={filtered.length === 0}
-                    onClick={() => {
-                      const exp = exportRows(filtered);
-                      const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
-                      if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
-                      if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
-                      if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
-                    }}
-                  >
-                    <FileDown className="h-3.5 w-3.5 mr-1" />{fmt}
-                  </Button>
-                ))}
+              {/* One Export control on the right instead of three buttons; format picked from the menu. */}
+              <div className="ml-auto">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className={FILTER_BTN_CLASS} disabled={filtered.length === 0}>
+                      <FileDown className="h-3.5 w-3.5 mr-1" />
+                      Export
+                      <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-70" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-36">
+                    {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
+                      <DropdownMenuItem
+                        key={fmt}
+                        onSelect={() => {
+                          const exp = exportRows(filtered);
+                          const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                          if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
+                          if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
+                          if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
+                        }}
+                      >
+                        <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />
+                        {fmt}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             </>
           }
@@ -527,6 +570,7 @@ export default function OverallStock() {
             emptyState={`No stock yet${plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.`}
             noResultsState="No stock rows match your search."
             hasActiveFilters={!!search}
+            enableTotalsRow
             enableZebraStripes
             sortMode="client"
             paginationMode="client"
