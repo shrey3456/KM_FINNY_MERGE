@@ -904,14 +904,15 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
     // Fetch sessions ordered by createdAt ASC to preserve upload sequence
     const sessions = await db
       .select({
-        id:             orderImportSessions.id,
-        plant:          orderImportSessions.plant,
-        csvFileName:    orderImportSessions.csvFileName,
-        rowCount:       orderImportSessions.rowCount,
-        importedByCode: orderImportSessions.importedByCode,
-        importedByName: users.name,
-        createdAt:      orderImportSessions.createdAt,
-        scanStatus:     orderImportSessions.scanStatus,
+        id:                 orderImportSessions.id,
+        plant:              orderImportSessions.plant,
+        csvFileName:        orderImportSessions.csvFileName,
+        rowCount:           orderImportSessions.rowCount,
+        importedByCode:     orderImportSessions.importedByCode,
+        importedByName:     users.name,
+        createdAt:          orderImportSessions.createdAt,
+        scanStatus:         orderImportSessions.scanStatus,
+        receivingSessionId: orderImportSessions.receivingSessionId,
       })
       .from(orderImportSessions)
       .leftJoin(users, eq(orderImportSessions.importedByCode, users.userCode))
@@ -923,6 +924,32 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
     }
 
     const sessionIds = sessions.map((s) => s.id);
+
+    // Credit an earlier part's extra against a later part's shortfall for the SAME barcode,
+    // live — without this, Master View's per-file merge just adds scannedQty and extraQty
+    // independently, which cancels out to "0 done" for a barcode that's actually already
+    // covered by another part's over-scan (see computeGroupReport's own comment for why this
+    // is safe: if reconcileCredits has already made the credit permanent, the later part's
+    // real total_scanned_qty already reflects it and this computes nothing extra to add).
+    // remainingExtraByKey mirrors the source part's own extra display: once some of a part's
+    // over-scan has been used to cover a later part's shortfall (adjustedTo), that portion is
+    // no longer "still unclaimed" — showing the full original amount forever would make it look
+    // like more is available to credit than actually remains.
+    const creditedQtyByKey = new Map<string, number>();
+    const remainingExtraByKey = new Map<string, number>();
+    const groupIds = Array.from(new Set(sessions.map((s) => s.receivingSessionId ?? s.id)));
+    for (const groupId of groupIds) {
+      const report = await computeGroupReport(groupId);
+      if (!report) continue;
+      for (const part of report.parts) {
+        for (const item of part.items) {
+          const key = `${part.id}::${item.barcode}`;
+          const credited = item.adjustedFrom.reduce((sum, a) => sum + a.qty, 0);
+          if (credited > 0) creditedQtyByKey.set(key, credited);
+          if (item.extraQty > 0) remainingExtraByKey.set(key, item.remainingExtra);
+        }
+      }
+    }
 
     // Use a correlated subquery for scan totals so we always get exactly one row
     // per import item — a plain LEFT JOIN on order_import_item_id would produce
@@ -957,7 +984,10 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       id: number; sessionId: number; barcode: string | null; itemName: string | null;
       sapCode: string | null; quantity: number | null; expectedPallets: number | null;
       scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
-    }> = rawItems;
+    }> = rawItems.map((item: any) => {
+      const credited = item.barcode ? creditedQtyByKey.get(`${item.sessionId}::${item.barcode}`) ?? 0 : 0;
+      return credited > 0 ? { ...item, scannedQty: (item.scannedQty ?? 0) + credited } : item;
+    });
 
     // Group items by sessionId
     const itemsBySession = new Map<number, typeof allItems>();
@@ -987,6 +1017,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
 
     extraRows.forEach((ex: any, idx: number) => {
       const list = itemsBySession.get(ex.sessionId) ?? [];
+      const remaining = remainingExtraByKey.get(`${ex.sessionId}::${ex.barcode}`);
       list.push({
         id: -1 - idx,
         sessionId: ex.sessionId,
@@ -995,7 +1026,11 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         sapCode: null,
         quantity: 0,
         expectedPallets: null,
-        scannedQty: ex.scannedQty,
+        // Whatever's already been used to cover a later part's shortfall no longer counts as
+        // "still sitting unclaimed" — remaining is what's left after that, not the full
+        // original amount ever logged. Falls back to the raw total for sessions outside a
+        // FIFO batch (remainingExtraByKey has no entry there).
+        scannedQty: remaining ?? ex.scannedQty,
         scanStatus: 'extra',
         isExtra: true,
       });

@@ -108,11 +108,6 @@ type ImpItem = {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function scanLocalISODate(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
 function scanFmtIST(dt: string | null | undefined): string {
   if (!dt) return "—";
   const s = String(dt);
@@ -201,11 +196,14 @@ export default function ScanOrderPage() {
 
   // ── Master View / Separate CSVs tab state ────────────────────────────────
   const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("master-view");
-  const scanTodayStr = scanLocalISODate();
   const [mvSearch,    setMvSearch]    = useState("");
   const [mvShowFiles, setMvShowFiles] = useState(false); // toggle: show/hide source-file names in Master View
-  const [csvDate,     setCsvDate]     = useState(scanTodayStr);
-  const [csvPlant,    setCsvPlant]    = useState("");
+  // Part Order (Separate CSVs) no longer has its own date/plant pickers — it always follows
+  // the currently active session's own date + plant, exactly like Master View and Scan
+  // (mvDate/mvPlant, defined below). This closes a real plant-access gap: the old free-text
+  // plant field let anyone TYPE any plant name, and while the server already ignores that for
+  // plant-scoped (dispatch) users and forces their own plant, the field itself was misleading —
+  // it looked like cross-plant browsing was possible when it never actually worked that way.
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
 
@@ -1171,21 +1169,21 @@ export default function ScanOrderPage() {
   });
 
   const csvSessQuery = useQuery<{ sessions: ImpSession[]; total: number }>({
-    queryKey: ["/api/order-import/sessions", "scan-page", csvDate, csvPlant],
+    queryKey: ["/api/order-import/sessions", "scan-page", mvDate, mvPlant],
     queryFn: () => {
       const p = new URLSearchParams({ page: "1", pageSize: "100" });
-      if (csvDate)  p.set("date",  csvDate);
-      if (csvPlant) p.set("plant", csvPlant);
+      if (mvDate)  p.set("date",  mvDate);
+      if (mvPlant) p.set("plant", mvPlant);
       return apiRequest("GET", `/api/order-import/sessions?${p}`).then((r) => r.json());
     },
-    enabled: osTab === "separate-csvs",
+    enabled: osTab === "separate-csvs" && !!mvDate,
     staleTime: 0,
     refetchOnMount: true,
     refetchInterval: wsConnected ? 30000 : 8000,
     refetchIntervalInBackground: false,
   });
 
-  // Separate allocation query — always uses csvDate/csvPlant so it matches the sessions list
+  // Separate allocation query — always uses mvDate/mvPlant so it matches the sessions list
 const csvItemsQuery2 = useQuery<ImpItem[]>({
     queryKey: ["/api/order-import/items", csvExpId, "scan-page"],
     queryFn: () => apiRequest("GET", `/api/order-import/sessions/${csvExpId}/items`).then((r) => r.json()),
@@ -1999,10 +1997,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </div>
                   <div className="text-right shrink-0">
                     <p className="font-bold text-amber-600">{e.totalQty} units</p>
-                    <p className="text-[11px] text-gray-400">
-                      {e.scanCount} scan{e.scanCount !== 1 ? "s" : ""}
-                      {eIpp > 0 && <span className="text-purple-500"> · {(e.totalQty / eIpp).toFixed(2)} plt</span>}
-                    </p>
+                    {eIpp > 0 && <p className="text-[11px] text-purple-500">{(e.totalQty / eIpp).toFixed(2)} plt</p>}
                   </div>
                 </div>
               );
@@ -2686,7 +2681,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </div>
                 )}
                 {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400 py-4 text-center">No active session — load a CSV to see its Master View.</p>}
-                {sideInfoPanel}
               </div>
             )}
 
@@ -2694,13 +2688,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <input type="date" value={csvDate} onChange={(e) => setCsvDate(e.target.value)}
-                    className="rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
-                  <input type="text" value={csvPlant} onChange={(e) => setCsvPlant(e.target.value)} placeholder="Plant (optional)"
-                    className="rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-28" />
+                  <span className="rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">
+                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                  </span>
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading files…</p>}
-                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400 py-4 text-center">No uploaded files for this date/plant.</p>}
+                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400 py-4 text-center">No uploaded files for this order.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
                     <div key={sess.id} className="rounded-xl border bg-white shadow-sm overflow-hidden">
@@ -3158,7 +3151,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
                 </div>
               )}
-              {(osTab === "scan" || osTab === "master-view") && sideInfoPanel}
+              {osTab === "scan" && sideInfoPanel}
               </div>
 
             </div>
@@ -3169,13 +3162,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <input type="date" value={csvDate} onChange={(e) => setCsvDate(e.target.value)}
-                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
-                  <input type="text" value={csvPlant} onChange={(e) => setCsvPlant(e.target.value)} placeholder="Plant (optional)"
-                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-36" />
+                  <span className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
+                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                  </span>
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}
-                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No uploaded files for this date/plant.</p>}
+                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No uploaded files for this order.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
                     <div key={sess.id} className="rounded-xl border bg-white shadow-sm overflow-hidden">
