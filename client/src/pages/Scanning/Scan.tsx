@@ -458,7 +458,10 @@ export default function ScanOrderPage() {
   // before the operator ever saw it, so returning to Scan would always demand a re-pick.
   const osPrevSessionIdRef = useRef<number | null>(null);
   useEffect(() => {
-    setOsSelectedStv("");
+    const id = activeOrderScanSession?.id ?? null;
+    const prev = osPrevSessionIdRef.current;
+    osPrevSessionIdRef.current = id;
+    if (prev !== null && id !== null && prev !== id) setOsSelectedStv("");
     osScanSeqRef.current = { seq: 0, byId: new Map(), byBarcode: new Map() };
   }, [activeOrderScanSession?.id]);
 
@@ -1059,6 +1062,23 @@ export default function ScanOrderPage() {
             if (osPartCompleteBannerTimerRef.current) clearTimeout(osPartCompleteBannerTimerRef.current);
             setOsPartCompleteBanner({ csvFileName: data.csvFileName, partIndex: data.partIndex });
             osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 10000);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
+          if (data.type === 'session-deleted') {
+            // Admin deleted the CSV we're actively scanning against (delete-with-rollback).
+            // Nothing else auto-activates until a corrected CSV is uploaded for this plant/
+            // date, at which point the active-session polls below will pick it up on their
+            // own — no explicit navigation needed, this component already renders a "no
+            // active session" fallback whenever activeOrderScanSession is null.
+            toast({
+              title: "Session removed",
+              description: "This CSV was deleted by an admin. If a corrected CSV is uploaded for the same plant/date, it will appear here automatically.",
+              variant: "destructive",
+            });
+            setOsSelectedSessionId(null);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
             queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
             queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
             return;

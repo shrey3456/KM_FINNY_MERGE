@@ -3,8 +3,10 @@ import { db, pool } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
 import { eq, desc, and, sql, inArray, asc } from 'drizzle-orm';
 import { addSseClient, removeSseClient, broadcastOrderImportUpdate } from '../lib/importEvents';
-import { seedAndActivateSession, seedSessionItems, sweepStaleCompletions, getPlantFilter } from './order-scan';
+import { seedAndActivateSession, seedSessionItems, sweepStaleCompletions, getPlantFilter, broadcastSessionDeleted, autoActivateNextInScope } from './order-scan';
 import { computeGroupReport, resolveGroupId, computePartReport, reconcileCredits } from '../lib/orderGroupReport';
+import { remapDeletedSessionScans } from '../lib/orderScanRemap';
+import { storage } from '../storage';
 
 export { broadcastOrderImportUpdate };
 
@@ -184,6 +186,28 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     if (!normOrderDate) {
       return res.status(400).json({ message: 'Order Date is required — it determines which CSVs merge together as parts of one order.' });
     }
+    // ── Delete-with-rollback replacement: reclaim a deleted session's slot ─────────────────
+    // If a CSV was deleted for this exact (plant, orderDate) slot and no replacement has
+    // claimed it yet, THIS upload is that replacement — it reclaims the deleted session's
+    // group id + partIndex (instead of being appended after the surviving parts), and its
+    // scan history gets carried forward below via remapDeletedSessionScans. Oldest unresolved
+    // deletion first, so multiple wrong uploads/deletes in a row resolve in order.
+    const [replacementFor] = await db
+      .select({
+        id: orderImportSessions.id,
+        receivingSessionId: orderImportSessions.receivingSessionId,
+        partIndex: orderImportSessions.partIndex,
+        csvFileName: orderImportSessions.csvFileName,
+      })
+      .from(orderImportSessions)
+      .where(and(
+        sql`LOWER(${orderImportSessions.plant}) = LOWER(${plant})`,
+        sql`${orderImportSessions.orderDate} IS NOT DISTINCT FROM ${normOrderDate}`,
+        eq(orderImportSessions.isDeleted, true),
+        sql`${orderImportSessions.remappedToSessionId} IS NULL`,
+      ))
+      .orderBy(asc(orderImportSessions.deletedAt))
+      .limit(1);
 
     // ── Auto-group by (plant + order date) ───────────────────────────────────────
     // Look for an existing non-deleted group for this plant + order date. If found,
@@ -193,14 +217,24 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     let effectiveGroupId: number | null = null;
     let computedPartIndex = 1;
     let joinedExistingGroup = false;
-    {
+    if (replacementFor) {
+      effectiveGroupId = replacementFor.receivingSessionId;
+      computedPartIndex = replacementFor.partIndex ?? 1;
+    } else if (normOrderDate) {
+      // Include DELETED sessions here (not just active ones) so a permanently-discarded part's
+      // slot number is RETIRED, never reused: a fresh upload always gets max(partIndex)+1 over
+      // EVERY session that ever existed in this (plant, orderDate) group. Without this, two
+      // wrong-then-discard cases misbehave — discarding the highest part and re-uploading would
+      // hand back that same part number (max over just the survivors reproduces it), and
+      // discarding the only part would restart numbering at 1. A replace-delete never reaches
+      // here (it's reclaimed above via `replacementFor`), so this only affects normal appends
+      // and post-discard uploads, which is exactly where we want strictly-increasing numbering.
       const existing = await db
         .select({ id: orderImportSessions.id, receivingSessionId: orderImportSessions.receivingSessionId, partIndex: orderImportSessions.partIndex })
         .from(orderImportSessions)
         .where(and(
           sql`LOWER(${orderImportSessions.plant}) = LOWER(${plant})`,
           eq(orderImportSessions.orderDate, normOrderDate),
-          eq(orderImportSessions.isDeleted, false),
         ))
         .orderBy(asc(orderImportSessions.partIndex), asc(orderImportSessions.id));
       if (existing.length > 0) {
@@ -255,6 +289,39 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     }));
 
     await db.insert(orderImportItems).values(rows);
+
+    // ── Delete-with-rollback replacement: carry D's scan history forward onto S ────────────
+    // Runs BEFORE seeding below, so seedSessionItems' per-item idempotency correctly skips
+    // the barcodes remap already created order_scan_items rows for.
+    let remapSummary: Awaited<ReturnType<typeof remapDeletedSessionScans>> | null = null;
+    if (replacementFor) {
+      const remapClient = await pool.connect();
+      try {
+        await remapClient.query('BEGIN');
+        remapSummary = await remapDeletedSessionScans(remapClient, replacementFor.id, session.id);
+        await remapClient.query('COMMIT');
+      } catch (err) {
+        await remapClient.query('ROLLBACK');
+        throw err;
+      } finally {
+        remapClient.release();
+      }
+      session = { ...session, replacesSessionId: replacementFor.id } as typeof session;
+      await storage.logActivity({
+        pageName: 'OrderImport',
+        action: 'remap-replacement',
+        entityType: 'orderImportSession',
+        entityId: session.id,
+        userCode,
+        userName: (req.user as any)?.name ?? null,
+        details: {
+          replacesSessionId: replacementFor.id,
+          replacesCsvFileName: replacementFor.csvFileName,
+          ...remapSummary,
+        },
+      });
+      console.log(`[order-import] session ${session.id} (${csvFileName}) auto-linked as replacement for deleted session ${replacementFor.id} (${replacementFor.csvFileName}) — ${remapSummary?.itemsCarriedForward ?? 0} scanned item(s) carried forward`);
+    }
 
     // Seed order_scan_items immediately, regardless of activation state — every part in a
     // FIFO group is scannable from the moment it's uploaded, since sequential cross-part
@@ -325,7 +392,11 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
       console.log(`[order-import] session ${session.id} left 'available' — plant ${plant} already has an active session`);
     }
 
-    res.status(201).json({ success: true, session, rowCount: rows.length, activated });
+    res.status(201).json({
+      success: true, session, rowCount: rows.length, activated,
+      replacesSessionId: replacementFor?.id ?? null,
+      remapSummary,
+    });
 
     // Push change event AFTER responding so client response is never delayed
     broadcastOrderImportUpdate();
@@ -564,23 +635,228 @@ router.put('/order-import/sessions/:id', requireAdmin, async (req: Request, res:
   }
 });
 
-// DELETE /api/order-import/sessions/:id
-router.delete('/order-import/sessions/:id', requireOrderImportWrite, async (req: Request, res: Response) => {
+// Shared by the delete-preview endpoint and the actual DELETE handler below, so the two
+// never drift on what counts as "scanned"/"extra" for this session.
+async function getSessionScanCounts(
+  queryable: { query: (text: string, params?: any[]) => Promise<{ rows: any[] }> },
+  sessionId: number,
+) {
+  const { rows: itemRows } = await queryable.query(
+    `SELECT COUNT(*)::int AS "scannedItemCount", COALESCE(SUM(total_scanned_qty), 0)::int AS "scannedQtyTotal"
+     FROM order_scan_items WHERE session_id = $1 AND total_scanned_qty > 0`,
+    [sessionId],
+  );
+  const { rows: extraRows } = await queryable.query(
+    `SELECT COALESCE(SUM(total_qty), 0)::int AS "extraQtyTotal"
+     FROM order_scan_events WHERE session_id = $1 AND is_extra = true AND voided IS NOT TRUE`,
+    [sessionId],
+  );
+  return {
+    scannedItemCount: itemRows[0]?.scannedItemCount ?? 0,
+    scannedQtyTotal: itemRows[0]?.scannedQtyTotal ?? 0,
+    extraQtyTotal: extraRows[0]?.extraQtyTotal ?? 0,
+  };
+}
+
+// GET /api/order-import/sessions/:id/delete-preview — Admin-only. Powers the delete
+// confirmation dialog's "N items already scanned against this file..." warning.
+router.get('/order-import/sessions/:id/delete-preview', requireAdmin, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
+    const { rows: sessRows } = await pool.query(
+      `SELECT id FROM order_import_sessions WHERE id = $1`,
+      [id],
+    );
+    if (!sessRows[0]) return res.status(404).json({ message: 'Session not found' });
+
+    // "stockApplied" = did this session's scans actually move stock? In the live-scan model
+    // every scan applies its own delta immediately (applyLiveScanStock) WITHOUT ever setting
+    // stock_applied_at, so we must detect stock from the presence of non-voided received
+    // events, not from stock_applied_at (which is null for a normally-scanned session).
+    const { rows: stockRows } = await pool.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM order_scan_events
+         WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE AND total_qty <> 0
+       ) AS "stockApplied"`,
+      [id],
+    );
+
+    const counts = await getSessionScanCounts(pool, id);
+    res.json({ ...counts, stockApplied: stockRows[0]?.stockApplied ?? false });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to compute delete preview' });
+  }
+});
+
+// DELETE /api/order-import/sessions/:id?mode=replace|discard — Admin-only. The admin states
+// intent at delete time (the "will you re-upload a corrected version?" dialog):
+//
+//   mode=replace (default): soft-delete only. Scan items/events stay pointed at this
+//     (now-deleted) session and stock is LEFT in place — the physical boxes are real and get
+//     carried forward onto whichever corrected CSV is next uploaded into the same
+//     (plant, orderDate) slot (see remapDeletedSessionScans, invoked from the upload handler).
+//     Because stock is never reversed here, remap never has to re-add it — the boxes simply
+//     stay counted through the delete→re-upload cycle.
+//
+//   mode=discard: the admin does NOT want this CSV at all. Reverse the stock its scans moved,
+//     void its scan events, reset its scan items to pending (so it leaves Master View/reports),
+//     and mark it resolved (remapped_to_session_id = self) so the NEXT upload is treated as a
+//     brand-new file rather than inheriting this deleted CSV's slot and scans.
+router.delete('/order-import/sessions/:id', requireAdmin, async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  const userCode = (req.user as any)?.userCode ?? null;
+  const userName = (req.user as any)?.name ?? null;
+  const discard = String(req.query.mode ?? 'replace') === 'discard';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const sessResult = await client.query(
+      `SELECT * FROM order_import_sessions WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    const session = sessResult.rows[0];
+    if (!session) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Session not found' });
+    }
+
+    const scanCounts = await getSessionScanCounts(client, id);
+
+    // Stock reversal + scan teardown only happen on a permanent (discard) delete — a replace
+    // delete deliberately leaves both intact for the remap to carry forward.
+    const stockReversed: Array<{ barcode: string; qty: number; extraQty: number }> = [];
+    if (discard) {
+      // Reverse stock this session's scans actually moved. Driven off the presence of received
+      // events, NOT stock_applied_at: live scanning (applyLiveScanStock) applies stock per scan
+      // without ever setting stock_applied_at, so gating on that flag would skip the reversal
+      // entirely for a normally-scanned session.
+      const { rows: received } = await client.query(
+        `SELECT MAX(barcode) AS barcode,
+                SUM(total_qty)::int AS qty,
+                COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
+         FROM order_scan_events
+         WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
+         GROUP BY LOWER(barcode)
+         HAVING SUM(total_qty) <> 0`,
+        [id],
+      );
+
+      for (const r of received) {
+        // Lock the plant-stock row and clamp against its CURRENT value before writing — stock
+        // may have moved (dispatch, another session) since this session's apply, so blindly
+        // subtracting r.qty with a GREATEST(0, ...) floor would silently remove less than the
+        // ledger row claims. Computing the actual delta up front keeps the negative
+        // stock_movements row truthful (what was actually reversed, not what was requested).
+        const { rows: plantRows } = await client.query(
+          `SELECT in_stock, extra_qty FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
+          [r.barcode, session.plant],
+        );
+        const actualQty = Math.min(r.qty, Number(plantRows[0]?.in_stock ?? 0));
+        const actualExtraQty = Math.min(r.extra_qty, Number(plantRows[0]?.extra_qty ?? 0));
+        if (actualQty <= 0 && actualExtraQty <= 0) continue;
+
+        await client.query(
+          `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
+          [actualQty, r.barcode],
+        );
+        if (plantRows[0]) {
+          await client.query(
+            `UPDATE product_plant_stock
+             SET in_stock = in_stock - $1, extra_qty = extra_qty - $2, updated_at = NOW()
+             WHERE barcode = $3 AND plant = $4`,
+            [actualQty, actualExtraQty, r.barcode, session.plant],
+          );
+        }
+        await client.query(
+          `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
+           VALUES ($1, $2, $3, $4, 'adjust', 'Order CSV deleted — rollback', $5, NOW())`,
+          [r.barcode, session.plant, -actualQty, -actualExtraQty, id],
+        );
+        stockReversed.push({ barcode: r.barcode, qty: actualQty, extraQty: actualExtraQty });
+      }
+
+      // Tear down the scan work so it leaves Master View/reports and can never be carried
+      // forward: void the events and reset the items to pending.
+      await client.query(
+        `UPDATE order_scan_events SET voided = true WHERE session_id = $1 AND voided IS NOT TRUE`,
+        [id],
+      );
+      await client.query(
+        `UPDATE order_scan_items
+         SET total_scanned_qty = 0, scanned_pallets = 0, scanned_loose_qty = 0, status = 'pending'
+         WHERE session_id = $1`,
+        [id],
+      );
+    }
+
     // Raw pg (not Drizzle's .update().set()) so deleted_at gets the same IST wall-clock
     // convention as every other timestamp write in this app — see the matching comment in
     // order-scan.ts's /complete for why Drizzle's own serialization doesn't match.
-    await pool.query(
-      `UPDATE order_import_sessions SET is_deleted = true, deleted_at = $1, scan_status = 'available' WHERE id = $2`,
-      [new Date(), id],
+    //
+    // On discard, mark the session resolved by pointing remapped_to_session_id at itself: the
+    // upload replacement lookup and remapDeletedSessionScans both treat a non-null
+    // remapped_to_session_id as "already resolved, skip", so this deleted CSV can never be
+    // picked up as a remap target — the next upload for this slot is a brand-new file.
+    await client.query(
+      `UPDATE order_import_sessions
+       SET is_deleted = true, deleted_at = $1, deleted_by_code = $2, scan_status = 'available',
+           stock_applied_at = CASE WHEN $3 THEN NULL ELSE stock_applied_at END,
+           remapped_to_session_id = CASE WHEN $3 THEN $4 ELSE remapped_to_session_id END,
+           remapped_at = CASE WHEN $3 THEN $1 ELSE remapped_at END
+       WHERE id = $4`,
+      [new Date(), userCode, discard, id],
     );
 
-    res.json({ success: true });
+    await client.query('COMMIT');
+
+    const summary = { ...scanCounts, stockReversed, mode: discard ? 'discard' : 'replace' };
+
+    await storage.logActivity({
+      pageName: 'OrderImport',
+      action: discard ? 'delete-discard' : 'delete-for-replace',
+      entityType: 'orderImportSession',
+      entityId: id,
+      userCode,
+      userName,
+      details: { csvFileName: session.csv_file_name, plant: session.plant, ...summary },
+    });
+
+    res.json({ success: true, ...summary });
 
     broadcastOrderImportUpdate();
+    // Tell anyone actively scanning against this session right now, before they hit a scan
+    // and get a confusing 404 — see broadcastSessionDeleted's comment in order-scan.ts.
+    broadcastSessionDeleted(id);
+
+    // On a permanent (discard) delete, don't leave the plant idle: if the CSV we just removed
+    // was the active/front part, promote the next 'available' part in the same group so
+    // scanning continues on Part 2 automatically. Runs after COMMIT (seedAndActivateSession
+    // opens its own transaction) and self-guards — a no-op if another part is already active
+    // or none remain. Not done for a replace delete: there, the corrected re-upload reclaims
+    // the front slot itself, so promoting a later part would just fight FIFO order.
+    if (discard) {
+      try {
+        const nextId = await autoActivateNextInScope(
+          {
+            id,
+            plant: session.plant,
+            receivingSessionId: session.receiving_session_id ?? null,
+            csvFileName: session.csv_file_name,
+          },
+          userCode,
+        );
+        if (nextId) broadcastOrderImportUpdate();
+      } catch (e) {
+        console.error('[order-import] auto-activate next part after discard failed:', e);
+      }
+    }
   } catch (err) {
+    await client.query('ROLLBACK');
     res.status(500).json({ message: err instanceof Error ? err.message : 'Delete failed' });
+  } finally {
+    client.release();
   }
 });
 
@@ -704,6 +980,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       FROM order_scan_events ose
       WHERE ose.session_id = ANY($1::int[])
         AND ose.is_extra = true
+        AND ose.voided IS NOT TRUE
         AND ose.barcode IS NOT NULL
       GROUP BY ose.session_id, ose.barcode
     `, [sessionIds]);

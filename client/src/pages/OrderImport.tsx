@@ -190,6 +190,12 @@ export default function OrderImport() {
   const canWriteOrderImport = ["admin", "super-admin"].includes(role)
     || department === "billing"
     || hasPageWriteAccess("order-import");
+  // Deleting a CSV (with stock/scan rollback) is stricter than general Order Import write
+  // access — the server's DELETE/delete-preview routes require this exact admin/super-admin/
+  // billing set (requireAdmin in server/routes/order-import.ts), NOT hasPageWriteAccess, so a
+  // user only granted "Order Import" write access must not see an enabled delete button that
+  // would just 403.
+  const canDeleteOrderImport =canWriteOrderImport;
 
   // Form state
   const [plant, setPlant] = useState("");
@@ -221,6 +227,9 @@ export default function OrderImport() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [itemSearch, setItemSearch] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [deletePreview, setDeletePreview] = useState<{
+    scannedItemCount: number; scannedQtyTotal: number; extraQtyTotal: number; stockApplied: boolean;
+  } | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<number | null>(null);
   const [completeTarget, setCompleteTarget] = useState<number | null>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
@@ -471,6 +480,17 @@ export default function OrderImport() {
         );
       }
 
+      if (data.replacesSessionId) {
+        const carried = data.remapSummary?.itemsCarriedForward ?? 0;
+        toast({
+          title: "Linked as replacement",
+          description: carried > 0
+            ? `${carried} previously scanned item(s) were carried forward from the deleted CSV.`
+            : `Replaces the deleted CSV for this plant/date — no prior scans to carry forward.`,
+          className: "bg-green-50 border-green-200 text-green-900",
+        });
+      }
+
       toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) =>
@@ -542,11 +562,26 @@ export default function OrderImport() {
     onSettled: () => refetchAllSessionQueries(),
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: async (id: number) => {
-      await apiRequest("DELETE", `/api/order-import/sessions/${id}`);
+  // Fetches the scanned-item/stock counts shown in the delete confirmation dialog, so the
+  // admin knows how much will be reversed before confirming. Falls back to opening the
+  // dialog with generic copy if the preview call itself fails.
+  const deletePreviewMutation = useMutation({
+    mutationFn: async (id: number) =>
+      (await apiRequest("GET", `/api/order-import/sessions/${id}/delete-preview`)).json(),
+    onSuccess: (data, id) => {
+      setDeletePreview(data);
+      setDeleteTarget(id);
     },
-    onMutate: async (id) => {
+    onError: (_err: any, id) => {
+      setDeletePreview(null);
+      setDeleteTarget(id);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async ({ id, mode }: { id: number; mode: "replace" | "discard" }) =>
+      (await apiRequest("DELETE", `/api/order-import/sessions/${id}?mode=${mode}`)).json(),
+    onMutate: async ({ id }: { id: number; mode: "replace" | "discard" }) => {
       await Promise.all([
         qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] }),
         qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] }),
@@ -558,6 +593,7 @@ export default function OrderImport() {
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       const previousNotif        = qc.getQueryData(["/api/order-scan/notification"]);
       setDeleteTarget(null);
+      setDeletePreview(null);
       if (expandedId === id)     setExpandedId(null);
       if (scanExpandedId === id) setScanExpandedId(null);
       patchImportSessions((rows) => rows.filter((s) => s.id !== id));
@@ -584,6 +620,20 @@ export default function OrderImport() {
           qc.setQueryData(["/api/order-scan/notification"], context.previousNotif);
       }
       toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+    onSuccess: (data) => {
+      if (!(data?.scannedItemCount > 0)) return;
+      if (data.mode === "discard") {
+        toast({
+          title: "CSV removed",
+          description: `${data.scannedItemCount} scanned item(s) reverted${data.stockReversed?.length ? " and stock rolled back" : ""}. Your next upload for this plant/date will be treated as a new file.`,
+        });
+      } else {
+        toast({
+          title: "CSV deleted",
+          description: `${data.scannedItemCount} scanned item(s) held. Upload the corrected CSV for this plant/date and these scans will be carried forward automatically.`,
+        });
+      }
     },
     onSettled: () => refetchAllSessionQueries(),
   });
@@ -1154,11 +1204,7 @@ export default function OrderImport() {
                 </Button>
               </div>
               {/* Content */}
-              {/* isLoading (first load), NOT isFetching: this list polls every 2.5–8s, and with
-                  isFetching an empty/filtered result flipped to a spinner on every poll — the
-                  whole panel appeared to reload constantly. Background refetches now update the
-                  data silently and leave the rendered list in place. */}
-              {scanSessionsQuery.isLoading && availableScanSessions.length === 0 ? (
+              {scanSessionsQuery.isFetching && availableScanSessions.length === 0 ? (
                 <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
@@ -1228,10 +1274,12 @@ export default function OrderImport() {
                               </Button>
                               <Button size="sm" variant="ghost"
                                 className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30"
-                                disabled={!canWriteOrderImport}
-                                title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}
-                                onClick={(e) => { e.stopPropagation(); setDeleteTarget(s.id); }}>
-                                <Trash2 className="h-3.5 w-3.5" />
+                                disabled={!canDeleteOrderImport || deletePreviewMutation.isPending}
+                                title={!canDeleteOrderImport ? "Deleting a CSV is restricted to Admin" : undefined}
+                                onClick={(e) => { e.stopPropagation(); deletePreviewMutation.mutate(s.id); }}>
+                                {deletePreviewMutation.isPending && deletePreviewMutation.variables === s.id
+                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  : <Trash2 className="h-3.5 w-3.5" />}
                               </Button>
                             </div>
                           </div>
@@ -1416,8 +1464,7 @@ export default function OrderImport() {
                 </Button>
               </div>
               {/* Content */}
-              {/* isLoading not isFetching — same polling-flicker reason as the Available tab. */}
-              {scanSessionsQuery.isLoading && completedScanSessions.length === 0 ? (
+              {scanSessionsQuery.isFetching && completedScanSessions.length === 0 ? (
                 <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-green-600" />
                 </div>
@@ -1505,9 +1552,7 @@ export default function OrderImport() {
                     <SelectItem value="50">50</SelectItem>
                   </SelectContent>
                 </Select>
-                {/* Only on first load — this query polls, so an isFetching spinner blinked every
-                    few seconds and read as the page constantly reloading. */}
-                {sessionsQuery.isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
+                {sessionsQuery.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
               </div>
               {/* Content */}
               {sessionsQuery.isLoading ? (
@@ -1862,20 +1907,43 @@ export default function OrderImport() {
       </AlertDialog>
 
       {/* ── Delete confirmation ── */}
-      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) { setDeleteTarget(null); setDeletePreview(null); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete this import session?</AlertDialogTitle>
+            <AlertDialogTitle>Delete this CSV?</AlertDialogTitle>
             <AlertDialogDescription>
-              All rows in this session will be permanently deleted. This cannot be undone.
+              {deletePreview && deletePreview.scannedItemCount > 0 ? (
+                <>
+                  {deletePreview.scannedItemCount} item(s) already scanned against this file
+                  ({deletePreview.scannedQtyTotal} total qty
+                  {deletePreview.extraQtyTotal > 0 ? `, ${deletePreview.extraQtyTotal} extra qty` : ""}
+                  {deletePreview.stockApplied ? ", stock applied" : ""}).
+                  {" "}Will you re-upload a corrected version for this plant/date?
+                  <br /><br />
+                  <b>Yes, I'll re-upload:</b> these scans are held and carried forward automatically onto the corrected CSV.
+                  <br />
+                  <b>No, remove permanently:</b> these scans are reverted{deletePreview.stockApplied ? " and stock is rolled back" : ""}, and your next upload is treated as a brand-new file.
+                </>
+              ) : (
+                <>
+                  Will you re-upload a corrected version for this plant/date?
+                  {" "}Choose <b>re-upload later</b> to keep this slot for the corrected CSV, or
+                  {" "}<b>remove permanently</b> to treat your next upload as a brand-new file.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <AlertDialogCancel className="mt-0">Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-red-600 text-white hover:bg-red-700"
-              onClick={() => deleteTarget !== null && deleteMutation.mutate(deleteTarget)}
+              onClick={() => deleteTarget !== null && deleteMutation.mutate({ id: deleteTarget, mode: "discard" })}
               disabled={deleteMutation.isPending}>
-              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete"}
+              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Remove permanently"}
+            </AlertDialogAction>
+            <AlertDialogAction
+              onClick={() => deleteTarget !== null && deleteMutation.mutate({ id: deleteTarget, mode: "replace" })}
+              disabled={deleteMutation.isPending}>
+              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete, I'll re-upload"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

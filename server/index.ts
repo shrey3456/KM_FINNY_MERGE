@@ -93,6 +93,15 @@ app.use((req, res, next) => {
       SET order_date = TO_CHAR(created_at, 'YYYY-MM-DD')
       WHERE order_date IS NULL
     `);
+     // Delete-with-rollback for order-import CSVs: tracks who deleted a session and links a
+    // deleted session to whichever replacement CSV later carried its scan history forward.
+    await pool.query(`
+      ALTER TABLE order_import_sessions
+      ADD COLUMN IF NOT EXISTS deleted_by_code TEXT,
+      ADD COLUMN IF NOT EXISTS remapped_to_session_id INTEGER,
+      ADD COLUMN IF NOT EXISTS remapped_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS replaces_session_id INTEGER
+    `);
     console.log('Database migrations completed successfully');
   } catch (error) {
     console.error('Error running migrations:', error);
