@@ -12,6 +12,6 @@ vite.config.ts.*
 *.tmp
 *.swp   
 deploy.bat
-migrations/
+server/migrations/
 web.config
 .claude/

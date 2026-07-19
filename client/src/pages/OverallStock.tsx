@@ -4,8 +4,14 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Factory, Boxes, TrendingUp } from "lucide-react";
+import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -489,21 +495,34 @@ export default function OverallStock() {
                 buttonClassName={FILTER_BTN_CLASS}
               />
 
-              <div className="flex gap-2 ml-auto">
-                {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
-                  <Button key={fmt} variant="outline" size="sm" className={FILTER_BTN_CLASS}
-                    disabled={filtered.length === 0}
-                    onClick={() => {
-                      const exp = exportRows(filtered);
-                      const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
-                      if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
-                      if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
-                      if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
-                    }}
-                  >
-                    <FileDown className="h-3.5 w-3.5 mr-1" />{fmt}
-                  </Button>
-                ))}
+              {/* One Export control instead of three buttons; the format is picked from the menu. */}
+              <div className="ml-auto">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className={FILTER_BTN_CLASS} disabled={filtered.length === 0}>
+                      <FileDown className="h-3.5 w-3.5 mr-1" />
+                      Export
+                      <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-70" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-36">
+                    {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
+                      <DropdownMenuItem
+                        key={fmt}
+                        onSelect={() => {
+                          const exp = exportRows(filtered);
+                          const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                          if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
+                          if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
+                          if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
+                        }}
+                      >
+                        <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />
+                        {fmt}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             </>
           }
