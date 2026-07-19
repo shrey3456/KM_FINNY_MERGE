@@ -48,6 +48,15 @@ function broadcastScanEvent(sessionId: number, payload: object) {
   });
 }
 
+// Tells any device actively scanning against this session (joined via {type:'join',
+// sessionId}) that it was just deleted — see the 'session-deleted' handler in
+// client/src/pages/Scanning/Scan.tsx, which shows a toast and lets the page's normal
+// active-session polling fall back to "no active session" without the scanner needing to
+// hit a scan and get a confusing 404. Called from order-import.ts's DELETE handler.
+export function broadcastSessionDeleted(sessionId: number) {
+  broadcastScanEvent(sessionId, { type: 'session-deleted', sessionId });
+}
+
 export function initOrderScanWs(httpServer: HttpServer) {
   // Use noServer so we manually control which upgrades we handle.
   // This prevents conflicts with Vite HMR, which also listens on the same
@@ -268,17 +277,21 @@ function resolveFullPalletSize(
 // "active" flip anymore. Safe to call from an already-open client/transaction (pass one in)
 // or standalone (a pool client is grabbed and released internally).
 async function seedSessionItemsWithClient(client: any, id: number, plant: string): Promise<void> {
+  // Per-item idempotency (not all-or-nothing): a session can already have SOME scan items
+  // seeded here — a delete-with-rollback replacement (see remapDeletedSessionScans) moves a
+  // deleted session's scan items onto this one BEFORE seeding, for barcodes with prior scan
+  // history. Only the remaining CSV rows still need fresh scan items.
   const existingResult = await client.query(
-    'SELECT id FROM order_scan_items WHERE session_id = $1 LIMIT 1',
+    'SELECT order_import_item_id AS "orderImportItemId" FROM order_scan_items WHERE session_id = $1 AND order_import_item_id IS NOT NULL',
     [id],
   );
-  if (existingResult.rows.length > 0) return;
+  const alreadySeededItemIds = new Set(existingResult.rows.map((r: any) => r.orderImportItemId));
 
   const importItemsResult = await client.query(
     'SELECT * FROM order_import_items WHERE session_id = $1',
     [id],
   );
-  const importItems = importItemsResult.rows;
+  const importItems = importItemsResult.rows.filter((i: any) => !alreadySeededItemIds.has(i.id));
   if (importItems.length === 0) return;
 
   const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
@@ -392,7 +405,7 @@ export async function seedAndActivateSession(id: number, userCode: string | null
 // ordered by partIndex — so an unrelated 'available' session for the same plant can never
 // jump the queue. Otherwise fall back to plant-wide behaviour. Either way, only proceed if
 // nothing else in that scope is already active (avoid stealing an active lock).
-async function autoActivateNextInScope(
+export async function autoActivateNextInScope(
   completed: { id: number; plant: string; receivingSessionId: number | null; csvFileName: string },
   userCode: string | null,
 ): Promise<number | null> {
@@ -830,55 +843,57 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
       [userCode, new Date(), id],
     );
 
-    // Pre-populate orderScanItems only if none exist yet.
-    // The lock on the session row above means only one request can reach here
+    // Pre-populate orderScanItems for any CSV rows not already seeded. Per-item idempotency
+    // (not all-or-nothing): a session can already have SOME scan items here — a
+    // delete-with-rollback replacement (see remapDeletedSessionScans) moves a deleted
+    // session's scan items onto this one before activation, for barcodes with prior scan
+    // history. The lock on the session row above means only one request can reach here
     // at a time, so there is no double-insert race.
     const existingResult = await client.query(
-      'SELECT id FROM order_scan_items WHERE session_id = $1 LIMIT 1',
+      'SELECT order_import_item_id AS "orderImportItemId" FROM order_scan_items WHERE session_id = $1 AND order_import_item_id IS NOT NULL',
       [id],
     );
+    const alreadySeededItemIds = new Set(existingResult.rows.map((r: any) => r.orderImportItemId));
 
-    if (existingResult.rows.length === 0) {
-      const importItemsResult = await client.query(
-        'SELECT * FROM order_import_items WHERE session_id = $1',
-        [id],
-      );
-      const importItems = importItemsResult.rows;
+    const importItemsResult = await client.query(
+      'SELECT * FROM order_import_items WHERE session_id = $1',
+      [id],
+    );
+    const importItems = importItemsResult.rows.filter((i: any) => !alreadySeededItemIds.has(i.id));
 
-      if (importItems.length > 0) {
-        const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
-        let productMap = new Map<string, any>();
-        if (barcodes.length > 0) {
-          const prodResult = await client.query(
-            `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
-             FROM products WHERE barcode = ANY($1)`,
-            [barcodes],
-          );
-          prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
-        }
-
-        const vals: any[] = [];
-        const placeholders: string[] = [];
-        let pi = 1;
-        for (const item of importItems) {
-          const prod = item.barcode ? productMap.get(item.barcode) : null;
-          // Reuse getPalletSize but with snake_case keys from pg driver
-          const prodObj = prod
-            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
-            : null;
-          const palletSize = prodObj ? resolveFullPalletSize(prodObj, session.plant) : 0;
-          vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
-          placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
-          pi += 7;
-        }
-
-        await client.query(
-          `INSERT INTO order_scan_items
-             (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
-           VALUES ${placeholders.join(',')}`,
-          vals,
+    if (importItems.length > 0) {
+      const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
+      let productMap = new Map<string, any>();
+      if (barcodes.length > 0) {
+        const prodResult = await client.query(
+          `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
+           FROM products WHERE barcode = ANY($1)`,
+          [barcodes],
         );
+        prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
       }
+
+      const vals: any[] = [];
+      const placeholders: string[] = [];
+      let pi = 1;
+      for (const item of importItems) {
+        const prod = item.barcode ? productMap.get(item.barcode) : null;
+        // Reuse getPalletSize but with snake_case keys from pg driver
+        const prodObj = prod
+          ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
+          : null;
+        const palletSize = prodObj ? resolveFullPalletSize(prodObj, session.plant) : 0;
+        vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
+        placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
+        pi += 7;
+      }
+
+      await client.query(
+        `INSERT INTO order_scan_items
+           (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+         VALUES ${placeholders.join(',')}`,
+        vals,
+      );
     }
 
     await client.query('COMMIT');
@@ -1183,13 +1198,18 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
   try {
     await client.query('BEGIN');
 
+    // Verify session exists and hasn't been deleted (no lock needed — session row isn't
+    // mutated here). Rejecting a deleted session closes the window where a scan could land
+    // on a CSV an admin just deleted-with-rollback — see remapDeletedSessionScans, which
+    // reads/moves this session's scan items once a replacement is uploaded; a scan slipping
+    // in after that read would be silently lost.
     const sessResult = await client.query(
-      'SELECT id, plant, receiving_session_id AS "receivingSessionId" FROM order_import_sessions WHERE id = $1',
+      'SELECT id, plant, receiving_session_id AS "receivingSessionId" FROM order_import_sessions WHERE id = $1 AND is_deleted = false',
       [sessionId],
     );
     if (!sessResult.rows[0]) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Session not found' });
+      return res.status(404).json({ message: 'Session not found or has been deleted' });
     }
     const anchorSession = sessResult.rows[0];
     const groupId = anchorSession.receivingSessionId ?? anchorSession.id;
@@ -1457,9 +1477,14 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
 // already been finalized from these numbers, so voiding is blocked at that point.
 // This is purely additive: it doesn't touch the /scan endpoint or any other
 // existing read path — everything that already worked keeps working unchanged.
-router.post('/order-scan/events/:id/void', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
+router.post('/order-scan/events/:id/void', async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+
+  const role = ((req.user as any)?.role ?? '').toLowerCase().trim();
+  if (!ADMIN_ROLES.includes(role)) {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
 
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : null;
   const userCode = (req.user as any)?.userCode ?? null;

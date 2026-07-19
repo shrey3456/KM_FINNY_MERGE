@@ -48,9 +48,15 @@
         margin: 0;
         padding: 0;
         background-color: #ffffff;
+        /* The app shell (Layout) is h-screen/overflow-hidden and scrolls in its own
+           <main>. The document must therefore never scroll — without this, anything
+           that pushes #root past the viewport adds a second, outer scrollbar. */
+        overflow: hidden;
       }
       #root {
-        min-height: 100%;
+        /* height, not min-height: min-height lets #root grow past the viewport, which
+           is what produced the outer scrollbar alongside <main>'s. */
+        height: 100%;
         display: flex;
         flex-direction: column;
       }

@@ -93,7 +93,35 @@ app.use((req, res, next) => {
       SET order_date = TO_CHAR(created_at, 'YYYY-MM-DD')
       WHERE order_date IS NULL
     `);
+     // Delete-with-rollback for order-import CSVs: tracks who deleted a session and links a
+    // deleted session to whichever replacement CSV later carried its scan history forward.
+    await pool.query(`
+      ALTER TABLE order_import_sessions
+      ADD COLUMN IF NOT EXISTS deleted_by_code TEXT,
+      ADD COLUMN IF NOT EXISTS remapped_to_session_id INTEGER,
+      ADD COLUMN IF NOT EXISTS remapped_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS replaces_session_id INTEGER
+    `);
+    // Remembers the last scan-history → Notion upload target + column selection so the 30-min
+    // auto-sync (runAutoScanHistorySync) can reuse them. Single-row table (id is always 1).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS scan_history_notion_config (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        page_id TEXT,
+        columns JSONB,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
     console.log('Database migrations completed successfully');
+
+    // Auto-sync scan history to the configured Notion inventory DB every 30 minutes. No-ops
+    // quietly until a Notion DB is configured (via a manual upload or SCAN_HISTORY_NOTION_DB_ID),
+    // and skips a tick if the previous run is still going — see runAutoScanHistorySync.
+    const { runAutoScanHistorySync } = await import('./services/scanHistoryNotionSync');
+    const SCAN_HISTORY_SYNC_INTERVAL_MS = 15 * 60 * 1000;
+    setInterval(() => { void runAutoScanHistorySync(); }, SCAN_HISTORY_SYNC_INTERVAL_MS);
+    // Kick one off shortly after boot so it doesn't wait a full interval.
+    setTimeout(() => { void runAutoScanHistorySync(); }, 15 * 1000);
   } catch (error) {
     console.error('Error running migrations:', error);
   }

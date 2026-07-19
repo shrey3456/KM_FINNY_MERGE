@@ -519,7 +519,7 @@ export default function OverallStock() {
                 buttonClassName={FILTER_BTN_CLASS}
               />
 
-              {/* One Export control on the right instead of three buttons; format picked from the menu. */}
+              {/* One Export control instead of three buttons; the format is picked from the menu. */}
               <div className="ml-auto">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
