@@ -1430,12 +1430,49 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       return res.json({ items: [], total: 0, plants: [] });
     }
 
+    // ── Date range → switch data source ──────────────────────────────────────
+    // product_plant_stock holds only CURRENT running totals (no history), so a date filter
+    // can't come from it. stock_movements is the append-only ledger where every scan writes a
+    // dated row, so when a range is given we aggregate that instead. The result deliberately
+    // covers ONLY what was received inside the window — earlier stock is not carried in, so
+    // the numbers mean "received in this period", not "balance as of".
+    // NOTE: only 'receive' rows exist today (nothing writes dispatch/adjust yet), so this is
+    // inbound movement. Outbound will fold in automatically once it starts writing negatives.
+    const from = typeof req.query.from === 'string' ? req.query.from.trim() : '';
+    const to = typeof req.query.to === 'string' ? req.query.to.trim() : '';
+    const extrasOnly = req.query.extrasOnly === 'true' || req.query.extrasOnly === '1';
+    const sort = typeof req.query.sort === 'string' ? req.query.sort.trim() : '';
+    const dateMode = !!(from || to);
+
     const params: any[] = [];
     const conds: string[] = [];
+
+    // Date params must be pushed FIRST: they appear earlier in the final SQL text (inside the
+    // subquery) than the plant/search conditions, and pg placeholders are positional.
+    let sourceSql = 'product_plant_stock';
+    if (dateMode) {
+      const dateConds: string[] = [];
+      if (from) { params.push(from); dateConds.push(`created_at::date >= $${params.length}::date`); }
+      if (to)   { params.push(to);   dateConds.push(`created_at::date <= $${params.length}::date`); }
+      sourceSql = `(
+        SELECT barcode,
+               plant,
+               SUM(qty)::int       AS in_stock,
+               SUM(extra_qty)::int AS extra_qty,
+               MAX(created_at)     AS updated_at
+        FROM stock_movements
+        WHERE ${dateConds.join(' AND ')}
+        GROUP BY barcode, plant
+        HAVING SUM(qty) <> 0 OR SUM(extra_qty) <> 0
+      )`;
+    }
 
     if (allowed !== null) {
       params.push(allowed);
       conds.push(`LOWER(pps.plant) = ANY($${params.length}::text[])`);
+    }
+    if (extrasOnly) {
+      conds.push(`pps.extra_qty > 0`);
     }
     if (plantParam) {
       params.push(plantParam.toLowerCase());
@@ -1470,10 +1507,14 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
           NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0)
         )                                                  AS "itemsPerPallet",
         pps.updated_at                                     AS "lastArrived"
-      FROM product_plant_stock pps
+      FROM ${sourceSql} pps
       LEFT JOIN products p ON LOWER(p.barcode) = LOWER(pps.barcode)
       ${where}
-      ORDER BY "itemName" ASC, pps.plant ASC
+      ORDER BY ${
+        sort === 'stock' ? 'pps.in_stock DESC, "itemName" ASC'
+        : sort === 'extra' ? 'pps.extra_qty DESC, "itemName" ASC'
+        : '"itemName" ASC, pps.plant ASC'
+      }
     `, params);
 
     const items = rows.map((r: any, i: number) => {
@@ -1497,7 +1538,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       };
     });
 
-    res.json({ items, total: items.length, plants: allowed });
+    // dateMode tells the client that inStock/extraQty mean "received in the selected window",
+    // not "total on hand", so it can label the columns honestly.
+    res.json({ items, total: items.length, plants: allowed, dateMode, from: from || null, to: to || null });
   } catch (error) {
     console.error('Error generating plant stock report:', error);
     res.status(500).json({ error: 'Failed to generate plant stock report' });

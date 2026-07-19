@@ -82,6 +82,17 @@ app.use((req, res, next) => {
       ALTER TABLE order_scan_events
       ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0
     `);
+
+    // Order Date is now mandatory on upload and is what Master View scopes by (it replaced the
+    // old created_at/upload-day filter). Rows imported before that change can have a NULL
+    // order_date and would otherwise drop out of Master View entirely — backfill them from the
+    // day they were uploaded, which is what the old filter used anyway, so their behavior is
+    // preserved exactly. One-time and idempotent (only touches NULLs).
+    await pool.query(`
+      UPDATE order_import_sessions
+      SET order_date = TO_CHAR(created_at, 'YYYY-MM-DD')
+      WHERE order_date IS NULL
+    `);
     console.log('Database migrations completed successfully');
   } catch (error) {
     console.error('Error running migrations:', error);

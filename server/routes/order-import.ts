@@ -98,8 +98,12 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
     const page     = Math.max(1, parseInt(String(req.query.page     ?? '1')));
     const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? '10'))));
 
+    // Filters on the ORDER DATE (what the CSV was uploaded FOR) rather than created_at (when
+    // it happened to be uploaded). Those differ whenever a late part is added to an earlier
+    // order, and the order date is the value users actually think in — it's also what FIFO
+    // grouping and Master View key on, so all three now agree.
     const dateCondition = req.query.date
-      ? sql`(${orderImportSessions.createdAt})::date = ${String(req.query.date)}::date`
+      ? eq(orderImportSessions.orderDate, String(req.query.date))
       : null;
 
     const forcedPlant = (req as any).importViewPlant as string | null;
@@ -131,6 +135,9 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
         importedByCode: orderImportSessions.importedByCode,
         importedByName: users.name,
         createdAt:      orderImportSessions.createdAt,
+        // The date this CSV was uploaded FOR (chosen at upload). Distinct from createdAt, and
+        // what every date filter/display on the Order Import page now uses.
+        orderDate:      orderImportSessions.orderDate,
         scanStatus:     orderImportSessions.scanStatus,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex:      orderImportSessions.partIndex,
@@ -172,14 +179,21 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     const userCode = (req.user as any)?.userCode ?? null;
     const normOrderDate = orderDate && String(orderDate).trim() ? String(orderDate).trim() : null;
 
+    // Order Date is mandatory: it's what decides FIFO grouping (plant + orderDate) AND what
+    // Master View scopes by. An import without one can't be placed in a group at all.
+    if (!normOrderDate) {
+      return res.status(400).json({ message: 'Order Date is required — it determines which CSVs merge together as parts of one order.' });
+    }
+
     // ── Auto-group by (plant + order date) ───────────────────────────────────────
     // Look for an existing non-deleted group for this plant + order date. If found,
     // join it as the next part; otherwise this CSV starts a new group (becomes Part 1
     // and self-assigns its own id as the group id after insert).
+    // Runs BEFORE the past-date check below, which needs to know whether a group exists.
     let effectiveGroupId: number | null = null;
     let computedPartIndex = 1;
     let joinedExistingGroup = false;
-    if (normOrderDate) {
+    {
       const existing = await db
         .select({ id: orderImportSessions.id, receivingSessionId: orderImportSessions.receivingSessionId, partIndex: orderImportSessions.partIndex })
         .from(orderImportSessions)
@@ -193,6 +207,20 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
         effectiveGroupId = existing[0].receivingSessionId ?? existing[0].id;
         computedPartIndex = Math.max(...existing.map((e) => e.partIndex ?? 0)) + 1;
         joinedExistingGroup = true;
+      }
+    }
+
+    // A brand-new order can't be created for a date that has already passed — but adding a
+    // LATE PART to an order that already exists is allowed, otherwise a multi-day delivery
+    // could never receive its remaining CSVs once its order date rolled by. Enforced here (not
+    // just via the date picker) since a min= attribute is trivially bypassed.
+    if (!joinedExistingGroup) {
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      if (normOrderDate < today) {
+        return res.status(400).json({
+          message: `Order Date cannot be in the past for a new order (got ${normOrderDate}, today is ${today}). Adding a part to an existing order for that date is allowed.`,
+        });
       }
     }
 
@@ -577,9 +605,14 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       conditions = [eq(orderImportSessions.isDeleted, false), inArray(orderImportSessions.id, ids)];
       if (forcedPlant) conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`);
     } else if (dateStr) {
+      // Matches the ORDER DATE chosen at upload — the same value FIFO grouping keys on — not
+      // the day the file happened to be uploaded. Using created_at here meant a CSV uploaded on
+      // a different day than its order date (e.g. a late part) silently dropped out of Master
+      // View even though it was correctly part of the group. Legacy NULL order_date rows are
+      // backfilled from created_at at startup (see server/index.ts), so no fallback is needed.
       conditions = [
         eq(orderImportSessions.isDeleted, false),
-        sql`(${orderImportSessions.createdAt})::date = ${dateStr}::date`,
+        eq(orderImportSessions.orderDate, dateStr),
       ];
       if (forcedPlant) {
         conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`);

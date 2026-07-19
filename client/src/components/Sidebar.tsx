@@ -243,20 +243,19 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "scan-history",
         },
         {
-
           label: "Order Management",
           icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/order-import",
-          permission: "canAccessOrderManagement",
-          departments: ['billing'],
+          // permission: "canAccessOrderManagement",
+          // departments: ['billing'],
           pageKey: "order-import",
         },
         {
           label: "Order Reports",
           icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" style={{ fill: "#c4b5fd" }} />,
           path: "/order-reports",
-          permission: "canAccessOrderManagement",
-          departments: ['billing'],
+          // permission: "canAccessOrderManagement",
+          // departments: ['billing'],
           pageKey: "order-import",
         },
         {

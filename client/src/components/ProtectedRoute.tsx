@@ -39,11 +39,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
           return <NotFound />;
         }
 
-        if (requireOrderManagement && !userPermissions.canAccessOrderManagement) {
-          return <NotFound />;
-        }
-
         // Page-based access control for non-admin users
+        let hasPageGrant = true;
         if (requiredPage) {
           const role = (user as any)?.role ?? '';
           const isAdmin = role === 'admin' || role === 'super-admin';
@@ -54,10 +51,20 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
             } catch {
               allowedPages = [];
             }
-            if (!allowedPages.includes(requiredPage)) {
-              return <NotFound />;
-            }
+            hasPageGrant = allowedPages.includes(requiredPage);
           }
+        }
+
+        // requireOrderManagement is an older, department-only gate. When combined with
+        // requiredPage on the same route, either one passing is enough (OR, not AND) —
+        // otherwise a page granted via User Management's Allowed Pages would still be
+        // blocked by this legacy check.
+        if (requireOrderManagement && !userPermissions.canAccessOrderManagement && !hasPageGrant) {
+          return <NotFound />;
+        }
+
+        if (requiredPage && !hasPageGrant) {
+          return <NotFound />;
         }
 
         return <Component {...params} />;

@@ -187,10 +187,16 @@ export default function ScanOrderPage() {
   const { user: currentUser } = useUser();
   const [, navigate] = useLocation();
   const isDispatchUser = (currentUser?.department ?? '').toLowerCase().includes('dispatch');
-  // Force-completing a part (even with items still short) is admin-only for now — the
+  // Force-completing a part (even with items still short) is admin-only by default — the
   // shortage can be picked up by a later part and reconciled via the combined-report
   // FIFO adjustment logic, so dispatch scanners shouldn't be the ones deciding to close it.
-  const canCompletePart = ["admin", "super-admin"].includes(((currentUser as any)?.role ?? "").toLowerCase());
+  // Also allowed for: a user who BOTH has "scan-order" granted via Allowed Pages AND has
+  // the Supervisor designation — either alone is not enough.
+  const userDesignation = String((currentUser as any)?.designation || "").toLowerCase().trim();
+  let osAllowedPagesList: string[] = [];
+  try { osAllowedPagesList = JSON.parse((currentUser as any)?.allowedPages || "[]"); } catch { osAllowedPagesList = []; }
+  const canCompletePart = ["admin", "super-admin"].includes(((currentUser as any)?.role ?? "").toLowerCase())
+    || (osAllowedPagesList.includes("scan-order") && userDesignation === "supervisor");
   const queryClient = useQueryClient();
 
   // ── Master View / Separate CSVs tab state ────────────────────────────────
@@ -203,6 +209,9 @@ export default function ScanOrderPage() {
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
 
+  // Scanner sits in a collapsible panel above the full-width table. Closed on load so the
+  // table gets the whole viewport; the operator opens it when they need to scan.
+  const [osScannerOpen, setOsScannerOpen] = useState(false);
 
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
@@ -338,12 +347,14 @@ export default function ScanOrderPage() {
     return p?.isAutoScanEnabled === true;
   })();
 
-  // Master View has no manual plant/date pickers — it always shows the currently active
-  // session's own plant/date, derived from scanActivatedAt (stored as IST wall-clock, same
-  // convention as createdAt, so its date portion matches the day that CSV was uploaded).
+  // Master View has no manual plant/date pickers — it always follows the currently active
+  // session. Scoped by that session's ORDER DATE (the value chosen at upload, which is also
+  // what FIFO grouping keys on) so every part of the order shows together no matter which day
+  // each CSV was actually uploaded. Previously this used scanActivatedAt (≈ the upload/scan
+  // day), which split a group whenever its parts arrived on different days.
   const mvPlant = activeOrderScanSession?.plant ?? "";
-  const mvDate = activeOrderScanSession?.scanActivatedAt
-    ? String(activeOrderScanSession.scanActivatedAt).slice(0, 10)
+  const mvDate = activeOrderScanSession?.orderDate
+    ? String(activeOrderScanSession.orderDate).slice(0, 10)
     : "";
 
   // ── Embedded order-scan state (admin-loaded CSV) ───────────────────────────
@@ -447,8 +458,8 @@ export default function ScanOrderPage() {
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
   // Clearing the STV is meant for "the active session actually switched" (new CSV = probably
   // a new vehicle/delivery). It must NOT fire on the initial resolve (undefined → id), which
-  // happens on every page load/remount — that was wiping the STV restored from localStorage
-  // before the operator ever saw it, so returning to Scan always demanded a re-pick.
+  // happens on every page load/remount — that would wipe the STV restored from localStorage
+  // before the operator ever saw it, so returning to Scan would always demand a re-pick.
   const osPrevSessionIdRef = useRef<number | null>(null);
   useEffect(() => {
     setOsSelectedStv("");
@@ -1865,27 +1876,31 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       if (ipp > 0) osTotals.palletsExtra += qty / ipp;
     });
 
-    // Master View doesn't carry a per-item pallet-size field the way the Scan tab's CSV
-    // items do — only the CSV's own expected-pallets total per item — so Done/Remain
-    // pallets here are a proportional split of that total rather than an exact per-item
-    // division. Expected pallets itself is exact (summed straight from the CSV).
+    // Computed the same way every Master View row already displays its own pallet figures
+    // (quantity / itemsPerPallet — see the "Exp Plt"/"Done Plt"/etc. table cells and the
+    // mobile list below) rather than the CSV's raw "Expected Pallets" column, which has no
+    // guaranteed relationship to itemsPerPallet and previously made this total disagree
+    // with what every row underneath it actually shows.
     const mvTotals = allMvItems.reduce((acc, item) => {
       const exp = item.quantity ?? 0;
       const done = item.scannedQty ?? 0;
-      const expPlt = item.expectedPallets ?? 0;
+      const ipp = item.itemsPerPallet ?? 0;
       if (item._isExtra) {
         acc.extra += done;
+        if (ipp > 0) acc.palletsExtra += done / ipp;
       } else {
         const doneCapped = Math.min(done, exp);
         const remaining = Math.max(0, exp - done);
+        const overage = Math.max(0, done - exp);
         acc.expected  += exp;
         acc.done      += doneCapped;
         acc.remaining += remaining;
-        acc.extra     += Math.max(0, done - exp);
-        acc.palletsExpected += expPlt;
-        if (exp > 0) {
-          acc.palletsDone      += expPlt * (doneCapped / exp);
-          acc.palletsRemaining += expPlt * (remaining / exp);
+        acc.extra     += overage;
+        if (ipp > 0) {
+          acc.palletsExpected  += exp / ipp;
+          acc.palletsDone      += doneCapped / ipp;
+          acc.palletsRemaining += remaining / ipp;
+          if (overage > 0) acc.palletsExtra += overage / ipp;
         }
       }
       return acc;
@@ -2181,6 +2196,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+              )}
+              {/* No STVs configured for this plant — say so instead of rendering nothing, which
+                  looked like a missing/broken control (notably on production, where the plant's
+                  STV list hadn't been set up). */}
+              {!osStvsQuery.isLoading && stvs.length === 0 && (
+                <div className="flex items-center">
+                  <span className="rounded border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                    No STV — create one in Plant Settings
+                  </span>
                 </div>
               )}
 
