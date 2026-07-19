@@ -1,5 +1,4 @@
 import { Router, Request, Response } from 'express';
-import { Client as NotionClient } from '@notionhq/client';
 import { db, pool } from '../db';
 import {
   scanSessions,
@@ -16,6 +15,7 @@ import { eq, desc, inArray, count, asc } from 'drizzle-orm';
 import { z } from 'zod';
 import { requirePageWrite } from '../lib/pageAccess';
 import { getUserPlants } from './order-scan';
+import { pushScanHistoryToNotion, saveScanHistoryNotionConfig } from '../services/scanHistoryNotionSync';
 
 const router = Router();
 
@@ -1225,188 +1225,26 @@ router.post('/reports/upload-to-notion', requirePageWrite('scan-history'), async
       plant?: string;
     };
 
-    // Use env var as default; allow override from request body
     const resolvedPageId = (pageId && pageId.trim()) || process.env.SCAN_HISTORY_NOTION_DB_ID || '';
-
     if (!resolvedPageId || !columns || columns.length === 0) {
       return res.status(400).json({ error: 'No Notion database ID configured. Set SCAN_HISTORY_NOTION_DB_ID in .env or enter it in the dialog.' });
     }
 
-    const notion = new NotionClient({ auth: process.env.NOTION_INTEGRATION_SECRET });
-
-    // Extract the 32-char hex ID from whatever is provided (full URL or bare ID)
-    const hexMatch = resolvedPageId.match(/([a-f0-9]{32})/i);
-    if (!hexMatch) {
-      return res.status(400).json({ error: 'Could not find a valid Notion ID. Paste the 32-character ID from the page URL.' });
-    }
-    const raw = hexMatch[1];
-    const databaseId = `${raw.slice(0,8)}-${raw.slice(8,12)}-${raw.slice(12,16)}-${raw.slice(16,20)}-${raw.slice(20)}`;
-
-    // --- Step 1: retrieve database schema ---
-    const existingDb = await notion.databases.retrieve({ database_id: databaseId }) as any;
-    const schema: Record<string, string> = {};
-    for (const [name, prop] of Object.entries(existingDb.properties ?? {})) {
-      schema[name] = (prop as any).type;
-    }
-
-    // Find the title property name
-    const titlePropName = Object.entries(schema).find(([, t]) => t === 'title')?.[0] ?? 'Name';
-
-    const selectedSet = new Set(columns);
-
-    // --- Step 2: add truly missing columns (only if not already in schema) ---
-    const propsToAdd: Record<string, any> = {};
-    for (const col of selectedSet) {
-      if (col in schema) continue; // already exists, skip
-      if (col === '#') continue;   // title handled separately
-      // Default types for new columns
-      if (['Qty', 'Pallets'].includes(col))          propsToAdd[col] = { number: {} };
-      else if (['Plant', 'Type'].includes(col))       propsToAdd[col] = { select: {} };
-      else                                            propsToAdd[col] = { rich_text: {} };
-    }
-    if (Object.keys(propsToAdd).length > 0) {
-      await notion.databases.update({ database_id: databaseId, properties: propsToAdd });
-      // Merge new columns into schema with their default types
-      for (const [col, def] of Object.entries(propsToAdd)) {
-        schema[col] = Object.keys(def)[0];
-      }
-    }
-
-    // Helper: format a value to match the Notion property type
-    function toNotionValue(propType: string, value: any): any {
-      const str = String(value ?? '');
-      switch (propType) {
-        case 'title':     return { title:      [{ text: { content: str } }] };
-        case 'rich_text': return { rich_text:  [{ text: { content: str } }] };
-        case 'number':    return { number: isNaN(parseFloat(str)) ? 0 : parseFloat(str) };
-        case 'select':    return str ? { select: { name: str } } : { select: null };
-        case 'date': {
-          try {
-            const d = new Date(value);
-            if (!isNaN(d.getTime())) return { date: { start: d.toISOString() } };
-          } catch {}
-          return { date: null };
-        }
-        case 'checkbox':  return { checkbox: Boolean(value) };
-        default:          return { rich_text:  [{ text: { content: str } }] };
-      }
-    }
-
-    // --- Step 3: fetch scan history rows ---
-    // Plant scoping mirrors GET /reports/scan-history: admins export any plant; others are
-    // limited to their assigned plant(s), so a restricted user can't push other plants to Notion.
-    const allowedPlants = getUserPlants(_req.user);
-    const conditions: string[] = [];
-    const params: (string | boolean | string[])[] = [];
-
-    if (allowedPlants !== null) {
-      if (allowedPlants.length === 0) {
-        return res.json({ success: true, fetched: 0, uploaded: 0, errors: [], databaseId, url: `https://www.notion.so/${databaseId.replace(/-/g, '')}` });
-      }
-      params.push(allowedPlants);
-      conditions.push(`LOWER(ois.plant) = ANY($${params.length}::text[])`);
-    }
-    if (plant)   { params.push(plant.toLowerCase()); conditions.push(`LOWER(ois.plant) = $${params.length}`); }
-    if (date)    { params.push(date);    conditions.push(`DATE(ose.scanned_at) = $${params.length}`); }
-    if (scanner) { params.push(scanner); conditions.push(`ose.scanned_by_name = $${params.length}`); }
-    if (type === 'regular') conditions.push(`ose.is_extra = false`);
-    if (type === 'extra')   conditions.push(`ose.is_extra = true`);
-    if (search) {
-      params.push(`%${search.toLowerCase()}%`);
-      const n = params.length;
-      conditions.push(`(LOWER(COALESCE(ose.item_name,'')) LIKE $${n} OR LOWER(COALESCE(ose.barcode,'')) LIKE $${n} OR LOWER(COALESCE(ose.scanned_by_name,'')) LIKE $${n})`);
-    }
-
-    // Only upload rows not yet synced to Notion
-    conditions.push('ose.notion_synced_at IS NULL');
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    const dataRes = await pool.query(
-      `SELECT
-         ose.id,
-         ose.barcode,
-         ose.item_name        AS "itemName",
-         ose.pallets,
-         ose.total_qty        AS "totalQty",
-         ose.is_extra         AS "isExtra",
-         ose.stv,
-         ose.scanned_by_code  AS "scannedByCode",
-         ose.scanned_by_name  AS "scannedByName",
-         ose.scanned_at       AS "scannedAt",
-         ois.csv_file_name    AS "orderName",
-         ois.plant
-       FROM order_scan_events ose
-       JOIN order_import_sessions ois ON ois.id = ose.session_id
-       ${where}
-       ORDER BY ose.scanned_at ASC
-       LIMIT 2000`,
-      params,
-    );
-
-    const rows = dataRes.rows;
-
-    // --- Step 4: insert rows, formatting each value to match the DB's actual schema ---
-    let insertedCount = 0;
-    const insertErrors: string[] = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const h = rows[i];
-      try {
-        const rowNum = String(i + 1);
-
-        // Map our column names → raw values
-        const colValues: Record<string, any> = {
-          '#':          rowNum,
-          'Scanned By': h.scannedByName ?? '',
-          'Code':       h.scannedByCode ?? '',
-          'Item':       h.itemName ?? '',
-          'Barcode':    h.barcode ?? '',
-          'Order':      h.orderName ?? '',
-          'Plant':      h.plant || 'Unknown',
-          'Qty':        h.totalQty ?? 0,
-          'Pallets':    h.pallets != null ? parseFloat(String(h.pallets)) : 0,
-          'STV':        h.stv ?? '',
-          'Type':       h.isExtra ? 'Extra' : 'Regular',
-          'Time':       h.scannedAt ?? null,
-        };
-
-        // Always populate the title property first
-        const props: Record<string, any> = {
-          [titlePropName]: toNotionValue('title', colValues[titlePropName] ?? rowNum),
-        };
-
-        // Populate selected columns using the actual schema type
-        for (const col of selectedSet) {
-          if (col === titlePropName) continue; // already set above
-          if (!(col in schema)) continue;       // not in DB, skip
-          props[col] = toNotionValue(schema[col], colValues[col]);
-        }
-
-        await notion.pages.create({
-          parent: { database_id: databaseId },
-          properties: props,
-        });
-        // Mark this row as synced so it won't be re-uploaded
-        await pool.query(
-          `UPDATE order_scan_events SET notion_synced_at = NOW() WHERE id = $1`,
-          [h.id],
-        );
-        insertedCount++;
-      } catch (rowErr: any) {
-        console.error(`Row ${i + 1} insert failed:`, rowErr?.message);
-        insertErrors.push(`Row ${i + 1}: ${rowErr?.message}`);
-        if (insertErrors.length >= 5) break;
-      }
-    }
-
-    const dbUrl = `https://www.notion.so/${databaseId.replace(/-/g, '')}`;
-    return res.json({
-      success: true,
-      fetched: rows.length,
-      uploaded: insertedCount,
-      errors: insertErrors,
-      databaseId,
-      url: dbUrl,
+    // Push logic lives in the shared service so this manual upload and the 30-min auto-sync run
+    // identical code. Plant scoping mirrors GET /reports/scan-history: admins export any plant;
+    // others are limited to their assigned plant(s).
+    const result = await pushScanHistoryToNotion({
+      pageId: resolvedPageId,
+      columns,
+      allowedPlants: getUserPlants(_req.user),
+      date, search, scanner, type, plant,
     });
+
+    // Remember this target + column selection so the auto-sync reuses them (best-effort).
+    saveScanHistoryNotionConfig(result.databaseId, columns).catch((e) =>
+      console.error('Failed to persist scan-history Notion config:', e?.message ?? e));
+
+    return res.json({ success: true, ...result });
   } catch (error: any) {
     console.error('Error uploading to Notion:', error);
     return res.status(500).json({ error: error?.message ?? 'Failed to upload to Notion' });
