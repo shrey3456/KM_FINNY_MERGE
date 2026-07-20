@@ -434,12 +434,10 @@ export function DataTable<TData>({
 
       {isLoading ? (
         <div className="py-10 text-center text-sm text-muted-foreground">{loadingLabel}</div>
-      ) : allRows.length === 0 ? (
-        renderEmptyState(
-          computedHasActiveFilters ? noResultsState ?? emptyState : emptyState,
-          computedHasActiveFilters ? "No results match your filters." : "No data found.",
-        )
       ) : (
+        // The table always renders — even with no rows at all — so the column headers stay on
+        // screen and you can see the shape of the data. The empty/no-results message goes in the
+        // body instead of replacing the whole table.
         <div className={cn("rounded-md border", containerClassName)}>
           {computedShowSwipeHint && (
             <div className="flex items-center justify-center gap-1.5 border-b bg-muted/40 py-1 sm:hidden">
@@ -527,6 +525,18 @@ export function DataTable<TData>({
                 </tr>
               </thead>
               <tbody>
+                {pageRows.length === 0 && (
+                  <tr>
+                    <td colSpan={totalColSpan} className="border-b border-gray-200 px-3">
+                      {/* Same renderer as the standalone empty state, so a rich
+                          DataTableEmptyState (icon/title/description) works here too. A filter
+                          that matched nothing reads differently from having no data at all. */}
+                      {computedHasActiveFilters
+                        ? renderEmptyState(noResultsState ?? emptyState, "No results match your filters.")
+                        : renderEmptyState(emptyState, "No data found.")}
+                    </td>
+                  </tr>
+                )}
                 {pageRows.map(({ row, id }, rowIndex) => {
                   const globalRowIndex = paginationMode === "client" ? safePageIndex * pSize + rowIndex : rowIndex;
                   const clickable = onRowClick ? (isRowClickable ? isRowClickable(row) : true) : false;

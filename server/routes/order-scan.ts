@@ -575,6 +575,8 @@ router.get('/order-scan/notification', async (req: Request, res: Response) => {
         // Master View scopes by the ACTIVE session's order date (not the upload day), so the
         // client needs it here — see mvDate in Scan.tsx.
         orderDate: orderImportSessions.orderDate,
+        // Upload timestamp — the Scan header shows this in place of the CSV file name.
+        createdAt: orderImportSessions.createdAt,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex: orderImportSessions.partIndex,
       })
@@ -620,6 +622,8 @@ router.get('/order-scan/active-sessions', async (req: Request, res: Response) =>
         // Master View scopes by the ACTIVE session's order date (not the upload day), so the
         // client needs it here — see mvDate in Scan.tsx.
         orderDate: orderImportSessions.orderDate,
+        // Upload timestamp — the Scan header shows this in place of the CSV file name.
+        createdAt: orderImportSessions.createdAt,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex: orderImportSessions.partIndex,
       })

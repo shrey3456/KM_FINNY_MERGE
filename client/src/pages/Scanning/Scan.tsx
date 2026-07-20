@@ -116,6 +116,21 @@ function scanFmtIST(dt: string | null | undefined): string {
   return d.toLocaleString("en-IN", { timeZone: "UTC" });
 }
 
+// Upload date for the session header — date only, no clock, since it identifies which day's
+// upload this is. Parses the same bare-timestamp shape scanFmtIST handles.
+function scanFmtUploadDate(dt: string | null | undefined): string {
+  if (!dt) return "—";
+  const s = String(dt);
+  const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-IN", {
+    timeZone: "UTC",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 const normalize = (value?: string | number | null) =>
   String(value ?? "").trim().toLowerCase();
 
@@ -139,6 +154,10 @@ const CUSTOM_SCAN_SOUND_URL = "/sounds/scan-beep.mp3";
 // Remembers the operator's STV pick across page navigations (the Scan page unmounts when you
 // leave it, which would otherwise clear the selection and re-trigger "Select an STV").
 const OS_STV_STORAGE_KEY = "km-finny.scan.selectedStv";
+// Width split (percent) between the totals card and the scanner column — operator-draggable.
+const OS_TOTALS_PCT_KEY = "km-finny.scan.totalsWidthPct";
+const OS_TOTALS_PCT_MIN = 30;
+const OS_TOTALS_PCT_MAX = 80;
 let customScanSoundBroken = false; // set once the custom file is confirmed missing/unplayable
 let scanBeepCtx: AudioContext | null = null;
 
@@ -198,12 +217,48 @@ export default function ScanOrderPage() {
   const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("master-view");
   const [mvSearch,    setMvSearch]    = useState("");
   const [mvShowFiles, setMvShowFiles] = useState(false); // toggle: show/hide source-file names in Master View
-  // Part Order (Separate CSVs) no longer has its own date/plant pickers — it always follows
-  // the currently active session's own date + plant, exactly like Master View and Scan
-  // (mvDate/mvPlant, defined below). This closes a real plant-access gap: the old free-text
-  // plant field let anyone TYPE any plant name, and while the server already ignores that for
-  // plant-scoped (dispatch) users and forces their own plant, the field itself was misleading —
-  // it looked like cross-plant browsing was possible when it never actually worked that way.
+  // Clicking a totals box narrows the items table to just those rows. "" = show everything;
+  // clicking the active box again clears it.
+  const [osStatFilter, setOsStatFilter] = useState<"" | "done" | "remaining" | "extra">("");
+  // Draggable split between the totals card and the scanner column. Stored as a percent of the
+  // row's width so it survives a reload and adapts to any window size.
+  const totalsRowRef = useRef<HTMLDivElement | null>(null);
+  const [totalsPct, setTotalsPct] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem(OS_TOTALS_PCT_KEY));
+      return Number.isFinite(saved) && saved >= OS_TOTALS_PCT_MIN && saved <= OS_TOTALS_PCT_MAX ? saved : 60;
+    } catch { return 60; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(OS_TOTALS_PCT_KEY, String(Math.round(totalsPct))); } catch { /* private mode */ }
+  }, [totalsPct]);
+
+  // Pointer events (not mouse) so a stylus/touch drag works too. Listeners go on window so the
+  // drag keeps tracking even when the cursor leaves the thin handle.
+  const startTotalsResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const row = totalsRowRef.current;
+    if (!row) return;
+    const onMove = (ev: PointerEvent) => {
+      const rect = row.getBoundingClientRect();
+      if (!rect.width) return;
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setTotalsPct(Math.min(OS_TOTALS_PCT_MAX, Math.max(OS_TOTALS_PCT_MIN, pct)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  // No csvDate/csvPlant here: the Separate CSVs tab filters by mvDate/mvPlant, which are derived
+  // from the active scan session further down.
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
 
@@ -1415,6 +1470,17 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     };
   };
 
+  // Same totals-box filter the Scan tab uses, so clicking Done/Remaining/Extra narrows Master View
+  // to those rows too. Declared after mvRowState because it calls it.
+  const mvVisible = !osStatFilter
+    ? filtMvItems
+    : filtMvItems.filter((i) => {
+        const { done, remain, extra } = mvRowState(i);
+        if (osStatFilter === "done") return done > 0 && remain === 0;
+        if (osStatFilter === "remaining") return remain > 0;
+        return extra > 0;
+      });
+
   const mvColumns: DataTableColumn<MvMergedItem>[] = [
     {
       id: "state",
@@ -1675,6 +1741,17 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         partial: !done && effScanned > 0,
       };
     };
+
+    // Totals-box filter, applied after osRowState exists: Done = fully scanned, Remaining = still
+    // owed, Extra = over-scanned. Runs last so it narrows the already-searched, already-sorted list.
+    const osVisible = !osStatFilter
+      ? osFiltered
+      : osFiltered.filter((i) => {
+          const { doneQty, rem, extra } = osRowState(i);
+          if (osStatFilter === "done") return doneQty > 0 && rem === 0;
+          if (osStatFilter === "remaining") return rem > 0;
+          return extra > 0;
+        });
 
     const osColumns: DataTableColumn<OsScanItem>[] = [
       {
@@ -2779,8 +2856,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <Zap className="h-4 w-4 text-white" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-sm font-bold text-gray-900 leading-tight truncate max-w-xs lg:max-w-sm">
-                    {stripCsvExt(activeOrderScanSession.csvFileName)}
+                  {/* Upload date rather than the CSV file name — operators identify a session by
+                      when it came in. The file name is still available as the tooltip. */}
+                  <p
+                    className="text-sm font-bold text-gray-900 leading-tight truncate max-w-xs lg:max-w-sm"
+                    title={stripCsvExt(activeOrderScanSession.csvFileName)}
+                  >
+                    {scanFmtUploadDate(activeOrderScanSession.createdAt)}
                     {(osGroupCreditsQuery.data?.totalParts ?? 0) > 1 && (
                       <span className="ml-1.5 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
                         Part {osGroupCreditsQuery.data?.partIndex} of {osGroupCreditsQuery.data?.totalParts}
@@ -2856,9 +2938,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               ))}
             </div>
 
-            {/* ── Order totals — persistent across Scan / Master View, hidden on Separate CSVs ── */}
+            {/* ── Order totals — persistent across Scan / Master View, hidden on Separate CSVs ──
+                Two resizable columns on lg+: the --totals-col variable drives the split so the
+                drag handle can change it without Tailwind needing a static class. Below lg the
+                columns stack and the handle is hidden. */}
             {osTab !== "separate-csvs" && (
-            <div className="grid items-start gap-3 lg:grid-cols-[7fr_3fr]">
+            <div
+              ref={totalsRowRef}
+              style={{ "--totals-col": `${totalsPct}%` } as React.CSSProperties}
+              className="grid items-start gap-3 lg:grid-cols-[var(--totals-col)_0.75rem_minmax(0,1fr)] lg:gap-0"
+            >
               {/* Totals live in one card rather than four free-floating boxes, so the block reads as
                   a single unit. items-start on the row keeps this card at its natural height rather
                   than stretching to match the taller scanner column. */}
@@ -2872,22 +2961,39 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
+                {/* All four totals on one line; they stack 2×2 only on narrow screens. */}
+                {/* Each box filters the items table to its own rows; clicking the active one clears
+                    the filter. Total is the "show everything" box, so it doubles as Clear. */}
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {([
-                    { label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                    { label: "Done", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
-                    { label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-[#001d6e]", text: "text-[#001d6e]" },
-                    { label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-amber-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
-                  ] as const).map((s) => (
-                    <div key={s.label} className="rounded-lg border border-gray-100 bg-gray-50/70 px-2.5 py-1">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
-                        <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
-                      </div>
-                      <p className={`text-lg font-bold leading-tight ${s.text}`}>{s.value}</p>
-                      <p className="text-xs font-medium text-gray-500">{s.plt.toFixed(2)} plt</p>
-                    </div>
-                  ))}
+                    { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                    { key: "done", label: "Done", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                    { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-[#001d6e]", text: "text-[#001d6e]" },
+                    { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-amber-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                  ] as const).map((s) => {
+                    const isActive = osStatFilter === s.key;
+                    return (
+                      <button
+                        key={s.label}
+                        type="button"
+                        onClick={() => setOsStatFilter(isActive ? "" : s.key)}
+                        aria-pressed={isActive}
+                        title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                        className={`rounded-lg border px-2.5 py-1 text-left transition-colors ${
+                          isActive
+                            ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
+                            : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                        </div>
+                        <p className={`text-lg font-bold leading-tight ${s.text}`}>{s.value}</p>
+                        <p className="text-xs font-medium text-gray-500">{s.plt.toFixed(2)} plt</p>
+                      </button>
+                    );
+                  })}
                 </div>
 
                 <div className="space-y-1">
@@ -2902,6 +3008,29 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <span>{displayTotals.remaining} remaining</span>
                   </div>
                 </div>
+              </div>
+
+              {/* Drag handle — sits in the 0.75rem gutter column and trades width between the two
+                  cards. Keyboard-accessible via arrow keys since a pointer drag isn't reachable
+                  without a mouse. */}
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize totals and scanner columns"
+                aria-valuenow={Math.round(totalsPct)}
+                aria-valuemin={OS_TOTALS_PCT_MIN}
+                aria-valuemax={OS_TOTALS_PCT_MAX}
+                tabIndex={0}
+                onPointerDown={startTotalsResize}
+                onDoubleClick={() => setTotalsPct(60)}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowLeft") { e.preventDefault(); setTotalsPct((p) => Math.max(OS_TOTALS_PCT_MIN, p - 2)); }
+                  if (e.key === "ArrowRight") { e.preventDefault(); setTotalsPct((p) => Math.min(OS_TOTALS_PCT_MAX, p + 2)); }
+                }}
+                title="Drag to resize · double-click to reset"
+                className="group hidden cursor-col-resize touch-none select-none items-center justify-center rounded focus:outline-none focus:ring-2 focus:ring-[#001d6e]/40 lg:flex"
+              >
+                <span className="h-10 w-[3px] rounded-full bg-gray-200 transition-colors group-hover:bg-[#001d6e]" />
               </div>
 
               {/* Scanner controls sit beside the totals: STV picker, then the mode buttons under it. */}
@@ -3054,7 +3183,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     className="space-y-0"
                     containerClassName="rounded-none border-0"
                     columns={osColumns}
-                    data={osFiltered}
+                    data={osVisible}
                     getRowId={(item) => String(item.id)}
                     isLoading={osItemsQuery.isLoading}
                     loadingLabel="Loading items…"
@@ -3084,13 +3213,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <span className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
                       {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
                     </span>
-                    <button
-                      onClick={() => setMvShowFiles((v) => !v)}
-                      title={mvShowFiles ? "Hide file names" : "Show file names"}
-                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 shadow-sm hover:bg-gray-50"
-                    >
-                      {mvShowFiles ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                    </button>
                     {allMvItems.length > 0 && (
                       <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
                         <Download className="h-3.5 w-3.5" /> Export CSV
@@ -3113,7 +3235,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       <TableCard
                         icon={Layers}
                         title="Items"
-                        subtitle={`${filtMvItems.length} of ${allMvItems.length}`}
+                        subtitle={`${mvVisible.length} of ${allMvItems.length}`}
                         searchValue={mvSearch}
                         onSearchChange={setMvSearch}
                         searchPlaceholder="Search items…"
@@ -3122,7 +3244,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           className="space-y-0"
                           containerClassName="rounded-none border-0"
                           columns={mvColumns}
-                          data={filtMvItems}
+                          data={mvVisible}
                           getRowId={(item, i) => `${item.barcode ?? "na"}-${i}`}
                           emptyState="No items found"
                           noResultsState="No items match your search."
