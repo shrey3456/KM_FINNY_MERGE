@@ -2024,23 +2024,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             <div className="grid grid-cols-4 gap-2">
               <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
                 <p className="text-[10px] uppercase tracking-wide text-gray-400">Total</p>
-                <p className="text-lg font-bold text-gray-900">{displayTotals.expected}</p>
-                <p className="text-[10px] text-gray-400">{displayTotals.palletsExpected.toFixed(2)} plt</p>
+                <p className="text-xl font-bold text-gray-900">{displayTotals.expected}</p>
+                <p className="text-xl font-bold text-gray-600">{displayTotals.palletsExpected.toFixed(2)} plt</p>
               </div>
               <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
-                <p className="text-[10px] uppercase tracking-wide text-gray-400">Done</p>
-                <p className="text-lg font-bold text-emerald-600">{displayTotals.done}</p>
-                <p className="text-[10px] text-gray-400">{displayTotals.palletsDone.toFixed(2)} plt</p>
+                <p className="text-[10px] uppercase tracking-wide text-gray-400">Received Qty</p>
+                <p className="text-xl font-bold text-green-600">{displayTotals.done}</p>
+                <p className="text-xl font-bold text-green-600">{displayTotals.palletsDone.toFixed(2)} plt</p>
               </div>
               <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
                 <p className="text-[10px] uppercase tracking-wide text-gray-400">Remaining</p>
-                <p className="text-lg font-bold text-[#001d6e]">{displayTotals.remaining}</p>
-                <p className="text-[10px] text-gray-400">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
+                <p className="text-xl font-bold text-red-600">{displayTotals.remaining}</p>
+                <p className="text-xl font-bold text-red-600">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
               </div>
               <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
                 <p className="text-[10px] uppercase tracking-wide text-gray-400">Extra</p>
-                <p className={`text-lg font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{displayTotals.extra}</p>
-                <p className="text-[10px] text-gray-400">{displayTotals.palletsExtra.toFixed(2)} plt</p>
+                <p className={`text-xl font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{displayTotals.extra}</p>
+                <p className="text-xl font-bold text-gray-600">{displayTotals.palletsExtra.toFixed(2)} plt</p>
               </div>
             </div>
             )}
@@ -2123,16 +2123,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           </p>
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
                             <span className="text-xs text-gray-500">
-                              <span className="font-bold text-gray-800">{scanned}</span>/{exp}
+                              <span className="font-bold text-green-600">{scanned}</span>/{exp}
                               {(item.itemsPerPallet ?? 0) > 0 && (
-                                <span className="text-gray-400"> ({(exp / (item.itemsPerPallet ?? 1)).toFixed(2)} plt)</span>
+                                <span className="text-sm font-bold text-gray-600"> ({(exp / (item.itemsPerPallet ?? 1)).toFixed(2)} plt)</span>
                               )}
                             </span>
                             {remaining > 0 && (
-                              <span className="text-xs font-semibold text-[#001d6e]">
+                              <span className="text-xs font-semibold text-red-600">
                                 {remaining} left
                                 {(item.itemsPerPallet ?? 0) > 0 && (
-                                  <span className="text-purple-600"> (≈{(remaining / (item.itemsPerPallet ?? 1)).toFixed(2)} plt)</span>
+                                  <span className="text-sm font-bold text-red-600"> (≈{(remaining / (item.itemsPerPallet ?? 1)).toFixed(2)} plt)</span>
                                 )}
                               </span>
                             )}
@@ -2140,7 +2140,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               <span className="text-xs font-semibold text-amber-600">+{extra} extra</span>
                             )}
                             {scanned > 0 && (item.itemsPerPallet ?? 0) > 0 && (
-                              <span className="text-xs text-purple-600">{(scanned / (item.itemsPerPallet ?? 1)).toFixed(2)} plt</span>
+                              <span className="text-sm font-bold text-green-600">{(scanned / (item.itemsPerPallet ?? 1)).toFixed(2)} plt</span>
                             )}
                           </div>
                           {credit && (
@@ -2434,22 +2434,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-gray-400">Total</p>
                 <p className="text-2xl font-bold text-gray-900">{displayTotals.expected}</p>
-                <p className="text-[11px] text-gray-400">{displayTotals.palletsExpected.toFixed(2)} plt</p>
+                <p className="text-xl font-bold text-gray-600">{displayTotals.palletsExpected.toFixed(2)} plt</p>
               </div>
               <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Done</p>
-                <p className="text-2xl font-bold text-emerald-600">{displayTotals.done}</p>
-                <p className="text-[11px] text-gray-400">{displayTotals.palletsDone.toFixed(2)} plt</p>
+                <p className="text-xs uppercase tracking-wide text-gray-400">Received Qty</p>
+                <p className="text-2xl font-bold text-green-600">{displayTotals.done}</p>
+                <p className="text-xl font-bold text-green-600">{displayTotals.palletsDone.toFixed(2)} plt</p>
               </div>
               <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-gray-400">Remaining</p>
-                <p className="text-2xl font-bold text-[#001d6e]">{displayTotals.remaining}</p>
-                <p className="text-[11px] text-gray-400">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
+                <p className="text-2xl font-bold text-red-600">{displayTotals.remaining}</p>
+                <p className="text-xl font-bold text-red-600">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
               </div>
               <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-gray-400">Extra</p>
                 <p className={`text-2xl font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{displayTotals.extra}</p>
-                <p className="text-[11px] text-gray-400">{displayTotals.palletsExtra.toFixed(2)} plt</p>
+                <p className="text-xl font-bold text-gray-600">{displayTotals.palletsExtra.toFixed(2)} plt</p>
               </div>
             </div>
             )}
@@ -2502,8 +2502,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode / SAP</th>
                             <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Exp Qty</th>
                             <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Exp Plt</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Done Qty</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Done Plt</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Received Qty</th>
+                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Received Plt</th>
                             <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Remain Qty</th>
                             <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Remain Plt</th>
                             <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Extra Qty</th>
@@ -2561,32 +2561,32 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 <td className="px-3 py-3 text-right text-gray-600 font-medium tabular-nums">
                                   {item.expectedQty}
                                 </td>
-                                <td className="px-3 py-3 text-right tabular-nums text-gray-500">
+                                <td className="px-3 py-3 text-right tabular-nums text-base font-bold text-gray-600">
                                   {(item.itemsPerPallet ?? 0) > 0
                                     ? (exp / (item.itemsPerPallet ?? 1)).toFixed(2)
                                     : <span className="text-gray-300">0.00</span>}
                                 </td>
                                 <td className="px-3 py-3 text-right tabular-nums font-bold">
                                   <span
-                                    className={done ? "text-emerald-700" : partial ? "text-amber-700" : "text-gray-400"}
+                                    className="text-green-600"
                                     title={`${item.scannedPallets ?? 0} plt + ${item.scannedLooseQty ?? 0} loose`}
                                   >
                                     {doneQty}
                                   </span>
                                 </td>
-                                <td className="px-3 py-3 text-right tabular-nums font-semibold">
+                                <td className="px-3 py-3 text-right tabular-nums text-base font-bold">
                                   {doneQty > 0 && (item.itemsPerPallet ?? 0) > 0
-                                    ? <span className="text-[#001d6e]">{(doneQty / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
+                                    ? <span className="text-green-600">{(doneQty / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
                                     : <span className="text-gray-300">0.00</span>}
                                 </td>
                                 <td className="px-3 py-3 text-right tabular-nums font-bold">
                                   {rem > 0
-                                    ? <span className="text-[#001d6e]">{rem}</span>
+                                    ? <span className="text-red-600">{rem}</span>
                                     : <span className="text-gray-300">0</span>}
                                 </td>
-                                <td className="px-3 py-3 text-right tabular-nums font-semibold">
+                                <td className="px-3 py-3 text-right tabular-nums text-base font-bold">
                                   {rem > 0 && (item.itemsPerPallet ?? 0) > 0
-                                    ? <span className="text-purple-600">{(rem / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
+                                    ? <span className="text-red-600">{(rem / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
                                     : <span className="text-gray-300">0.00</span>}
                                 </td>
                                 <td className="px-3 py-3 text-right tabular-nums font-semibold">
@@ -2594,7 +2594,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                     ? <span className="text-amber-600">+{extra}</span>
                                     : <span className="text-gray-300">0</span>}
                                 </td>
-                                <td className="px-3 py-3 text-right tabular-nums font-semibold">
+                                <td className="px-3 py-3 text-right tabular-nums text-base font-bold">
                                   {extra > 0 && (item.itemsPerPallet ?? 0) > 0
                                     ? <span className="text-amber-600">{(extra / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
                                     : <span className="text-gray-300">0.00</span>}
@@ -2675,8 +2675,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 {mvShowFiles && <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Files</th>}
                                 <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp Qty</th>
                                 <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp Plt</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done Qty</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done Plt</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Received Qty</th>
+                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Received Plt</th>
                                 <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain Qty</th>
                                 <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain Plt</th>
                                 <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Extra Qty</th>
@@ -3147,14 +3147,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           </span>
                         ) : null}
                       </p>
-                      <p>Expected: <strong>{osPending.matchedItem.expectedQty}</strong> · Already scanned: <strong>{osPending.matchedItem.totalScannedQty}</strong></p>
+                      <p>Expected: <strong>{osPending.matchedItem.expectedQty}</strong> · Received Qty: <strong className="text-green-600">{osPending.matchedItem.totalScannedQty}</strong></p>
                       {(() => {
                         const remaining = Math.max(0, (osPending.matchedItem.expectedQty ?? 0) - (osPending.matchedItem.totalScannedQty ?? 0));
                         const remainingPallets = plt > 0 ? (remaining / plt).toFixed(2) : null;
                         return (
                           <p>
-                            Remaining: <strong>{remaining}</strong> boxes
-                            {remainingPallets != null && <> · <strong>{remainingPallets}</strong> plt</>}
+                            Remaining: <strong className="text-red-600">{remaining}</strong> boxes
+                            {remainingPallets != null && <> · <strong className="text-base font-bold text-red-600">{remainingPallets}</strong> plt</>}
                           </p>
                         );
                       })()}
