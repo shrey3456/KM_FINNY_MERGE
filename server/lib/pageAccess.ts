@@ -23,3 +23,23 @@ export function requirePageWrite(pageKey: string | string[]) {
     return res.status(403).json({ message: "Write access required" });
   };
 }
+
+// View-level gate for routes that only read/search data (no mutation). Admin/super-admin
+// always pass; anyone else passes if the page is in their allowedPages grant. Use this
+// instead of requirePageWrite for read-only endpoints — search/lookup shouldn't require
+// write access.
+export function requirePageAccess(pageKey: string | string[]) {
+  const pageKeys = Array.isArray(pageKey) ? pageKey : [pageKey];
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    const user = req.user as any;
+    const role = (user?.role ?? "").toString().toLowerCase();
+    if (WRITE_ADMIN_ROLES.includes(role)) return next();
+    let allowed: string[] = [];
+    try { allowed = JSON.parse(user?.allowedPages || "[]"); } catch { /* default [] */ }
+    if (pageKeys.some((key) => allowed.includes(key))) return next();
+    return res.status(403).json({ message: "Page access required" });
+  };
+}

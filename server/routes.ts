@@ -109,7 +109,7 @@ import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
 import orderImportRoutes from "./routes/order-import";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
-import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges } from "./services/notionInventorySync";
+import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
 import { requirePageWrite } from "./lib/pageAccess";
 
@@ -8624,7 +8624,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use("/api", apiRouter);
 
   // Every 24 hours: if DB has no products → full import from Notion;
-  // otherwise detect changes AND automatically apply them to the database.
+  // otherwise detect changes, and apply them automatically only if an admin has turned on
+  // the auto-apply toggle (notion_inventory_sync_config) — otherwise leave them pending for review.
   if (process.env.NOTION_INVENTORY_DATABASE_ID) {
     const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
     // syncImages: the boot-time run skips per-product image downloads so startup stays fast;
@@ -8638,13 +8639,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.log('[Notion Inventory Sync] DB is empty — running full import from Notion...');
           await fullSyncFromNotion();
         } else {
-          console.log(`[Notion Inventory Sync] Running scheduled detect + apply (images: ${syncImages ? 'on' : 'off'})...`);
+          const autoApplyEnabled = await getAutoApplyEnabled();
+          console.log(`[Notion Inventory Sync] Running scheduled detect${autoApplyEnabled ? ' + apply' : ' (auto-apply is off — review required)'} (images: ${syncImages ? 'on' : 'off'})...`);
           const detectReport = await detectChangesFromNotion('system', syncImages);
           const hasChanges = (detectReport.created ?? 0) + (detectReport.updated ?? 0) > 0;
-          if (hasChanges) {
+          if (hasChanges && autoApplyEnabled) {
             console.log(`[Notion Inventory Sync] ${detectReport.created} new, ${detectReport.updated} changed — applying now...`);
             await applyPendingChanges();
             console.log('[Notion Inventory Sync] Auto-apply complete.');
+          } else if (hasChanges) {
+            console.log(`[Notion Inventory Sync] ${detectReport.created} new, ${detectReport.updated} changed — left pending for review (auto-apply is off).`);
           } else {
             console.log('[Notion Inventory Sync] No changes found, nothing to apply.');
           }

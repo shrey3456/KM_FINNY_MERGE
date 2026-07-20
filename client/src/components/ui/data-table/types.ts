@@ -18,6 +18,14 @@ export interface DataTableColumn<TData> {
   cellClassName?: string;
   /** Stops the row's onClick (e.g. expansion toggle) from firing when this cell is clicked. */
   preventRowClick?: boolean;
+  /**
+   * Totals row (enable with DataTable's `enableTotalsRow`). Receives every filtered row, not just
+   * the current page. Omit and the column auto-sums when its accessor yields numbers; return null
+   * from a custom total to leave the cell blank.
+   */
+  total?: (rows: TData[]) => ReactNode;
+  /** Set false to leave this column's totals cell blank even when its accessor is numeric. */
+  totalable?: boolean;
 }
 
 export interface DataTableEmptyState {

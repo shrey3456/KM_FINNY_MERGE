@@ -1,5 +1,6 @@
 import { Client } from '@notionhq/client';
 import { storage } from '../storage';
+import { pool } from '../db';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -696,3 +697,21 @@ export function getSyncStatus() {
 
 export function getSyncHistory(): SyncReport[] { return syncHistory; }
 export function getPendingReport(): SyncReport | null { return pendingReport; }
+
+// ─── Auto-apply toggle (server-persisted, shared across everyone) ─────────────
+// Gates whether the 24-hour scheduled sync (server/routes.ts) is allowed to apply detected
+// changes on its own. Off by default — the scheduled job then only detects and leaves changes
+// pending for an admin to review via the UI.
+export async function getAutoApplyEnabled(): Promise<boolean> {
+  const { rows } = await pool.query(`SELECT auto_apply_enabled AS "autoApplyEnabled" FROM notion_inventory_sync_config WHERE id = 1`);
+  return rows[0]?.autoApplyEnabled === true;
+}
+
+export async function setAutoApplyEnabled(enabled: boolean, updatedBy: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO notion_inventory_sync_config (id, auto_apply_enabled, updated_by, updated_at)
+     VALUES (1, $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET auto_apply_enabled = EXCLUDED.auto_apply_enabled, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+    [enabled, updatedBy],
+  );
+}

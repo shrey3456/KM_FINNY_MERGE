@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   History, Search, X, RefreshCw, FileDown,
-  User, UserCircle, Loader2, ScanLine, Upload,
+  User, UserCircle, Loader2, ScanLine, Upload, Trash2,
 } from "lucide-react";
+import { useAuth } from "../../hooks/use-auth";
+import { useToast } from "@/hooks/use-toast";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -22,7 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import PageHeader from "../components/PageHeader";
+import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -42,6 +44,9 @@ type ScanHistoryItem = {
   scannedAt: string;
   orderName: string;
   plant: string;
+  voided: boolean | null;
+  voidedAt: string | null;
+  voidReason: string | null;
 };
 
 type ScanHistoryResponse = {
@@ -111,6 +116,26 @@ function downloadPdf(filename: string, title: string, rows: Array<Array<string |
 const ALL_NOTION_COLUMNS = ["#", "Scanned By", "Code", "Item", "Barcode", "Order", "Plant", "Qty", "Pallets", "STV", "Type", "Time"] as const;
 
 const Reports = () => {
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const isAdmin = ["admin", "super-admin"].includes(((user as any)?.role ?? "").toLowerCase());
+  const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
+  const [voidReason, setVoidReason] = useState("");
+  const voidMutation = useMutation({
+    mutationFn: (payload: { id: number; reason: string }) =>
+      apiRequest("POST", `/api/order-scan/events/${payload.id}/void`, { reason: payload.reason }).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
+      // Voiding reverses real stock (product_plant_stock/products.in_stock) — keep Overall
+      // Stock's cache from showing a now-stale number if that tab is already open.
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      setVoidTarget(null);
+      setVoidReason("");
+      toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
+    },
+    onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
+  });
   const [selectedDate,   setSelectedDate]   = useState("");
   const [historyPage,    setHistoryPage]    = useState(1);
   const [historySearch,  setHistorySearch]  = useState("");
@@ -373,19 +398,20 @@ const Reports = () => {
                 <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px]">STV</TableHead>
                 <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px]">Type</TableHead>
                 <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px] whitespace-nowrap">Time</TableHead>
+                {isAdmin && <TableHead className="text-white font-semibold uppercase tracking-wide text-center text-[11px] w-[60px]">Void</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
               {historyLoading ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="py-16 text-center text-sm text-gray-400">
+                  <TableCell colSpan={isAdmin ? 12 : 11} className="py-16 text-center text-sm text-gray-400">
                     <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2 text-gray-300" />
                     Loading scan history…
                   </TableCell>
                 </TableRow>
               ) : historyItems.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="py-16 text-center">
+                  <TableCell colSpan={isAdmin ? 12 : 11} className="py-16 text-center">
                     <ScanLine className="h-10 w-10 text-gray-200 mx-auto mb-3" />
                     <p className="text-sm text-gray-400">
                       No scan events found{selectedDate ? " for this date" : ""}.
@@ -397,7 +423,9 @@ const Reports = () => {
                   // Stripe by the row's stable id (not its position), so a new scan
                   // landing at the top doesn't flip every row's color/number on each poll.
                   const stripeEven = h.id % 2 === 0;
-                  const rowBg = h.isExtra
+                  const rowBg = h.voided
+                    ? "bg-gray-50 opacity-60"
+                    : h.isExtra
                     ? (stripeEven ? "bg-amber-50/50" : "bg-amber-50/80")
                     : (stripeEven ? "bg-white" : "bg-slate-50");
                   return (
@@ -414,9 +442,14 @@ const Reports = () => {
                         )}
                       </TableCell>
                       <TableCell className="min-w-[180px] max-w-[240px] py-2.5">
-                        <p className="font-medium text-gray-900 text-xs leading-snug whitespace-normal break-words">
+                        <p className={`font-medium text-gray-900 text-xs leading-snug whitespace-normal break-words ${h.voided ? "line-through" : ""}`}>
                           {h.itemName ?? <span className="text-gray-300">—</span>}
                         </p>
+                        {h.voided && (
+                          <p className="text-[10px] font-semibold text-red-500" title={h.voidReason ?? undefined}>
+                            Voided{h.voidedAt ? ` · ${format(new Date(h.voidedAt), "MMM d, h:mm a")}` : ""}
+                          </p>
+                        )}
                       </TableCell>
                       <TableCell className="font-mono text-[11px] text-gray-500 py-2.5">
                         {h.barcode ?? <span className="text-gray-300">—</span>}
@@ -446,6 +479,16 @@ const Reports = () => {
                       <TableCell className="text-[11px] text-gray-500 whitespace-nowrap py-2.5">
                         {h.scannedAt ? format(new Date(h.scannedAt), "MMM d, h:mm a") : "—"}
                       </TableCell>
+                      {isAdmin && (
+                        <TableCell className="text-center py-2.5">
+                          {!h.voided && (
+                            <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                              onClick={() => setVoidTarget(h)} title="Void this scan">
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </TableCell>
+                      )}
                     </TableRow>
                   );
                 })
@@ -569,6 +612,39 @@ const Reports = () => {
             ) : (
               <><Upload className="h-3.5 w-3.5 mr-1.5" />Upload</>
             )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* Void scan confirmation — admin-only. Keeps the row in history (never deleted), marked
+        Voided; excluded from totals and reversed out of stock. */}
+    <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Void this scan?</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-gray-600">
+          <span className="font-semibold text-gray-900">{voidTarget?.itemName ?? voidTarget?.barcode}</span> — {voidTarget?.totalQty ?? 0} scanned by {voidTarget?.scannedByName ?? "—"}.
+        </p>
+        <p className="text-sm text-gray-500">
+          This removes it from totals and stock, but the entry stays here marked "Voided" for the record — it is never deleted.
+        </p>
+        <div className="space-y-1.5">
+          <Label className="text-sm">Reason (optional)</Label>
+          <Input value={voidReason} onChange={(e) => setVoidReason(e.target.value)} placeholder="e.g. wrong barcode scanned by mistake" />
+        </div>
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={() => { setVoidTarget(null); setVoidReason(""); }} disabled={voidMutation.isPending}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => { if (voidTarget) voidMutation.mutate({ id: voidTarget.id, reason: voidReason }); }}
+            disabled={voidMutation.isPending}
+            className="bg-red-600 hover:bg-red-700 text-white"
+          >
+            {voidMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Void Scan
           </Button>
         </DialogFooter>
       </DialogContent>

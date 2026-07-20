@@ -19,6 +19,38 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
+/**
+ * Totals-row cell for one column, over every filtered row (not just the current page).
+ *
+ * Order of precedence: an explicit `total` wins; `totalable: false` blanks the cell; otherwise the
+ * column auto-sums when its accessor yields numbers. Text columns stay blank rather than showing a
+ * meaningless 0. Decimals are preserved to the widest precision seen in the column, so a pallet
+ * column reading 1.25 / 2.00 totals as 3.25 rather than 3.
+ */
+function columnTotal<TData>(col: DataTableColumn<TData>, rows: TData[]): ReactNode {
+  if (col.total) return col.total(rows);
+  if (col.totalable === false || !col.accessor) return null;
+
+  let sum = 0;
+  let seen = 0;
+  let decimals = 0;
+  for (const row of rows) {
+    const raw = col.accessor(row);
+    // Accept numeric strings ("12", "3.50") as well as numbers; ignore blanks and non-numerics.
+    const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+    if (!Number.isFinite(n)) continue;
+    sum += n;
+    seen += 1;
+    const dot = String(raw).indexOf(".");
+    if (dot >= 0) decimals = Math.max(decimals, String(raw).length - dot - 1);
+  }
+  if (seen === 0) return null;
+  return sum.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+
 function getCellValue<TData>(row: TData, column: DataTableColumn<TData>): unknown {
   if (column.accessor) return column.accessor(row);
   return (row as Record<string, unknown>)[column.id];
@@ -106,6 +138,14 @@ interface DataTableProps<TData> {
   headerClassName?: string;
   showMobileSwipeHint?: boolean;
   enableZebraStripes?: boolean;
+  /**
+   * Append a totals row under the last data row. Totals cover every filtered row, not just the
+   * current page, so they don't change as you page through. Columns auto-sum when their accessor
+   * yields numbers; override per column with `total`, or opt out with `totalable: false`.
+   */
+  enableTotalsRow?: boolean;
+  /** Label placed in the totals row's first cell. */
+  totalsLabel?: string;
   /** Per-row classes (e.g. status tints). Wins over enableZebraStripes for rows it styles. */
   rowClassName?: (row: TData, rowIndex: number) => string | undefined;
 
@@ -160,6 +200,8 @@ export function DataTable<TData>({
   headerClassName,
   showMobileSwipeHint,
   enableZebraStripes = false,
+  enableTotalsRow = false,
+  totalsLabel = "Total",
   rowClassName,
   className,
   containerClassName,
@@ -228,6 +270,8 @@ export function DataTable<TData>({
   }
 
   const allRows = sortedRows;
+  // allRows holds { row, id } wrappers; column accessors expect the bare TData, so unwrap for totals.
+  const totalsRows = allRows.map((r) => r.row);
 
   const pSize = paginationMode === "client" ? pageSize ?? internalPageSize : Math.max(allRows.length, 1);
   const pageCount = paginationMode === "client" ? Math.max(1, Math.ceil(allRows.length / pSize)) : 1;
@@ -554,6 +598,29 @@ export function DataTable<TData>({
                   );
                 })}
               </tbody>
+              {enableTotalsRow && allRows.length > 0 && (
+                <tfoot>
+                  <tr className="border-t-2 border-[#001d6e]/20 bg-[#001d6e]/[0.04] font-bold text-gray-900">
+                    {enableRowSelection && <td className="border-b border-r border-gray-200 px-2 py-2" />}
+                    {visibleColumns.map((col, colIndex) => {
+                      // The label goes in the first cell; every other cell shows its column total.
+                      const isFirst = colIndex === 0 && !enableRowSelection;
+                      return (
+                        <td
+                          key={col.id}
+                          className={cn(
+                            "border-b border-r border-gray-200 px-2 py-2 align-middle text-xs sm:px-2.5",
+                            col.align === "right" && "text-right",
+                            col.align === "center" && "text-center",
+                          )}
+                        >
+                          {isFirst ? totalsLabel : columnTotal(col, totalsRows)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                </tfoot>
+              )}
               {renderFooter && renderFooter(footerCtx)}
             </table>
           </div>

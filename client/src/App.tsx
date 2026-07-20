@@ -7,7 +7,7 @@ import Home from "@/pages/Dashboard";
 import ScanOrder from "@/pages/Scanning/Scan";
 import Inventory from "@/pages/Inventory";
 import NotionInventory from "@/pages/NotionInventory";
-import Reports from "@/pages/Reports";
+import Reports from "@/pages/Scanning/Reports.tsx";
 import Users from "@/pages/Users";
 import Settings from "@/pages/Settings";
 import Purchases from "@/pages/Purchases";
