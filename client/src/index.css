@@ -50,6 +50,16 @@ input[type="number"] {
   overflow-y: auto;
   z-index: 30;
 }
+
+/* Rotated kiosk mode is viewed from farther away on a wall-mounted portrait screen, so bump
+   the small text and tighten touch targets across the whole rotated subtree. Scoped to
+   .kiosk-rotate-90 so the normal (unrotated) layout is completely unchanged. Higher specificity
+   than the bare Tailwind utilities, so these win without needing !important. */
+.kiosk-rotate-90 .text-\[10px\] { font-size: 0.72rem; line-height: 1rem; }
+.kiosk-rotate-90 .text-\[11px\] { font-size: 0.8rem; line-height: 1.1rem; }
+.kiosk-rotate-90 .text-xs { font-size: 0.86rem; line-height: 1.2rem; }
+.kiosk-rotate-90 .text-sm { font-size: 1.02rem; line-height: 1.5rem; }
+.kiosk-rotate-90 .text-base { font-size: 1.15rem; line-height: 1.65rem; }
   .scrollbar-none::-webkit-scrollbar {
     display: none;
   }

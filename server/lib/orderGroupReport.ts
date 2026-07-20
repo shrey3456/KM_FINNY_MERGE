@@ -427,6 +427,43 @@ export async function applyLiveScanStock(
   );
 }
 
+// Reverses applyLiveScanStock — used when an admin voids a mistaken scan. Subtracts back out
+// exactly what the original scan added; never edits or deletes that original 'receive' row,
+// so stock_movements stays a true append-only audit trail (a logged 'adjust' entry explains
+// the change instead). Clamped at 0 with GREATEST so a data inconsistency elsewhere can't push
+// a plant's stock negative.
+export async function reverseLiveScanStock(
+  client: import('pg').PoolClient,
+  plant: string,
+  barcode: string,
+  orderQty: number,
+  extraQty: number,
+  sessionId: number,
+): Promise<void> {
+  const totalQty = orderQty + extraQty;
+  if (totalQty <= 0) return;
+
+  await client.query(
+    `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
+    [totalQty, barcode],
+  );
+
+  await client.query(
+    `UPDATE product_plant_stock
+     SET in_stock  = GREATEST(0, in_stock  - $1),
+         extra_qty = GREATEST(0, extra_qty - $2),
+         updated_at = NOW()
+     WHERE LOWER(barcode) = LOWER($3) AND LOWER(plant) = LOWER($4)`,
+    [totalQty, extraQty, barcode, plant],
+  );
+
+  await client.query(
+    `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
+     VALUES ($1, $2, $3, $4, 'adjust', 'Voided scan', $5, NOW())`,
+    [barcode, plant, -totalQty, -extraQty, sessionId],
+  );
+}
+
 // Makes the "already covered by an earlier part" credit REAL instead of a display-only
 // number. Previously, the Scan tab computed `totalScannedQty + creditQty` purely client-side
 // to decide what to show — nothing was ever written back, so Master View and Auto Complete
