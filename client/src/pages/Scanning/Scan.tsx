@@ -2025,22 +2025,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
                 <p className="text-[10px] uppercase tracking-wide text-gray-400">Total</p>
                 <p className="text-xl font-bold text-gray-900">{displayTotals.expected}</p>
-                <p className="text-xl font-bold text-gray-600">{displayTotals.palletsExpected.toFixed(2)} plt</p>
+                <p className="text-sm font-bold text-gray-600">{displayTotals.palletsExpected.toFixed(2)} plt</p>
               </div>
               <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
-                <p className="text-[10px] uppercase tracking-wide text-gray-400">Received Qty</p>
+                <p className="text-[10px] uppercase tracking-wide text-gray-400">Received</p>
                 <p className="text-xl font-bold text-green-600">{displayTotals.done}</p>
-                <p className="text-xl font-bold text-green-600">{displayTotals.palletsDone.toFixed(2)} plt</p>
+                <p className="text-sm font-bold text-green-600">{displayTotals.palletsDone.toFixed(2)} plt</p>
               </div>
               <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
                 <p className="text-[10px] uppercase tracking-wide text-gray-400">Remaining</p>
                 <p className="text-xl font-bold text-red-600">{displayTotals.remaining}</p>
-                <p className="text-xl font-bold text-red-600">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
+                <p className="text-sm font-bold text-red-600">{
+                  displayTotals.palletsRemaining.toFixed(2)} plt</p>
               </div>
               <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
                 <p className="text-[10px] uppercase tracking-wide text-gray-400">Extra</p>
                 <p className={`text-xl font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{displayTotals.extra}</p>
-                <p className="text-xl font-bold text-gray-600">{displayTotals.palletsExtra.toFixed(2)} plt</p>
+                <p className="text-sm font-bold text-gray-600">{displayTotals.palletsExtra.toFixed(2)} plt</p>
               </div>
             </div>
             )}
@@ -2434,22 +2435,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-gray-400">Total</p>
                 <p className="text-2xl font-bold text-gray-900">{displayTotals.expected}</p>
-                <p className="text-xl font-bold text-gray-600">{displayTotals.palletsExpected.toFixed(2)} plt</p>
+                <p className="text-sm font-bold text-gray-600">{displayTotals.palletsExpected.toFixed(2)} plt</p>
               </div>
               <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-gray-400">Received Qty</p>
                 <p className="text-2xl font-bold text-green-600">{displayTotals.done}</p>
-                <p className="text-xl font-bold text-green-600">{displayTotals.palletsDone.toFixed(2)} plt</p>
+                <p className="text-sm font-bold text-green-600">{displayTotals.palletsDone.toFixed(2)} plt</p>
               </div>
               <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-gray-400">Remaining</p>
                 <p className="text-2xl font-bold text-red-600">{displayTotals.remaining}</p>
-                <p className="text-xl font-bold text-red-600">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
+                <p className="text-sm font-bold text-red-600">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
               </div>
               <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
                 <p className="text-xs uppercase tracking-wide text-gray-400">Extra</p>
                 <p className={`text-2xl font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{displayTotals.extra}</p>
-                <p className="text-xl font-bold text-gray-600">{displayTotals.palletsExtra.toFixed(2)} plt</p>
+                <p className="text-sm font-bold text-gray-600">{displayTotals.palletsExtra.toFixed(2)} plt</p>
               </div>
             </div>
             )}
