@@ -139,12 +139,14 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
     }
   }
 
-  // A part's over-scan only becomes available to credit later parts once that part is
-  // COMPLETED — while it's still being scanned the "extra" isn't final (more of its own
-  // boxes may still arrive), so it must not yet be moved onto another part.
-  const completedByPartId = new Map(parts.map((p) => [p.id, p.scanStatus === 'completed']));
-
-  // FIFO netting per barcode: an earlier COMPLETED part's extra offsets a LATER part's missing.
+  // FIFO netting per barcode: an earlier part's extra offsets a LATER part's missing, live —
+  // this is purely a read-time view (nothing here writes to the database), so an in-progress
+  // part's extra is included too, not just an already-completed part's. That's deliberately
+  // different from reconcileCredits (server/lib/orderGroupReport.ts below), which is the
+  // PERMANENT write and still only ever runs once a part is actually marked completed — this
+  // computation just lets Master View / the Scan tab / this report show the same "here's what
+  // it'll net out to" picture live, before that write happens, instead of showing a false
+  // shortfall for stock that already physically arrived.
   for (const entries of entriesByBarcode.values()) {
     entries.sort((a, b) => a.sequence - b.sequence);
     const pool_: { entry: GroupReportEntry; qty: number }[] = [];
@@ -159,7 +161,7 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
         entry.adjustedFrom.push({ fromPartId: src.entry.partId, fromCsvFileName: src.entry.csvFileName, qty: take });
         if (src.qty === 0) pool_.shift();
       }
-      if (entry.extraQty > 0 && completedByPartId.get(entry.partId)) pool_.push({ entry, qty: entry.extraQty });
+      if (entry.extraQty > 0) pool_.push({ entry, qty: entry.extraQty });
     }
   }
 
