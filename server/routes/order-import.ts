@@ -157,6 +157,32 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
   }
 });
 
+// GET /api/order-import/sessions/date-check?plant=&date=
+// Whether ANY session (active OR deleted-but-unclaimed) already exists for this exact
+// plant + Order Date. The upload form uses this to warn before submitting a past-dated
+// Order Date: the server only accepts one when it's joining an existing group or reclaiming
+// a deleted one (see POST below) — never for a genuinely brand-new order.
+router.get('/order-import/sessions/date-check', requireImportViewAccess, async (req: Request, res: Response) => {
+  try {
+    const date = String(req.query.date ?? '').trim();
+    if (!date) return res.status(400).json({ message: 'date is required' });
+
+    const forcedPlant = (req as any).importViewPlant as string | null;
+    const plant = forcedPlant || String(req.query.plant ?? '').trim();
+    if (!plant) return res.status(400).json({ message: 'plant is required' });
+
+    const { rows } = await pool.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM order_import_sessions WHERE LOWER(plant) = LOWER($1) AND order_date = $2
+       ) AS exists`,
+      [plant, date],
+    );
+    res.json({ exists: rows[0]?.exists === true });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to check date' });
+  }
+});
+
 // POST /api/order-import/sessions  — create session + bulk-insert items
 router.post('/order-import/sessions', requireOrderImportWrite, async (req: Request, res: Response) => {
   try {
@@ -220,6 +246,12 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     if (replacementFor) {
       effectiveGroupId = replacementFor.receivingSessionId;
       computedPartIndex = replacementFor.partIndex ?? 1;
+      // A replacement reclaims an existing order's slot — it's never a brand-new order — so
+      // it must skip the past-Order-Date guard below exactly like joining an existing group
+      // does (the deleted session's Order Date is often already in the past by the time its
+      // replacement is uploaded), and it should get the same post-join sweep/credit
+      // reconciliation pass further down as any other part joining an existing group.
+      joinedExistingGroup = true;
     } else if (normOrderDate) {
       // Include DELETED sessions here (not just active ones) so a permanently-discarded part's
       // slot number is RETIRED, never reused: a fresh upload always gets max(partIndex)+1 over

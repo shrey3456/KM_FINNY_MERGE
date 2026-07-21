@@ -431,6 +431,7 @@ export default function OverallStock() {
 
         {/* Summary tiles */}
         <StatsBar
+        
           stats={[
             {
               icon: Boxes,

@@ -230,6 +230,15 @@ export default function OrderImport() {
   const [deletePreview, setDeletePreview] = useState<{
     scannedItemCount: number; scannedQtyTotal: number; extraQtyTotal: number; stockApplied: boolean;
   } | null>(null);
+  // Plant/Order Date of the session being deleted — captured when the delete dialog opens
+  // (from the row itself), so that if the admin picks "Delete, I'll re-upload" we can
+  // pre-fill the Upload form with the SAME plant/date and jump straight into the mapping
+  // dialog for the corrected file, instead of leaving them to scroll up and re-enter it.
+  const [deleteTargetInfo, setDeleteTargetInfo] = useState<{ plant: string; orderDate: string } | null>(null);
+  // Set right before programmatically opening the file picker after a "Delete, I'll re-upload".
+  // handleFileChange checks this to skip straight to the mapping dialog for the chosen file,
+  // instead of waiting for a separate "Map & Import" click.
+  const reuploadPendingRef = useRef(false);
   const [deactivateTarget, setDeactivateTarget] = useState<number | null>(null);
   const [completeTarget, setCompleteTarget] = useState<number | null>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
@@ -295,6 +304,19 @@ export default function OrderImport() {
     refetchOnMount: true,
     refetchOnWindowFocus: true,
   });
+
+  // Warns before a brand-new order gets a past Order Date (the server only accepts a past
+  // date when it's a late part joining/reclaiming an existing group for that exact
+  // plant+date — never for a genuinely new one). Only runs once both fields are filled and
+  // the date is actually in the past, so it never fires for the normal today-or-later case.
+  const isPastOrderDate = !!orderDate && orderDate < todayStr;
+  const pastDateCheckQuery = useQuery<{ exists: boolean }>({
+    queryKey: ["/api/order-import/sessions/date-check", plant, orderDate],
+    queryFn: async () =>
+      (await apiRequest("GET", `/api/order-import/sessions/date-check?plant=${encodeURIComponent(plant)}&date=${orderDate}`)).json(),
+    enabled: isPastOrderDate && !!plant.trim(),
+  });
+  const isPastDateBlocked = isPastOrderDate && !!plant.trim() && pastDateCheckQuery.data?.exists === false;
 
   const itemsQuery = useQuery<OrderImportItem[]>({
     queryKey: ["/api/order-import/items", expandedId],
@@ -838,6 +860,17 @@ export default function OrderImport() {
     setSelectedFiles(files);
     setLastImport(null);
     e.target.value = "";
+
+    // Reupload flow: plant/orderDate were already filled in when the file picker was popped
+    // open, so skip the separate "Map & Import" click and go straight to the mapping dialog.
+    if (reuploadPendingRef.current) {
+      reuploadPendingRef.current = false;
+      uploadQueueRef.current = files;
+      uploadIdxRef.current = 0;
+      uploadCollectedRef.current = { sessionIds: [], fileNames: [], failed: [], totalRows: 0, groupId: null };
+      setUploadProgress({ current: 1, total: files.length });
+      parseAndOpen(files[0]);
+    }
   }
 
   // Start the sequential Map & Import queue: opens the mapping dialog for the first file;
@@ -855,6 +888,14 @@ export default function OrderImport() {
     }
     if (selectedFiles.length === 0) {
       toast({ title: "Select a CSV file first", variant: "destructive" });
+      return;
+    }
+    if (isPastDateBlocked) {
+      toast({
+        title: "This Order Date is in the past",
+        description: `No existing order for ${plant} on ${orderDate} — a brand-new order can't use a past date. Pick today or later, or the correct existing date for a late part.`,
+        variant: "destructive",
+      });
       return;
     }
     uploadQueueRef.current = selectedFiles;
@@ -1096,10 +1137,16 @@ export default function OrderImport() {
               {/* Date */}
               <div className="grid gap-1">
                 <Label className="text-xs text-gray-500">Order Date</Label>
-                {/* No min= here on purpose: a past date must stay selectable so a LATE PART can
-                    still be added to an order that already exists for that date. The server
-                    allows exactly that and rejects only brand-new past-dated orders. */}
-                <Input type="date" className="h-9 text-sm w-[150px]" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                {/* min=today: a normal upload here is always a new file for today (or later).
+                    The one legitimate past-date case — replacing a deleted CSV for an order
+                    that already exists — goes through "Delete, I'll re-upload" instead, which
+                    sets orderDate via state and so isn't affected by this min. The
+                    pastDateCheckQuery/isPastDateBlocked warning below stays as a second line of
+                    defense against a manually typed-in past date slipping past the picker. */}
+                <Input type="date" min={todayStr} className={`h-9 text-sm w-[150px] ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                {isPastDateBlocked && (
+                  <p className="text-[11px] text-red-600 max-w-[220px]">No existing order for this plant/date — pick today or later.</p>
+                )}
               </div>
               {/* File */}
               <div className="grid gap-1 flex-[2] min-w-[180px]">
@@ -1117,8 +1164,8 @@ export default function OrderImport() {
                   <X className="h-4 w-4" />
                 </Button>
                 <Button className="h-9 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport}
-                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}>
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1153,7 +1200,10 @@ export default function OrderImport() {
                 </div>
                 <div className="grid gap-1">
                   <Label className="text-xs text-gray-500">Order Date</Label>
-                  <Input type="date" className="h-10 text-sm w-full" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                  <Input type="date" min={todayStr} className={`h-10 text-sm w-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                  {isPastDateBlocked && (
+                    <p className="text-[11px] text-red-600">No existing order for this plant/date — pick today or later.</p>
+                  )}
                 </div>
               </div>
               <div className="flex gap-2">
@@ -1162,8 +1212,8 @@ export default function OrderImport() {
                   <X className="h-4 w-4" />
                 </Button>
                 <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport}
-                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}>
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1351,7 +1401,7 @@ export default function OrderImport() {
                                 className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30"
                                 disabled={!canDeleteOrderImport || deletePreviewMutation.isPending}
                                 title={!canDeleteOrderImport ? "Deleting a CSV is restricted to Admin" : undefined}
-                                onClick={(e) => { e.stopPropagation(); deletePreviewMutation.mutate(s.id); }}>
+                                onClick={(e) => { e.stopPropagation(); setDeleteTargetInfo({ plant: s.plant, orderDate: s.orderDate || todayStr }); deletePreviewMutation.mutate(s.id); }}>
                                 {deletePreviewMutation.isPending && deletePreviewMutation.variables === s.id
                                   ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                   : <Trash2 className="h-3.5 w-3.5" />}
@@ -1954,7 +2004,7 @@ export default function OrderImport() {
       </AlertDialog>
 
       {/* ── Delete confirmation ── */}
-      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) { setDeleteTarget(null); setDeletePreview(null); } }}>
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) { setDeleteTarget(null); setDeletePreview(null); setDeleteTargetInfo(null); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this CSV?</AlertDialogTitle>
@@ -1988,7 +2038,28 @@ export default function OrderImport() {
               {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Remove permanently"}
             </AlertDialogAction>
             <AlertDialogAction
-              onClick={() => deleteTarget !== null && deleteMutation.mutate({ id: deleteTarget, mode: "replace" })}
+              onClick={() => {
+                if (deleteTarget === null) return;
+                const info = deleteTargetInfo;
+                deleteMutation.mutate(
+                  { id: deleteTarget, mode: "replace" },
+                  {
+                    onSuccess: () => {
+                      if (info) {
+                        setPlant(info.plant);
+                        setOrderDate(info.orderDate);
+                      }
+                      toast({
+                        title: "Pick the corrected CSV",
+                        description: "Plant and Order Date are filled in — choose the file to continue.",
+                      });
+                      reuploadPendingRef.current = true;
+                      fileRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                      fileRef.current?.click();
+                    },
+                  },
+                );
+              }}
               disabled={deleteMutation.isPending}>
               {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete, I'll re-upload"}
             </AlertDialogAction>
