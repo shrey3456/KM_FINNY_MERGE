@@ -108,6 +108,7 @@ import checkinoutRoutes from "./routes/checkinout";
 import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
 import orderImportRoutes from "./routes/order-import";
+import orderImportEditRoutes from "./routes/order-import-edit";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
@@ -8616,6 +8617,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount order import routes
   apiRouter.use(orderImportRoutes);
+
+  // Mount order import edit routes (fix a mistake in an already-uploaded, not-yet-completed CSV)
+  apiRouter.use(orderImportEditRoutes);
 
   // Mount order scan routes
   apiRouter.use(orderScanRoutes);
