@@ -38,6 +38,8 @@ type ScanHistoryItem = {
   itemsPerPallet: number | null;
   looseQty: number | null;
   isExtra: boolean;
+  isEmptyBox?: boolean;
+  emptyBoxNote?: string | null;
   stv: string | null;
   scannedByCode: string | null;
   scannedByName: string | null;
@@ -55,6 +57,7 @@ type ScanHistoryResponse = {
   totalBoxes: number;
   totalPallets: number;
   extraCount: number;
+  emptyBoxCount?: number;
   scanners: string[];
   limit: number;
   offset: number;
@@ -229,6 +232,7 @@ const Reports = () => {
   const historyTotalBoxes   = historyData?.totalBoxes ?? 0;
   const historyTotalPallets = historyData?.totalPallets ?? 0;
   const historyExtraCount   = historyData?.extraCount ?? 0;
+  const historyEmptyBoxCount = historyData?.emptyBoxCount ?? 0;
   const historyScanners     = historyData?.scanners ?? [];
   const historyHasMore      = historyOffset + historyItems.length < historyTotal;
 
@@ -276,7 +280,7 @@ const Reports = () => {
       h.totalQty,
       h.pallets != null ? parseFloat(String(h.pallets)).toFixed(2) : "",
       h.stv ?? "",
-      h.isExtra ? "Extra" : "Regular",
+      h.isEmptyBox ? "Empty Box" : h.isExtra ? "Extra" : "Regular",
       h.scannedAt ? format(new Date(h.scannedAt), "yyyy-MM-dd HH:mm") : "",
     ]),
   ];
@@ -344,6 +348,7 @@ const Reports = () => {
               <SelectItem value="all">All types</SelectItem>
               <SelectItem value="regular">Regular only</SelectItem>
               <SelectItem value="extra">Extra only</SelectItem>
+              <SelectItem value="empty">Empty Box only</SelectItem>
             </SelectContent>
           </Select>
 
@@ -421,6 +426,10 @@ const Reports = () => {
             <span className="text-amber-600">Extra Events</span>
             <span className="font-bold text-amber-700">{historyExtraCount.toLocaleString()}</span>
           </div>
+          <div className="flex items-center gap-1.5 rounded-md border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs">
+            <span className="text-orange-600">Empty Boxes</span>
+            <span className="font-bold text-orange-700">{historyEmptyBoxCount.toLocaleString()}</span>
+          </div>
         </div>
 
         {/* History table */}
@@ -466,7 +475,9 @@ const Reports = () => {
                   // Stripe by the row's stable id (not its position), so a new scan
                   // landing at the top doesn't flip every row's color/number on each poll.
                   const stripeEven = h.id % 2 === 0;
-                  const rowBg = h.voided
+                  const rowBg = h.isEmptyBox
+                    ? (stripeEven ? "bg-orange-50/50" : "bg-orange-50/80")
+                    : h.voided
                     ? "bg-gray-50 opacity-60"
                     : h.isExtra
                     ? (stripeEven ? "bg-amber-50/50" : "bg-amber-50/80")
@@ -515,7 +526,9 @@ const Reports = () => {
                         {h.stv ?? <span className="text-gray-300">—</span>}
                       </TableCell>
                       <TableCell className="py-2.5">
-                        {h.isExtra
+                        {h.isEmptyBox
+                          ? <Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 text-[11px] px-1.5 border-0">Empty Box</Badge>
+                          : h.isExtra
                           ? <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>
                           : <Badge className="bg-green-100 text-green-800 hover:bg-green-100 text-[11px] px-1.5 border-0">Regular</Badge>}
                       </TableCell>

@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown, CalendarDays, Check } from "lucide-react";
+import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown, PackageX, CalendarDays, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -41,6 +41,11 @@ type PlantStockRow = {
   pallets: number | null;
   extraPallets: number | null;
   lastArrived: string | null;
+  // Marks a synthetic "Empty Box" row (a distinct entry, NOT product stock). When true,
+  // inStock carries the empty-box quantity purely for display and emptyBoxCount the # of
+  // entries; the stock/extra/pallet cells render as dashes so it's never read as inventory.
+  isEmptyBox?: boolean;
+  emptyBoxCount?: number;
 };
 
 type PlantStockResponse = {
@@ -48,6 +53,10 @@ type PlantStockResponse = {
   total: number;
   // null = admin/super-admin (all plants). Array = the plant(s) this user is limited to.
   plants: string[] | null;
+  // Empty boxes: physical boxes received with no product — a distinct status, never part of
+  // stock. Surfaced separately for reconciliation.
+  emptyBoxByPlant?: { plant: string; qty: number; count: number }[];
+  emptyBoxTotal?: number;
   // true when a from/to range was applied — quantities then mean "received in that window"
   // (sourced from the stock_movements ledger), not current totals.
   dateMode?: boolean;
@@ -202,10 +211,30 @@ export default function OverallStock() {
     );
   }, [rows, search]);
 
-  // Summary
+  // Summary — from REAL stock rows only; empty boxes are never counted as stock.
   const totalStock = filtered.reduce((s, r) => s + r.inStock, 0);
   const totalExtra = filtered.reduce((s, r) => s + r.extraQty, 0);
   const totalExtraPallets = filtered.reduce((s, r) => s + (r.extraPallets ?? 0), 0);
+
+  // Empty boxes as their OWN distinct rows (one per plant), appended below the stock rows.
+  // Never mixed into stock/extra totals — the quantity shows only inside the "Empty Box" badge.
+  const emptyBoxRows = useMemo<PlantStockRow[]>(() => {
+    const list = stockData?.emptyBoxByPlant ?? [];
+    const q = search.toLowerCase();
+    return list
+      .filter((e) => e.qty > 0)
+      .filter((e) => !search || "empty box".includes(q) || e.plant.toLowerCase().includes(q))
+      .map((e) => ({
+        srNo: 0, barcode: "EMPTY_BOX", plant: e.plant, itemName: "Empty Box",
+        itemNo: null, sapCode: null, hsnCode: null, category: null, brand: null,
+        itemsPerPallet: null, inStock: e.qty, extraQty: 0, pallets: null, extraPallets: null,
+        lastArrived: null, isEmptyBox: true, emptyBoxCount: e.count,
+      }));
+  }, [stockData?.emptyBoxByPlant, search]);
+  const emptyBoxTotal = stockData?.emptyBoxTotal ?? 0;
+
+  // Real stock rows first, then the distinct empty-box rows.
+  const displayRows = useMemo(() => [...filtered, ...emptyBoxRows], [filtered, emptyBoxRows]);
 
   // Export rows
   const exportRows = (src: PlantStockRow[]): Array<Array<string | number>> => [
@@ -242,7 +271,15 @@ export default function OverallStock() {
       accessor: (row) => row.itemName,
       headerClassName: headerBorder,
       cellClassName: `font-medium text-gray-900 whitespace-normal break-words ${cellBorder}`,
-      render: (row) => row.itemName,
+      render: (row) =>
+        row.isEmptyBox ? (
+          <span className="inline-flex items-center gap-1.5" title={row.emptyBoxCount ? `${row.emptyBoxCount} entr${row.emptyBoxCount === 1 ? "y" : "ies"}` : undefined}>
+            <span>Empty Box</span>
+            <span className="inline-flex items-center rounded-full bg-orange-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-orange-700">No product</span>
+          </span>
+        ) : (
+          row.itemName
+        ),
     },
     {
       id: "barcode",
@@ -253,7 +290,7 @@ export default function OverallStock() {
       totalable: false,
       headerClassName: headerBorder,
       cellClassName: `font-mono text-gray-600 ${cellBorder}`,
-      render: (row) => row.barcode ?? dash,
+      render: (row) => (row.isEmptyBox ? dash : row.barcode ?? dash),
     },
     {
       id: "sapCode",
@@ -317,7 +354,10 @@ export default function OverallStock() {
       accessor: (row) => row.inStock,
       headerClassName: headerBorder,
       cellClassName: `font-bold text-[#001d6e] tabular-nums ${cellBorder}`,
-      render: (row) => row.inStock.toLocaleString(),
+      render: (row) =>
+        row.isEmptyBox
+          ? <span className="font-bold text-orange-600 tabular-nums" title="Empty boxes — not counted in stock totals">{row.inStock.toLocaleString()}</span>
+          : row.inStock.toLocaleString(),
     },
     {
       id: "extra",
@@ -411,6 +451,12 @@ export default function OverallStock() {
               tone: "navy",
               value: filtered.length.toLocaleString(),
               label: "item · plant rows",
+            },
+            {
+              icon: PackageX,
+              tone: "amber",
+              value: emptyBoxTotal.toLocaleString(),
+              label: "empty boxes · not counted as stock",
             },
           ]}
           actions={
@@ -565,8 +611,9 @@ export default function OverallStock() {
             className="space-y-0"
             containerClassName="rounded-none border-0"
             columns={stockColumns}
-            data={filtered}
-            getRowId={(row) => `${row.barcode}-${row.plant}`}
+            data={displayRows}
+            getRowId={(row) => `${row.isEmptyBox ? "EB" : row.barcode}-${row.plant}`}
+            rowClassName={(row) => (row.isEmptyBox ? "bg-orange-50/40" : undefined)}
             emptyState={`No stock yet${plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.`}
             noResultsState="No stock rows match your search."
             hasActiveFilters={!!search}

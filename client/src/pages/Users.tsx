@@ -759,10 +759,10 @@ const Users = () => {
     },
     {
       id: 'actions',
-      header: '',
+      header: 'Actions',
       width: 90,
-      align: 'right',
-      hideable: false,
+      align: 'left',
+      hideable: false,  
       preventRowClick: true,
       render: (user) => (
         <div className="flex justify-end gap-1">

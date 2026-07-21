@@ -883,6 +883,11 @@ export const orderScanEvents = pgTable("order_scan_events", {
   // set on is_extra=true rows; caps the amount available to credit anything else so the
   // same physical boxes can't be credited twice. 0 for ordinary (non-extra) events.
   creditedQty: integer("credited_qty").default(0),
+  // "Empty Box" manual entry (a box with no item/barcode to scan) reuses THIS table's existing
+  // columns instead of dedicated flags: it's an event with the sentinel barcode 'EMPTY_BOX'
+  // (how every read identifies one — no real numeric SKU collides), its count in total_qty,
+  // is_extra=false and scan_item_id=null (so received/extra/stock totals never see it), and its
+  // item_name holding the label + optional note ('Empty Box' or 'Empty Box: <note>').
 });
 
 export const insertOrderScanItemSchema = createInsertSchema(orderScanItems).pick({

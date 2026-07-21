@@ -619,7 +619,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
           FROM order_scan_events ose
           JOIN  order_import_sessions ois ON ois.id = ose.session_id
           LEFT JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
-          WHERE ose.is_extra = true
+          WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'
           ${newDateAnd}
         ),
         combined AS (
@@ -722,7 +722,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
        FROM order_scan_events ose
        INNER JOIN order_import_sessions ois ON ois.id = ose.session_id
        LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
-       WHERE ose.is_extra = true
+       WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'
          ${osDateAnd}
        ORDER BY ose.scanned_at DESC`,
       dateParams,
@@ -978,6 +978,8 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
         JOIN  order_import_sessions ois ON ois.id = ose.session_id
         LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
         WHERE DATE(ose.scanned_at AT TIME ZONE 'Asia/Kolkata') = $1
+          AND ose.barcode <> 'EMPTY_BOX'  -- empty boxes aren't stock (see order-scan.ts)
+          AND ose.voided IS NOT TRUE
         GROUP BY ose.barcode, ose.session_id
         ORDER BY MAX(COALESCE(p.name, ose.item_name)) ASC
       `, queryParams);
@@ -1124,7 +1126,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
 
     const dateParam    = typeof req.query.date    === 'string' && req.query.date.trim()    ? req.query.date.trim()    : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
-    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra'].includes(req.query.type) ? req.query.type : null;
+    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty'].includes(req.query.type) ? req.query.type : null;
     const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
     const plantParam   = typeof req.query.plant   === 'string' && req.query.plant.trim()   ? req.query.plant.trim()   : null;
 
@@ -1146,8 +1148,14 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     if (plantParam)   { params.push(plantParam.toLowerCase()); conditions.push(`LOWER(ois.plant) = $${params.length}`); }
     if (dateParam)    { params.push(dateParam);    conditions.push(`DATE(ose.scanned_at) = $${params.length}`); }
     if (scannerParam) { params.push(scannerParam); conditions.push(`ose.scanned_by_name = $${params.length}`); }
-    if (typeParam === 'regular') conditions.push(`ose.is_extra = false`);
-    if (typeParam === 'extra')   conditions.push(`ose.is_extra = true`);
+    // Empty boxes ARE shown in scan history as a distinct status (isEmptyBox below), but they
+    // are never product scans — so 'regular'/'extra' filters must exclude them, and the box/
+    // pallet totals below exclude 
+    //them too (they don't count toward order quantity). A
+    // dedicated 'empty' filter shows only empty boxes.
+    if (typeParam === 'regular') conditions.push(`ose.is_extra = false AND ose.barcode <> 'EMPTY_BOX'`);
+    if (typeParam === 'extra')   conditions.push(`ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'`);
+    if (typeParam === 'empty')   conditions.push(`ose.barcode = 'EMPTY_BOX'`);
     if (searchParam) {
       params.push(`%${searchParam.toLowerCase()}%`);
       const n = params.length;
@@ -1168,6 +1176,8 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
            ose.items_per_pallet AS "itemsPerPallet",
            ose.loose_qty        AS "looseQty",
            ose.is_extra         AS "isExtra",
+           (ose.barcode = 'EMPTY_BOX') AS "isEmptyBox",
+           CASE WHEN ose.item_name LIKE 'Empty Box: %' THEN SUBSTRING(ose.item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
            ose.stv,
            ose.scanned_by_code  AS "scannedByCode",
            ose.scanned_by_name  AS "scannedByName",
@@ -1185,9 +1195,10 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       pool.query(`SELECT COUNT(*) AS total ${baseFrom}`, params),
       pool.query(
         `SELECT
-           COALESCE(SUM(ose.total_qty), 0)                          AS "totalBoxes",
-           COALESCE(SUM(ose.pallets), 0)                            AS "totalPallets",
-           COUNT(*) FILTER (WHERE ose.is_extra = true)              AS "extraCount"
+           COALESCE(SUM(ose.total_qty) FILTER (WHERE ose.barcode <> 'EMPTY_BOX'), 0)  AS "totalBoxes",
+           COALESCE(SUM(ose.pallets)   FILTER (WHERE ose.barcode <> 'EMPTY_BOX'), 0)  AS "totalPallets",
+           COUNT(*) FILTER (WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX') AS "extraCount",
+           COALESCE(SUM(ose.total_qty) FILTER (WHERE ose.barcode = 'EMPTY_BOX'), 0)   AS "emptyBoxCount"
          ${baseFrom}`,
         params,
       ),
@@ -1205,6 +1216,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       totalBoxes:   parseInt(summaryRes.rows[0].totalBoxes, 10),
       totalPallets: parseFloat(summaryRes.rows[0].totalPallets),
       extraCount:   parseInt(summaryRes.rows[0].extraCount, 10),
+      emptyBoxCount: parseInt(summaryRes.rows[0].emptyBoxCount, 10),
       scanners:     scannersRes.rows.map((r: any) => r.name as string),
       limit,
       offset,
@@ -1381,7 +1393,24 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
 
     // dateMode tells the client that inStock/extraQty mean "received in the selected window",
     // not "total on hand", so it can label the columns honestly.
-    res.json({ items, total: items.length, plants: allowed, dateMode, from: from || null, to: to || null });
+    // Empty boxes are received physical boxes with no product/stock — a distinct status, not
+    // inventory. Surface them here as a separate per-plant reconciliation figure (never mixed
+    // into inStock). Scoped to the same plants as the stock rows above.
+    const ebParams: any[] = [];
+    const ebConds: string[] = [`ose.barcode = 'EMPTY_BOX'`, 'ose.voided IS NOT TRUE'];
+    if (allowed !== null) { ebParams.push(allowed); ebConds.push(`LOWER(ois.plant) = ANY($${ebParams.length}::text[])`); }
+    if (plantParam)       { ebParams.push(plantParam.toLowerCase()); ebConds.push(`LOWER(ois.plant) = $${ebParams.length}`); }
+    const { rows: ebRows } = await pool.query(`
+      SELECT ois.plant, COALESCE(SUM(ose.total_qty), 0)::int AS "qty", COUNT(*)::int AS "count"
+      FROM order_scan_events ose
+      JOIN order_import_sessions ois ON ois.id = ose.session_id
+      WHERE ${ebConds.join(' AND ')}
+      GROUP BY ois.plant
+    `, ebParams);
+    const emptyBoxByPlant = ebRows.map((r: any) => ({ plant: r.plant, qty: r.qty, count: r.count }));
+    const emptyBoxTotal = ebRows.reduce((s: number, r: any) => s + Number(r.qty), 0);
+
+    res.json({ items, total: items.length, plants: allowed, emptyBoxByPlant, emptyBoxTotal, dateMode, from: from || null, to: to || null });
   } catch (error) {
     console.error('Error generating plant stock report:', error);
     res.status(500).json({ error: 'Failed to generate plant stock report' });

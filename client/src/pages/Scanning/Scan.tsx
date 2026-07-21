@@ -13,12 +13,14 @@ import {
   Keyboard,
   Loader2,
   PackageCheck,
+  Package,
   FileSpreadsheet,
   Layers,
   Plug,
   ScanLine,
   Search,
   Trash2,
+  Undo2,
   X,
   Zap,
   Eye,
@@ -88,6 +90,7 @@ type MvFile = {
   sessionId: number; csvFileName: string; rowCount: number | null;
   uploadedAt: string | null; uploadedBy: string; plant: string;
   scanStatus: string | null; items: MvItem[];
+  emptyBoxCount?: number; emptyBoxTotalQty?: number;
 };
 type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
 type MvMergedItem = {
@@ -95,6 +98,8 @@ type MvMergedItem = {
   quantity: number; scannedQty: number; extraQty: number; expectedPallets: number | null;
   itemsPerPallet: number;
   _files: string[]; _isExtra: boolean;
+  // Distinct synthetic "Empty Box" entry — not a product, never counted toward order qty.
+  _isEmptyBox?: boolean; _emptyBoxCount?: number; _emptyBoxQty?: number;
 };
 type ImpSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
@@ -428,6 +433,10 @@ export default function ScanOrderPage() {
   const [osManualCode, setOsManualCode] = useState("");
   const [osManualFocused, setOsManualFocused] = useState(false);
   const [osSuggIdx, setOsSuggIdx] = useState(-1);
+  // Empty Box manual entry (a box with no item/barcode to scan) — dialog state.
+  const [showEmptyBox, setShowEmptyBox] = useState(false);
+  const [emptyBoxQty, setEmptyBoxQty] = useState("1");
+  const [emptyBoxNote, setEmptyBoxNote] = useState("");
   const [osRecentScans, setOsRecentScans] = useState<{ barcode: string; name: string; total: number; isExtra: boolean }[]>([]);
   // Barcodes we already added optimistically; WS handler skips the echo for these
   const osRecentScanSentRef = useRef<Set<string>>(new Set());
@@ -516,6 +525,40 @@ export default function ScanOrderPage() {
     enabled: !!activeOrderScanSession,
     refetchInterval: wsConnected ? 30000 : 8000,
     refetchIntervalInBackground: false,
+  });
+
+  // ── Empty Box: running count/list + log + undo ───────────────────────────────
+  const osEmptyBoxesQuery = useQuery<{ count: number; totalQty: number; entries: any[] }>({
+    queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "empty-boxes"],
+    queryFn: () =>
+      apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/empty-boxes`).then((r) => r.json()),
+    enabled: !!activeOrderScanSession,
+  });
+  const emptyBoxKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "empty-boxes"] as const;
+
+  const osEmptyBoxMutation = useMutation({
+    mutationFn: (payload: { quantity: number; note: string | null }) =>
+      apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/empty-box`, payload).then((r) => r.json()),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: emptyBoxKey });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+      setShowEmptyBox(false);
+      setEmptyBoxQty("1");
+      setEmptyBoxNote("");
+      toast({ title: "Empty box logged", description: `${data?.totalQty ?? 0} empty box(es) recorded for this order.` });
+    },
+    onError: (err: any) => toast({ title: "Failed to log empty box", description: err?.message, variant: "destructive" }),
+  });
+
+  const osEmptyBoxUndoMutation = useMutation({
+    mutationFn: (entryId: number) =>
+      apiRequest("POST", `/api/order-scan/empty-box/${entryId}/undo`).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: emptyBoxKey });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+      toast({ title: "Empty box removed" });
+    },
+    onError: (err: any) => toast({ title: "Failed to remove empty box", description: err?.message, variant: "destructive" }),
   });
 
   const osSuggestions = useMemo(() => {
@@ -1031,6 +1074,13 @@ export default function ScanOrderPage() {
             queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
             return;
           }
+          if (data.type === 'empty-box') {
+            // Another device logged/undid an empty box against this session — refresh the
+            // running count + list and Master View's reconciliation figure.
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", data.sessionId, "empty-boxes"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
           if (data.type === 'session-deleted') {
             // Admin deleted the CSV we're actively scanning against (delete-with-rollback).
             // Nothing else auto-activates until a corrected CSV is uploaded for this plant/
@@ -1333,7 +1383,20 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         if (!item.isExtra) g._isExtra = false;
       });
     });
-    return Array.from(groups.values());
+    const merged = Array.from(groups.values());
+    // Append ONE distinct "Empty Box" entry summing every file's empty boxes for this view —
+    // a separate labeled row, never mixed into order quantity/scanned/extra.
+    const ebQty = mvData.files.reduce((s, f) => s + (f.emptyBoxTotalQty ?? 0), 0);
+    const ebCount = mvData.files.reduce((s, f) => s + (f.emptyBoxCount ?? 0), 0);
+    if (ebQty > 0) {
+      merged.push({
+        barcode: null, itemName: "Empty Box", sapCode: null,
+        quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
+        itemsPerPallet: 0, _files: [], _isExtra: false,
+        _isEmptyBox: true, _emptyBoxCount: ebCount, _emptyBoxQty: ebQty,
+      });
+    }
+    return merged;
   })();
   const filtMvItems = mvSearch
     ? allMvItems.filter((i) =>
@@ -1390,6 +1453,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       align: "center",
       hideable: false,
       render: (item) => {
+        if (item._isEmptyBox) return <Package className="mx-auto h-4 w-4 text-orange-500" />;
         const { isExtraOnly, isDone, isPartial } = mvRowState(item);
         return isExtraOnly ? <AlertTriangle className="mx-auto h-4 w-4 text-orange-500" />
           : isDone ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
@@ -1404,7 +1468,15 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       sortable: true,
       accessor: (i) => i.itemName,
       cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
-      render: (i) => i.itemName ?? "—",
+      render: (i) =>
+        i._isEmptyBox ? (
+          <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-800">
+            Empty Box · {i._emptyBoxQty} box{i._emptyBoxQty === 1 ? "" : "es"}
+            {i._emptyBoxCount ? ` (${i._emptyBoxCount})` : ""}
+          </span>
+        ) : (
+          i.itemName ?? "—"
+        ),
     },
     {
       id: "barcode",
@@ -2316,6 +2388,24 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </Button>
                 </div>
               )}
+
+              {/* ── Empty Box — log a box with no item/barcode, alongside Gun Mode. Separate
+                  from a product scan: no CSV lookup, doesn't count toward order qty. ── */}
+              <div className="flex items-center gap-2 mt-2">
+                <Button
+                  variant="outline"
+                  disabled={!activeOrderScanSession || activeOrderScanSession.scanStatus === "completed" || !!osPending}
+                  onClick={() => { setEmptyBoxQty("1"); setEmptyBoxNote(""); setShowEmptyBox(true); }}
+                  className="flex-1 h-9 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                >
+                  <Package className="h-4 w-4 mr-1.5" /> Empty Box
+                </Button>
+                {(osEmptyBoxesQuery.data?.totalQty ?? 0) > 0 && (
+                  <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1 shrink-0">
+                    {osEmptyBoxesQuery.data!.totalQty} empty
+                  </span>
+                )}
+              </div>
             </div>
             )}
           </div>
@@ -2553,6 +2643,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           {filtMvItems.length === 0 ? (
                             <tr><td colSpan={mvShowFiles ? 7 : 6} className="py-10 text-center text-gray-400">No items found</td></tr>
                           ) : filtMvItems.map((item, idx) => {
+                        if (item._isEmptyBox) {
+                          return (
+                            <div key={idx} className="flex items-center gap-3 px-4 py-3 bg-orange-50/60">
+                              <span className="shrink-0"><Package className="h-5 w-5 text-orange-500" /></span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-orange-900 leading-snug">Empty Box</p>
+                                <p className="text-[11px] text-orange-600/80">
+                                  {item._emptyBoxQty} box{item._emptyBoxQty === 1 ? "" : "es"} logged
+                                  {item._emptyBoxCount ? ` · ${item._emptyBoxCount} entr${item._emptyBoxCount === 1 ? "y" : "ies"}` : ""} · not counted as stock
+                                </p>
+                              </div>
+                              <span className="shrink-0">
+                                <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-700">Empty Box</span>
+                              </span>
+                            </div>
+                          );
+                        }
                             const exp = item.quantity ?? 0;
                             const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
                             const remain = Math.max(0, exp - done);
@@ -2946,6 +3053,24 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </CardContent>
                   </Card>
                 )}
+
+                {/* ── Empty Box — log a box with no item/barcode, alongside Gun Mode. Separate
+                    from a product scan: no CSV lookup, doesn't count toward order qty. ── */}
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    disabled={!activeOrderScanSession || activeOrderScanSession.scanStatus === "completed" || !!osPending}
+                    onClick={() => { setEmptyBoxQty("1"); setEmptyBoxNote(""); setShowEmptyBox(true); }}
+                    className="flex-1 h-9 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                  >
+                    <Package className="h-4 w-4 mr-1.5" /> Empty Box
+                  </Button>
+                  {(osEmptyBoxesQuery.data?.totalQty ?? 0) > 0 && (
+                    <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1 shrink-0">
+                      {osEmptyBoxesQuery.data!.totalQty} empty
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
             )}
@@ -3046,6 +3171,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           hasActiveFilters={!!mvSearch}
                           enableZebraStripes
                           rowClassName={(item) => {
+                            if (item._isEmptyBox) return "bg-orange-50/60";
                             const { isExtraOnly, isDone, isPartial } = mvRowState(item);
                             return isExtraOnly ? "bg-orange-50/40"
                               : isDone ? "bg-emerald-50/40"
@@ -3176,6 +3302,86 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
           </div>
         </div>
+
+        {/* Empty Box dialog — manual entry (quantity + optional note), plus undo of prior entries */}
+        <Dialog open={showEmptyBox} onOpenChange={(o) => { if (!o) setShowEmptyBox(false); }}>
+          <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-amber-700">
+                <Package className="h-5 w-5" /> Log Empty Box
+              </DialogTitle>
+              <DialogDescription className="text-left pt-1">
+                Record a box with no item/barcode to scan. It's logged separately — it doesn't
+                count toward the order quantity and won't affect completion.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-3 py-1">
+              <div className="space-y-1.5">
+                <Label htmlFor="emptyBoxQty" className="text-xs">Quantity</Label>
+                <Input
+                  id="emptyBoxQty"
+                  type="number"
+                  min={1}
+                  value={emptyBoxQty}
+                  onChange={(e) => setEmptyBoxQty(e.target.value)}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="emptyBoxNote" className="text-xs">Note (optional)</Label>
+                <Input
+                  id="emptyBoxNote"
+                  value={emptyBoxNote}
+                  onChange={(e) => setEmptyBoxNote(e.target.value)}
+                  placeholder="e.g. damaged, missing item"
+                  className="h-10"
+                />
+              </div>
+
+              {(osEmptyBoxesQuery.data?.entries?.length ?? 0) > 0 && (
+                <div className="border-t pt-2">
+                  <p className="text-[11px] font-medium text-gray-500 mb-1.5">
+                    Logged this order — {osEmptyBoxesQuery.data!.totalQty} box(es)
+                  </p>
+                  <div className="max-h-40 overflow-y-auto space-y-1">
+                    {osEmptyBoxesQuery.data!.entries.map((en: any) => (
+                      <div key={en.id} className="flex items-center gap-2 text-xs bg-amber-50/60 rounded px-2 py-1.5">
+                        <span className="font-medium text-amber-800 shrink-0">×{en.quantity}</span>
+                        <span className="flex-1 min-w-0 truncate text-gray-600">
+                          {en.note || "No note"}{en.scannedByName ? ` · ${en.scannedByName}` : ""}
+                        </span>
+                        <Button
+                          size="sm" variant="ghost"
+                          className="h-6 px-1.5 text-gray-400 hover:text-red-600 shrink-0"
+                          disabled={osEmptyBoxUndoMutation.isPending}
+                          onClick={() => osEmptyBoxUndoMutation.mutate(en.id)}
+                          title="Undo this empty box"
+                        >
+                          <Undo2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowEmptyBox(false)}>Cancel</Button>
+              <Button
+                className="bg-amber-600 hover:bg-amber-700 text-white"
+                disabled={osEmptyBoxMutation.isPending || !(Number(emptyBoxQty) >= 1)}
+                onClick={() => osEmptyBoxMutation.mutate({
+                  quantity: Math.max(1, Math.floor(Number(emptyBoxQty) || 1)),
+                  note: emptyBoxNote.trim() || null,
+                })}
+              >
+                {osEmptyBoxMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Log Empty Box"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Multi-match selection dialog */}
         <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) { setOsMultiMatch(null); resetOsConfirmation(); } }}>
