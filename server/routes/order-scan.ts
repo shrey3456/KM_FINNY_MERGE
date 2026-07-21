@@ -9,7 +9,7 @@ import {
 import { eq, and, or, desc, asc, gte, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
-import { computeGroupReport, resolveGroupId, applyLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
+import { computeGroupReport, resolveGroupId, applyLiveScanStock, reverseLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
 import { requirePageWrite } from '../lib/pageAccess';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
@@ -1476,11 +1476,15 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
 // ── POST /api/order-scan/events/:id/void ─────────────────────────────────────
 // Admin-only. Marks a single scan event as a mistake: the row stays in history
 // (never deleted) but its quantity is reversed out of the linked order_scan_items
-// row, mirroring exactly what the original /scan increment did, in reverse. Only
-// allowed while the parent session is still active — once completed, stock has
-// already been finalized from these numbers, so voiding is blocked at that point.
-// This is purely additive: it doesn't touch the /scan endpoint or any other
-// existing read path — everything that already worked keeps working unchanged.
+// row AND out of stock (product_plant_stock / stock_movements / products.in_stock),
+// mirroring exactly what the original /scan increment did, in reverse. Allowed
+// regardless of whether the part has since been completed — an admin needs to be
+// able to correct a mistake discovered after the fact, not just while it's still
+// open. Blocked only if this exact event has already been used as a FIFO credit
+// source for a later part (credited_qty > 0) — voiding it out from under that
+// credit would leave the later part's numbers wrong with nothing pointing at why;
+// that credit would need to be dealt with first (e.g. void the later part's
+// credited entry, which un-does reconcileCredits' write — not handled here).
 router.post('/order-scan/events/:id/void', async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
@@ -1510,15 +1514,16 @@ router.post('/order-scan/events/:id/void', async (req: Request, res: Response) =
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'This scan is already voided' });
     }
+    if (Number(event.credited_qty ?? 0) > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Part of this scan has already been credited to a later part — void that credited entry first.' });
+    }
 
     const sessResult = await client.query(
-      `SELECT scan_status FROM order_import_sessions WHERE id = $1`,
+      `SELECT plant FROM order_import_sessions WHERE id = $1`,
       [event.session_id],
     );
-    if (sessResult.rows[0]?.scan_status === 'completed') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'This part is already completed — stock has been finalized and this scan can no longer be voided.' });
-    }
+    const plant = sessResult.rows[0]?.plant as string | undefined;
 
     let updatedItem: any = null;
     if (event.scan_item_id) {
@@ -1545,6 +1550,16 @@ router.post('/order-scan/events/:id/void', async (req: Request, res: Response) =
         );
         updatedItem = updateResult.rows[0];
       }
+    }
+
+    if (plant && event.barcode) {
+      const qty = Number(event.total_qty ?? 0);
+      await reverseLiveScanStock(
+        client, plant, event.barcode,
+        event.is_extra ? 0 : qty,
+        event.is_extra ? qty : 0,
+        event.session_id,
+      );
     }
 
     const voidResult = await client.query(

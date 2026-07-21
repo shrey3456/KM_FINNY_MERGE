@@ -1765,7 +1765,7 @@ export default function ExpenseVoucher() {
               </h3>
 
               <p className="text-gray-600 max-w-md mb-8 text-lg">
-                We couldn't locate an expense voucher with number <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedOrder}</span> on <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{format(effectiveDate, "dd/MM/yyyy")}</span>
+                We couldn't locate an expense voucher with number <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedOrder}</span> on <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedDate ? format(selectedDate, "dd/MM/yyyy") : "the selected date"}</span>
               </p>
               
               <div className="grid gap-4 w-full max-w-lg">

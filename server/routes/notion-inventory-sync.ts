@@ -7,6 +7,8 @@ import {
   getPendingReport,
   getSyncStatus,
   getSyncHistory,
+  getAutoApplyEnabled,
+  setAutoApplyEnabled,
   PRODUCT_IMAGE_DIR,
 } from '../services/notionInventorySync';
 import { storage } from '../storage';
@@ -78,6 +80,28 @@ router.post('/notion-inventory-sync/full-sync', async (req, res) => {
 // GET /api/notion-inventory-sync/status
 router.get('/notion-inventory-sync/status', (_req, res) => {
   res.json(getSyncStatus());
+});
+
+// GET /api/notion-inventory-sync/auto-apply-config
+// Whether the 24-hour scheduled sync is allowed to apply detected changes on its own.
+// Shared across everyone (single server-side setting), not a per-browser preference — mounted
+// under requireAdminRole above, so only admin/super-admin can read or change it.
+router.get('/notion-inventory-sync/auto-apply-config', async (_req, res) => {
+  try {
+    res.json({ enabled: await getAutoApplyEnabled() });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to read auto-apply setting' });
+  }
+});
+
+router.post('/notion-inventory-sync/auto-apply-config', async (req, res) => {
+  try {
+    const enabled = req.body?.enabled === true;
+    await setAutoApplyEnabled(enabled, callerName(req));
+    res.json({ enabled });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to save auto-apply setting' });
+  }
 });
 
 // GET /api/notion-inventory-sync/inspect-properties

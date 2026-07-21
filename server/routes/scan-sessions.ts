@@ -1172,6 +1172,9 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
            ose.scanned_by_code  AS "scannedByCode",
            ose.scanned_by_name  AS "scannedByName",
            ose.scanned_at       AS "scannedAt",
+           ose.voided,
+           ose.voided_at        AS "voidedAt",
+           ose.void_reason      AS "voidReason",
            ois.csv_file_name    AS "orderName",
            ois.plant
          ${baseFrom}

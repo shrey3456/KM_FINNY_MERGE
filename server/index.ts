@@ -112,6 +112,18 @@ app.use((req, res, next) => {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    // Server-side switch for the Notion product-inventory sync: whether the 24-hour scheduled
+    // job (server/routes.ts) is allowed to auto-apply detected changes on its own, or must only
+    // detect and leave them pending for an admin to review. Single-row table (id is always 1),
+    // off by default so a fresh install never silently writes to the product DB unattended.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notion_inventory_sync_config (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        auto_apply_enabled BOOLEAN NOT NULL DEFAULT false,
+        updated_by TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
     console.log('Database migrations completed successfully');
 
     // Auto-sync scan history to the configured Notion inventory DB every 30 minutes. No-ops
