@@ -347,6 +347,7 @@ export async function applySessionStock(client: import('pg').PoolClient, session
             COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
      FROM order_scan_events
      WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
+       AND barcode <> 'EMPTY_BOX'
      GROUP BY LOWER(barcode)
      HAVING SUM(total_qty) <> 0`,
     [sessionId],

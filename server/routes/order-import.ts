@@ -560,7 +560,9 @@ router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, 
     const { rows: events } = await pool.query(
       `SELECT session_id AS "sessionId", barcode, item_name AS "itemName",
               pallets, loose_qty AS "looseQty", total_qty AS "totalQty",
-              is_extra AS "isExtra", stv, scanned_by_code AS "scannedByCode",
+              is_extra AS "isExtra", (barcode = 'EMPTY_BOX') AS "isEmptyBox",
+              CASE WHEN item_name LIKE 'Empty Box: %' THEN SUBSTRING(item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
+              stv, scanned_by_code AS "scannedByCode",
               scanned_by_name AS "scannedByName", scanned_at AS "scannedAt"
        FROM order_scan_events
        WHERE session_id = ANY($1::int[])
@@ -738,6 +740,7 @@ router.delete('/order-import/sessions/:id', requireAdmin, async (req: Request, r
                 COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
          FROM order_scan_events
          WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
+           AND barcode <> 'EMPTY_BOX'
          GROUP BY LOWER(barcode)
          HAVING SUM(total_qty) <> 0`,
         [id],
@@ -1012,6 +1015,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         AND ose.is_extra = true
         AND ose.voided IS NOT TRUE
         AND ose.barcode IS NOT NULL
+        AND ose.barcode <> 'EMPTY_BOX'
       GROUP BY ose.session_id, ose.barcode
     `, [sessionIds]);
 
@@ -1037,6 +1041,19 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       itemsBySession.set(ex.sessionId, list);
     });
 
+    // Empty-box running totals per session — a distinct status, never mixed into order/extra
+    // quantities (empty boxes are order_scan_events with the sentinel barcode 'EMPTY_BOX', kept
+    // out of every qty/stock total — see the empty-box block in order-scan.ts). Surfaced so
+    // Master View can show the count for reconciliation.
+    const { rows: emptyBoxRows } = await pool.query(`
+      SELECT session_id AS "sessionId", COUNT(*)::int AS "count", COALESCE(SUM(total_qty), 0)::int AS "totalQty"
+      FROM order_scan_events
+      WHERE session_id = ANY($1::int[]) AND barcode = 'EMPTY_BOX' AND voided IS NOT TRUE
+      GROUP BY session_id
+    `, [sessionIds]);
+    const emptyBoxBySession = new Map<number, { count: number; totalQty: number }>();
+    for (const r of emptyBoxRows) emptyBoxBySession.set(r.sessionId, { count: r.count, totalQty: r.totalQty });
+
     const files = sessions.map((s) => ({
       sessionId:    s.id,
       csvFileName:  s.csvFileName,
@@ -1046,6 +1063,8 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       plant:        s.plant,
       scanStatus:   s.scanStatus,
       items:        itemsBySession.get(s.id) ?? [],
+      emptyBoxCount:   emptyBoxBySession.get(s.id)?.count ?? 0,
+      emptyBoxTotalQty: emptyBoxBySession.get(s.id)?.totalQty ?? 0,
     }));
 
     const totalRows = files.reduce((sum, f) => sum + f.items.length, 0);

@@ -1444,6 +1444,7 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
         MAX(ose.scanned_by_name)             AS "scannedByName"
       FROM order_scan_events ose
       WHERE ose.session_id = $1 AND ose.is_extra = true AND ose.voided IS NOT TRUE
+        AND ose.barcode <> 'EMPTY_BOX'
       GROUP BY COALESCE(ose.barcode, '')
       ORDER BY MAX(ose.scanned_at) DESC
     `, [id]);
@@ -1573,6 +1574,134 @@ router.post('/order-scan/events/:id/void', async (req: Request, res: Response) =
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to void scan' });
   } finally {
     client.release();
+  }
+});
+
+// ── Empty Box (order-scan) ───────────────────────────────────────────────────
+// An "Empty Box" is a box the operator receives with no item/barcode to scan. It's logged as
+// an ordinary order_scan_events row — NOT a separate table and with NO dedicated flag column —
+// identified purely by the reserved sentinel barcode 'EMPTY_BOX' (no real numeric SKU can
+// collide). That keeps it out of every order/extra/stock total for free:
+//   • received qty comes from order_scan_items (an empty box creates none),
+//   • extra qty comes from is_extra=true events (an empty box is is_extra=false),
+//   • stock joins on real product barcodes ('EMPTY_BOX' matches no product/plant-stock row).
+// So it can never trip the quantity-breach popup or falsely complete a part. Its qty lives in
+// total_qty; its optional note lives in item_name as 'Empty Box' or 'Empty Box: <note>'; undo
+// is a soft-void (voided=true).
+const EMPTY_BOX_BARCODE = 'EMPTY_BOX';
+// item_name is 'Empty Box' with no note, or 'Empty Box: <note>' with one. This SQL fragment
+// pulls the note back out (NULL when there's just the bare label). Keep in sync with the label
+// built in the POST handler below.
+const EMPTY_BOX_NOTE_SQL = `CASE WHEN item_name LIKE 'Empty Box: %' THEN SUBSTRING(item_name FROM 12) ELSE NULL END`;
+
+// Running totals of non-voided empty boxes for a session: count = number of entries,
+// totalQty = sum of their quantities. Both power the reconciliation figure in the UI.
+async function getEmptyBoxSummary(sessionId: number) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS "count", COALESCE(SUM(total_qty), 0)::int AS "totalQty"
+     FROM order_scan_events
+     WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+    [sessionId, EMPTY_BOX_BARCODE],
+  );
+  return { count: rows[0]?.count ?? 0, totalQty: rows[0]?.totalQty ?? 0 };
+}
+
+// ── GET /api/order-scan/sessions/:id/empty-boxes ─────────────────────────────
+// List of non-voided empty box entries for a session, plus the running summary.
+router.get('/order-scan/sessions/:id/empty-boxes', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+  try {
+    const { rows: entries } = await pool.query(
+      `SELECT id, session_id AS "sessionId", total_qty AS quantity, ${EMPTY_BOX_NOTE_SQL} AS note,
+              scanned_by_code AS "scannedByCode", scanned_by_name AS "scannedByName",
+              scanned_at AS "scannedAt"
+       FROM order_scan_events
+       WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE
+       ORDER BY id DESC`,
+      [id, EMPTY_BOX_BARCODE],
+    );
+    res.json({ ...(await getEmptyBoxSummary(id)), entries });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch empty boxes' });
+  }
+});
+
+// ── POST /api/order-scan/sessions/:id/empty-box ──────────────────────────────
+// Log an empty box against a session. No barcode/CSV lookup — a separate action from a
+// product scan. quantity defaults to 1; an optional note is kept for audit. Blocked once
+// the session is completed (its numbers are finalized, same rule as voiding a scan).
+router.post('/order-scan/sessions/:id/empty-box', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+  const rawQty = Number(req.body?.quantity ?? 1);
+  const quantity = Number.isFinite(rawQty) ? Math.max(1, Math.floor(rawQty)) : 1;
+  const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) || null : null;
+  // Note is folded into item_name (no dedicated column): 'Empty Box' or 'Empty Box: <note>'.
+  const itemName = note ? `Empty Box: ${note}` : 'Empty Box';
+  const userCode = (req.user as any)?.userCode ?? null;
+  const userName = (req.user as any)?.name ?? null;
+
+  try {
+    const { rows: sessRows } = await pool.query(
+      `SELECT scan_status AS "scanStatus" FROM order_import_sessions WHERE id = $1 AND is_deleted = false`,
+      [id],
+    );
+    if (!sessRows[0]) return res.status(404).json({ message: 'Session not found or has been deleted' });
+    if (sessRows[0].scanStatus === 'completed') {
+      return res.status(400).json({ message: 'This part is already completed — empty boxes can no longer be added.' });
+    }
+
+    // Sentinel barcode + is_extra=false + scan_item_id=null — see the block comment above for
+    // why this keeps empty boxes out of every quantity/stock aggregation.
+    const { rows: inserted } = await pool.query(
+      `INSERT INTO order_scan_events
+         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+          items_per_pallet, is_extra, scanned_by_code, scanned_by_name)
+       VALUES ($1, NULL, $2, $3, 0, $4, $4, 0, false, $5, $6)
+       RETURNING id, session_id AS "sessionId", total_qty AS quantity, ${EMPTY_BOX_NOTE_SQL} AS note,
+                 scanned_by_code AS "scannedByCode", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt"`,
+      [id, EMPTY_BOX_BARCODE, itemName, quantity, userCode, userName],
+    );
+
+    const summary = await getEmptyBoxSummary(id);
+    res.status(201).json({ entry: inserted[0], ...summary });
+
+    broadcastScanEvent(id, { type: 'empty-box', sessionId: id, ...summary });
+    broadcastOrderImportUpdate();
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to log empty box' });
+  }
+});
+
+// ── POST /api/order-scan/empty-box/:id/undo ──────────────────────────────────
+// Undo/remove an empty box marked by mistake. Soft-void (keeps the audit row) so it drops
+// out of counts/reports. Any scan-order writer can undo (it's operator self-correction).
+// Scoped to the sentinel barcode so this can never void a real product scan.
+router.post('/order-scan/empty-box/:id/undo', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+  const entryId = parseInt(req.params.id);
+  if (isNaN(entryId)) return res.status(400).json({ message: 'Invalid entry ID' });
+  const userCode = (req.user as any)?.userCode ?? null;
+
+  try {
+    const { rows } = await pool.query(
+      `UPDATE order_scan_events
+       SET voided = true, voided_by_code = $1, voided_at = NOW()
+       WHERE id = $2 AND barcode = $3 AND voided IS NOT TRUE
+       RETURNING session_id AS "sessionId"`,
+      [userCode, entryId, EMPTY_BOX_BARCODE],
+    );
+    if (!rows[0]) return res.status(404).json({ message: 'Empty box entry not found or already removed' });
+
+    const sessionId = rows[0].sessionId;
+    const summary = await getEmptyBoxSummary(sessionId);
+    res.json({ success: true, sessionId, ...summary });
+
+    broadcastScanEvent(sessionId, { type: 'empty-box', sessionId, ...summary });
+    broadcastOrderImportUpdate();
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to undo empty box' });
   }
 });
 
