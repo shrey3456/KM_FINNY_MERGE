@@ -2523,7 +2523,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             <div className="bg-white rounded-xl border overflow-hidden">
               {/* List header */}
               <div className="flex items-center justify-between px-4 py-2.5 border-b bg-[#001d6e]">
-                <p className="text-xs font-semibold text-white">CSV Items</p>
+                <p className="text-xs font-semibold text-white">Items</p>
                 <div className="flex items-center gap-3">
                   <span className="text-xs text-blue-200">{osDoneCount}/{osTotalCount} done</span>
                   {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-white" />}
@@ -2951,6 +2951,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* Totals live in one card rather than four free-floating boxes, so the block reads as
                   a single unit. items-start on the row keeps this card at its natural height rather
                   than stretching to match the taller scanner column. */}
+              <div className="flex min-w-0 flex-col gap-3">
               <div className="flex flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
                 <div className="flex items-baseline justify-between">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
@@ -3008,6 +3009,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <span>{displayTotals.remaining} remaining</span>
                   </div>
                 </div>
+              </div>
+              {osTab === "master-view" && (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <span className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
+                          {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                        </span>
+                        {allMvItems.length > 0 && (
+                          <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
+                            <Download className="h-3.5 w-3.5" /> Export CSV
+                          </button>
+                        )}
+                      </div>
+              )}
               </div>
 
               {/* Drag handle — sits in the 0.75rem gutter column and trades width between the two
@@ -3163,17 +3177,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             )}
 
             <div className="space-y-4">
-            <div className="flex flex-col gap-4">
-
-              {/* Single full-width column: the scanner collapsible sits above the table (order-1)
-                  and the table spans the whole width below it (order-2). The scanner panel is
-                  shared/persistent across both tabs so the camera never remounts (and drops its
-                  stream) when switching between them. */}
-              <div className="order-2 space-y-4 min-w-0">
               {osTab === "scan" && (
                 <TableCard
                   icon={ScanLine}
-                  title="CSV Items"
+                  title="Items"
                   subtitle={`${osDoneCount} / ${osTotalCount} done`}
                   searchValue={osSearch}
                   onSearchChange={setOsSearch}
@@ -3209,16 +3216,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
               {osTab === "master-view" && (
                 <div className="space-y-4">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <span className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
-                      {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
-                    </span>
-                    {allMvItems.length > 0 && (
-                      <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Export CSV
-                      </button>
-                    )}
-                  </div>
                   {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
                   {mvData && (
                     <>
@@ -3274,11 +3271,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
               )}
               {osTab === "scan" && sideInfoPanel}
-              </div>
-
             </div>
 
-            </div>
 
             {/* ── Separate CSVs Tab (desktop) ── */}
             {osTab === "separate-csvs" && (
