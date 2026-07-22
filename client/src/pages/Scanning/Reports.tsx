@@ -5,11 +5,17 @@ import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
-  History, Search, X, RefreshCw, FileDown,
-  User, UserCircle, Loader2, ScanLine, Upload, Trash2,
+  History, Search, X, RefreshCw, FileDown, ChevronDown,
+  User, UserCircle, Loader2, ScanLine, Upload,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -371,32 +377,33 @@ const Reports = () => {
           )}
 
           <div className="flex gap-2 ml-auto">
-            {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
-              <Button
-                key={fmt} variant="outline" size="sm" className="h-9 text-xs"
-                disabled={historyItems.length === 0 || historyExporting !== null}
-                onClick={async () => {
-                  setHistoryExporting(fmt);
-                  try {
-                    const allItems = await fetchAllHistoryItems();
-                    const rows = historyExportRows(allItems);
-                    const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
-                    if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
-                    if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
-                    if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
-                  } catch (err: any) {
-                    toast({ title: "Export failed", description: err?.message, variant: "destructive" });
-                  } finally {
-                    setHistoryExporting(null);
-                  }
-                }}
-              >
-                {historyExporting === fmt
-                  ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                  : <FileDown className="h-3.5 w-3.5 mr-1" />}
-                {fmt}
-              </Button>
-            ))}
+            {/* One Export control instead of three buttons; the format is picked from the menu. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="h-9 text-xs" disabled={historyItems.length === 0}>
+                  <FileDown className="h-3.5 w-3.5 mr-1" />
+                  Export
+                  <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-70" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-36">
+                {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
+                  <DropdownMenuItem
+                    key={fmt}
+                    onSelect={() => {
+                      const rows = historyExportRows(historyItems);
+                      const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                      if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
+                      if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
+                      if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
+                    }}
+                  >
+                    <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />
+                    {fmt}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Button
               size="sm" className="h-9 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white"
               onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
