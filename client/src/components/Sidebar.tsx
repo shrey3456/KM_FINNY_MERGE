@@ -232,7 +232,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "scan-order",
         },
         {
-          label: "Overall Stock",
+          label: "Stock Overview",
           icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/overall-stock",
           pageKey: "overall-stock",
