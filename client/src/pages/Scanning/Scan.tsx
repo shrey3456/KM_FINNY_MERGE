@@ -2197,8 +2197,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 complete action / progress read as distinct fields rather than floating text. */}
             <div className={`flex items-stretch divide-x divide-gray-200 border-b border-gray-300 ${osRotated ? "text-sm" : ""}`}>
               <div className={`flex-1 min-w-0 ${osRotated ? "px-4 py-3" : "px-3 py-2"}`}>
-                <p className={`font-bold text-gray-900 truncate leading-tight ${osRotated ? "text-base" : "text-xs"}`}>
-                  {stripCsvExt(activeOrderScanSession.csvFileName)}
+                <p
+                  className={`font-bold text-gray-900 truncate leading-tight ${osRotated ? "text-base" : "text-xs"}`}
+                  title={stripCsvExt(activeOrderScanSession.csvFileName)}
+                >
+                  {scanFmtUploadDate(activeOrderScanSession.orderDate)}
                   {(osGroupCreditsQuery.data?.totalParts ?? 0) > 1 && (
                     <span className={`ml-1.5 inline-block bg-purple-100 font-semibold text-purple-700 ${osRotated ? "px-2 py-0.5 text-xs" : "px-1.5 py-0.5 text-[10px]"}`}>
                       Part {osGroupCreditsQuery.data?.partIndex} of {osGroupCreditsQuery.data?.totalParts}
@@ -2880,13 +2883,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <Zap className="h-4 w-4 text-white" />
                 </div>
                 <div className="min-w-0">
-                  {/* Upload date rather than the CSV file name — operators identify a session by
-                      when it came in. The file name is still available as the tooltip. */}
+                  {/* Order Date (what the CSV was uploaded FOR) rather than the CSV file name —
+                      operators identify a session by the order it belongs to, not the raw upload
+                      timestamp. The file name is still available as the tooltip. */}
                   <p
                     className="text-sm font-bold text-gray-900 leading-tight truncate max-w-xs lg:max-w-sm"
                     title={stripCsvExt(activeOrderScanSession.csvFileName)}
                   >
-                    {scanFmtUploadDate(activeOrderScanSession.createdAt)}
+                    {scanFmtUploadDate(activeOrderScanSession.orderDate)}
                     {(osGroupCreditsQuery.data?.totalParts ?? 0) > 1 && (
                       <span className="ml-1.5 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
                         Part {osGroupCreditsQuery.data?.partIndex} of {osGroupCreditsQuery.data?.totalParts}

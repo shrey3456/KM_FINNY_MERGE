@@ -23,8 +23,6 @@ import TollVoucher from "./pages/TollVoucher";
 import StockSheets from "./pages/StockSheets";
 import OrderManagement from "./pages/OrderManagement";
 import OrderImport from "./pages/OrderImport";
-import EditOrderImport from "./pages/EditOrderImport";
-import OrderReports from "./pages/OrderReports";
 import MessagesPage from "./pages/MessagesPage";
 import CheckInOutPage from "./pages/CheckInOutPage";
 import Profile from "./pages/Profile";
@@ -258,8 +256,6 @@ function Router() {
         <ProtectedRoute path="/plant-settings" component={PlantSettings} requiredPage="plant-management" />
         <ProtectedRoute path="/order-management" component={OrderManagement} requiredPage="order-management" />
         <ProtectedRoute path="/order-import" component={OrderImport} requireOrderManagement={true} requiredPage="order-import" />
-        <ProtectedRoute path="/order-reports" component={OrderReports} requiredPage="order-import" />
-        <ProtectedRoute path="/order-import-edit" component={EditOrderImport} requiredPage="order-import-edit" />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />
         <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />

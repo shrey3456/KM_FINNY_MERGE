@@ -644,24 +644,154 @@ export default function PlantSettings() {
     },
   ];
 
+  // STV directory panel for one plant — shared by the desktop table's expanded row and the
+  // mobile card list below, so the two don't drift apart.
+  const renderStvPanel = (plant: any) => (
+    <div className="rounded-xl border bg-white p-0 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/40 px-5 py-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white shadow-sm">
+            <Tag className="h-4 w-4 text-muted-foreground" />
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-sm font-semibold">STV Directory</div>
+            <div className="text-xs text-muted-foreground">{plant.name}</div>
+          </div>
+        </div>
+        <div className="rounded-full border bg-white px-3 py-1 text-xs font-medium text-muted-foreground">
+          {stvs?.length ?? 0} STVs
+        </div>
+      </div>
+
+      <div className="px-5 py-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex w-full max-w-md gap-2">
+            <Input
+              placeholder="Add STV"
+              value={newStv}
+              onChange={(event) => setNewStv(event.target.value)}
+              onClick={(event) => event.stopPropagation()}
+            />
+            <Button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                handleAddStv();
+              }}
+              disabled={createStvMutation.isPending || !newStv.trim() || !canWrite}
+              title={!canWrite ? "You have read-only access to Plant Management" : undefined}
+            >
+              Add
+            </Button>
+          </div>
+        </div>
+
+        {isStvsLoading ? (
+          <div className="mt-4 text-sm text-muted-foreground">Loading STVs...</div>
+        ) : stvs && stvs.length > 0 ? (
+          <div className="mt-4 space-y-2">
+            {stvs.map((stv: any, index: number) => (
+              <div key={stv.id} className="flex items-center gap-3 rounded-lg border bg-muted/30 px-3 py-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full border bg-white text-xs font-semibold text-muted-foreground">
+                  {String(index + 1).padStart(2, "0")}
+                </div>
+                {editingStvId === stv.id ? (
+                  <div className="flex flex-1 flex-wrap items-center gap-2">
+                    <Input
+                      value={editingStvValue}
+                      onChange={(event) => setEditingStvValue(event.target.value)}
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                    <Button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        updateStvMutation.mutate({
+                          id: stv.id,
+                          stv: editingStvValue.trim(),
+                        });
+                      }}
+                      disabled={updateStvMutation.isPending || !editingStvValue.trim() || !canWrite}
+                      title={!canWrite ? "You have read-only access to Plant Management" : undefined}
+                    >
+                      Save
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setEditingStvId(null);
+                        setEditingStvValue("");
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex-1 text-sm font-semibold text-gray-900">
+                      {stv.stv}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      disabled={!canWrite}
+                      title={!canWrite ? "You have read-only access to Plant Management" : undefined}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setEditingStvId(stv.id);
+                        setEditingStvValue(stv.stv || "");
+                      }}
+                    >
+                      <Edit className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="text-destructive"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        deleteStvMutation.mutate(stv.id);
+                      }}
+                      disabled={deleteStvMutation.isPending || !canWrite}
+                      title={!canWrite ? "You have read-only access to Plant Management" : undefined}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-4 text-sm text-muted-foreground">No STVs added yet.</div>
+        )}
+      </div>
+    </div>
+  );
+
   return (
-    <div className="w-full px-4 py-8 sm:px-6">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Factory className="h-6 w-6" />
+    <div className="w-full px-4 py-6 sm:py-8 sm:px-6">
+      <div className="flex flex-col gap-3 mb-6 sm:flex-row sm:items-center sm:justify-between">
+        <h1 className="text-xl sm:text-2xl font-bold flex items-center gap-2">
+            <Factory className="h-6 w-6 shrink-0" />
             Plant Management
         </h1>
         <div className="flex gap-2">
-          <Link href="/print-operations">
-            <Button variant="outline">
-              <Printer className="mr-2 h-4 w-4" />
-              Print Operations
+          <Link href="/print-operations" className="flex-1 sm:flex-initial">
+            <Button variant="outline" className="w-full sm:w-auto">
+              <Printer className="mr-2 h-4 w-4 shrink-0" />
+              <span className="sm:hidden">Print Ops</span>
+              <span className="hidden sm:inline">Print Operations</span>
             </Button>
           </Link>
           <Dialog open={isDialogOpen} onOpenChange={handleDialogChange}>
             <DialogTrigger asChild>
-              <Button onClick={handleAddNew} disabled={!canWrite} title={!canWrite ? "You have read-only access to Plant Management" : undefined}>
-                <Plus className="mr-2 h-4 w-4" /> Add New Plant
+              <Button onClick={handleAddNew} disabled={!canWrite} title={!canWrite ? "You have read-only access to Plant Management" : undefined} className="flex-1 sm:flex-initial">
+                <Plus className="mr-2 h-4 w-4 shrink-0" /> <span className="sm:hidden">Add Plant</span><span className="hidden sm:inline">Add New Plant</span>
               </Button>
             </DialogTrigger>
             <DialogContent className="max-h-[90vh] gap-0 overflow-hidden p-0 sm:max-w-2xl">
@@ -850,153 +980,101 @@ export default function PlantSettings() {
         onSearchChange={setPlantSearch}
         searchPlaceholder="Search plants…"
       >
-        <DataTable<any>
-          className="space-y-0"
-          containerClassName="rounded-none border-0"
-          columns={plantColumns}
-          data={filteredPlants}
-          getRowId={(plant) => String(plant.id)}
-          isLoading={isLoading}
-          loadingLabel="Loading plants…"
-          emptyState="No plants configured yet."
-          noResultsState="No plants match your search."
-          hasActiveFilters={!!plantSearch}
-          sortMode="client"
-          paginationMode="client"
-          defaultPageSize={10}
-          pageSizeOptions={[10, 25, 50, 100]}
-          enableColumnResizing
-          enableZebraStripes
-          showMobileSwipeHint
-          headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
-          expandedRowId={expandedPlantId ? String(expandedPlantId) : null}
-          renderExpandedRow={(plant: any) => (
-                      <div className="rounded-xl border bg-white p-0 shadow-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/40 px-5 py-3">
-                          <div className="flex items-center gap-3">
-                            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white shadow-sm">
-                              <Tag className="h-4 w-4 text-muted-foreground" />
-                            </div>
-                            <div className="space-y-0.5">
-                              <div className="text-sm font-semibold">STV Directory</div>
-                              <div className="text-xs text-muted-foreground">{plant.name}</div>
-                            </div>
-                          </div>
-                          <div className="rounded-full border bg-white px-3 py-1 text-xs font-medium text-muted-foreground">
-                            {stvs?.length ?? 0} STVs
-                          </div>
-                        </div>
+        {/* Desktop/tablet: full table with every column. */}
+        <div className="hidden sm:block">
+          <DataTable<any>
+            className="space-y-0"
+            containerClassName="rounded-none border-0"
+            columns={plantColumns}
+            data={filteredPlants}
+            getRowId={(plant) => String(plant.id)}
+            isLoading={isLoading}
+            loadingLabel="Loading plants…"
+            emptyState="No plants configured yet."
+            noResultsState="No plants match your search."
+            hasActiveFilters={!!plantSearch}
+            sortMode="client"
+            paginationMode="client"
+            defaultPageSize={10}
+            pageSizeOptions={[10, 25, 50, 100]}
+            enableColumnResizing
+            enableZebraStripes
+            showMobileSwipeHint
+            headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+            expandedRowId={expandedPlantId ? String(expandedPlantId) : null}
+            renderExpandedRow={renderStvPanel}
+          />
+        </div>
 
-                        <div className="px-5 py-4">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="flex w-full max-w-md gap-2">
-                              <Input
-                                placeholder="Add STV"
-                                value={newStv}
-                                onChange={(event) => setNewStv(event.target.value)}
-                                onClick={(event) => event.stopPropagation()}
-                              />
-                              <Button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleAddStv();
-                                }}
-                                disabled={createStvMutation.isPending || !newStv.trim() || !canWrite}
-                                title={!canWrite ? "You have read-only access to Plant Management" : undefined}
-                              >
-                                Add
-                              </Button>
-                            </div>
-                          </div>
+        {/* Mobile: one card per plant instead of a sideways-scrolling table — the color
+            columns collapse into a single name badge styled with the plant's actual print
+            colors, since the exact hex values aren't actionable from a phone anyway (Edit
+            still shows them). */}
+        <div className="sm:hidden divide-y divide-gray-100">
+          {isLoading ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">Loading plants…</div>
+          ) : filteredPlants.length === 0 ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">
+              {plantSearch ? "No plants match your search." : "No plants configured yet."}
+            </div>
+          ) : (
+            filteredPlants.map((plant: any) => (
+              <div key={plant.id} className="p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div
+                    className="rounded border px-2.5 py-1 text-sm font-bold truncate"
+                    style={{ backgroundColor: plant.bgColor, color: plant.textColor, borderColor: plant.borderColor, borderWidth: "1px" }}
+                  >
+                    {plant.name}
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      disabled={!canWrite}
+                      title={!canWrite ? "You have read-only access to Plant Management" : undefined}
+                      onClick={() => handleEdit(plant)}
+                    >
+                      <Edit className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="text-destructive"
+                      disabled={!canWrite}
+                      title={!canWrite ? "You have read-only access to Plant Management" : undefined}
+                      onClick={() => deleteMutation.mutate(plant.id)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
 
-                          {isStvsLoading ? (
-                            <div className="mt-4 text-sm text-muted-foreground">Loading STVs...</div>
-                          ) : stvs && stvs.length > 0 ? (
-                            <div className="mt-4 space-y-2">
-                              {stvs.map((stv: any, index: number) => (
-                                <div key={stv.id} className="flex items-center gap-3 rounded-lg border bg-muted/30 px-3 py-2">
-                                  <div className="flex h-7 w-7 items-center justify-center rounded-full border bg-white text-xs font-semibold text-muted-foreground">
-                                    {String(index + 1).padStart(2, "0")}
-                                  </div>
-                                  {editingStvId === stv.id ? (
-                                    <div className="flex flex-1 flex-wrap items-center gap-2">
-                                      <Input
-                                        value={editingStvValue}
-                                        onChange={(event) => setEditingStvValue(event.target.value)}
-                                        onClick={(event) => event.stopPropagation()}
-                                      />
-                                      <Button
-                                        type="button"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          updateStvMutation.mutate({
-                                            id: stv.id,
-                                            stv: editingStvValue.trim(),
-                                          });
-                                        }}
-                                        disabled={updateStvMutation.isPending || !editingStvValue.trim() || !canWrite}
-                                        title={!canWrite ? "You have read-only access to Plant Management" : undefined}
-                                      >
-                                        Save
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        variant="outline"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          setEditingStvId(null);
-                                          setEditingStvValue("");
-                                        }}
-                                      >
-                                        Cancel
-                                      </Button>
-                                    </div>
-                                  ) : (
-                                    <>
-                                      <div className="flex-1 text-sm font-semibold text-gray-900">
-                                        {stv.stv}
-                                      </div>
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        disabled={!canWrite}
-                                        title={!canWrite ? "You have read-only access to Plant Management" : undefined}
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          setEditingStvId(stv.id);
-                                          setEditingStvValue(stv.stv || "");
-                                        }}
-                                      >
-                                        <Edit className="h-4 w-4" />
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        className="text-destructive"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          deleteStvMutation.mutate(stv.id);
-                                        }}
-                                        disabled={deleteStvMutation.isPending || !canWrite}
-                                        title={!canWrite ? "You have read-only access to Plant Management" : undefined}
-                                      >
-                                        <Trash2 className="h-4 w-4" />
-                                      </Button>
-                                    </>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="mt-4 text-sm text-muted-foreground">No STVs added yet.</div>
-                          )}
-                        </div>
-                      </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                  {statusCell(!!plant.isLockingEnabled, <Lock className="h-3.5 w-3.5" />, "Locked", <Unlock className="h-3.5 w-3.5" />, "Unlocked", "text-red-600")}
+                  {statusCell(!!plant.isSplitPagesEnabled, <FileText className="h-3.5 w-3.5" />, "Split Pages", <ScrollText className="h-3.5 w-3.5" />, "Continuous", "text-blue-600")}
+                  {statusCell(!!plant.isAutoCompleteEnabled, <CheckCircle2 className="h-3.5 w-3.5" />, "Auto Complete", <Hand className="h-3.5 w-3.5" />, "Manual Complete", "text-emerald-600")}
+                  {statusCell(!!plant.isAutoScanEnabled, <Zap className="h-3.5 w-3.5" />, "Auto Scan", <FileText className="h-3.5 w-3.5" />, "Confirm Scan", "text-amber-600")}
+                </div>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="w-full justify-center"
+                  onClick={() => handleToggleStvPanel(plant)}
+                >
+                  {expandedPlantId === plant.id ? <ChevronDown className="h-4 w-4 mr-1.5" /> : <ChevronRight className="h-4 w-4 mr-1.5" />}
+                  View STVs
+                </Button>
+
+                {expandedPlantId === plant.id && (
+                  <div className="pt-1">{renderStvPanel(plant)}</div>
+                )}
+              </div>
+            ))
           )}
-        />
+        </div>
       </TableCard>
     </div>
   );

@@ -34,10 +34,15 @@ function callerName(req: Request): string {
   return u?.name || u?.username || u?.userCode || 'unknown';
 }
 
-// POST /api/notion-inventory-sync/detect
+// POST /api/notion-inventory-sync/detect  — body: { syncImages?: boolean }
+// syncImages defaults to false ("Sync Notion" — fast, data fields only). The client's "Sync
+// Photos" button is the only caller that passes true; Apply only ever touches images that a
+// syncImages:true run actually queued, so this default never risks Apply silently reverting
+// photos.
 router.post('/notion-inventory-sync/detect', async (req, res) => {
   try {
-    const report = await detectChangesFromNotion(callerName(req));
+    const syncImages = req.body?.syncImages === true;
+    const report = await detectChangesFromNotion(callerName(req), syncImages);
     res.json({ success: true, ...report });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
