@@ -6,7 +6,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   History, Search, X, RefreshCw, FileDown, ChevronDown,
-  User, UserCircle, Loader2, ScanLine, Upload,
+  User, UserCircle, Loader2, ScanLine, Upload, Trash2,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
@@ -370,11 +370,14 @@ const Reports = () => {
             </SelectContent>
           </Select>
 
-          {historyFetching && !historyLoading && (
-            <span className="flex items-center gap-1 text-xs text-emerald-600">
-              <RefreshCw className="h-3 w-3 animate-spin" />Updating…
-            </span>
-          )}
+          {/* Always mounted (visibility toggled, not presence) so the 5s poll never shifts the
+              filter bar layout — a mount/unmount here was pushing Export sideways every cycle. */}
+          <span
+            className={`flex items-center gap-1 text-xs text-emerald-600 ${historyFetching && !historyLoading ? "visible" : "invisible"}`}
+            aria-hidden={!(historyFetching && !historyLoading)}
+          >
+            <RefreshCw className="h-3 w-3 animate-spin" />Updating…
+          </span>
 
           <div className="flex gap-2 ml-auto">
             {/* One Export control instead of three buttons; the format is picked from the menu. */}
@@ -547,7 +550,7 @@ const Reports = () => {
                           {!h.voided && (
                             <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
                               onClick={() => setVoidTarget(h)} title="Void this scan">
-                              <Trash2 className="h-3.5 w-3.5" />
+                              < Trash2 className="h-3.5 w-3.5" />
                             </Button>
                           )}
                         </TableCell>
