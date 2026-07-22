@@ -40,17 +40,13 @@ interface StatsBarProps {
   /** Tiles per row on md+ screens. Defaults to the number of stats (capped at 6). */
   columns?: number;
   className?: string;
-  /** Let labels wrap onto a 2nd line instead of single-line-ellipsis truncating. Opt-in
-   *  (default false, unchanged) — turn on for pages whose labels run long (dates, plant
-   *  lists, units) so they read in full instead of getting cut off with "…". */
-  wrapLabels?: boolean;
 }
 
 /**
  * Stats tiles (+ optional action bar) in one bordered card — the Notion Inventory
  * header treatment, reusable across modules.
  */
-export function StatsBar({ stats, actions, columns, className, wrapLabels }: StatsBarProps) {
+export function StatsBar({ stats, actions, columns, className }: StatsBarProps) {
   const cols = Math.min(columns ?? stats.length, 6);
 
   return (
@@ -88,10 +84,7 @@ export function StatsBar({ stats, actions, columns, className, wrapLabels }: Sta
                 >
                   {stat.value}
                 </p>
-                <p className={cn(
-                  "mt-0.5 text-sm font-medium text-gray-500 sm:text-base",
-                  wrapLabels ? "whitespace-normal leading-snug" : "truncate",
-                )}>
+                <p className="mt-0.5 truncate text-sm font-medium text-gray-500 sm:text-base">
                   {stat.label}
                 </p>
               </div>
