@@ -82,6 +82,8 @@ app.use((req, res, next) => {
       ALTER TABLE order_scan_events
       ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0
     `);
+    // (Empty Box entries reuse order_scan_events' existing columns — sentinel barcode
+    // 'EMPTY_BOX', count in total_qty, note in item_name — so no schema change is needed.)
 
     // Order Date is now mandatory on upload and is what Master View scopes by (it replaced the
     // old created_at/upload-day filter). Rows imported before that change can have a NULL

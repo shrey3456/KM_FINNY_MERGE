@@ -6,7 +6,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   History, Search, X, RefreshCw, FileDown, ChevronDown,
-  User, UserCircle, Loader2, ScanLine, Upload,
+  User, UserCircle, Loader2, ScanLine, Upload, Trash2,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
@@ -44,6 +44,8 @@ type ScanHistoryItem = {
   itemsPerPallet: number | null;
   looseQty: number | null;
   isExtra: boolean;
+  isEmptyBox?: boolean;
+  emptyBoxNote?: string | null;
   stv: string | null;
   scannedByCode: string | null;
   scannedByName: string | null;
@@ -61,6 +63,7 @@ type ScanHistoryResponse = {
   totalBoxes: number;
   totalPallets: number;
   extraCount: number;
+  emptyBoxCount?: number;
   scanners: string[];
   limit: number;
   offset: number;
@@ -148,6 +151,7 @@ const Reports = () => {
   const [historyScanner, setHistoryScanner] = useState("__all__");
   const [historyType,    setHistoryType]    = useState("all");
   const [historyPlant,   setHistoryPlant]   = useState("__all__");
+  const [historyExporting, setHistoryExporting] = useState<string | null>(null);
 
   // Plant options for the filter. Non-admins are already restricted server-side, so this
   // dropdown mainly lets admins narrow to one plant; picking a plant you can't see returns
@@ -234,8 +238,40 @@ const Reports = () => {
   const historyTotalBoxes   = historyData?.totalBoxes ?? 0;
   const historyTotalPallets = historyData?.totalPallets ?? 0;
   const historyExtraCount   = historyData?.extraCount ?? 0;
+  const historyEmptyBoxCount = historyData?.emptyBoxCount ?? 0;
   const historyScanners     = historyData?.scanners ?? [];
   const historyHasMore      = historyOffset + historyItems.length < historyTotal;
+
+  // Export must cover every row matching the current filters, not just the current page —
+  // the server caps `limit` at 100 (see /reports/scan-history), so this pages through with
+  // the SAME filters until it has everything, then hands the full set to the exporter.
+  // Previously the button exported `historyItems` directly, which is only the current
+  // HISTORY_PAGE_SIZE (20) page — e.g. exporting "today" silently dropped every row past
+  // page 1.
+  async function fetchAllHistoryItems(): Promise<ScanHistoryItem[]> {
+    const EXPORT_PAGE_SIZE = 100; // server-side max for `limit`
+    let offset = 0;
+    let total = Infinity;
+    const all: ScanHistoryItem[] = [];
+    while (offset < total) {
+      const url = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
+        date:    selectedDate                                  || undefined,
+        search:  historySearch                                 || undefined,
+        scanner: historyScanner !== "__all__" ? historyScanner : undefined,
+        type:    historyType    !== "all"     ? historyType    : undefined,
+        plant:   historyPlant   !== "__all__" ? historyPlant   : undefined,
+        limit:   EXPORT_PAGE_SIZE,
+        offset,
+      });
+      const r: ScanHistoryResponse | undefined = await apiRequest("GET", withCacheBuster(url), undefined, false, true);
+      const items = r?.items ?? [];
+      if (items.length === 0) break; // guards against an infinite loop if total is ever wrong
+      all.push(...items);
+      total = r?.total ?? all.length;
+      offset += items.length;
+    }
+    return all;
+  }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
     ["#", "Scanned By", "Code", "Item", "Barcode", "Order", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
@@ -250,7 +286,7 @@ const Reports = () => {
       h.totalQty,
       h.pallets != null ? parseFloat(String(h.pallets)).toFixed(2) : "",
       h.stv ?? "",
-      h.isExtra ? "Extra" : "Regular",
+      h.isEmptyBox ? "Empty Box" : h.isExtra ? "Extra" : "Regular",
       h.scannedAt ? format(new Date(h.scannedAt), "yyyy-MM-dd HH:mm") : "",
     ]),
   ];
@@ -318,6 +354,7 @@ const Reports = () => {
               <SelectItem value="all">All types</SelectItem>
               <SelectItem value="regular">Regular only</SelectItem>
               <SelectItem value="extra">Extra only</SelectItem>
+              <SelectItem value="empty">Empty Box only</SelectItem>
             </SelectContent>
           </Select>
 
@@ -333,11 +370,14 @@ const Reports = () => {
             </SelectContent>
           </Select>
 
-          {historyFetching && !historyLoading && (
-            <span className="flex items-center gap-1 text-xs text-emerald-600">
-              <RefreshCw className="h-3 w-3 animate-spin" />Updating…
-            </span>
-          )}
+          {/* Always mounted (visibility toggled, not presence) so the 5s poll never shifts the
+              filter bar layout — a mount/unmount here was pushing Export sideways every cycle. */}
+          <span
+            className={`flex items-center gap-1 text-xs text-emerald-600 ${historyFetching && !historyLoading ? "visible" : "invisible"}`}
+            aria-hidden={!(historyFetching && !historyLoading)}
+          >
+            <RefreshCw className="h-3 w-3 animate-spin" />Updating…
+          </span>
 
           <div className="flex gap-2 ml-auto">
             {/* One Export control instead of three buttons; the format is picked from the menu. */}
@@ -396,6 +436,10 @@ const Reports = () => {
             <span className="text-amber-600">Extra Events</span>
             <span className="font-bold text-amber-700">{historyExtraCount.toLocaleString()}</span>
           </div>
+          <div className="flex items-center gap-1.5 rounded-md border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs">
+            <span className="text-orange-600">Empty Boxes</span>
+            <span className="font-bold text-orange-700">{historyEmptyBoxCount.toLocaleString()}</span>
+          </div>
         </div>
 
         {/* History table */}
@@ -441,7 +485,9 @@ const Reports = () => {
                   // Stripe by the row's stable id (not its position), so a new scan
                   // landing at the top doesn't flip every row's color/number on each poll.
                   const stripeEven = h.id % 2 === 0;
-                  const rowBg = h.voided
+                  const rowBg = h.isEmptyBox
+                    ? (stripeEven ? "bg-orange-50/50" : "bg-orange-50/80")
+                    : h.voided
                     ? "bg-gray-50 opacity-60"
                     : h.isExtra
                     ? (stripeEven ? "bg-amber-50/50" : "bg-amber-50/80")
@@ -490,7 +536,9 @@ const Reports = () => {
                         {h.stv ?? <span className="text-gray-300">—</span>}
                       </TableCell>
                       <TableCell className="py-2.5">
-                        {h.isExtra
+                        {h.isEmptyBox
+                          ? <Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 text-[11px] px-1.5 border-0">Empty Box</Badge>
+                          : h.isExtra
                           ? <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>
                           : <Badge className="bg-green-100 text-green-800 hover:bg-green-100 text-[11px] px-1.5 border-0">Regular</Badge>}
                       </TableCell>
@@ -502,7 +550,7 @@ const Reports = () => {
                           {!h.voided && (
                             <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
                               onClick={() => setVoidTarget(h)} title="Void this scan">
-                              <Trash2 className="h-3.5 w-3.5" />
+                              < Trash2 className="h-3.5 w-3.5" />
                             </Button>
                           )}
                         </TableCell>

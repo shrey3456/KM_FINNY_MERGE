@@ -108,6 +108,7 @@ import checkinoutRoutes from "./routes/checkinout";
 import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
 import orderImportRoutes from "./routes/order-import";
+import orderImportEditRoutes from "./routes/order-import-edit";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
@@ -8617,6 +8618,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount order import routes
   apiRouter.use(orderImportRoutes);
 
+  // Mount order import edit routes (fix a mistake in an already-uploaded, not-yet-completed CSV)
+  apiRouter.use(orderImportEditRoutes);
+
   // Mount order scan routes
   apiRouter.use(orderScanRoutes);
 
@@ -8628,10 +8632,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // the auto-apply toggle (notion_inventory_sync_config) — otherwise leave them pending for review.
   if (process.env.NOTION_INVENTORY_DATABASE_ID) {
     const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
-    // syncImages: the boot-time run skips per-product image downloads so startup stays fast;
-    // the recurring 24-hour run includes them (parallelized in detectChangesFromNotion) so
-    // any new/changed Notion image — including a product that had none and just got one — is
-    // fetched and cached. A manual "Check Sync" always includes images too.
+    // syncImages is always false here — neither the boot-time run nor the recurring 24-hour
+    // run ever downloads/checks product images. Photos are only ever synced when an admin
+    // clicks "Sync Photos" on the Notion Inventory page; "Sync Notion" there and this scheduler
+    // both run the fast, data-fields-only path.
     const runScheduledSync = async (syncImages: boolean) => {
       try {
         const allProducts = await storage.getAllProducts();
@@ -8657,10 +8661,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.error('[Notion Inventory Sync] Scheduled sync failed:', err);
       }
     };
-    // Recurring 24-hour run includes images.
-    setInterval(() => runScheduledSync(true), SYNC_INTERVAL_MS);
-    // Boot-time run (10s after start) skips images to keep startup fast — handles empty-DB
-    // first boot and picks up field changes; images come on the next 24h run or a manual sync.
+    // Both the recurring run and the boot-time run are data-fields-only now — photos are
+    // never checked automatically. An admin syncs photos on demand from the Notion Inventory
+    // page's "Sync Photos" button; Apply only ever touches images that a photo sync actually
+    // queued, so staying data-only here never risks silently reverting/losing photo changes.
+    setInterval(() => runScheduledSync(false), SYNC_INTERVAL_MS);
     setTimeout(() => runScheduledSync(false), 10000);
     console.log('[Notion Inventory Sync] 24-hour auto sync+apply scheduler registered');
   }

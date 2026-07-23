@@ -2,17 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
-import { getCurrentUserPermissions, hasPageWriteAccess } from "../lib/permissions";
+import { getCurrentUserPermissions, hasPageWriteAccess, hasPageViewAccess } from "../lib/permissions";
 import {
   AlertCircle,
   CheckCircle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  FileBarChart,
   FileUp,
   History,
   Loader2,
+  MoreVertical,
   PackageCheck,
+  Pencil,
   RefreshCw,
   ScanLine,
   Search,
@@ -21,6 +24,8 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import EditCsvDialog from "@/components/modals/EditCsvDialog";
+import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,6 +40,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -140,6 +151,9 @@ type ScanSession = {
   orderDate: string | null;
   scanActivatedByName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null;
   scanActivatedByCode:string | null;
+  // FIFO batch membership — already returned by /api/order-scan/sessions, just wasn't typed
+  // here until Reports needed to know whether to offer group-level (Final/CSV-wise) reports.
+  receivingSessionId: number | null; partIndex: number | null;
 };
 
 // DB stores timestamps in IST (server local time). The pg driver reads them as UTC
@@ -196,6 +210,11 @@ export default function OrderImport() {
   // user only granted "Order Import" write access must not see an enabled delete button that
   // would just 403.
   const canDeleteOrderImport =canWriteOrderImport;
+  // The Edit (pencil) button on Available/Active rows is gated by its OWN page key —
+  // "order-import-edit" — independent of Order Import's own access above, exactly as it was
+  // when this lived on its own page. hasPageViewAccess just controls whether the button is
+  // shown at all; EditCsvDialog itself further disables its inputs unless hasPageWriteAccess.
+  const canViewCsvEdit = hasPageViewAccess("order-import-edit");
 
   // Form state
   const [plant, setPlant] = useState("");
@@ -230,9 +249,24 @@ export default function OrderImport() {
   const [deletePreview, setDeletePreview] = useState<{
     scannedItemCount: number; scannedQtyTotal: number; extraQtyTotal: number; stockApplied: boolean;
   } | null>(null);
+  // Plant/Order Date of the session being deleted — captured when the delete dialog opens
+  // (from the row itself), so that if the admin picks "Delete, I'll re-upload" we can
+  // pre-fill the Upload form with the SAME plant/date and jump straight into the mapping
+  // dialog for the corrected file, instead of leaving them to scroll up and re-enter it.
+  const [deleteTargetInfo, setDeleteTargetInfo] = useState<{ plant: string; orderDate: string } | null>(null);
+  // Set right before programmatically opening the file picker after a "Delete, I'll re-upload".
+  // handleFileChange checks this to skip straight to the mapping dialog for the chosen file,
+  // instead of waiting for a separate "Map & Import" click.
+  const reuploadPendingRef = useRef(false);
   const [deactivateTarget, setDeactivateTarget] = useState<number | null>(null);
   const [completeTarget, setCompleteTarget] = useState<number | null>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
+  // Session id whose "Edit CSV" dialog is open — set from the Edit button on an Available/
+  // Active row, cleared when the dialog closes.
+  const [editSessionId, setEditSessionId] = useState<number | null>(null);
+  // Session whose Reports dialog is open — set from the Reports action on an Active/Completed/
+  // History row, cleared when the dialog closes. Replaces the old standalone Order Reports page.
+  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
@@ -294,7 +328,24 @@ export default function OrderImport() {
     refetchIntervalInBackground: true,
     refetchOnMount: true,
     refetchOnWindowFocus: true,
+    // Keep showing the last-known list while a poll/refresh is in flight — without this, some
+    // refetch paths can briefly report no data, which flashes the "Loading…" state instead of
+    // quietly updating the numbers once the new data arrives.
+    placeholderData: (previousData) => previousData,
   });
+
+  // Warns before a brand-new order gets a past Order Date (the server only accepts a past
+  // date when it's a late part joining/reclaiming an existing group for that exact
+  // plant+date — never for a genuinely new one). Only runs once both fields are filled and
+  // the date is actually in the past, so it never fires for the normal today-or-later case.
+  const isPastOrderDate = !!orderDate && orderDate < todayStr;
+  const pastDateCheckQuery = useQuery<{ exists: boolean }>({
+    queryKey: ["/api/order-import/sessions/date-check", plant, orderDate],
+    queryFn: async () =>
+      (await apiRequest("GET", `/api/order-import/sessions/date-check?plant=${encodeURIComponent(plant)}&date=${orderDate}`)).json(),
+    enabled: isPastOrderDate && !!plant.trim(),
+  });
+  const isPastDateBlocked = isPastOrderDate && !!plant.trim() && pastDateCheckQuery.data?.exists === false;
 
   const itemsQuery = useQuery<OrderImportItem[]>({
     queryKey: ["/api/order-import/items", expandedId],
@@ -325,6 +376,9 @@ export default function OrderImport() {
     refetchIntervalInBackground: true,
     refetchOnMount: true,
     refetchOnWindowFocus: true,
+    // Same as sessionsQuery above — keeps Available/Active/Completed showing their last-known
+    // rows through every background poll instead of flashing a loading state.
+    placeholderData: (previousData) => previousData,
   });
 
   // Active session — uses /active endpoint which has NO date filter whatsoever,
@@ -339,6 +393,7 @@ export default function OrderImport() {
     refetchIntervalInBackground: true,
     refetchOnMount: true,
     refetchOnWindowFocus: true,
+    placeholderData: (previousData) => previousData,
   });
 
   // ── WebSocket: real-time sync ──────────────────────────────────────────────
@@ -479,7 +534,7 @@ export default function OrderImport() {
         );
 
         qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
-          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: data.session.scanStatus ?? "available", importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), orderDate: data.session.orderDate ?? orderDate ?? null, scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null }, ...old] : [],
+          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: data.session.scanStatus ?? "available", importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), orderDate: data.session.orderDate ?? orderDate ?? null, scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null, receivingSessionId: data.session.receivingSessionId ?? null, partIndex: data.session.partIndex ?? null }, ...old] : [],
         );
       }
 
@@ -838,6 +893,17 @@ export default function OrderImport() {
     setSelectedFiles(files);
     setLastImport(null);
     e.target.value = "";
+
+    // Reupload flow: plant/orderDate were already filled in when the file picker was popped
+    // open, so skip the separate "Map & Import" click and go straight to the mapping dialog.
+    if (reuploadPendingRef.current) {
+      reuploadPendingRef.current = false;
+      uploadQueueRef.current = files;
+      uploadIdxRef.current = 0;
+      uploadCollectedRef.current = { sessionIds: [], fileNames: [], failed: [], totalRows: 0, groupId: null };
+      setUploadProgress({ current: 1, total: files.length });
+      parseAndOpen(files[0]);
+    }
   }
 
   // Start the sequential Map & Import queue: opens the mapping dialog for the first file;
@@ -855,6 +921,14 @@ export default function OrderImport() {
     }
     if (selectedFiles.length === 0) {
       toast({ title: "Select a CSV file first", variant: "destructive" });
+      return;
+    }
+    if (isPastDateBlocked) {
+      toast({
+        title: "This Order Date is in the past",
+        description: `No existing order for ${plant} on ${orderDate} — a brand-new order can't use a past date. Pick today or later, or the correct existing date for a late part.`,
+        variant: "destructive",
+      });
       return;
     }
     uploadQueueRef.current = selectedFiles;
@@ -1071,54 +1145,61 @@ export default function OrderImport() {
 
         {/* ── Upload Card ── */}
         <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="flex items-center gap-2 border-b border-gray-100 px-5 py-4">
+          <div className="flex items-center gap-2 border-b border-gray-100 px-6 py-4">
             <Upload className="h-5 w-5 text-[#001d6e]" />
             <h2 className="text-base font-semibold text-gray-900">Upload CSV</h2>
           </div>
-          <div className="p-5 space-y-4">
-            {/* Desktop layout */}
-            <div className="hidden sm:flex flex-wrap items-end gap-3">
+          <div className="p-6 space-y-4">
+            {/* Desktop layout — a fixed 12-col grid instead of flex-wrap with ad-hoc min-widths,
+                so the fields always line up the same way regardless of content length. */}
+            <div className="hidden sm:grid sm:grid-cols-12 sm:items-end sm:gap-4">
               {/* Plant */}
-              <div className="grid gap-1 min-w-[130px] flex-1">
-                <Label className="text-xs text-gray-500">Plant</Label>
+              <div className="col-span-3 grid gap-1.5">
+                <Label className="text-xs font-medium text-gray-600">Plant</Label>
                 {plantOptions.length > 0 ? (
                   <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
-                    <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
+                    <SelectTrigger className="h-10 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="_none_">— Select —</SelectItem>
                       {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 ) : (
-                  <Input className="h-9 text-sm" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
+                  <Input className="h-10 text-sm" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
                 )}
               </div>
               {/* Date */}
-              <div className="grid gap-1">
-                <Label className="text-xs text-gray-500">Order Date</Label>
-                {/* No min= here on purpose: a past date must stay selectable so a LATE PART can
-                    still be added to an order that already exists for that date. The server
-                    allows exactly that and rejects only brand-new past-dated orders. */}
-                <Input type="date" className="h-9 text-sm w-[150px]" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+              <div className="col-span-2 grid gap-1.5">
+                <Label className="text-xs font-medium text-gray-600">Order Date</Label>
+                {/* min=today: a normal upload here is always a new file for today (or later).
+                    The one legitimate past-date case — replacing a deleted CSV for an order
+                    that already exists — goes through "Delete, I'll re-upload" instead, which
+                    sets orderDate via state and so isn't affected by this min. The
+                    pastDateCheckQuery/isPastDateBlocked warning below stays as a second line of
+                    defense against a manually typed-in past date slipping past the picker. */}
+                <Input type="date" min={todayStr} className={`h-10 text-sm w-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                {isPastDateBlocked && (
+                  <p className="text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
+                )}
               </div>
               {/* File */}
-              <div className="grid gap-1 flex-[2] min-w-[180px]">
-                <Label className="text-xs text-gray-500">
+              <div className="col-span-4 grid gap-1.5">
+                <Label className="text-xs font-medium text-gray-600 truncate">
                   CSV File{selectedFiles.length === 1 && <span className="text-green-600 font-medium"> · {selectedFiles[0].name}</span>}
                   {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
                 </Label>
-                <Input ref={fileRef} type="file" accept=".csv" multiple className="h-9 text-sm"
+                <Input ref={fileRef} type="file" accept=".csv" multiple className="h-10 text-sm"
                   onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
               {/* Actions */}
-              <div className="flex gap-2 pb-0.5">
-                <Button variant="outline" className="h-9" onClick={clearForm}
+              <div className="col-span-3 flex gap-2">
+                <Button variant="outline" className="h-10 shrink-0" onClick={clearForm}
                   disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
                 </Button>
-                <Button className="h-9 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport}
-                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}>
+                <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1126,9 +1207,9 @@ export default function OrderImport() {
             </div>
 
             {/* Mobile layout */}
-            <div className="sm:hidden space-y-3">
-              <div className="grid gap-1">
-                <Label className="text-xs text-gray-500 font-medium">
+            <div className="sm:hidden space-y-4">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-medium text-gray-600">
                   CSV File{selectedFiles.length === 1 && <span className="text-green-600 font-medium"> · {selectedFiles[0].name}</span>}
                   {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
                 </Label>
@@ -1136,34 +1217,40 @@ export default function OrderImport() {
                   className="h-11 text-sm file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:font-medium file:bg-[#001d6e]/10 file:text-[#001d6e]"
                   onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="grid gap-1">
-                  <Label className="text-xs text-gray-500">Plant</Label>
+              {/* Plant + Date on one row — Date gets a fixed minimum wide enough for the native
+                  picker to render its value (it clips/hides below ~140px), Plant absorbs
+                  whatever width remains instead of splitting evenly. */}
+              <div className="grid grid-cols-[1fr_142px] gap-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-medium text-gray-600">Plant</Label>
                   {plantOptions.length > 0 ? (
                     <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
-                      <SelectTrigger className="h-10 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
+                      <SelectTrigger className="h-11 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="_none_">— Select —</SelectItem>
                         {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   ) : (
-                    <Input className="h-10 text-sm" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
+                    <Input className="h-11 text-sm" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
                   )}
                 </div>
-                <div className="grid gap-1">
-                  <Label className="text-xs text-gray-500">Order Date</Label>
-                  <Input type="date" className="h-10 text-sm w-full" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-medium text-gray-600">Order Date</Label>
+                  <Input type="date" min={todayStr} className={`h-11 w-full text-sm px-2 ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 </div>
+                {isPastDateBlocked && (
+                  <p className="col-span-2 text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
+                )}
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" className="h-10 px-3 shrink-0" onClick={clearForm}
+                <Button variant="outline" className="h-11 px-3.5 shrink-0" onClick={clearForm}
                   disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
                 </Button>
-                <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport}
-                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}>
+                <Button className="h-11 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1347,11 +1434,19 @@ export default function OrderImport() {
                                   : <ScanLine className="h-3 w-3 mr-1" />}
                                 Load
                               </Button>
+                              {canViewCsvEdit && (
+                                <Button size="sm" variant="ghost"
+                                  className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
+                                  title="Edit CSV"
+                                  onClick={(e) => { e.stopPropagation(); setEditSessionId(s.id); }}>
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
                               <Button size="sm" variant="ghost"
                                 className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30"
                                 disabled={!canDeleteOrderImport || deletePreviewMutation.isPending}
                                 title={!canDeleteOrderImport ? "Deleting a CSV is restricted to Admin" : undefined}
-                                onClick={(e) => { e.stopPropagation(); deletePreviewMutation.mutate(s.id); }}>
+                                onClick={(e) => { e.stopPropagation(); setDeleteTargetInfo({ plant: s.plant, orderDate: s.orderDate || todayStr }); deletePreviewMutation.mutate(s.id); }}>
                                 {deletePreviewMutation.isPending && deletePreviewMutation.variables === s.id
                                   ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                   : <Trash2 className="h-3.5 w-3.5" />}
@@ -1429,7 +1524,7 @@ export default function OrderImport() {
                 <div className="divide-y divide-amber-100">
                   {activeScanSessions.map((s) => (
                     <div key={s.id} className="bg-amber-50 border border-amber-200 rounded-xl p-4 mx-4 my-3">
-                      <div className="flex items-start gap-3">
+                      <div className="flex items-center gap-3">
                         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 border border-amber-200">
                           <ScanLine className="h-5 w-5 text-amber-600" />
                         </div>
@@ -1446,51 +1541,48 @@ export default function OrderImport() {
                             {s.importedByName && <span className="text-xs text-gray-500">· {s.importedByName}</span>}
                           </div>
                           {s.scanActivatedByName && (
-                            <p className="mt-1 text-xs text-amber-700 font-medium">
+                            <p className="mt-1 text-xs text-amber-700 font-medium truncate">
                               Scanning by: {s.scanActivatedByName}
                               {s.scanActivatedAt && <span className="font-normal text-gray-400"> · since {fmtIST(s.scanActivatedAt)}</span>}
                             </p>
                           )}
-                          {/* Mobile buttons */}
-                          <div className="mt-3 flex flex-wrap gap-2 sm:hidden">
-                            <Button size="sm" className="h-9 flex-1 text-xs bg-amber-600 hover:bg-amber-700 text-white"
-                              onClick={() => navigate("/scan")}>
-                              <ScanLine className="mr-1.5 h-3.5 w-3.5" /> View Scan
-                            </Button>
-                            <Button size="sm" variant="outline"
-                              className="h-9 flex-1 text-xs text-amber-700 border-amber-200 hover:bg-amber-50"
-                              disabled={deactivateMutation.isPending}
-                              onClick={() => setDeactivateTarget(s.id)}>
-                              <StopCircle className="mr-1 h-3 w-3" /> Deactivate
-                            </Button>
-                            <Button size="sm" variant="outline"
-                              className="h-9 flex-1 text-xs text-green-700 border-green-200 hover:bg-green-50"
-                              disabled={completeMutation.isPending}
-                              onClick={() => setCompleteTarget(s.id)}>
-                              <CheckCircle2 className="mr-1 h-3 w-3" /> Complete
-                            </Button>
-                          </div>
                         </div>
-                        {/* Desktop buttons */}
-                        <div className="hidden sm:flex shrink-0 flex-col items-end gap-1.5">
-                          <Button size="sm" className="h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white"
+                        {/* One primary action + a kebab menu for the rest — same on mobile and
+                            desktop, avoids the old 4-button pileup that wrapped unevenly. */}
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <Button size="sm" className="h-8 px-2.5 text-xs bg-amber-600 hover:bg-amber-700 text-white"
                             onClick={() => navigate("/scan")}>
-                            <ScanLine className="mr-1.5 h-3.5 w-3.5" /> View Scan
+                            <ScanLine className="sm:mr-1.5 h-3.5 w-3.5" /> <span className="hidden sm:inline">View Scan</span>
                           </Button>
-                          <div className="flex items-center gap-1">
-                            <Button size="sm" variant="outline"
-                              className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50"
-                              disabled={deactivateMutation.isPending}
-                              onClick={() => setDeactivateTarget(s.id)}>
-                              <StopCircle className="mr-1 h-3 w-3" /> Deactivate
-                            </Button>
-                            <Button size="sm" variant="outline"
-                              className="h-7 px-2 text-xs text-green-700 border-green-200 hover:bg-green-50"
-                              disabled={completeMutation.isPending}
-                              onClick={() => setCompleteTarget(s.id)}>
-                              <CheckCircle2 className="mr-1 h-3 w-3" /> Complete
-                            </Button>
-                          </div>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button size="sm" variant="outline" className="h-8 w-8 p-0 text-gray-500 border-amber-200 hover:bg-amber-100">
+                                <MoreVertical className="h-4 w-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-44">
+                              {canViewCsvEdit && (
+                                <DropdownMenuItem onClick={() => setEditSessionId(s.id)}>
+                                  <Pencil className="mr-2 h-3.5 w-3.5 text-gray-500" /> Edit CSV
+                                </DropdownMenuItem>
+                              )}
+                              <DropdownMenuItem onClick={() => setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
+                                <FileBarChart className="mr-2 h-3.5 w-3.5 text-gray-500" /> Reports
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                disabled={deactivateMutation.isPending}
+                                onClick={() => setDeactivateTarget(s.id)}
+                                className="text-amber-700 focus:text-amber-700">
+                                <StopCircle className="mr-2 h-3.5 w-3.5" /> Deactivate
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                disabled={completeMutation.isPending}
+                                onClick={() => setCompleteTarget(s.id)}
+                                className="text-green-700 focus:text-green-700">
+                                <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Complete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
                       </div>
                     </div>
@@ -1561,6 +1653,10 @@ export default function OrderImport() {
                           <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
                             <CheckCircle2 className="h-3 w-3" /> Done
                           </span>
+                          <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50"
+                            onClick={() => setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
+                            <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
+                          </Button>
                         </div>
                       </div>
                     </div>
@@ -1599,7 +1695,9 @@ export default function OrderImport() {
                     <SelectItem value="50">50</SelectItem>
                   </SelectContent>
                 </Select>
-                {sessionsQuery.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
+                {/* Always mounted (visibility toggled, not presence) so the background poll
+                    never shifts the filter row — a mount/unmount here was the flicker source. */}
+                <Loader2 className={`h-3.5 w-3.5 animate-spin text-gray-400 ${sessionsQuery.isFetching ? "visible" : "invisible"}`} />
               </div>
               {/* Content */}
               {sessionsQuery.isLoading ? (
@@ -1677,6 +1775,18 @@ export default function OrderImport() {
                                   <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 whitespace-nowrap">
                                     Ready
                                   </span>
+                                )}
+                                {((session as any).scanStatus === "completed" || (session as any).scanStatus === "active") && (
+                                  <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setReportsSession({
+                                        id: session.id, csvFileName: session.csvFileName, plant: session.plant,
+                                        receivingSessionId: (session as any).receivingSessionId, partIndex: (session as any).partIndex,
+                                      });
+                                    }}>
+                                    <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
+                                  </Button>
                                 )}
                               </div>
                             </div>
@@ -1818,8 +1928,8 @@ export default function OrderImport() {
                   {TARGET_FIELDS.map((field) => {
                     const matched = mapping[field.key] !== SKIP && mapping[field.key] !== "";
                     return (
-                      <div key={field.key} className="flex items-center gap-3">
-                        <div className="flex w-[140px] shrink-0 items-center gap-1.5">
+                      <div key={field.key} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                        <div className="flex w-full items-center gap-1.5 sm:w-[140px] sm:shrink-0">
                           <span className={`h-2 w-2 rounded-full ${matched ? "bg-green-500" : "bg-gray-300"}`} />
                           <Label className="text-sm">{field.label}</Label>
                         </div>
@@ -1827,7 +1937,7 @@ export default function OrderImport() {
                           value={mapping[field.key] || SKIP}
                           onValueChange={(v) => setMapping((m) => ({ ...m, [field.key]: v }))}
                         >
-                          <SelectTrigger className={`flex-1 h-9 text-sm ${!matched ? "border-dashed text-gray-400" : ""}`}>
+                          <SelectTrigger className={`sm:flex-1 h-9 text-sm ${!matched ? "border-dashed text-gray-400" : ""}`}>
                             <SelectValue placeholder="— skip this field —" />
                           </SelectTrigger>
                           <SelectContent>
@@ -1954,7 +2064,7 @@ export default function OrderImport() {
       </AlertDialog>
 
       {/* ── Delete confirmation ── */}
-      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) { setDeleteTarget(null); setDeletePreview(null); } }}>
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) { setDeleteTarget(null); setDeletePreview(null); setDeleteTargetInfo(null); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this CSV?</AlertDialogTitle>
@@ -1988,13 +2098,37 @@ export default function OrderImport() {
               {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Remove permanently"}
             </AlertDialogAction>
             <AlertDialogAction
-              onClick={() => deleteTarget !== null && deleteMutation.mutate({ id: deleteTarget, mode: "replace" })}
+              onClick={() => {
+                if (deleteTarget === null) return;
+                const info = deleteTargetInfo;
+                deleteMutation.mutate(
+                  { id: deleteTarget, mode: "replace" },
+                  {
+                    onSuccess: () => {
+                      if (info) {
+                        setPlant(info.plant);
+                        setOrderDate(info.orderDate);
+                      }
+                      toast({
+                        title: "Pick the corrected CSV",
+                        description: "Plant and Order Date are filled in — choose the file to continue.",
+                      });
+                      reuploadPendingRef.current = true;
+                      fileRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                      fileRef.current?.click();
+                    },
+                  },
+                );
+              }}
               disabled={deleteMutation.isPending}>
               {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete, I'll re-upload"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <EditCsvDialog sessionId={editSessionId} onClose={() => setEditSessionId(null)} />
+      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} />
     </main>
   );
 }

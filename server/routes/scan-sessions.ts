@@ -619,7 +619,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
           FROM order_scan_events ose
           JOIN  order_import_sessions ois ON ois.id = ose.session_id
           LEFT JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
-          WHERE ose.is_extra = true
+          WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'
           ${newDateAnd}
         ),
         combined AS (
@@ -722,7 +722,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
        FROM order_scan_events ose
        INNER JOIN order_import_sessions ois ON ois.id = ose.session_id
        LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
-       WHERE ose.is_extra = true
+       WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'
          ${osDateAnd}
        ORDER BY ose.scanned_at DESC`,
       dateParams,
@@ -978,6 +978,8 @@ router.get('/reports/completed-stock', async (req: Request, res: Response) => {
         JOIN  order_import_sessions ois ON ois.id = ose.session_id
         LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
         WHERE DATE(ose.scanned_at AT TIME ZONE 'Asia/Kolkata') = $1
+          AND ose.barcode <> 'EMPTY_BOX'  -- empty boxes aren't stock (see order-scan.ts)
+          AND ose.voided IS NOT TRUE
         GROUP BY ose.barcode, ose.session_id
         ORDER BY MAX(COALESCE(p.name, ose.item_name)) ASC
       `, queryParams);
@@ -1124,7 +1126,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
 
     const dateParam    = typeof req.query.date    === 'string' && req.query.date.trim()    ? req.query.date.trim()    : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
-    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra'].includes(req.query.type) ? req.query.type : null;
+    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty'].includes(req.query.type) ? req.query.type : null;
     const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
     const plantParam   = typeof req.query.plant   === 'string' && req.query.plant.trim()   ? req.query.plant.trim()   : null;
 
@@ -1146,8 +1148,14 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     if (plantParam)   { params.push(plantParam.toLowerCase()); conditions.push(`LOWER(ois.plant) = $${params.length}`); }
     if (dateParam)    { params.push(dateParam);    conditions.push(`DATE(ose.scanned_at) = $${params.length}`); }
     if (scannerParam) { params.push(scannerParam); conditions.push(`ose.scanned_by_name = $${params.length}`); }
-    if (typeParam === 'regular') conditions.push(`ose.is_extra = false`);
-    if (typeParam === 'extra')   conditions.push(`ose.is_extra = true`);
+    // Empty boxes ARE shown in scan history as a distinct status (isEmptyBox below), but they
+    // are never product scans — so 'regular'/'extra' filters must exclude them, and the box/
+    // pallet totals below exclude 
+    //them too (they don't count toward order quantity). A
+    // dedicated 'empty' filter shows only empty boxes.
+    if (typeParam === 'regular') conditions.push(`ose.is_extra = false AND ose.barcode <> 'EMPTY_BOX'`);
+    if (typeParam === 'extra')   conditions.push(`ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'`);
+    if (typeParam === 'empty')   conditions.push(`ose.barcode = 'EMPTY_BOX'`);
     if (searchParam) {
       params.push(`%${searchParam.toLowerCase()}%`);
       const n = params.length;
@@ -1168,6 +1176,8 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
            ose.items_per_pallet AS "itemsPerPallet",
            ose.loose_qty        AS "looseQty",
            ose.is_extra         AS "isExtra",
+           (ose.barcode = 'EMPTY_BOX') AS "isEmptyBox",
+           CASE WHEN ose.item_name LIKE 'Empty Box: %' THEN SUBSTRING(ose.item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
            ose.stv,
            ose.scanned_by_code  AS "scannedByCode",
            ose.scanned_by_name  AS "scannedByName",
@@ -1185,9 +1195,10 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       pool.query(`SELECT COUNT(*) AS total ${baseFrom}`, params),
       pool.query(
         `SELECT
-           COALESCE(SUM(ose.total_qty), 0)                          AS "totalBoxes",
-           COALESCE(SUM(ose.pallets), 0)                            AS "totalPallets",
-           COUNT(*) FILTER (WHERE ose.is_extra = true)              AS "extraCount"
+           COALESCE(SUM(ose.total_qty) FILTER (WHERE ose.barcode <> 'EMPTY_BOX'), 0)  AS "totalBoxes",
+           COALESCE(SUM(ose.pallets)   FILTER (WHERE ose.barcode <> 'EMPTY_BOX'), 0)  AS "totalPallets",
+           COUNT(*) FILTER (WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX') AS "extraCount",
+           COALESCE(SUM(ose.total_qty) FILTER (WHERE ose.barcode = 'EMPTY_BOX'), 0)   AS "emptyBoxCount"
          ${baseFrom}`,
         params,
       ),
@@ -1205,6 +1216,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       totalBoxes:   parseInt(summaryRes.rows[0].totalBoxes, 10),
       totalPallets: parseFloat(summaryRes.rows[0].totalPallets),
       extraCount:   parseInt(summaryRes.rows[0].extraCount, 10),
+      emptyBoxCount: parseInt(summaryRes.rows[0].emptyBoxCount, 10),
       scanners:     scannersRes.rows.map((r: any) => r.name as string),
       limit,
       offset,
@@ -1379,12 +1391,156 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       };
     });
 
+    // ── Expected Qty — sum of every CSV's ordered quantity for ONE specific order date ──────
+    // Only meaningful for a single day (summing across a range would blend unrelated orders
+    // together), so this only activates when from/to pin down exactly one date — e.g. the
+    // "Today"/"Yesterday" presets (which set from === to), or the user filling in just `from`.
+    // Answers "if I uploaded 3 CSVs (parts) for the 17th, what's the total ordered qty per
+    // item?" — summed across ALL parts of that date's FIFO group, not just one file.
+    // With NO date filter at all, default to today (IST — this app's timestamp convention, see
+    // the Asia/Kolkata usages elsewhere in this file) so "today's order" total is visible
+    // without the user having to explicitly pick a date every time. This default is scoped
+    // ONLY to expected-qty — it never flips dateMode (still `!!(from || to)`), so Stock/Extra
+    // keep showing running totals as before, unaffected by this default.
+    const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+    const singleDate = from && (!to || to === from) ? from : (!from && !to ? todayIST : null);
+    const expectedByKey = new Map<string, number>();
+    let expectedTotal = 0;
+    const expectedOnlyRows: typeof items = [];
+    if (singleDate) {
+      const expParams: any[] = [singleDate];
+      const expConds: string[] = ['ois.order_date = $1', 'ois.is_deleted = false'];
+      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
+      if (plantParam) { expParams.push(plantParam.toLowerCase()); expConds.push(`LOWER(oii.plant) = $${expParams.length}`); }
+      const { rows: expRows } = await pool.query(`
+        SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
+        FROM order_import_items oii
+        JOIN order_import_sessions ois ON ois.id = oii.session_id
+        WHERE ${expConds.join(' AND ')}
+        GROUP BY oii.barcode, oii.plant
+        HAVING SUM(oii.quantity) <> 0
+      `, expParams);
+
+      const unmatchedBarcodes = new Set<string>();
+      for (const r of expRows as any[]) {
+        const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
+        const qty = Number(r.expectedQty) || 0;
+        expectedByKey.set(key, qty);
+        expectedTotal += qty;
+        if (r.barcode) unmatchedBarcodes.add(r.barcode);
+      }
+
+      // Some ordered barcodes may have nothing scanned yet at all — no stock row exists for
+      // them. Build a synthetic row for those (inStock/extraQty = 0) so the full ordered qty
+      // is visible even before a single box is scanned. Product metadata is fetched separately
+      // (rather than joined into the GROUP BY above) to keep that aggregate query simple.
+      const barcodesNeedingLookup = [...unmatchedBarcodes];
+      const productByBarcode = new Map<string, any>();
+      if (barcodesNeedingLookup.length > 0) {
+        const { rows: prodRows } = await pool.query(
+          `SELECT barcode, name, item_no, sap_code, gj_sap, mp_sap, hsn_code, category, brand,
+                  items_per_pallet, val_plt, ind_plt, pallets
+           FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
+          [barcodesNeedingLookup.map((b) => b.toLowerCase())],
+        );
+        for (const p of prodRows as any[]) productByBarcode.set(String(p.barcode).toLowerCase(), p);
+      }
+
+      for (const r of expRows as any[]) {
+        const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
+        if (items.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key)) continue;
+        const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
+        const plantUpper = String(r.plant ?? '').toUpperCase();
+        const sapCode = p ? (plantUpper.includes('VAL') ? (p.gj_sap ?? p.sap_code) : plantUpper.includes('IND') ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
+        const ipp = p ? Number(
+          (plantUpper.includes('VAL') && p.val_plt) || (plantUpper.includes('IND') && p.ind_plt)
+            ? (plantUpper.includes('VAL') ? p.val_plt : p.ind_plt)
+            : (p.items_per_pallet || p.pallets || 0)
+        ) : 0;
+        expectedOnlyRows.push({
+          srNo: 0, barcode: r.barcode, plant: r.plant,
+          itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
+          hsnCode: p?.hsn_code ?? null, category: p?.category ?? null, brand: p?.brand ?? null,
+          itemsPerPallet: ipp || null, inStock: 0, extraQty: 0,
+          pallets: null, extraPallets: null, lastArrived: null,
+        } as any);
+      }
+    }
+
+    const itemsWithExpected = singleDate
+      ? [...items, ...expectedOnlyRows].map((it: any) => ({
+          ...it,
+          expectedQty: expectedByKey.get(`${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}`) ?? null,
+        }))
+      : items;
+
     // dateMode tells the client that inStock/extraQty mean "received in the selected window",
     // not "total on hand", so it can label the columns honestly.
-    res.json({ items, total: items.length, plants: allowed, dateMode, from: from || null, to: to || null });
+    // Empty boxes are received physical boxes with no product/stock — a distinct status, not
+    // inventory. Surface them here as a separate per-plant reconciliation figure (never mixed
+    // into inStock). Scoped to the same plants as the stock rows above.
+    const ebParams: any[] = [];
+    const ebConds: string[] = [`ose.barcode = 'EMPTY_BOX'`, 'ose.voided IS NOT TRUE'];
+    if (allowed !== null) { ebParams.push(allowed); ebConds.push(`LOWER(ois.plant) = ANY($${ebParams.length}::text[])`); }
+    if (plantParam)       { ebParams.push(plantParam.toLowerCase()); ebConds.push(`LOWER(ois.plant) = $${ebParams.length}`); }
+    const { rows: ebRows } = await pool.query(`
+      SELECT ois.plant, COALESCE(SUM(ose.total_qty), 0)::int AS "qty", COUNT(*)::int AS "count"
+      FROM order_scan_events ose
+      JOIN order_import_sessions ois ON ois.id = ose.session_id
+      WHERE ${ebConds.join(' AND ')}
+      GROUP BY ois.plant
+    `, ebParams);
+    const emptyBoxByPlant = ebRows.map((r: any) => ({ plant: r.plant, qty: r.qty, count: r.count }));
+    const emptyBoxTotal = ebRows.reduce((s: number, r: any) => s + Number(r.qty), 0);
+
+    res.json({
+      items: itemsWithExpected, total: itemsWithExpected.length, plants: allowed,
+      emptyBoxByPlant, emptyBoxTotal, dateMode, from: from || null, to: to || null,
+      expectedDate: singleDate, expectedTotal: singleDate ? expectedTotal : null,
+    });
   } catch (error) {
     console.error('Error generating plant stock report:', error);
     res.status(500).json({ error: 'Failed to generate plant stock report' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/stock-movements?barcode=X&plant=Y ────────────────────────
+// Arrival history for ONE item at ONE plant — powers the "click a row in Overall Stock" drill
+// down: every dated entry from the stock_movements ledger (the same append-only source the
+// plant-stock report's date-range mode reads from), newest first, with the originating
+// CSV/order attached when the entry came from a scan (session_id is null for anything that
+// isn't order-scan sourced).
+router.get('/reports/stock-movements', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!barcode || !plant) {
+      return res.status(400).json({ message: 'barcode and plant are required' });
+    }
+
+    // Same plant scoping as every other report here: admins see any plant, everyone else is
+    // limited to their assigned plant(s).
+    const allowed = getUserPlants(req.user);
+    if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT
+        sm.id, sm.qty, sm.extra_qty AS "extraQty", sm.type, sm.reason,
+        sm.created_at AS "arrivedAt",
+        ois.csv_file_name AS "orderName", ois.order_date AS "orderDate", ois.part_index AS "partIndex"
+      FROM stock_movements sm
+      LEFT JOIN order_import_sessions ois ON ois.id = sm.session_id
+      WHERE LOWER(sm.barcode) = LOWER($1) AND LOWER(sm.plant) = LOWER($2)
+      ORDER BY sm.created_at DESC
+      LIMIT 500
+    `, [barcode, plant]);
+
+    res.json({ items: rows });
+  } catch (error) {
+    console.error('Error fetching stock movement history:', error);
+    res.status(500).json({ error: 'Failed to fetch stock movement history' });
   }
 });
 

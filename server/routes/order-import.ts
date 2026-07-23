@@ -157,6 +157,32 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
   }
 });
 
+// GET /api/order-import/sessions/date-check?plant=&date=
+// Whether ANY session (active OR deleted-but-unclaimed) already exists for this exact
+// plant + Order Date. The upload form uses this to warn before submitting a past-dated
+// Order Date: the server only accepts one when it's joining an existing group or reclaiming
+// a deleted one (see POST below) — never for a genuinely brand-new order.
+router.get('/order-import/sessions/date-check', requireImportViewAccess, async (req: Request, res: Response) => {
+  try {
+    const date = String(req.query.date ?? '').trim();
+    if (!date) return res.status(400).json({ message: 'date is required' });
+
+    const forcedPlant = (req as any).importViewPlant as string | null;
+    const plant = forcedPlant || String(req.query.plant ?? '').trim();
+    if (!plant) return res.status(400).json({ message: 'plant is required' });
+
+    const { rows } = await pool.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM order_import_sessions WHERE LOWER(plant) = LOWER($1) AND order_date = $2
+       ) AS exists`,
+      [plant, date],
+    );
+    res.json({ exists: rows[0]?.exists === true });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to check date' });
+  }
+});
+
 // POST /api/order-import/sessions  — create session + bulk-insert items
 router.post('/order-import/sessions', requireOrderImportWrite, async (req: Request, res: Response) => {
   try {
@@ -220,6 +246,12 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     if (replacementFor) {
       effectiveGroupId = replacementFor.receivingSessionId;
       computedPartIndex = replacementFor.partIndex ?? 1;
+      // A replacement reclaims an existing order's slot — it's never a brand-new order — so
+      // it must skip the past-Order-Date guard below exactly like joining an existing group
+      // does (the deleted session's Order Date is often already in the past by the time its
+      // replacement is uploaded), and it should get the same post-join sweep/credit
+      // reconciliation pass further down as any other part joining an existing group.
+      joinedExistingGroup = true;
     } else if (normOrderDate) {
       // Include DELETED sessions here (not just active ones) so a permanently-discarded part's
       // slot number is RETIRED, never reused: a fresh upload always gets max(partIndex)+1 over
@@ -560,7 +592,9 @@ router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, 
     const { rows: events } = await pool.query(
       `SELECT session_id AS "sessionId", barcode, item_name AS "itemName",
               pallets, loose_qty AS "looseQty", total_qty AS "totalQty",
-              is_extra AS "isExtra", stv, scanned_by_code AS "scannedByCode",
+              is_extra AS "isExtra", (barcode = 'EMPTY_BOX') AS "isEmptyBox",
+              CASE WHEN item_name LIKE 'Empty Box: %' THEN SUBSTRING(item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
+              stv, scanned_by_code AS "scannedByCode",
               scanned_by_name AS "scannedByName", scanned_at AS "scannedAt"
        FROM order_scan_events
        WHERE session_id = ANY($1::int[])
@@ -738,6 +772,7 @@ router.delete('/order-import/sessions/:id', requireAdmin, async (req: Request, r
                 COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
          FROM order_scan_events
          WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
+           AND barcode <> 'EMPTY_BOX'
          GROUP BY LOWER(barcode)
          HAVING SUM(total_qty) <> 0`,
         [id],
@@ -1012,6 +1047,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         AND ose.is_extra = true
         AND ose.voided IS NOT TRUE
         AND ose.barcode IS NOT NULL
+        AND ose.barcode <> 'EMPTY_BOX'
       GROUP BY ose.session_id, ose.barcode
     `, [sessionIds]);
 
@@ -1037,6 +1073,19 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       itemsBySession.set(ex.sessionId, list);
     });
 
+    // Empty-box running totals per session — a distinct status, never mixed into order/extra
+    // quantities (empty boxes are order_scan_events with the sentinel barcode 'EMPTY_BOX', kept
+    // out of every qty/stock total — see the empty-box block in order-scan.ts). Surfaced so
+    // Master View can show the count for reconciliation.
+    const { rows: emptyBoxRows } = await pool.query(`
+      SELECT session_id AS "sessionId", COUNT(*)::int AS "count", COALESCE(SUM(total_qty), 0)::int AS "totalQty"
+      FROM order_scan_events
+      WHERE session_id = ANY($1::int[]) AND barcode = 'EMPTY_BOX' AND voided IS NOT TRUE
+      GROUP BY session_id
+    `, [sessionIds]);
+    const emptyBoxBySession = new Map<number, { count: number; totalQty: number }>();
+    for (const r of emptyBoxRows) emptyBoxBySession.set(r.sessionId, { count: r.count, totalQty: r.totalQty });
+
     const files = sessions.map((s) => ({
       sessionId:    s.id,
       csvFileName:  s.csvFileName,
@@ -1046,6 +1095,8 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       plant:        s.plant,
       scanStatus:   s.scanStatus,
       items:        itemsBySession.get(s.id) ?? [],
+      emptyBoxCount:   emptyBoxBySession.get(s.id)?.count ?? 0,
+      emptyBoxTotalQty: emptyBoxBySession.get(s.id)?.totalQty ?? 0,
     }));
 
     const totalRows = files.reduce((sum, f) => sum + f.items.length, 0);
@@ -1053,6 +1104,55 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
     res.json({ date: dateStr, totalFiles: files.length, totalRows, files });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Master view failed' });
+  }
+});
+
+// GET /api/order-import/master-view/item-history?barcode=X&sessionIds=1,2,3
+// Every raw scan event for ONE barcode across the CSVs/parts currently shown in Master View —
+// powers the "click an item in Master View" drill-down: who scanned it, when, how much, which
+// file/part, and whether it's since been voided. Same access + plant-scoping as Master View
+// itself; voiding an entry uses the EXISTING /api/order-scan/events/:id/void endpoint (unchanged,
+// admin-only) — since both this view and Scan History read the same order_scan_events rows, a
+// void made from either place is immediately reflected in the other, with no extra work needed.
+router.get('/order-import/master-view/item-history', requireImportViewAccess, async (req: Request, res: Response) => {
+  try {
+    const barcode = String(req.query.barcode ?? '').trim();
+    const sessionIdsParam = String(req.query.sessionIds ?? '').trim();
+    if (!barcode || !sessionIdsParam) {
+      return res.status(400).json({ message: 'barcode and sessionIds are required' });
+    }
+    const sessionIds = sessionIdsParam.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
+    if (sessionIds.length === 0) {
+      return res.status(400).json({ message: 'sessionIds must be a comma-separated list of numbers' });
+    }
+
+    // Dispatch users are forced to their own plant — narrow the session set to it so a barcode
+    // scanned only on another plant's part of this group can't leak through.
+    const forcedPlant = (req as any).importViewPlant as string | null;
+    const sessionConditions: any[] = [inArray(orderImportSessions.id, sessionIds)];
+    if (forcedPlant) sessionConditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`);
+    const allowedSessions = await db.select({ id: orderImportSessions.id })
+      .from(orderImportSessions).where(and(...sessionConditions));
+    const allowedSessionIds = allowedSessions.map((s) => s.id);
+    if (allowedSessionIds.length === 0) return res.json({ items: [] });
+
+    const { rows } = await pool.query(`
+      SELECT
+        ose.id, ose.session_id AS "sessionId", ose.barcode, ose.item_name AS "itemName",
+        ose.pallets, ose.total_qty AS "totalQty", ose.is_extra AS "isExtra",
+        ose.scanned_by_name AS "scannedByName", ose.scanned_at AS "scannedAt",
+        ose.voided, ose.voided_by_code AS "voidedByCode", ose.voided_at AS "voidedAt",
+        ose.void_reason AS "voidReason",
+        ois.csv_file_name AS "orderName", ois.part_index AS "partIndex"
+      FROM order_scan_events ose
+      JOIN order_import_sessions ois ON ois.id = ose.session_id
+      WHERE ose.session_id = ANY($1::int[]) AND LOWER(ose.barcode) = LOWER($2)
+      ORDER BY ose.scanned_at DESC
+    `, [allowedSessionIds, barcode]);
+
+    res.json({ items: rows });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch item history' });
   }
 });
 

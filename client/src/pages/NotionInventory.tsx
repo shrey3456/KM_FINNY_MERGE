@@ -14,6 +14,7 @@ import {
   Download,
   FileDown,
   FileUp,
+  Image as ImageIcon,
   Loader2,
   PackagePlus,
   RefreshCw,
@@ -313,9 +314,14 @@ export default function NotionInventory() {
     },
   });
 
+  // syncImages=false ("Sync Notion") checks data fields only and is fast; syncImages=true
+  // ("Sync Photos") also downloads/hashes every product image, which is the slow part. Apply
+  // only ever applies image changes that a syncImages:true run actually queued — running
+  // "Sync Notion" after a "Sync Photos" review (without applying) clears any queued photo
+  // changes too, since each detect pass replaces the pending state outright.
   const detectMutation = useMutation({
-    mutationFn: async () => {
-      const response = await apiRequest("POST", "/api/notion-inventory-sync/detect");
+    mutationFn: async (syncImages: boolean) => {
+      const response = await apiRequest("POST", "/api/notion-inventory-sync/detect", { syncImages });
       return response.json();
     },
     onSuccess: async (data) => {
@@ -619,10 +625,20 @@ export default function NotionInventory() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {/* 3. Sync Notion */}
-        <Button size="sm" className={BTN} onClick={() => detectMutation.mutate()} disabled={isBusy || !isConfigured}>
-          {detectMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <CloudDownload className="mr-1.5 h-3.5 w-3.5" />}
+        {/* 3. Sync Notion — data fields only, fast. Photos are a separate, deliberate action
+            below so a routine sync never pays the slow per-product image download+hash cost. */}
+        <Button size="sm" className={BTN} onClick={() => detectMutation.mutate(false)} disabled={isBusy || !isConfigured}
+          title="Check Notion for data changes (fast — item name, SAP code, qty, etc). Does not check photos.">
+          {detectMutation.isPending && detectMutation.variables === false ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <CloudDownload className="mr-1.5 h-3.5 w-3.5" />}
           Sync Notion
+        </Button>
+
+        {/* 3b. Sync Photos — on demand only; never runs automatically (not on the 24h job,
+            not bundled into "Sync Notion"). Apply only ever touches images that this queued. */}
+        <Button size="sm" className={BTN} onClick={() => detectMutation.mutate(true)} disabled={isBusy || !isConfigured}
+          title="Check Notion for photo changes. Slower — downloads and hashes every product image.">
+          {detectMutation.isPending && detectMutation.variables === true ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="mr-1.5 h-3.5 w-3.5" />}
+          Sync Photos
         </Button>
 
         {/* 4. Review / Apply */}

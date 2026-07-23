@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown, CalendarDays, Check } from "lucide-react";
+import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown, PackageX, CalendarDays, Check, Loader2, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -15,6 +15,9 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from "@/components/ui/dialog";
 import PageHeader from "@/components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
@@ -41,6 +44,15 @@ type PlantStockRow = {
   pallets: number | null;
   extraPallets: number | null;
   lastArrived: string | null;
+  // Marks a synthetic "Empty Box" row (a distinct entry, NOT product stock). When true,
+  // inStock carries the empty-box quantity purely for display and emptyBoxCount the # of
+  // entries; the stock/extra/pallet cells render as dashes so it's never read as inventory.
+  isEmptyBox?: boolean;
+  emptyBoxCount?: number;
+  // Sum of every CSV's ordered quantity for this barcode+plant on the picked date (across ALL
+  // parts uploaded for that date) — only populated when exactly one date is selected (see
+  // expectedDate below). null when no single date is active.
+  expectedQty?: number | null;
 };
 
 type PlantStockResponse = {
@@ -48,11 +60,33 @@ type PlantStockResponse = {
   total: number;
   // null = admin/super-admin (all plants). Array = the plant(s) this user is limited to.
   plants: string[] | null;
+  // Empty boxes: physical boxes received with no product — a distinct status, never part of
+  // stock. Surfaced separately for reconciliation.
+  emptyBoxByPlant?: { plant: string; qty: number; count: number }[];
+  emptyBoxTotal?: number;
   // true when a from/to range was applied — quantities then mean "received in that window"
   // (sourced from the stock_movements ledger), not current totals.
   dateMode?: boolean;
   from?: string | null;
   to?: string | null;
+  // Set only when from/to pin down exactly one date — the date Expected Qty was computed for.
+  expectedDate?: string | null;
+  expectedTotal?: number | null;
+};
+
+// One dated entry from the stock_movements ledger for a single (barcode, plant) — powers the
+// arrival-history drill-down dialog. type: 'receive' (a scan added stock), 'adjust' (a void or
+// a CSV delete-rollback reversed some), 'dispatch' (future — outbound, not written yet).
+type StockMovementRow = {
+  id: number;
+  qty: number;
+  extraQty: number | null;
+  type: "receive" | "dispatch" | "adjust";
+  reason: string | null;
+  arrivedAt: string;
+  orderName: string | null;
+  orderDate: string | null;
+  partIndex: number | null;
 };
 
 // ─── Column config ────────────────────────────────────────────────────────────
@@ -62,6 +96,7 @@ const ALL_COLUMNS = [
   { key: "sapCode",     label: "SAP Code" },
   { key: "category",    label: "Category" },
   { key: "brand",       label: "Brand" },
+  { key: "expected",    label: "Expected Qty" },
   { key: "stock",       label: "Stock (Boxes)" },
   { key: "extra",       label: "Extra" },
   { key: "pallets",     label: "Pallets" },
@@ -94,25 +129,72 @@ function downloadExcel(filename: string, rows: Array<Array<string | number>>) {
   XLSX.writeFile(book, filename);
 }
 
-function downloadPdf(filename: string, rows: Array<Array<string | number>>) {
+// Business-report layout: a branded header band (title + scope/filter line + generated-on/row
+// count), a bordered grid table with zebra striping and right-aligned numeric columns, and a
+// footer with page numbers — instead of a bare title + default-styled table.
+function downloadPdf(
+  filename: string,
+  rows: Array<Array<string | number>>,
+  meta: { title: string; scope: string },
+) {
   const doc = new jsPDF({ orientation: "landscape" });
-  doc.setFontSize(12);
-  doc.text("Overall Stock Report (Plant-wise)", 14, 12);
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+
+  // ── Header band ──
+  doc.setFillColor(0, 29, 110); // brand navy — matches the app's header treatment
+  doc.rect(0, 0, pageWidth, 24, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(15);
+  doc.text(meta.title, margin, 14);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.text(meta.scope, margin, 20);
+
+  doc.setFontSize(8);
+  doc.text(`Generated ${format(new Date(), "MMM d, yyyy 'at' h:mm a")}`, pageWidth - margin, 17, { align: "right" });
+  doc.setTextColor(0, 0, 0);
+
   const [header, ...body] = rows;
+  // Right-align every numeric/quantity column — matches the header order built by exportRows:
+  // #, Item, Barcode, SAP Code, HSN Code, Category, Brand, Plant, Expected Qty, Stock (Boxes),
+  // Extra, Pallets, Extra Pallets, Last Updated.
+  const rightAlignCols = [0, 8, 9, 10, 11, 12];
+  const columnStyles: Record<number, { halign: "right" }> = {};
+  rightAlignCols.forEach((i) => { columnStyles[i] = { halign: "right" }; });
+
   autoTable(doc, {
     head: [header as string[]],
     body: body as string[][],
-    startY: 18,
-    styles: { fontSize: 7 },
-    headStyles: { fillColor: [0, 29, 110] },
+    startY: 30,
+    theme: "grid",
+    styles: { fontSize: 7, cellPadding: 2.2, lineColor: [210, 210, 210], lineWidth: 0.15 },
+    headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold", halign: "left" },
+    alternateRowStyles: { fillColor: [245, 247, 251] },
+    columnStyles,
+    margin: { left: margin, right: margin },
   });
+
+  // ── Footer: page numbers + brand, on every page ──
+  const pageCount = doc.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFontSize(8);
+    doc.setTextColor(150, 150, 150);
+    doc.text("KM Finny — Confidential", margin, pageHeight - 8);
+    doc.text(`Page ${i} of ${pageCount}`, pageWidth - margin, pageHeight - 8, { align: "right" });
+  }
+
   doc.save(filename);
 }
 
 const PAGE_SIZE = 20;
 
-// Solid navy fill, matching the Notion Inventory action buttons.
-const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
+// Solid navy fill, matching the Notion Inventory action buttons. Squared off (rounded-none)
+// for the business-report look — no soft/pill-shaped filter controls.
+const FILTER_BTN_CLASS = "h-8 rounded-none border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
 // Date-range presets. Declared once so the dropdown items and the trigger's active label
 // (and thus the "which filter is selected" state) can't drift apart.
@@ -143,6 +225,20 @@ export default function OverallStock() {
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
   );
+
+  // Arrival-history drill-down — clicking a row opens a dialog showing every dated entry from
+  // the stock_movements ledger for that exact (barcode, plant): when it arrived and how much.
+  const [detailRow, setDetailRow] = useState<PlantStockRow | null>(null);
+  const { data: movementsData, isLoading: movementsLoading } = useQuery<{ items: StockMovementRow[] }>({
+    queryKey: ["/api/scan-sessions/reports/stock-movements", detailRow?.barcode, detailRow?.plant],
+    queryFn: () =>
+      apiRequest(
+        "GET",
+        buildUrl("/api/scan-sessions/reports/stock-movements", { barcode: detailRow!.barcode!, plant: detailRow!.plant }),
+        undefined, false, true,
+      ),
+    enabled: !!detailRow?.barcode,
+  });
 
   const toggleColumn = (key: string) =>
     setVisibleColumnIds((prev) => {
@@ -177,6 +273,10 @@ export default function OverallStock() {
   // True when a date range is active: the Stock/Extra numbers then mean "received in this
   // window" rather than "total on hand", so the UI labels them differently.
   const dateMode = stockData?.dateMode ?? false;
+  // Expected Qty (sum of every CSV's ordered quantity across all parts for one date) only
+  // populates when from/to pin down exactly ONE date — set server-side as expectedDate.
+  const expectedDate = stockData?.expectedDate ?? null;
+  const expectedTotal = stockData?.expectedTotal ?? 0;
 
   const rows = stockData?.items ?? [];
   // null = admin (may pick any plant). Array = restricted user → lock the switcher to these.
@@ -202,17 +302,37 @@ export default function OverallStock() {
     );
   }, [rows, search]);
 
-  // Summary
+  // Summary — from REAL stock rows only; empty boxes are never counted as stock.
   const totalStock = filtered.reduce((s, r) => s + r.inStock, 0);
   const totalExtra = filtered.reduce((s, r) => s + r.extraQty, 0);
   const totalExtraPallets = filtered.reduce((s, r) => s + (r.extraPallets ?? 0), 0);
 
+  // Empty boxes as their OWN distinct rows (one per plant), appended below the stock rows.
+  // Never mixed into stock/extra totals — the quantity shows only inside the "Empty Box" badge.
+  const emptyBoxRows = useMemo<PlantStockRow[]>(() => {
+    const list = stockData?.emptyBoxByPlant ?? [];
+    const q = search.toLowerCase();
+    return list
+      .filter((e) => e.qty > 0)
+      .filter((e) => !search || "empty box".includes(q) || e.plant.toLowerCase().includes(q))
+      .map((e) => ({
+        srNo: 0, barcode: "EMPTY_BOX", plant: e.plant, itemName: "Empty Box",
+        itemNo: null, sapCode: null, hsnCode: null, category: null, brand: null,
+        itemsPerPallet: null, inStock: e.qty, extraQty: 0, pallets: null, extraPallets: null,
+        lastArrived: null, isEmptyBox: true, emptyBoxCount: e.count,
+      }));
+  }, [stockData?.emptyBoxByPlant, search]);
+  const emptyBoxTotal = stockData?.emptyBoxTotal ?? 0;
+
+  // Real stock rows first, then the distinct empty-box rows.
+  const displayRows = useMemo(() => [...filtered, ...emptyBoxRows], [filtered, emptyBoxRows]);
+
   // Export rows
   const exportRows = (src: PlantStockRow[]): Array<Array<string | number>> => [
-    ["#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant", "Stock (Boxes)", "Extra", "Pallets", "Extra Pallets", "Last Updated"],
+    ["#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant", "Expected Qty", "Stock (Boxes)", "Extra", "Pallets", "Extra Pallets", "Last Updated"],
     ...src.map((r, i) => [
       i + 1, r.itemName, r.barcode ?? "", r.sapCode ?? "", r.hsnCode ?? "",
-      r.category ?? "", r.brand ?? "", r.plant, r.inStock, r.extraQty,
+      r.category ?? "", r.brand ?? "", r.plant, r.expectedQty ?? "", r.inStock, r.extraQty,
       r.pallets != null ? r.pallets.toFixed(2) : "",
       r.extraPallets != null ? r.extraPallets.toFixed(2) : "",
       r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "",
@@ -220,7 +340,9 @@ export default function OverallStock() {
   ];
 
   const dash = <span className="text-gray-300">—</span>;
-  const cellBorder = "border-r border-gray-100";
+  // Crisper grid lines (was border-gray-100) — a typical business/report table reads as an
+  // actual grid, not a barely-visible divider.
+  const cellBorder = "border-r border-gray-300";
   const headerBorder = "border-r border-[#001d6e]/30";
 
   const stockColumns: DataTableColumn<PlantStockRow>[] = [
@@ -242,7 +364,15 @@ export default function OverallStock() {
       accessor: (row) => row.itemName,
       headerClassName: headerBorder,
       cellClassName: `font-medium text-gray-900 whitespace-normal break-words ${cellBorder}`,
-      render: (row) => row.itemName,
+      render: (row) =>
+        row.isEmptyBox ? (
+          <span className="inline-flex items-center gap-1.5" title={row.emptyBoxCount ? `${row.emptyBoxCount} entr${row.emptyBoxCount === 1 ? "y" : "ies"}` : undefined}>
+            <span>Empty Box</span>
+            <span className="inline-flex items-center bg-orange-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-orange-700">No product</span>
+          </span>
+        ) : (
+          row.itemName
+        ),
     },
     {
       id: "barcode",
@@ -253,7 +383,7 @@ export default function OverallStock() {
       totalable: false,
       headerClassName: headerBorder,
       cellClassName: `font-mono text-gray-600 ${cellBorder}`,
-      render: (row) => row.barcode ?? dash,
+      render: (row) => (row.isEmptyBox ? dash : row.barcode ?? dash),
     },
     {
       id: "sapCode",
@@ -273,15 +403,8 @@ export default function OverallStock() {
       sortable: true,
       accessor: (row) => row.category,
       headerClassName: headerBorder,
-      cellClassName: cellBorder,
-      render: (row) =>
-        row.category ? (
-          <span className="inline-flex items-center rounded-full border border-gray-200 px-2 py-0.5 text-[11px] text-gray-700">
-            {row.category}
-          </span>
-        ) : (
-          dash
-        ),
+      cellClassName: `text-gray-700 ${cellBorder}`,
+      render: (row) => row.category ?? dash,
     },
     {
       id: "brand",
@@ -301,12 +424,24 @@ export default function OverallStock() {
       sortable: true,
       accessor: (row) => row.plant,
       headerClassName: headerBorder,
+      cellClassName: `font-semibold text-[#001d6e] uppercase ${cellBorder}`,
+      render: (row) => row.plant,
+    },
+    {
+      id: "expected",
+      header: "Expected Qty",
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.expectedQty ?? 0,
+      headerClassName: headerBorder,
       cellClassName: cellBorder,
-      render: (row) => (
-        <span className="inline-flex items-center rounded-full bg-[#001d6e]/10 px-2 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">
-          {row.plant}
-        </span>
-      ),
+      render: (row) =>
+        row.isEmptyBox || row.expectedQty == null ? dash : (
+          <span className="font-bold text-purple-700 tabular-nums" title="Sum of ordered quantity across every CSV/part uploaded for this date">
+            {row.expectedQty.toLocaleString()}
+          </span>
+        ),
     },
     {
       id: "stock",
@@ -317,7 +452,10 @@ export default function OverallStock() {
       accessor: (row) => row.inStock,
       headerClassName: headerBorder,
       cellClassName: `font-bold text-[#001d6e] tabular-nums ${cellBorder}`,
-      render: (row) => row.inStock.toLocaleString(),
+      render: (row) =>
+        row.isEmptyBox
+          ? <span className="font-bold text-orange-600 tabular-nums" title="Empty boxes — not counted in stock totals">{row.inStock.toLocaleString()}</span>
+          : row.inStock.toLocaleString(),
     },
     {
       id: "extra",
@@ -385,12 +523,16 @@ export default function OverallStock() {
       <div className="max-w-7xl mx-auto space-y-4">
         <PageHeader
           icon={LayoutList}
-          title="Overall Stock"
-          description="Live plant-wise stock. Stock = all boxes received (extras included); Extra is shown separately."
+          title="Stock Overview"
+          description="Live plant-wise inventory. Stock reflects all boxes received (extras included); Excess and Ordered quantity are reported separately."
         />
 
-        {/* Summary tiles */}
+        {/* Summary tiles — squared off (rounded-none, no shadow, stronger divider) to match the
+            business-report treatment applied to the table below. */}
         <StatsBar
+          className="rounded-none shadow-none border-gray-300 [&_.divide-x]:divide-gray-300"
+          wrapLabels
+        
           stats={[
             {
               icon: Boxes,
@@ -398,20 +540,29 @@ export default function OverallStock() {
               value: totalStock.toLocaleString(),
               // In date mode this is what ARRIVED in the window, not what's on hand — say so
               // explicitly, otherwise the number reads as a (much smaller) total stock figure.
-              label: `${dateMode ? "boxes received in range" : "boxes"}${plantFilter ? ` · ${plantFilter}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · all plants"}`,
+              label: `${dateMode ? "Total Stock Received" : "Total Stock (Boxes)"}${plantFilter ? ` · ${plantFilter}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · All Plants"}`,
             },
             {
               icon: TrendingUp,
               tone: "amber",
               value: totalExtra.toLocaleString(),
-              label: `boxes over order · ${totalExtraPallets.toFixed(2)} plt`,
+              label: `Excess Stock (Over-Order) · ${totalExtraPallets.toFixed(2)} plt`,
             },
             {
-              icon: LayoutList,
-              tone: "navy",
-              value: filtered.length.toLocaleString(),
-              label: "item · plant rows",
+              icon: PackageX,
+              tone: "amber",
+              value: emptyBoxTotal.toLocaleString(),
+              label: "Empty Boxes",
             },
+            // Always on: sums every CSV/part's ordered quantity for one date — defaults to
+            // TODAY when no date filter is set (see the server's todayIST default), or the
+            // exact date picked via From/To otherwise.
+            ...(expectedDate ? [{
+              icon: CalendarDays,
+              tone: "navy" as const,
+              value: expectedTotal.toLocaleString(),
+              label: !fromDate && !toDate ? `Today's Total Order Qty (${expectedDate})` : `Total Order Qty (${expectedDate})`,
+            }] : []),
           ]}
           actions={
             <>
@@ -433,7 +584,7 @@ export default function OverallStock() {
                   type="date"
                   value={fromDate}
                   onChange={(e) => { setFromDate(e.target.value); setQuickFilter(""); setPageIndex(0); }}
-                  className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs"
+                  className="h-8 rounded-none border border-gray-300 bg-white px-2 text-xs"
                   aria-label="From date"
                 />
                 <span className="text-xs text-gray-400">→</span>
@@ -441,7 +592,7 @@ export default function OverallStock() {
                   type="date"
                   value={toDate}
                   onChange={(e) => { setToDate(e.target.value); setQuickFilter(""); setPageIndex(0); }}
-                  className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs"
+                  className="h-8 rounded-none border border-gray-300 bg-white px-2 text-xs"
                   aria-label="To date"
                 />
               </div>
@@ -484,7 +635,7 @@ export default function OverallStock() {
               <Button
                 size="sm"
                 variant="outline"
-                className="h-8 border-gray-300 bg-white text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                className="h-8 rounded-none border-gray-300 bg-white text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-900"
                 onClick={() => { setFromDate(""); setToDate(""); setQuickFilter(""); setPageIndex(0); }}
               >
                 Clear
@@ -538,7 +689,11 @@ export default function OverallStock() {
                           const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
                           if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
                           if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
-                          if (fmt === "PDF")   downloadPdf(`overall-stock${suffix}.pdf`, exp);
+                          if (fmt === "PDF") {
+                            const plantScope = plantFilter || (allowedPlants && allowedPlants.length ? plantOptions.join(", ") : "All Plants");
+                            const dateScope = fromDate || toDate ? `  ·  ${fromDate || "…"} to ${toDate || "…"}` : "";
+                            downloadPdf(`overall-stock${suffix}.pdf`, exp, { title: "Stock Overview Report", scope: `${plantScope}${dateScope}` });
+                          }
                         }}
                       >
                         <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />
@@ -552,21 +707,27 @@ export default function OverallStock() {
           }
         />
 
-        {/* Table card — title + search only; filters live in the stats card's action bar */}
+        {/* Table card — title + search only; filters live in the stats card's action bar.
+            Squared off (rounded-none, no shadow) — a business report reads as a plain bordered
+            grid, not a soft floating card. */}
         <TableCard
           icon={LayoutList}
-          title="Plant-wise Stock"
+          title="Stock by Plant"
           subtitle={search ? `${filtered.length} of ${rows.length} rows` : `${rows.length} item · plant rows`}
           searchValue={search}
           onSearchChange={(v) => { setSearch(v); setPageIndex(0); }}
           searchPlaceholder="Item, barcode, SAP, category…"
+          className="rounded-none shadow-none border-gray-300"
         >
           <DataTable<PlantStockRow>
             className="space-y-0"
             containerClassName="rounded-none border-0"
             columns={stockColumns}
-            data={filtered}
-            getRowId={(row) => `${row.barcode}-${row.plant}`}
+            data={displayRows}
+            getRowId={(row) => `${row.isEmptyBox ? "EB" : row.barcode}-${row.plant}`}
+            rowClassName={(row) => (row.isEmptyBox ? "bg-orange-50/40" : "cursor-pointer")}
+            onRowClick={(row) => setDetailRow(row)}
+            isRowClickable={(row) => !row.isEmptyBox && !!row.barcode}
             emptyState={`No stock yet${plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.`}
             noResultsState="No stock rows match your search."
             hasActiveFilters={!!search}
@@ -587,6 +748,89 @@ export default function OverallStock() {
           />
         </TableCard>
       </div>
+
+      {/* ── Stock movement history drill-down — every dated entry from the stock_movements
+          ledger for the clicked (barcode, plant). Deliberately generalized to cover BOTH
+          directions, not just inbound: today every row is a receive/adjust (party-order
+          dispatch — outbound, stock-decreasing — isn't built yet), but once it is, its rows
+          land in this same ledger/table with type='dispatch' and a negative qty. The "Date &
+          Movement" column (was "Arrived" — inbound-only wording) shows the date PLUS a
+          Received/Dispatched/Adjusted badge so both directions read correctly without any
+          further UI change when dispatch ships. ── */}
+      <Dialog open={!!detailRow} onOpenChange={(open) => { if (!open) setDetailRow(null); }}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
+              <History className="h-5 w-5" />
+              {detailRow?.itemName ?? "Item"}
+            </DialogTitle>
+            <DialogDescription className="font-mono text-xs">
+              {detailRow?.barcode} · {detailRow?.plant}
+            </DialogDescription>
+          </DialogHeader>
+
+          {movementsLoading ? (
+            <div className="flex justify-center py-10">
+              <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
+            </div>
+          ) : (movementsData?.items?.length ?? 0) === 0 ? (
+            <p className="py-8 text-center text-sm text-gray-400">No stock movements yet for this item.</p>
+          ) : (
+            <div className="max-h-[420px] overflow-y-auto border border-gray-300">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                    <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
+                    <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order / CSV</th>
+                    <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Qty</th>
+                    <th className="px-3 py-2 text-right font-semibold">Extra</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {movementsData!.items.map((m) => {
+                    const isNegative = m.qty < 0;
+                    // type is the source of truth for direction (qty sign can be negative for
+                    // BOTH a dispatch and a reversal/void adjust) — badge them distinctly so
+                    // "stock going out because of a party order" reads differently from
+                    // "a mistaken scan being undone".
+                    const movementBadge = m.type === "dispatch"
+                      ? <span className="inline-block bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">Dispatched</span>
+                      : m.type === "adjust"
+                      ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Adjusted</span>
+                      : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
+                    return (
+                      <tr key={m.id} className="border-b border-gray-200">
+                        <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
+                          <div className="flex flex-col gap-1">
+                            <span>{m.arrivedAt ? format(new Date(m.arrivedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                            {movementBadge}
+                          </div>
+                        </td>
+                        <td className="border-r border-gray-200 px-3 py-2 text-gray-600">
+                          {m.orderName ? (
+                            <>
+                              {m.orderName}
+                              {m.partIndex ? <span className="text-gray-400"> · Part {m.partIndex}</span> : null}
+                            </>
+                          ) : (
+                            <span className="text-gray-400" title={m.reason ?? undefined}>{m.reason ?? "—"}</span>
+                          )}
+                        </td>
+                        <td className={`border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums ${isNegative ? "text-red-500" : "text-[#001d6e]"}`}>
+                          {isNegative ? m.qty : `+${m.qty}`}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-amber-600">
+                          {m.extraQty ? (isNegative ? m.extraQty : `+${m.extraQty}`) : <span className="text-gray-300">—</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
