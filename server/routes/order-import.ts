@@ -1107,4 +1107,53 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
   }
 });
 
+// GET /api/order-import/master-view/item-history?barcode=X&sessionIds=1,2,3
+// Every raw scan event for ONE barcode across the CSVs/parts currently shown in Master View —
+// powers the "click an item in Master View" drill-down: who scanned it, when, how much, which
+// file/part, and whether it's since been voided. Same access + plant-scoping as Master View
+// itself; voiding an entry uses the EXISTING /api/order-scan/events/:id/void endpoint (unchanged,
+// admin-only) — since both this view and Scan History read the same order_scan_events rows, a
+// void made from either place is immediately reflected in the other, with no extra work needed.
+router.get('/order-import/master-view/item-history', requireImportViewAccess, async (req: Request, res: Response) => {
+  try {
+    const barcode = String(req.query.barcode ?? '').trim();
+    const sessionIdsParam = String(req.query.sessionIds ?? '').trim();
+    if (!barcode || !sessionIdsParam) {
+      return res.status(400).json({ message: 'barcode and sessionIds are required' });
+    }
+    const sessionIds = sessionIdsParam.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
+    if (sessionIds.length === 0) {
+      return res.status(400).json({ message: 'sessionIds must be a comma-separated list of numbers' });
+    }
+
+    // Dispatch users are forced to their own plant — narrow the session set to it so a barcode
+    // scanned only on another plant's part of this group can't leak through.
+    const forcedPlant = (req as any).importViewPlant as string | null;
+    const sessionConditions: any[] = [inArray(orderImportSessions.id, sessionIds)];
+    if (forcedPlant) sessionConditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`);
+    const allowedSessions = await db.select({ id: orderImportSessions.id })
+      .from(orderImportSessions).where(and(...sessionConditions));
+    const allowedSessionIds = allowedSessions.map((s) => s.id);
+    if (allowedSessionIds.length === 0) return res.json({ items: [] });
+
+    const { rows } = await pool.query(`
+      SELECT
+        ose.id, ose.session_id AS "sessionId", ose.barcode, ose.item_name AS "itemName",
+        ose.pallets, ose.total_qty AS "totalQty", ose.is_extra AS "isExtra",
+        ose.scanned_by_name AS "scannedByName", ose.scanned_at AS "scannedAt",
+        ose.voided, ose.voided_by_code AS "voidedByCode", ose.voided_at AS "voidedAt",
+        ose.void_reason AS "voidReason",
+        ois.csv_file_name AS "orderName", ois.part_index AS "partIndex"
+      FROM order_scan_events ose
+      JOIN order_import_sessions ois ON ois.id = ose.session_id
+      WHERE ose.session_id = ANY($1::int[]) AND LOWER(ose.barcode) = LOWER($2)
+      ORDER BY ose.scanned_at DESC
+    `, [allowedSessionIds, barcode]);
+
+    res.json({ items: rows });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch item history' });
+  }
+});
+
 export default router;

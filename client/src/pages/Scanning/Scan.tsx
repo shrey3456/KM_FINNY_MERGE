@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { format } from "date-fns";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -1383,6 +1384,144 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     return () => { window.removeEventListener("keydown", handleKeyDown, true); clearFlush(); };
   }, [activeOrderScanSession]);
 
+  // ── Master View item history drill-down (click a row → see every raw scan for it) ────────
+  // Declared here — BEFORE the early loading-state return below — so these hooks always run on
+  // every render regardless of orderScanNotifLoading (a hook after a conditional return only
+  // fires on some renders, which is exactly what triggered the
+  // "Rendered more hooks than during the previous render" crash).
+  // Void rights mirror the server's own rule exactly (order-scan.ts's ADMIN_ROLES) rather than
+  // reusing canCompletePart, which also covers a "supervisor" role — that role has no void
+  // access server-side, so showing the button to them would just 403 on click.
+  const userRole = ((currentUser as any)?.role ?? "").toLowerCase();
+  const canVoidScan = ["admin", "super-admin", "billing"].includes(userRole);
+
+  type MvHistoryEvent = {
+    id: number; sessionId: number; barcode: string; itemName: string | null;
+    pallets: number | null; totalQty: number; isExtra: boolean;
+    scannedByName: string | null; scannedAt: string;
+    voided: boolean | null; voidedAt: string | null; voidReason: string | null;
+    orderName: string; partIndex: number | null;
+  };
+  const [mvHistoryItem, setMvHistoryItem] = useState<MvMergedItem | null>(null);
+  const [mvVoidTarget, setMvVoidTarget] = useState<MvHistoryEvent | null>(null);
+  const [mvVoidReason, setMvVoidReason] = useState("");
+  // Every session/part currently loaded into this Master View — the history drill-down spans
+  // all of them (not just one file), matching what "history of this item in this order" means.
+  const mvSessionIds = (mvQuery.data?.files ?? []).map((f) => f.sessionId);
+  const mvHistoryQuery = useQuery<{ items: MvHistoryEvent[] }>({
+    queryKey: ["/api/order-import/master-view/item-history", mvHistoryItem?.barcode, mvSessionIds.join(",")],
+    queryFn: () =>
+      apiRequest(
+        "GET",
+        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(mvHistoryItem!.barcode!)}&sessionIds=${mvSessionIds.join(",")}`,
+      ).then((r) => r.json()),
+    enabled: !!mvHistoryItem?.barcode && mvSessionIds.length > 0,
+  });
+  const mvVoidMutation = useMutation({
+    mutationFn: (payload: { id: number; reason: string }) =>
+      apiRequest("POST", `/api/order-scan/events/${payload.id}/void`, { reason: payload.reason }).then((r) => r.json()),
+    onSuccess: () => {
+      // Same order_scan_events table Scan History reads from — voiding here is already visible
+      // there with no extra sync step; just invalidate every cache that could show this event.
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      setMvVoidTarget(null);
+      setMvVoidReason("");
+      toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
+    },
+    onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
+  });
+
+  // Stable per-row id for the item-history expansion — barcode is already the merge/dedup key
+  // (see allMvItems above), so it's unique on its own; "empty-box" covers the one synthetic
+  // row that has barcode: null.
+  const mvRowKey = (item: MvMergedItem) => item.barcode ?? "empty-box";
+
+  // Inline history panel — same content whether it renders as a DataTable expanded row
+  // (desktop) or a plain <tr> below the clicked row (mobile custom table). Reads mvHistoryItem/
+  // mvHistoryQuery, so it only has real content once an item's name has been clicked.
+  const mvHistoryPanel = (
+    // Sticky + width-capped so this stays fully visible without its own horizontal scroll —
+    // it renders inside a <td colSpan> of a much wider table (which itself scrolls sideways),
+    // so a plain 100%-width block here would inherit that full width. "sticky left:0" pins it
+    // to the visible left edge of whatever ancestor is actually scrolled; capping the width
+    // well under any realistic viewport keeps the whole thing on-screen at that position.
+    <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
+      {mvHistoryQuery.isLoading ? (
+        <div className="flex justify-center py-6">
+          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+        </div>
+      ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
+        <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
+      ) : (
+        <div className="max-h-72 overflow-y-auto border border-gray-200">
+          <table className="w-full table-fixed border-collapse text-xs">
+            <thead>
+              <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0 z-10">
+                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-7">#</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-[122px]">Date &amp; Time</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2">Scanned By</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2">Order / Part</th>
+                <th className="font-semibold text-center border-r border-gray-200 px-2 py-2 w-14">Qty</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-16">Status</th>
+                {canVoidScan && <th className="font-semibold text-right px-2 py-2 w-14">Action</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {mvHistoryQuery.data!.items.map((ev, idx) => {
+                const isOdd = idx % 2 !== 0;
+                return (
+                  <tr
+                    key={ev.id}
+                    className={`border-b border-gray-100 transition-colors ${ev.voided ? "opacity-60" : "hover:bg-gray-50"} ${isOdd ? "bg-slate-50" : "bg-white"}`}
+                  >
+                    <td className="px-2 py-2 text-gray-400 font-mono border-r border-gray-100">{idx + 1}</td>
+                    <td className="px-2 py-2 text-gray-800 truncate border-r border-gray-100">
+                      {format(new Date(ev.scannedAt), "MMM d · h:mm a")}
+                    </td>
+                    <td className="px-2 py-2 text-gray-600 truncate border-r border-gray-100">{ev.scannedByName ?? "—"}</td>
+                    <td className="px-2 py-2 text-gray-600 truncate border-r border-gray-100">
+                      {stripCsvExt(ev.orderName)}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
+                    </td>
+                    <td className="px-2 py-2 text-center border-r border-gray-100">
+                      <span className={`inline-flex items-center justify-center rounded-full text-[11px] font-bold px-2 py-0.5 ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
+                        {ev.isExtra ? "+" : ""}{ev.totalQty}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-[11px] border-r border-gray-100 truncate">
+                      {ev.voided ? (
+                        <span className="font-medium text-red-500" title={ev.voidReason ?? undefined}>Voided</span>
+                      ) : ev.isExtra ? (
+                        <span className="font-semibold uppercase text-amber-700">Extra</span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    {canVoidScan && (
+                      <td className="px-2 py-2 text-right">
+                        {!ev.voided && (
+                          <Button
+                            size="sm" variant="ghost"
+                            className="h-6 px-2 text-[11px] text-red-600 hover:bg-red-50 hover:text-red-700"
+                            onClick={() => setMvVoidTarget(ev)}
+                          >
+                            Void
+                          </Button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
   // ─── Views ────────────────────────────────────────────────────────────────
 
   // Don't show the plain dashboard for a split second before we actually know whether
@@ -1534,6 +1673,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       sortable: true,
       accessor: (i) => i.itemName,
       cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
+      // Clicking the ITEM NAME specifically (not the row, not any other column) toggles the
+      // inline history panel below this row — see the DataTable's renderExpandedRow prop.
       render: (i) =>
         i._isEmptyBox ? (
           <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-800">
@@ -1541,7 +1682,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {i._emptyBoxCount ? ` (${i._emptyBoxCount})` : ""}
           </span>
         ) : (
-          i.itemName ?? "—"
+          <button
+            type="button"
+            onClick={() => setMvHistoryItem((cur) => (cur && mvRowKey(cur) === mvRowKey(i) ? null : i))}
+            className="text-left underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
+          >
+            {i.itemName ?? "—"}
+          </button>
         ),
     },
     {
@@ -2747,12 +2894,24 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             const isExtraOnly = item._isExtra;
                             const isDone = done >= exp && exp > 0;
                             const isPartial = done > 0 && !isDone && !isExtraOnly;
+                            const isMvExpanded = !!mvHistoryItem && mvRowKey(mvHistoryItem) === mvRowKey(item);
                             return (
-                              <tr key={idx} className={`border-b border-gray-200 ${
-                                isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
-                              }`}>
+                              <Fragment key={idx}>
+                              <tr
+                                className={`border-b border-gray-200 ${
+                                  isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                                }`}
+                              >
                                 <td className={`border-r border-gray-200 min-w-[180px] max-w-[320px] ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
-                                  <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug">{item.itemName ?? "—"}</p>
+                                  {/* Only the item NAME opens the history dropdown — clicking anywhere
+                                      else in the row (barcode, Exp/Done/Left/Extra, Status) does nothing. */}
+                                  <button
+                                    type="button"
+                                    onClick={() => setMvHistoryItem((cur) => (cur && mvRowKey(cur) === mvRowKey(item) ? null : item))}
+                                    className="text-left font-medium text-gray-900 whitespace-normal break-words leading-snug underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
+                                  >
+                                    {item.itemName ?? "—"}
+                                  </button>
                                   <p className="text-gray-400 font-mono whitespace-normal break-words">
                                     {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                                   </p>
@@ -2776,6 +2935,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   </span>
                                 </td>
                               </tr>
+                              {isMvExpanded && (
+                                <tr>
+                                  <td colSpan={mvShowFiles ? 7 : 6} className="p-0 border-b border-gray-200">
+                                    {mvHistoryPanel}
+                                  </td>
+                                </tr>
+                              )}
+                              </Fragment>
                             );
                           })}
                         </tbody>
@@ -3312,7 +3479,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           containerClassName="rounded-none border-0"
                           columns={mvColumns}
                           data={mvVisible}
-                          getRowId={(item, i) => `${item.barcode ?? "na"}-${i}`}
+                          getRowId={(item) => mvRowKey(item)}
                           emptyState="No items found"
                           noResultsState="No items match your search."
                           hasActiveFilters={!!mvSearch}
@@ -3325,6 +3492,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               : isPartial ? "bg-amber-50/30"
                               : undefined;
                           }}
+                          renderExpandedRow={() => mvHistoryPanel}
+                          isRowExpandable={(item) => !item._isEmptyBox && !!item.barcode}
+                          expandedRowId={mvHistoryItem ? mvRowKey(mvHistoryItem) : null}
                           sortMode="client"
                           paginationMode="client"
                           defaultPageSize={10}
@@ -3522,6 +3692,40 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 })}
               >
                 {osEmptyBoxMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Log Empty Box"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Void confirmation — requires a reason, mirroring Scan History's own void dialog.
+            (The history itself is no longer a Dialog — it's the inline expanded row shown
+            directly below the clicked item via mvHistoryPanel/renderExpandedRow.) */}
+        <Dialog open={!!mvVoidTarget} onOpenChange={(o) => { if (!o) { setMvVoidTarget(null); setMvVoidReason(""); } }}>
+          <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="text-red-600">Void this scan?</DialogTitle>
+              <DialogDescription>
+                This reverses its stock impact and excludes it from totals — the entry stays visible in history, marked as voided.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-1.5 py-1">
+              <Label htmlFor="mv-void-reason" className="text-xs">Reason</Label>
+              <Input
+                id="mv-void-reason"
+                value={mvVoidReason}
+                onChange={(e) => setMvVoidReason(e.target.value)}
+                placeholder="e.g. scanned wrong item, duplicate scan"
+                autoFocus
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => { setMvVoidTarget(null); setMvVoidReason(""); }}>Cancel</Button>
+              <Button
+                className="bg-red-600 hover:bg-red-700 text-white"
+                disabled={mvVoidMutation.isPending || !mvVoidReason.trim()}
+                onClick={() => mvVoidTarget && mvVoidMutation.mutate({ id: mvVoidTarget.id, reason: mvVoidReason.trim() })}
+              >
+                {mvVoidMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Void Scan"}
               </Button>
             </DialogFooter>
           </DialogContent>
