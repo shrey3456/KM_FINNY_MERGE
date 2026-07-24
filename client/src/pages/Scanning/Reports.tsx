@@ -5,8 +5,9 @@ import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
-  History, Search, X, RefreshCw, FileDown, ChevronDown,
-  User, UserCircle, Loader2, ScanLine, Upload, Trash2,
+  History, X, RefreshCw, FileDown, ChevronDown,
+  User, Loader2, ScanLine, Upload, Trash2,
+  Boxes, Layers, AlertTriangle, PackageX,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
@@ -16,9 +17,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +30,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
+import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
+import { StatsBar } from "@/components/ui/stats-bar";
+import { TableCard } from "@/components/ui/table-card";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -72,6 +73,15 @@ type ScanHistoryResponse = {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const HISTORY_PAGE_SIZE = 20;
+
+// Solid navy fill, matching Overall Stock / Notion Inventory's filter buttons. Squared off
+// (rounded-none) for the business-report look — no soft/pill-shaped filter controls.
+const FILTER_BTN_CLASS = "h-8 rounded-none border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
+
+// Column ids that can be hidden via the column-visibility toggle — mirrors historyColumns
+// below. "#", Scanned By, Item and Void always stay visible (hideable: false there), so they
+// don't need to be included/excluded here — DataTable adds them back regardless.
+const HISTORY_OPTIONAL_COLUMNS = ["barcode", "order", "plant", "qty", "pallets", "stv", "type", "time"] as const;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -152,6 +162,19 @@ const Reports = () => {
   const [historyType,    setHistoryType]    = useState("all");
   const [historyPlant,   setHistoryPlant]   = useState("__all__");
   const [historyExporting, setHistoryExporting] = useState<string | null>(null);
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
+    () => new Set(HISTORY_OPTIONAL_COLUMNS),
+  );
+  const toggleColumn = (key: string) =>
+    setVisibleColumnIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        // Keep at least one optional column visible.
+        const remainingOptional = HISTORY_OPTIONAL_COLUMNS.filter((c) => c !== key && next.has(c));
+        if (remainingOptional.length > 0) next.delete(key);
+      } else next.add(key);
+      return next;
+    });
 
   // Plant options for the filter. Non-admins are already restricted server-side, so this
   // dropdown mainly lets admins narrow to one plant; picking a plant you can't see returns
@@ -291,6 +314,148 @@ const Reports = () => {
     ]),
   ];
 
+  const dash = <span className="text-gray-300">—</span>;
+
+  // Same table structure/styling as Overall Stock (DataTable + TableCard): sortable/resizable/
+  // hideable columns, zebra stripes, business-report borders. No totals row here — the server
+  // only ever hands us one page of rows, so a client-side sum would just total the visible page
+  // instead of the real filtered total (the summary tiles above already show the true totals).
+  const historyColumns: DataTableColumn<ScanHistoryItem>[] = [
+    {
+      id: "srNo",
+      header: "#",
+      hideable: false,
+      width: 48,
+      cellClassName: "text-gray-400 tabular-nums",
+      render: (_row, rowIndex) => historyOffset + rowIndex + 1,
+    },
+    {
+      id: "scannedBy",
+      header: "Scanned By",
+      hideable: false,
+      width: 150,
+      accessor: (row) => row.scannedByName,
+      render: (row) => (
+        <>
+          <p className="font-medium text-gray-900 text-xs leading-tight">{row.scannedByName ?? dash}</p>
+          {row.scannedByCode && (
+            <p className="text-[11px] text-gray-400 font-mono leading-tight">{row.scannedByCode}</p>
+          )}
+        </>
+      ),
+    },
+    {
+      id: "item",
+      header: "Item",
+      hideable: false,
+      width: 220,
+      accessor: (row) => row.itemName,
+      cellClassName: "whitespace-normal break-words",
+      render: (row) => (
+        <>
+          <p className={`font-medium text-gray-900 text-xs leading-snug ${row.voided ? "line-through" : ""}`}>
+            {row.itemName ?? dash}
+          </p>
+          {row.voided && (
+            <p className="text-[10px] font-semibold text-red-500" title={row.voidReason ?? undefined}>
+              Voided{row.voidedAt ? ` · ${format(new Date(row.voidedAt), "MMM d, h:mm a")}` : ""}
+            </p>
+          )}
+        </>
+      ),
+    },
+    {
+      id: "barcode",
+      header: "Barcode",
+      width: 120,
+      accessor: (row) => row.barcode,
+      cellClassName: "font-mono text-gray-500",
+      render: (row) => row.barcode ?? dash,
+    },
+    {
+      id: "order",
+      header: "Order",
+      width: 140,
+      accessor: (row) => row.orderName,
+      cellClassName: "truncate",
+      render: (row) => row.orderName,
+    },
+    {
+      id: "plant",
+      header: "Plant",
+      width: 90,
+      accessor: (row) => row.plant,
+      render: (row) => <Badge variant="outline" className="text-[11px] px-1.5 py-0">{row.plant}</Badge>,
+    },
+    {
+      id: "qty",
+      header: "Qty",
+      width: 80,
+      align: "right",
+      accessor: (row) => row.totalQty,
+      cellClassName: "font-bold text-[#001d6e]",
+      render: (row) => row.totalQty.toLocaleString(),
+    },
+    {
+      id: "pallets",
+      header: "Pallets",
+      width: 90,
+      align: "right",
+      accessor: (row) => row.pallets,
+      cellClassName: "font-semibold text-[#001d6e]",
+      render: (row) =>
+        row.pallets != null && Number(row.pallets) > 0 ? parseFloat(String(row.pallets)).toFixed(2) : dash,
+    },
+    {
+      id: "stv",
+      header: "STV",
+      width: 90,
+      accessor: (row) => row.stv,
+      cellClassName: "text-gray-600",
+      render: (row) => row.stv ?? dash,
+    },
+    {
+      id: "type",
+      header: "Type",
+      width: 100,
+      accessor: (row) => (row.isEmptyBox ? "Empty Box" : row.isExtra ? "Extra" : "Regular"),
+      render: (row) =>
+        row.isEmptyBox ? (
+          <Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 text-[11px] px-1.5 border-0">Empty Box</Badge>
+        ) : row.isExtra ? (
+          <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>
+        ) : (
+          <Badge className="bg-green-100 text-green-800 hover:bg-green-100 text-[11px] px-1.5 border-0">Regular</Badge>
+        ),
+    },
+    {
+      id: "time",
+      header: "Time",
+      width: 130,
+      accessor: (row) => row.scannedAt,
+      cellClassName: "whitespace-nowrap text-gray-500",
+      render: (row) => (row.scannedAt ? format(new Date(row.scannedAt), "MMM d, h:mm a") : dash),
+    },
+    ...(isAdmin
+      ? [
+          {
+            id: "void",
+            header: "Void",
+            hideable: false,
+            width: 56,
+            align: "center" as const,
+            render: (row: ScanHistoryItem) =>
+              !row.voided && (
+                <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                  onClick={() => setVoidTarget(row)} title="Void this scan">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              ),
+          } as DataTableColumn<ScanHistoryItem>,
+        ]
+      : []),
+  ];
+
   return (
     <>
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
@@ -301,280 +466,197 @@ const Reports = () => {
           description="Every individual scan event — who scanned what, when, and on which order."
         />
 
-        {/* Filter bar */}
-        <div className="flex flex-wrap gap-2 items-center">
-          <div className="flex items-center gap-1.5 rounded-md border bg-white px-2.5 h-9">
-            <span className="text-xs text-gray-400 whitespace-nowrap">Date</span>
-            <input
-              type="date"
-              className="text-xs bg-transparent outline-none text-gray-700 w-[130px]"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-            />
-            {selectedDate && (
-              <button onClick={() => setSelectedDate("")}>
-                <X className="h-3.5 w-3.5 text-gray-400" />
-              </button>
-            )}
-          </div>
+        {/* Stats+filters and the table share ONE bordered box (divide-y draws the single line
+            between them) instead of two separate boxes with a gap — reads as one section. */}
+        <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden divide-y divide-gray-300">
+        {/* Summary tiles + filters — same "business report" treatment as Overall Stock:
+            squared tiles/controls (rounded-none), solid navy filter buttons. */}
+        <StatsBar
+          className="rounded-none shadow-none border-0 [&_.divide-x]:divide-gray-300"
+          stats={[
+            { icon: History, tone: "navy", value: historyTotal.toLocaleString(), label: "Total Events" },
+            { icon: Boxes, tone: "navy", value: historyTotalBoxes.toLocaleString(), label: "Total Boxes" },
+            {
+              icon: Layers, tone: "navy",
+              value: historyTotalPallets > 0 ? parseFloat(String(historyTotalPallets)).toFixed(2) : "—",
+              label: "Total Pallets",
+            },
+            { icon: AlertTriangle, tone: "amber", value: historyExtraCount.toLocaleString(), label: "Extra Events" },
+            { icon: PackageX, tone: "amber", value: historyEmptyBoxCount.toLocaleString(), label: "Empty Boxes" },
+          ]}
+          actions={
+            <>
+              <div className="flex items-center gap-1.5 h-8 rounded-none border border-gray-300 bg-white px-2.5">
+                <span className="text-xs text-gray-400 whitespace-nowrap">Date</span>
+                <input
+                  type="date"
+                  className="text-xs bg-transparent outline-none text-gray-700 w-[120px]"
+                  value={selectedDate}
+                  onChange={(e) => setSelectedDate(e.target.value)}
+                />
+                {selectedDate && (
+                  <button onClick={() => setSelectedDate("")}>
+                    <X className="h-3.5 w-3.5 text-gray-400" />
+                  </button>
+                )}
+              </div>
 
-          <div className="relative min-w-[180px] flex-1 max-w-xs">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-            <Input
-              className="pl-9 h-9 text-sm"
-              placeholder="Item, barcode, or scanner…"
-              value={historySearch}
-              onChange={(e) => setHistorySearch(e.target.value)}
-            />
-            {historySearch && (
-              <button className="absolute right-2 top-1/2 -translate-y-1/2" onClick={() => setHistorySearch("")}>
-                <X className="h-4 w-4 text-gray-400" />
-              </button>
-            )}
-          </div>
+              <Select value={historyScanner} onValueChange={setHistoryScanner}>
+                <SelectTrigger className={`w-[150px] gap-1.5 ${FILTER_BTN_CLASS}`}>
+                  <User className="h-3.5 w-3.5 shrink-0" />
+                  <SelectValue placeholder="All scanners" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All scanners</SelectItem>
+                  {historyScanners.map((name) => (
+                    <SelectItem key={name} value={name}>{name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
-          <Select value={historyScanner} onValueChange={setHistoryScanner}>
-            <SelectTrigger className="h-9 w-[160px] text-sm">
-              <User className="h-3.5 w-3.5 mr-1.5 text-gray-400 shrink-0" />
-              <SelectValue placeholder="All scanners" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All scanners</SelectItem>
-              {historyScanners.map((name) => (
-                <SelectItem key={name} value={name}>{name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+              <Select value={historyType} onValueChange={setHistoryType}>
+                <SelectTrigger className={`w-[130px] gap-1.5 ${FILTER_BTN_CLASS}`}>
+                  <SelectValue placeholder="All types" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All types</SelectItem>
+                  <SelectItem value="regular">Regular only</SelectItem>
+                  <SelectItem value="extra">Extra only</SelectItem>
+                  <SelectItem value="empty">Empty Box only</SelectItem>
+                </SelectContent>
+              </Select>
 
-          <Select value={historyType} onValueChange={setHistoryType}>
-            <SelectTrigger className="h-9 w-[140px] text-sm">
-              <SelectValue placeholder="All types" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All types</SelectItem>
-              <SelectItem value="regular">Regular only</SelectItem>
-              <SelectItem value="extra">Extra only</SelectItem>
-              <SelectItem value="empty">Empty Box only</SelectItem>
-            </SelectContent>
-          </Select>
+              <Select value={historyPlant} onValueChange={setHistoryPlant}>
+                <SelectTrigger className={`w-[140px] gap-1.5 ${FILTER_BTN_CLASS}`}>
+                  <SelectValue placeholder="All plants" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All plants</SelectItem>
+                  {plantList.map((p) => (
+                    <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
-          <Select value={historyPlant} onValueChange={setHistoryPlant}>
-            <SelectTrigger className="h-9 w-[150px] text-sm">
-              <SelectValue placeholder="All plants" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All plants</SelectItem>
-              {plantList.map((p) => (
-                <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+              {/* Always mounted (visibility toggled, not presence) so the 5s poll never shifts
+                  the filter bar layout — a mount/unmount here was pushing Export sideways
+                  every cycle. */}
+              <span
+                className={`flex items-center gap-1 text-xs text-emerald-600 ${historyFetching && !historyLoading ? "visible" : "invisible"}`}
+                aria-hidden={!(historyFetching && !historyLoading)}
+              >
+                <RefreshCw className="h-3 w-3 animate-spin" />Updating…
+              </span>
 
-          {/* Always mounted (visibility toggled, not presence) so the 5s poll never shifts the
-              filter bar layout — a mount/unmount here was pushing Export sideways every cycle. */}
-          <span
-            className={`flex items-center gap-1 text-xs text-emerald-600 ${historyFetching && !historyLoading ? "visible" : "invisible"}`}
-            aria-hidden={!(historyFetching && !historyLoading)}
-          >
-            <RefreshCw className="h-3 w-3 animate-spin" />Updating…
-          </span>
-
-          <div className="flex gap-2 ml-auto">
-            {/* One Export control instead of three buttons; the format is picked from the menu. */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="h-9 text-xs" disabled={historyItems.length === 0}>
-                  <FileDown className="h-3.5 w-3.5 mr-1" />
-                  Export
-                  <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-70" />
+              <div className="ml-auto flex gap-2">
+                <DataTableColumnToggle
+                  columns={historyColumns}
+                  visibleColumnIds={visibleColumnIds}
+                  onToggleColumn={toggleColumn}
+                  onSetAll={(visible) => setVisibleColumnIds(visible ? new Set(HISTORY_OPTIONAL_COLUMNS) : new Set())}
+                  buttonClassName={FILTER_BTN_CLASS}
+                />
+                {/* One Export control instead of three buttons; the format is picked from the menu. */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className={FILTER_BTN_CLASS} disabled={historyItems.length === 0}>
+                      <FileDown className="h-3.5 w-3.5 mr-1" />
+                      Export
+                      <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-70" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-36">
+                    {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
+                      <DropdownMenuItem
+                        key={fmt}
+                        onSelect={() => {
+                          const rows = historyExportRows(historyItems);
+                          const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                          if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
+                          if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
+                          if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
+                        }}
+                      >
+                        <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />
+                        {fmt}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
+                  size="sm" className={FILTER_BTN_CLASS}
+                  onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
+                >
+                  <Upload className="h-3.5 w-3.5 mr-1" />Upload to Notion
                 </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-36">
-                {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
-                  <DropdownMenuItem
-                    key={fmt}
-                    onSelect={() => {
-                      const rows = historyExportRows(historyItems);
-                      const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
-                      if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
-                      if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
-                      if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
-                    }}
-                  >
-                    <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />
-                    {fmt}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <Button
-              size="sm" className="h-9 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white"
-              onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
-            >
-              <Upload className="h-3.5 w-3.5 mr-1" />Upload to Notion
-            </Button>
-          </div>
-        </div>
+              </div>
+            </>
+          }
+        />
 
-        {/* Summary chips */}
-        <div className="flex flex-wrap gap-2">
-          <div className="flex items-center gap-1.5 rounded-md border bg-white px-3 py-1.5 text-xs">
-            <span className="text-gray-500">Total Events</span>
-            <span className="font-bold text-gray-900">{historyTotal.toLocaleString()}</span>
-          </div>
-          <div className="flex items-center gap-1.5 rounded-md border bg-white px-3 py-1.5 text-xs">
-            <span className="text-gray-500">Total Boxes</span>
-            <span className="font-bold text-[#001d6e]">{historyTotalBoxes.toLocaleString()}</span>
-          </div>
-          <div className="flex items-center gap-1.5 rounded-md border bg-white px-3 py-1.5 text-xs">
-            <span className="text-gray-500">Total Pallets</span>
-            <span className="font-bold text-[#001d6e]">
-              {historyTotalPallets > 0 ? parseFloat(String(historyTotalPallets)).toFixed(2) : "—"}
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs">
-            <span className="text-amber-600">Extra Events</span>
-            <span className="font-bold text-amber-700">{historyExtraCount.toLocaleString()}</span>
-          </div>
-          <div className="flex items-center gap-1.5 rounded-md border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs">
-            <span className="text-orange-600">Empty Boxes</span>
-            <span className="font-bold text-orange-700">{historyEmptyBoxCount.toLocaleString()}</span>
-          </div>
-        </div>
-
-        {/* History table */}
-        <div className="rounded-xl border bg-white overflow-x-auto shadow-sm">
-          <Table className="min-w-[1040px] text-xs sm:text-sm">
-            <TableHeader>
-              <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
-                <TableHead className="text-white font-semibold uppercase tracking-wide w-[44px] text-[11px]">#</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide min-w-[130px] text-[11px]">
-                  <span className="flex items-center gap-1"><UserCircle className="h-3.5 w-3.5" />Scanned By</span>
-                </TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide min-w-[180px] text-[11px]">Item</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px]">Barcode</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px]">Order</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px]">Plant</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-right text-[11px]">Qty</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-right text-[11px]">Pallets</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px]">STV</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px]">Type</TableHead>
-                <TableHead className="text-white font-semibold uppercase tracking-wide text-[11px] whitespace-nowrap">Time</TableHead>
-                {isAdmin && <TableHead className="text-white font-semibold uppercase tracking-wide text-center text-[11px] w-[60px]">Void</TableHead>}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {historyLoading ? (
-                <TableRow>
-                  <TableCell colSpan={isAdmin ? 12 : 11} className="py-16 text-center text-sm text-gray-400">
-                    <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2 text-gray-300" />
-                    Loading scan history…
-                  </TableCell>
-                </TableRow>
-              ) : historyItems.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={isAdmin ? 12 : 11} className="py-16 text-center">
-                    <ScanLine className="h-10 w-10 text-gray-200 mx-auto mb-3" />
-                    <p className="text-sm text-gray-400">
-                      No scan events found{selectedDate ? " for this date" : ""}.
-                    </p>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                historyItems.map((h, idx) => {
-                  // Stripe by the row's stable id (not its position), so a new scan
-                  // landing at the top doesn't flip every row's color/number on each poll.
-                  const stripeEven = h.id % 2 === 0;
-                  const rowBg = h.isEmptyBox
-                    ? (stripeEven ? "bg-orange-50/50" : "bg-orange-50/80")
-                    : h.voided
-                    ? "bg-gray-50 opacity-60"
-                    : h.isExtra
-                    ? (stripeEven ? "bg-amber-50/50" : "bg-amber-50/80")
-                    : (stripeEven ? "bg-white" : "bg-slate-50");
-                  return (
-                    <TableRow key={h.id} className={`${rowBg} transition-colors hover:bg-slate-100/70`}>
-                      <TableCell className="text-gray-400 text-[11px] py-2.5 w-[44px]">
-                        {historyOffset + idx + 1}
-                      </TableCell>
-                      <TableCell className="min-w-[130px] py-2.5">
-                        <p className="font-medium text-gray-900 text-xs leading-tight">
-                          {h.scannedByName ?? <span className="text-gray-300">—</span>}
-                        </p>
-                        {h.scannedByCode && (
-                          <p className="text-[11px] text-gray-400 font-mono leading-tight">{h.scannedByCode}</p>
-                        )}
-                      </TableCell>
-                      <TableCell className="min-w-[180px] max-w-[240px] py-2.5">
-                        <p className={`font-medium text-gray-900 text-xs leading-snug whitespace-normal break-words ${h.voided ? "line-through" : ""}`}>
-                          {h.itemName ?? <span className="text-gray-300">—</span>}
-                        </p>
-                        {h.voided && (
-                          <p className="text-[10px] font-semibold text-red-500" title={h.voidReason ?? undefined}>
-                            Voided{h.voidedAt ? ` · ${format(new Date(h.voidedAt), "MMM d, h:mm a")}` : ""}
-                          </p>
-                        )}
-                      </TableCell>
-                      <TableCell className="font-mono text-[11px] text-gray-500 py-2.5">
-                        {h.barcode ?? <span className="text-gray-300">—</span>}
-                      </TableCell>
-                      <TableCell className="text-xs text-gray-700 py-2.5 max-w-[140px] truncate">
-                        {h.orderName}
-                      </TableCell>
-                      <TableCell className="py-2.5">
-                        <Badge variant="outline" className="text-[11px] px-1.5 py-0">{h.plant}</Badge>
-                      </TableCell>
-                      <TableCell className="text-right font-bold text-[#001d6e] py-2.5">
-                        {h.totalQty.toLocaleString()}
-                      </TableCell>
-                      <TableCell className="text-right font-semibold text-[#001d6e] py-2.5">
-                        {h.pallets != null && Number(h.pallets) > 0
-                          ? parseFloat(String(h.pallets)).toFixed(2)
-                          : <span className="text-gray-300 font-normal">—</span>}
-                      </TableCell>
-                      <TableCell className="text-xs text-gray-600 py-2.5">
-                        {h.stv ?? <span className="text-gray-300">—</span>}
-                      </TableCell>
-                      <TableCell className="py-2.5">
-                        {h.isEmptyBox
-                          ? <Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 text-[11px] px-1.5 border-0">Empty Box</Badge>
-                          : h.isExtra
-                          ? <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>
-                          : <Badge className="bg-green-100 text-green-800 hover:bg-green-100 text-[11px] px-1.5 border-0">Regular</Badge>}
-                      </TableCell>
-                      <TableCell className="text-[11px] text-gray-500 whitespace-nowrap py-2.5">
-                        {h.scannedAt ? format(new Date(h.scannedAt), "MMM d, h:mm a") : "—"}
-                      </TableCell>
-                      {isAdmin && (
-                        <TableCell className="text-center py-2.5">
-                          {!h.voided && (
-                            <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
-                              onClick={() => setVoidTarget(h)} title="Void this scan">
-                              < Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          )}
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  );
-                })
-              )}
-            </TableBody>
-          </Table>
-
-          <div className="flex items-center justify-between border-t px-4 py-2.5 text-xs text-gray-500">
-            <span>
-              {historyTotal > 0
-                ? `Showing ${historyOffset + 1}–${Math.min(historyOffset + historyItems.length, historyTotal)} of ${historyTotal.toLocaleString()} events`
-                : "No events"}
-            </span>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" disabled={historyPage <= 1}
-                onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
-              <Button variant="outline" size="sm" disabled={!historyHasMore}
-                onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
-            </div>
-          </div>
+        {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/
+            hideable columns, zebra stripes, mobile swipe hint. Pagination is server-driven
+            (Prev/Next over 20-row pages), so it's rendered via renderFooter instead of the
+            DataTable's own client pageIndex/pageSize controls. */}
+        <TableCard
+          icon={History}
+          title="Scan Events"
+          subtitle={historyTotal > 0 ? `${historyItems.length} of ${historyTotal.toLocaleString()} events` : "0 events"}
+          searchValue={historySearch}
+          onSearchChange={setHistorySearch}
+          searchPlaceholder="Item, barcode, or scanner…"
+          className="rounded-none shadow-none border-0"
+        >
+          <DataTable<ScanHistoryItem>
+            className="space-y-0"
+            containerClassName="rounded-none border-0"
+            columns={historyColumns}
+            data={historyItems}
+            getRowId={(row) => String(row.id)}
+            isLoading={historyLoading}
+            loadingLabel="Loading scan history…"
+            emptyState={`No scan events found${selectedDate ? " for this date" : ""}.`}
+            noResultsState="No scan events match your search."
+            hasActiveFilters={!!historySearch}
+            rowClassName={(row) => {
+              // Stripe by the row's stable id (not its position), so a new scan landing at the
+              // top doesn't flip every row's color/number on each poll.
+              const stripeEven = row.id % 2 === 0;
+              if (row.isEmptyBox) return stripeEven ? "bg-orange-50/50" : "bg-orange-50/80";
+              if (row.voided) return "bg-gray-50 opacity-60";
+              if (row.isExtra) return stripeEven ? "bg-amber-50/50" : "bg-amber-50/80";
+              return undefined;
+            }}
+            enableZebraStripes
+            enableColumnResizing
+            enableColumnVisibility
+            columnVisibility={visibleColumnIds}
+            onColumnVisibilityChange={setVisibleColumnIds}
+            showMobileSwipeHint
+            headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+            renderFooter={(ctx) => (
+              <tfoot>
+                <tr>
+                  <td colSpan={ctx.columnCount} className="border-t border-gray-300 bg-white px-4 py-2.5">
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <span>
+                        {historyTotal > 0
+                          ? `Showing ${historyOffset + 1}–${Math.min(historyOffset + historyItems.length, historyTotal)} of ${historyTotal.toLocaleString()} events`
+                          : "No events"}
+                      </span>
+                      <div className="flex gap-2">
+                        <Button variant="outline" size="sm" className="rounded-none" disabled={historyPage <= 1}
+                          onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
+                        <Button variant="outline" size="sm" className="rounded-none" disabled={!historyHasMore}
+                          onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          />
+        </TableCard>
         </div>
       </div>
     </div>

@@ -301,7 +301,6 @@ export default function ScanOrderPage() {
   // mismatch that makes continuous swipe/wheel scrolling feel disorienting.
   const osTabBodyScrollRef = useRef<HTMLDivElement>(null);
   const osCsvListScrollRef = useRef<HTMLDivElement>(null);
-  const osManageExtraScrollRef = useRef<HTMLDivElement>(null);
 
   function ScrollNudgeButtons({ targetRef, amount = 240, className = "", large = false }: {
     targetRef: React.RefObject<HTMLElement>; amount?: number; className?: string; large?: boolean;
@@ -2279,38 +2278,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       : false;
     const osResolvedImageName = osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name;
 
-    // Extra Items panel — reused as-is in both the mobile and desktop layouts below. Manage
-    // Scans (void) used to live here too; it's been moved to the Scan History page instead,
-    // so this is just the Extra list now.
-    const sideInfoPanel = (
-      <div className="bg-white border shadow-sm overflow-hidden">
-        <div className="flex items-center justify-between border-b bg-gray-50 px-4 py-2">
-          <p className="text-xs font-semibold text-gray-600">Extra{(osExtrasQuery.data ?? []).length > 0 ? ` (${(osExtrasQuery.data ?? []).length})` : ""}</p>
-          {osRotated && <ScrollNudgeButtons targetRef={osManageExtraScrollRef} className="text-gray-500" />}
-        </div>
-        <div ref={osManageExtraScrollRef} className={`max-h-[420px] divide-y divide-gray-100 ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
-          {(osExtrasQuery.data ?? []).length > 0 ? (osExtrasQuery.data ?? []).map((e, i) => {
-            const eIpp = ippForBarcode(e.barcode);
-            return (
-              <div key={i} className={`flex items-center gap-3 px-4 py-2.5 text-xs ${i % 2 === 0 ? "bg-white" : "bg-slate-50"}`}>
-                <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium text-gray-900 truncate">{e.itemName ?? e.barcode}</p>
-                  <p className="text-[11px] text-gray-400 font-mono">{e.barcode}</p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="font-bold text-amber-600">{e.totalQty} units</p>
-                  {eIpp > 0 && <p className="text-[11px] text-purple-500">{(e.totalQty / eIpp).toFixed(2)} plt</p>}
-                </div>
-              </div>
-            );
-          }) : <p className="py-8 text-center text-xs text-gray-400">No extra scans.</p>}
-        </div>
-      </div>
-    );
 
     return (
-      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:px-4 sm:pb-4 sm:pt-2 lg:px-6 lg:pb-6 lg:pt-3 ${osRotated ? "kiosk-rotate-90" : ""}`}>
         <RotateToggleButton />
         {osRotated && (
           <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
@@ -2891,9 +2861,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
             </div>
 
-            {/* Manage / Extra — pinned to the bottom, below the CSV Items list */}
-            {sideInfoPanel}
-
               </>
             )}
 
@@ -3036,7 +3003,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </div>
                 )}
                 {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400 py-4 text-center">No active session — load a CSV to see its Master View.</p>}
-                {sideInfoPanel}
               </div>
             )}
 
@@ -3141,10 +3107,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
         {/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */}
         <div className={osRotated ? "hidden" : "hidden sm:block"}>
-          <div className="mx-auto max-w-7xl space-y-4">
+          <div className="mx-auto max-w-7xl space-y-3">
 
             {/* Header row */}
-            <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center bg-amber-400">
                   <Zap className="h-4 w-4 text-white" />
@@ -3170,67 +3136,63 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </p>
                 </div>
               </div>
-              <div className="flex flex-col items-stretch gap-1.5 shrink-0 sm:items-end">
-                <div className="flex items-center gap-2">
-                  <Progress value={osPct} className="w-28 h-2" />
-                  <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
-                  {canCompletePart && (
-                    <Button size="sm" className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
-                      Complete
-                    </Button>
-                  )}
-                </div>
-                {/* STV selector — sits under Complete as part of the order header. Highlighted so
-                    the operator notices it's unset before scanning. */}
-                {stvs.length > 0 && (
-                  <Select
-                    value={osSelectedStv || NO_STV}
-                    onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}
-                  >
-                    <SelectTrigger
-                      className={`h-9 w-full text-xs font-semibold sm:w-52 ${
-                        osSelectedStv
-                          ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
-                          : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
-                      }`}
-                    >
-                      <SelectValue placeholder="Select STV…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NO_STV}>— Select STV —</SelectItem>
-                      {stvs.map((s) => (
-                        <SelectItem key={s} value={s}>{s}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-                {/* No STVs configured for this plant — say so instead of rendering nothing,
-                    which looked like a missing/broken control (notably on production, where
-                    the plant's STV list hadn't been set up). */}
-                {!osStvsQuery.isLoading && stvs.length === 0 && (
-                  <span className="w-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-center text-[11px] text-amber-700 sm:w-52">
-                    No STV — create one in Plant Settings
-                  </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <Progress value={osPct} className="w-28 h-2" />
+                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
+                {canCompletePart && (
+                  <Button size="sm" className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
+                    Complete
+                  </Button>
                 )}
               </div>
             </div>
 
             {/* ── Tab strip ── */}
-            <div className="flex flex-wrap gap-1.5">
-              {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setOsTab(t)}
-                  className={`flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium transition-colors ${
-                    osTab === t
-                      ? "bg-[#001d6e] text-white"
-                      : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-                  }`}
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex flex-wrap gap-1.5">
+                {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setOsTab(t)}
+                    className={`flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium transition-colors ${
+                      osTab === t
+                        ? "bg-[#001d6e] text-white"
+                        : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {t === "scan" ? <ScanLine className="h-4 w-4" /> : t === "master-view" ? <Layers className="h-4 w-4" /> : <FileSpreadsheet className="h-4 w-4" />}
+                    {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Part Order"}
+                  </button>
+                ))}
+              </div>
+              {/* STV — sits on the right of the tab strip, so it's visible no matter which tab
+                  (Master View / Scan / Part Order) is active, instead of only inside one tab. */}
+              {stvs.length > 0 ? (
+                <Select
+                  value={osSelectedStv || NO_STV}
+                  onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}
                 >
-                  {t === "scan" ? <ScanLine className="h-4 w-4" /> : t === "master-view" ? <Layers className="h-4 w-4" /> : <FileSpreadsheet className="h-4 w-4" />}
-                  {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Part Order"}
-                </button>
-              ))}
+                  <SelectTrigger
+                    className={`h-9 w-52 text-sm font-semibold ${
+                      osSelectedStv
+                        ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
+                        : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+                    }`}
+                  >
+                    <SelectValue placeholder="Select STV…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                    {stvs.map((s) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : !osStvsQuery.isLoading && (
+                <span className="border border-dashed border-amber-300 bg-amber-50 px-3 py-1.5 text-sm text-amber-700">
+                  No STV — create one in Plant Settings
+                </span>
+              )}
             </div>
 
             {/* ── Order totals — persistent across Scan / Master View, hidden on Separate CSVs ──
@@ -3592,7 +3554,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
                 </div>
               )}
-              {(osTab === "scan" || osTab === "master-view") && sideInfoPanel}
               </div>
 
 
