@@ -1397,13 +1397,27 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // "Today"/"Yesterday" presets (which set from === to), or the user filling in just `from`.
     // Answers "if I uploaded 3 CSVs (parts) for the 17th, what's the total ordered qty per
     // item?" — summed across ALL parts of that date's FIFO group, not just one file.
-    // With NO date filter at all, default to today (IST — this app's timestamp convention, see
-    // the Asia/Kolkata usages elsewhere in this file) so "today's order" total is visible
-    // without the user having to explicitly pick a date every time. This default is scoped
-    // ONLY to expected-qty — it never flips dateMode (still `!!(from || to)`), so Stock/Extra
-    // keep showing running totals as before, unaffected by this default.
-    const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
-    const singleDate = from && (!to || to === from) ? from : (!from && !to ? todayIST : null);
+    // With NO date filter at all, default to the OLDEST order date that hasn't finished scanning
+    // yet (scan_status 'active' or 'available'), scoped to the same plants as the rest of this
+    // report. This keeps Expected Qty pinned to yesterday's CSV while it's still being scanned,
+    // and only rolls over to today once every earlier order is 'completed'. This default is
+    // scoped ONLY to expected-qty — it never flips dateMode (still `!!(from || to)`), so
+    // Stock/Extra keep showing running totals as before, unaffected by this default.
+    let singleDate: string | null = null;
+    if (from && (!to || to === from)) {
+      singleDate = from;
+    } else if (!from && !to) {
+      const pendingParams: any[] = [];
+      const pendingConds: string[] = ['is_deleted = false', "scan_status IN ('active', 'available')"];
+      if (allowed !== null) { pendingParams.push(allowed); pendingConds.push(`LOWER(plant) = ANY($${pendingParams.length}::text[])`); }
+      if (plantParam) { pendingParams.push(plantParam.toLowerCase()); pendingConds.push(`LOWER(plant) = $${pendingParams.length}`); }
+      const { rows: pendingRows } = await pool.query(
+        `SELECT MIN(order_date) AS "minDate" FROM order_import_sessions WHERE ${pendingConds.join(' AND ')}`,
+        pendingParams,
+      );
+      const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+      singleDate = pendingRows[0]?.minDate ?? todayIST;
+    }
     const expectedByKey = new Map<string, number>();
     let expectedTotal = 0;
     const expectedOnlyRows: typeof items = [];
