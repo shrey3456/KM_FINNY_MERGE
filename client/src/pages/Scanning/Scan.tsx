@@ -3139,9 +3139,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
         </div>
 
-        {/* ══════════════════════════════════════════════════
-            DESKTOP LAYOUT  (hidden on mobile, or when rotated — see MOBILE LAYOUT note above)
-        ════════════════════════════════════════════════════ */}
+        {/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */}
         <div className={osRotated ? "hidden" : "hidden sm:block"}>
           <div className="mx-auto max-w-7xl space-y-4">
 
@@ -4064,8 +4062,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         </Dialog>
 
       </div>
-          </div>
-        </div>
     );
   }
 
