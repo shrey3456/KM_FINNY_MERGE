@@ -3247,8 +3247,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
                           <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
                         </div>
-                        <p className={`text-lg font-bold leading-tight ${s.text}`}>{s.value}</p>
-                        <p className="text-xs font-medium text-gray-500">{s.plt.toFixed(2)} plt</p>
+                        <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                        <p className="text-lg font-semibold text-gray-600">{s.plt.toFixed(2)} plt</p>
                       </button>
                     );
                   })}

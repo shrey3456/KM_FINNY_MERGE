@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown, PackageX, CalendarDays, Check, Loader2, History } from "lucide-react";
+import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown, PackageX, CalendarDays, Check, Loader2, History, ArrowLeftRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -23,6 +23,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
 import { StatsBar } from "@/components/ui/stats-bar";
 import { TableCard } from "@/components/ui/table-card";
+import ExchangeProductDialog, { type ExchangeSourceRow } from "@/components/modals/ExchangeProductDialog";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -76,12 +77,13 @@ type PlantStockResponse = {
 
 // One dated entry from the stock_movements ledger for a single (barcode, plant) — powers the
 // arrival-history drill-down dialog. type: 'receive' (a scan added stock), 'adjust' (a void or
-// a CSV delete-rollback reversed some), 'dispatch' (future — outbound, not written yet).
+// a CSV delete-rollback reversed some), 'dispatch' (future — outbound, not written yet),
+// 'exchange' (a manual Product Exchange moved stock into or out of this barcode).
 type StockMovementRow = {
   id: number;
   qty: number;
   extraQty: number | null;
-  type: "receive" | "dispatch" | "adjust";
+  type: "receive" | "dispatch" | "adjust" | "exchange";
   reason: string | null;
   arrivedAt: string;
   orderName: string | null;
@@ -239,6 +241,10 @@ export default function OverallStock() {
       ),
     enabled: !!detailRow?.barcode,
   });
+
+  // Product Exchange — a distinct action from the row-click history drill-down above; opens
+  // ExchangeProductDialog with this row locked in as the source ("From") product.
+  const [exchangeSource, setExchangeSource] = useState<ExchangeSourceRow | null>(null);
 
   const toggleColumn = (key: string) =>
     setVisibleColumnIds((prev) => {
@@ -516,6 +522,34 @@ export default function OverallStock() {
       cellClassName: "text-gray-500 whitespace-nowrap",
       render: (row) => (row.lastArrived ? format(new Date(row.lastArrived), "MMM d, yyyy") : dash),
     },
+    ...(isAdmin ? [{
+      id: "actions",
+      header: "",
+      hideable: false,
+      totalable: false,
+      width: 48,
+      align: "center" as const,
+      render: (row: PlantStockRow) =>
+        !row.isEmptyBox && row.barcode ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
+            title="Exchange this product for another"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExchangeSource({
+                barcode: row.barcode!,
+                itemName: row.itemName,
+                plant: row.plant,
+                availableStock: row.inStock,
+              });
+            }}
+          >
+            <ArrowLeftRight className="h-3.5 w-3.5" />
+          </Button>
+        ) : null,
+    } satisfies DataTableColumn<PlantStockRow>] : []),
   ];
 
   return (
@@ -797,6 +831,8 @@ export default function OverallStock() {
                       ? <span className="inline-block bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">Dispatched</span>
                       : m.type === "adjust"
                       ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Adjusted</span>
+                      : m.type === "exchange"
+                      ? <span className="inline-block bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700">Exchanged</span>
                       : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
                     return (
                       <tr key={m.id} className="border-b border-gray-200">
@@ -831,6 +867,8 @@ export default function OverallStock() {
           )}
         </DialogContent>
       </Dialog>
+
+      <ExchangeProductDialog source={exchangeSource} onClose={() => setExchangeSource(null)} />
     </div>
   );
 }
