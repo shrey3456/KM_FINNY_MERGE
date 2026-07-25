@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Factory, Boxes, TrendingUp, ChevronDown, PackageX, CalendarDays, Check, Loader2, History } from "lucide-react";
+import { FileDown, LayoutList, Boxes, TrendingUp, ChevronDown, PackageX, CalendarDays, Check, Loader2, History, X, Plus, ArrowLeftRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -19,10 +19,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import PageHeader from "@/components/PageHeader";
+import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
 import { StatsBar } from "@/components/ui/stats-bar";
 import { TableCard } from "@/components/ui/table-card";
+import ExchangeProductDialog, { type ExchangeSourceRow } from "@/components/modals/ExchangeProductDialog";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -76,12 +78,13 @@ type PlantStockResponse = {
 
 // One dated entry from the stock_movements ledger for a single (barcode, plant) — powers the
 // arrival-history drill-down dialog. type: 'receive' (a scan added stock), 'adjust' (a void or
-// a CSV delete-rollback reversed some), 'dispatch' (future — outbound, not written yet).
+// a CSV delete-rollback reversed some), 'dispatch' (future — outbound, not written yet),
+// 'exchange' (a manual Product Exchange moved stock into or out of this barcode).
 type StockMovementRow = {
   id: number;
   qty: number;
   extraQty: number | null;
-  type: "receive" | "dispatch" | "adjust";
+  type: "receive" | "dispatch" | "adjust" | "exchange";
   reason: string | null;
   arrivedAt: string;
   orderName: string | null;
@@ -196,32 +199,17 @@ const PAGE_SIZE = 20;
 // for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-none border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
-// Date-range presets. Declared once so the dropdown items and the trigger's active label
-// (and thus the "which filter is selected" state) can't drift apart.
-const QUICK_FILTERS = [
-  { key: "today", label: "Today" },
-  { key: "yday",  label: "Yesterday" },
-  { key: "week",  label: "This week" },
-  { key: "month", label: "This month" },
-] as const;
-
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function OverallStock() {
-  const [plantFilter, setPlantFilter] = useState(""); // "" = all plants the user may see
   const [search,      setSearch]      = useState("");
   const [pageIndex,   setPageIndex]   = useState(0);
-  // Date range → the server switches from current running totals to the dated movements
-  // ledger, showing ONLY what was received inside the window (earlier stock is not carried
-  // in). Both empty = today's behavior, current totals.
-  const [fromDate,    setFromDate]    = useState("");
-  const [toDate,      setToDate]      = useState("");
-  const [extrasOnly,  setExtrasOnly]  = useState(false);
   const [sortBy,      setSortBy]      = useState<"" | "stock" | "extra">("");
-  // Which quick-filter preset produced the current date range, so the trigger can name it and
-  // Clear can undo just that. Reset to "" whenever the dates are edited by hand, since the range
-  // then no longer corresponds to a preset.
-  const [quickFilter, setQuickFilter] = useState<"" | "today" | "yday" | "week" | "month">("");
+  // Dynamic "+ Filter" conditions the operator adds on demand. Each is one field + a chosen value;
+  // an empty value means "added but not yet set" and matches everything until picked. See
+  // FILTER_FIELDS below for the available dimensions and how each one matches a row.
+  const [activeFilters, setActiveFilters] = useState<{ id: number; field: string; value: string }[]>([]);
+  const filterIdRef = useRef(0);
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
   );
@@ -240,6 +228,10 @@ export default function OverallStock() {
     enabled: !!detailRow?.barcode,
   });
 
+  // Product Exchange — a distinct action from the row-click history drill-down above; opens
+  // ExchangeProductDialog with this row locked in as the source ("From") product.
+  const [exchangeSource, setExchangeSource] = useState<ExchangeSourceRow | null>(null);
+
   const toggleColumn = (key: string) =>
     setVisibleColumnIds((prev) => {
       const next = new Set(prev);
@@ -257,16 +249,35 @@ export default function OverallStock() {
     queryFn: () => apiRequest("GET", "/api/plants", undefined, false, true),
   });
 
+  // The Date "+ Filter" chip's value is either a preset key (today/yday/week/month) or a custom
+  // single date encoded as "d:YYYY-MM-DD". Either way it resolves to a from/to window the server
+  // uses for ledger mode (received-in-window) instead of current totals. No chip = current totals.
+  const dateValue = activeFilters.find((f) => f.field === "date")?.value ?? "";
+  const { from: fromDate, to: toDate } = useMemo(() => {
+    if (!dateValue) return { from: "", to: "" };
+    if (dateValue.startsWith("d:")) { const day = dateValue.slice(2); return { from: day, to: day }; }
+    const d = new Date();
+    const iso = (x: Date) => format(x, "yyyy-MM-dd");
+    if (dateValue === "today") return { from: iso(d), to: iso(d) };
+    if (dateValue === "yday")  { const y = new Date(d); y.setDate(y.getDate() - 1); return { from: iso(y), to: iso(y) }; }
+    if (dateValue === "week")  { const w = new Date(d); w.setDate(w.getDate() - 6); return { from: iso(w), to: iso(d) }; }
+    if (dateValue === "month") return { from: iso(new Date(d.getFullYear(), d.getMonth(), 1)), to: iso(d) };
+    return { from: "", to: "" };
+  }, [dateValue]);
+
+  // The plant chosen via a chip, if any — sent to the server to scope the query, same as the
+  // date preset below. Extras is a purely client-side "+ Filter" dimension (see filterFields).
+  const activePlant = activeFilters.find((f) => f.field === "plant")?.value || "";
+
   // Plant-wise stock. Server enforces access: admins get every plant, others only theirs.
   const stockUrl = buildUrl("/api/scan-sessions/reports/plant-stock", {
-    plant: plantFilter || undefined,
+    plant: activePlant || undefined,
     from: fromDate || undefined,
     to: toDate || undefined,
-    extrasOnly: extrasOnly ? "1" : undefined,
     sort: sortBy || undefined,
   });
   const { data: stockData } = useQuery<PlantStockResponse>({
-    queryKey: ["/api/scan-sessions/reports/plant-stock", plantFilter, fromDate, toDate, extrasOnly, sortBy],
+    queryKey: ["/api/scan-sessions/reports/plant-stock", activePlant, fromDate, toDate, sortBy],
     queryFn: () => apiRequest("GET", stockUrl, undefined, false, true),
     refetchInterval: 30000,
   });
@@ -290,17 +301,73 @@ export default function OverallStock() {
     : (allowedPlants ?? []).map((p) => p.toUpperCase());
 
   // Client-side search filter (server already scoped by plant).
+  // Available "+ Filter" dimensions. options: the values to choose from (derived from the data
+  // for category/brand/plant, fixed for stock status); match: does a row satisfy this value?
+  const filterFields = useMemo(() => {
+    const distinct = (pick: (r: PlantStockRow) => string | null) =>
+      Array.from(new Set(rows.map(pick).filter((v): v is string => !!v)))
+        .sort()
+        .map((v) => ({ value: v, label: v }));
+    return [
+      { key: "plant", label: "Plant", options: distinct((r) => r.plant), match: (r: PlantStockRow, v: string) => r.plant === v },
+      {
+        // Date presets are handled server-side (the from/to below switch it into ledger mode),
+        // so match is a no-op here — the rows arrive already scoped to the window.
+        key: "date", label: "Date",
+        options: [
+          { value: "today", label: "Today" },
+          { value: "yday",  label: "Yesterday" },
+          { value: "week",  label: "This week" },
+          { value: "month", label: "This month" },
+        ],
+        match: () => true,
+      },
+      {
+        key: "extra", label: "Extras only",
+        options: [{ value: "yes", label: "Has extra" }],
+        match: (r: PlantStockRow, v: string) => (v === "yes" ? r.extraQty > 0 : true),
+      },
+    ];
+  }, [rows]);
+  const fieldOf = (key: string) => filterFields.find((f) => f.key === key);
+
+  const addFilter = (fieldKey: string) => {
+    // Single-option fields (e.g. Extras only) are toggles — apply their one value immediately so
+    // there's no pointless "pick from a list of one" dropdown step.
+    const opts = filterFields.find((f) => f.key === fieldKey)?.options ?? [];
+    const value = opts.length === 1 ? opts[0].value : "";
+    setActiveFilters((prev) => [...prev, { id: ++filterIdRef.current, field: fieldKey, value }]);
+    setPageIndex(0);
+  };
+  const setFilterValue = (id: number, value: string) => {
+    setActiveFilters((prev) => prev.map((f) => (f.id === id ? { ...f, value } : f)));
+    setPageIndex(0);
+  };
+  const removeFilter = (id: number) => {
+    setActiveFilters((prev) => prev.filter((f) => f.id !== id));
+    setPageIndex(0);
+  };
+
+  // A row passes when every set filter matches it (empty-value filters are ignored until picked).
+  const matchesActiveFilters = (r: PlantStockRow) =>
+    activeFilters.every((af) => !af.value || (fieldOf(af.field)?.match(r, af.value) ?? true));
+
   const filtered = useMemo(() => {
     if (!search) return rows;
     const q = search.toLowerCase();
-    return rows.filter((r) =>
-      r.itemName.toLowerCase().includes(q) ||
-      (r.barcode ?? "").toLowerCase().includes(q) ||
-      (r.sapCode ?? "").toLowerCase().includes(q) ||
-      (r.category ?? "").toLowerCase().includes(q) ||
-      r.plant.toLowerCase().includes(q),
-    );
-  }, [rows, search]);
+    return rows.filter((r) => {
+      if (!matchesActiveFilters(r)) return false;
+      if (q &&
+        !(r.itemName.toLowerCase().includes(q) ||
+          (r.barcode ?? "").toLowerCase().includes(q) ||
+          (r.sapCode ?? "").toLowerCase().includes(q) ||
+          (r.category ?? "").toLowerCase().includes(q) ||
+          (r.brand ?? "").toLowerCase().includes(q) ||
+          r.plant.toLowerCase().includes(q))
+      ) return false;
+      return true;
+    });
+  }, [rows, search, activeFilters]);
 
   // Summary — from REAL stock rows only; empty boxes are never counted as stock.
   const totalStock = filtered.reduce((s, r) => s + r.inStock, 0);
@@ -310,6 +377,9 @@ export default function OverallStock() {
   // Empty boxes as their OWN distinct rows (one per plant), appended below the stock rows.
   // Never mixed into stock/extra totals — the quantity shows only inside the "Empty Box" badge.
   const emptyBoxRows = useMemo<PlantStockRow[]>(() => {
+    // Empty boxes have no category/brand and aren't product stock, so any active dimension filter
+    // (once it has a value) necessarily excludes them.
+    if (activeFilters.some((f) => f.value)) return [];
     const list = stockData?.emptyBoxByPlant ?? [];
     const q = search.toLowerCase();
     return list
@@ -321,7 +391,7 @@ export default function OverallStock() {
         itemsPerPallet: null, inStock: e.qty, extraQty: 0, pallets: null, extraPallets: null,
         lastArrived: null, isEmptyBox: true, emptyBoxCount: e.count,
       }));
-  }, [stockData?.emptyBoxByPlant, search]);
+  }, [stockData?.emptyBoxByPlant, search, activeFilters]);
   const emptyBoxTotal = stockData?.emptyBoxTotal ?? 0;
 
   // Real stock rows first, then the distinct empty-box rows.
@@ -362,6 +432,7 @@ export default function OverallStock() {
       width: 220,
       sortable: true,
       accessor: (row) => row.itemName,
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `font-medium text-gray-900 whitespace-normal break-words ${cellBorder}`,
       render: (row) =>
@@ -402,6 +473,7 @@ export default function OverallStock() {
       width: 130,
       sortable: true,
       accessor: (row) => row.category,
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `text-gray-700 ${cellBorder}`,
       render: (row) => row.category ?? dash,
@@ -412,6 +484,7 @@ export default function OverallStock() {
       width: 110,
       sortable: true,
       accessor: (row) => row.brand,
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `text-gray-700 ${cellBorder}`,
       render: (row) => row.brand ?? dash,
@@ -423,9 +496,10 @@ export default function OverallStock() {
       width: 100,
       sortable: true,
       accessor: (row) => row.plant,
+      totalable: false,
       headerClassName: headerBorder,
-      cellClassName: `font-semibold text-[#001d6e] uppercase ${cellBorder}`,
-      render: (row) => row.plant,
+      cellClassName: cellBorder,
+      render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : dash),
     },
     {
       id: "expected",
@@ -513,9 +587,38 @@ export default function OverallStock() {
       width: 120,
       sortable: true,
       accessor: (row) => row.lastArrived,
+      totalable: false,
       cellClassName: "text-gray-500 whitespace-nowrap",
       render: (row) => (row.lastArrived ? format(new Date(row.lastArrived), "MMM d, yyyy") : dash),
     },
+    ...(isAdmin ? [{
+      id: "actions",
+      header: "",
+      hideable: false,
+      totalable: false,
+      width: 48,
+      align: "center" as const,
+      render: (row: PlantStockRow) =>
+        !row.isEmptyBox && row.barcode ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
+            title="Exchange this product for another"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExchangeSource({
+                barcode: row.barcode!,
+                itemName: row.itemName,
+                plant: row.plant,
+                availableStock: row.inStock,
+              });
+            }}
+          >
+            <ArrowLeftRight className="h-3.5 w-3.5" />
+          </Button>
+        ) : null,
+    } satisfies DataTableColumn<PlantStockRow>] : []),
   ];
 
   return (
@@ -540,7 +643,7 @@ export default function OverallStock() {
               value: totalStock.toLocaleString(),
               // In date mode this is what ARRIVED in the window, not what's on hand — say so
               // explicitly, otherwise the number reads as a (much smaller) total stock figure.
-              label: `${dateMode ? "Total Stock Received" : "Total Stock (Boxes)"}${plantFilter ? ` · ${plantFilter}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · All Plants"}`,
+              label: `${dateMode ? "Total Stock Received" : "Total Stock (Boxes)"}${activePlant ? ` · ${activePlant}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · All Plants"}`,
             },
             {
               icon: TrendingUp,
@@ -561,96 +664,11 @@ export default function OverallStock() {
               icon: CalendarDays,
               tone: "navy" as const,
               value: expectedTotal.toLocaleString(),
-              label: !fromDate && !toDate ? `Today's Total Order Qty (${expectedDate})` : `Total Order Qty (${expectedDate})`,
+              label: `Today's Total Order Qty (${expectedDate})`,
             }] : []),
           ]}
           actions={
             <>
-              <Select value={plantFilter || "_all_"} onValueChange={(v) => { setPlantFilter(v === "_all_" ? "" : v); setPageIndex(0); }}>
-                <SelectTrigger className={`w-[132px] gap-1.5 ${FILTER_BTN_CLASS}`}>
-                  <Factory className="h-3.5 w-3.5 shrink-0" />
-                  <SelectValue placeholder="All plants" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="_all_">{isAdmin ? "All plants" : "All my plants"}</SelectItem>
-                  {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
-                </SelectContent>
-              </Select>
-
-              {/* Date range — when set, the numbers become "received in this window" (from the
-                  movements ledger) instead of current totals. Both empty = totals, as before. */}
-              <div className="flex items-center gap-1">
-                <input
-                  type="date"
-                  value={fromDate}
-                  onChange={(e) => { setFromDate(e.target.value); setQuickFilter(""); setPageIndex(0); }}
-                  className="h-8 rounded-none border border-gray-300 bg-white px-2 text-xs"
-                  aria-label="From date"
-                />
-                <span className="text-xs text-gray-400">→</span>
-                <input
-                  type="date"
-                  value={toDate}
-                  onChange={(e) => { setToDate(e.target.value); setQuickFilter(""); setPageIndex(0); }}
-                  className="h-8 rounded-none border border-gray-300 bg-white px-2 text-xs"
-                  aria-label="To date"
-                />
-              </div>
-
-              {/* Quick presets — collapsed into one dropdown so the filter row stays compact. The
-                  trigger names the active preset so the selection is visible while closed. */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
-                    <CalendarDays className="h-3.5 w-3.5 mr-1" />
-                    {QUICK_FILTERS.find((p) => p.key === quickFilter)?.label ?? "Quick filter"}
-                    <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-70" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-40">
-                  {QUICK_FILTERS.map((p) => (
-                    <DropdownMenuItem
-                      key={p.key}
-                      onSelect={() => {
-                        const d = new Date();
-                        const iso = (x: Date) => format(x, "yyyy-MM-dd");
-                        let f = "", t = iso(d);
-                        if (p.key === "today") f = iso(d);
-                        if (p.key === "yday")  { const y = new Date(d); y.setDate(y.getDate() - 1); f = iso(y); t = iso(y); }
-                        if (p.key === "week")  { const w = new Date(d); w.setDate(w.getDate() - 6); f = iso(w); }
-                        if (p.key === "month") { f = iso(new Date(d.getFullYear(), d.getMonth(), 1)); }
-                        setFromDate(f); setToDate(t); setQuickFilter(p.key); setPageIndex(0);
-                      }}
-                    >
-                      <span className="flex-1">{p.label}</span>
-                      {quickFilter === p.key && <Check className="h-3.5 w-3.5 text-[#001d6e]" />}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-
-              {/* Only shown while a quick filter is active, and clears only that — the plant, sort
-                  and Extras-only filters are left untouched. */}
-              {quickFilter && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 rounded-none border-gray-300 bg-white text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-900"
-                onClick={() => { setFromDate(""); setToDate(""); setQuickFilter(""); setPageIndex(0); }}
-              >
-                Clear
-              </Button>
-              )}
-
-              <Button
-                size="sm"
-                variant="outline"
-                className={`${FILTER_BTN_CLASS} ${extrasOnly ? "ring-2 ring-amber-400" : ""}`}
-                onClick={() => { setExtrasOnly((v) => !v); setPageIndex(0); }}
-              >
-                Extras only
-              </Button>
-
               <Select value={sortBy || "_none_"} onValueChange={(v) => { setSortBy(v === "_none_" ? "" : (v as "stock" | "extra")); setPageIndex(0); }}>
                 <SelectTrigger className={`w-[124px] gap-1.5 ${FILTER_BTN_CLASS}`}>
                   <SelectValue placeholder="Sort" />
@@ -661,6 +679,112 @@ export default function OverallStock() {
                   <SelectItem value="extra">Sort: Extra ↓</SelectItem>
                 </SelectContent>
               </Select>
+
+              {/* Active filter chips — each is a field label + a value picker + a remove button.
+                  A freshly added chip has no value yet and opens on "Select…". */}
+              {activeFilters.map((af) => {
+                const field = fieldOf(af.field);
+                if (!field) return null;
+                return (
+                  <div
+                    key={af.id}
+                    className="flex h-8 items-center gap-1 rounded-md border border-[#001d6e]/30 bg-[#001d6e]/[0.04] pl-2 pr-1 text-xs"
+                  >
+                    <span className="font-semibold text-[#001d6e]">{field.label}</span>
+                    {af.field === "date" ? (
+                      // Date chip: a native date input shows/edits the resolved day, plus a small
+                      // menu for the relative presets (Today / Yesterday / week / month).
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="date"
+                          value={fromDate}
+                          onChange={(e) => setFilterValue(af.id, e.target.value ? `d:${e.target.value}` : "")}
+                          className="h-6 rounded border border-gray-200 bg-white px-1.5 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                          aria-label="Pick date"
+                        />
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button type="button" className="flex h-6 items-center gap-0.5 rounded px-1 text-xs font-medium text-gray-500 hover:bg-[#001d6e]/10 hover:text-[#001d6e]">
+                              <CalendarDays className="h-3.5 w-3.5" />
+                              <ChevronDown className="h-3 w-3 opacity-70" />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" className="w-36">
+                            {field.options.map((o) => (
+                              <DropdownMenuItem key={o.value} onSelect={() => setFilterValue(af.id, o.value)} className="text-xs">
+                                <span className="flex-1">{o.label}</span>
+                                {af.value === o.value && <Check className="h-3.5 w-3.5 text-[#001d6e]" />}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    ) : field.options.length === 1 ? (
+                      // Toggle field (one option): no dropdown and no value text — the chip label
+                      // alone ("Extras only") is the filter; its value was applied on add.
+                      null
+                    ) : (
+                      <Select value={af.value || undefined} onValueChange={(v) => setFilterValue(af.id, v)}>
+                        <SelectTrigger className="h-6 gap-1 border-0 bg-transparent px-1 text-xs font-medium text-gray-700 shadow-none focus:ring-0">
+                          <SelectValue placeholder="Select…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {field.options.length === 0 ? (
+                            <div className="px-2 py-1.5 text-xs text-gray-400">No values</div>
+                          ) : (
+                            field.options.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)
+                          )}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeFilter(af.id)}
+                      className="flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
+                      aria-label={`Remove ${field.label} filter`}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
+
+              {/* + Filter — lists only fields not already added, so each dimension appears once. */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Filter
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-44">
+                  {filterFields.filter((f) => !activeFilters.some((af) => af.field === f.key)).length === 0 ? (
+                    <div className="px-2 py-1.5 text-xs text-gray-400">All filters added</div>
+                  ) : (
+                    filterFields
+                      .filter((f) => !activeFilters.some((af) => af.field === f.key))
+                      .map((f) => (
+                        <DropdownMenuItem key={f.key} onSelect={() => addFilter(f.key)} className="text-xs">
+                          {f.label}
+                        </DropdownMenuItem>
+                      ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              {activeFilters.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900"
+                  onClick={() => { setActiveFilters([]); setPageIndex(0); }}
+                >
+                  Clear all
+                </Button>
+              )}
 
               <DataTableColumnToggle
                 columns={stockColumns}
@@ -686,13 +810,12 @@ export default function OverallStock() {
                         key={fmt}
                         onSelect={() => {
                           const exp = exportRows(filtered);
-                          const suffix = `${plantFilter ? "-" + plantFilter : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                          const suffix = `${activePlant ? "-" + activePlant : ""}-${format(new Date(), "yyyy-MM-dd")}`;
                           if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
                           if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
                           if (fmt === "PDF") {
-                            const plantScope = plantFilter || (allowedPlants && allowedPlants.length ? plantOptions.join(", ") : "All Plants");
-                            const dateScope = fromDate || toDate ? `  ·  ${fromDate || "…"} to ${toDate || "…"}` : "";
-                            downloadPdf(`overall-stock${suffix}.pdf`, exp, { title: "Stock Overview Report", scope: `${plantScope}${dateScope}` });
+                            const plantScope = activePlant || (allowedPlants && allowedPlants.length ? plantOptions.join(", ") : "All Plants");
+                            downloadPdf(`overall-stock${suffix}.pdf`, exp, { title: "Stock Overview Report", scope: plantScope });
                           }
                         }}
                       >
@@ -728,7 +851,7 @@ export default function OverallStock() {
             rowClassName={(row) => (row.isEmptyBox ? "bg-orange-50/40" : "cursor-pointer")}
             onRowClick={(row) => setDetailRow(row)}
             isRowClickable={(row) => !row.isEmptyBox && !!row.barcode}
-            emptyState={`No stock yet${plantFilter ? ` for ${plantFilter}` : ""}. Stock appears here once an order is completed.`}
+            emptyState={`No stock yet${activePlant ? ` for ${activePlant}` : ""}. Stock appears here once an order is completed.`}
             noResultsState="No stock rows match your search."
             hasActiveFilters={!!search}
             enableTotalsRow
@@ -797,6 +920,8 @@ export default function OverallStock() {
                       ? <span className="inline-block bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">Dispatched</span>
                       : m.type === "adjust"
                       ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Adjusted</span>
+                      : m.type === "exchange"
+                      ? <span className="inline-block bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700">Exchanged</span>
                       : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
                     return (
                       <tr key={m.id} className="border-b border-gray-200">
@@ -831,6 +956,8 @@ export default function OverallStock() {
           )}
         </DialogContent>
       </Dialog>
+
+      <ExchangeProductDialog source={exchangeSource} onClose={() => setExchangeSource(null)} />
     </div>
   );
 }

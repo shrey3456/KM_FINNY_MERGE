@@ -1118,6 +1118,64 @@ router.get('/reports/notion-config', (_req: Request, res: Response) => {
   return res.json({ dbId: raw || null });
 });
 
+// Product exchanges (stock_movements, type='exchange') are unioned in alongside the regular
+// order_scan_events rows, mapped onto the same shape — see the "no new table" note on the
+// exchange-stock endpoint above. Never modifies/reads back existing scan rows differently;
+// exchanges only ever ADD rows to what this endpoint already returned before they existed.
+const SCAN_HISTORY_COMBINED_SOURCE = `
+  (
+    SELECT
+      ose.id,
+      ose.barcode,
+      ose.item_name        AS "itemName",
+      ose.pallets,
+      ose.total_qty        AS "totalQty",
+      ose.items_per_pallet AS "itemsPerPallet",
+      ose.loose_qty        AS "looseQty",
+      ose.is_extra         AS "isExtra",
+      (ose.barcode = 'EMPTY_BOX') AS "isEmptyBox",
+      false AS "isExchange",
+      CASE WHEN ose.item_name LIKE 'Empty Box: %' THEN SUBSTRING(ose.item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
+      ose.stv,
+      ose.scanned_by_code  AS "scannedByCode",
+      ose.scanned_by_name  AS "scannedByName",
+      ose.scanned_at       AS "scannedAt",
+      ose.voided,
+      ose.voided_at        AS "voidedAt",
+      ose.void_reason      AS "voidReason",
+      ois.csv_file_name    AS "orderName",
+      ois.plant            AS "plant"
+    FROM order_scan_events ose
+    JOIN order_import_sessions ois ON ois.id = ose.session_id
+
+    UNION ALL
+
+    SELECT
+      (2000000000 + sm.id) AS id,
+      sm.barcode,
+      (SELECT p.name FROM products p WHERE LOWER(p.barcode) = LOWER(sm.barcode) LIMIT 1) AS "itemName",
+      NULL::integer AS pallets,
+      sm.qty AS "totalQty",
+      NULL::integer AS "itemsPerPallet",
+      NULL::integer AS "looseQty",
+      false AS "isExtra",
+      false AS "isEmptyBox",
+      true AS "isExchange",
+      NULL::text AS "emptyBoxNote",
+      NULL::text AS stv,
+      sm.created_by_code AS "scannedByCode",
+      (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "scannedByName",
+      sm.created_at AS "scannedAt",
+      false AS voided,
+      NULL::timestamp AS "voidedAt",
+      NULL::text AS "voidReason",
+      sm.reason AS "orderName",
+      sm.plant AS "plant"
+    FROM stock_movements sm
+    WHERE sm.type = 'exchange'
+  ) combined
+`;
+
 router.get('/reports/scan-history', async (_req: Request, res: Response) => {
   try {
     const req = _req;
@@ -1126,7 +1184,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
 
     const dateParam    = typeof req.query.date    === 'string' && req.query.date.trim()    ? req.query.date.trim()    : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
-    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty'].includes(req.query.type) ? req.query.type : null;
+    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange'].includes(req.query.type) ? req.query.type : null;
     const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
     const plantParam   = typeof req.query.plant   === 'string' && req.query.plant.trim()   ? req.query.plant.trim()   : null;
 
@@ -1140,73 +1198,65 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
 
     if (allowedPlants !== null) {
       if (allowedPlants.length === 0) {
-        return res.json({ items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit, offset });
+        return res.json({ items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, emptyBoxCount: 0, scanners: [], limit, offset });
       }
       params.push(allowedPlants);
-      conditions.push(`LOWER(ois.plant) = ANY($${params.length}::text[])`);
+      conditions.push(`LOWER("plant") = ANY($${params.length}::text[])`);
     }
-    if (plantParam)   { params.push(plantParam.toLowerCase()); conditions.push(`LOWER(ois.plant) = $${params.length}`); }
-    if (dateParam)    { params.push(dateParam);    conditions.push(`DATE(ose.scanned_at) = $${params.length}`); }
-    if (scannerParam) { params.push(scannerParam); conditions.push(`ose.scanned_by_name = $${params.length}`); }
-    // Empty boxes ARE shown in scan history as a distinct status (isEmptyBox below), but they
-    // are never product scans — so 'regular'/'extra' filters must exclude them, and the box/
-    // pallet totals below exclude 
-    //them too (they don't count toward order quantity). A
-    // dedicated 'empty' filter shows only empty boxes.
-    if (typeParam === 'regular') conditions.push(`ose.is_extra = false AND ose.barcode <> 'EMPTY_BOX'`);
-    if (typeParam === 'extra')   conditions.push(`ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'`);
-    if (typeParam === 'empty')   conditions.push(`ose.barcode = 'EMPTY_BOX'`);
+    if (plantParam)   { params.push(plantParam.toLowerCase()); conditions.push(`LOWER("plant") = $${params.length}`); }
+    if (dateParam)    { params.push(dateParam);    conditions.push(`DATE("scannedAt") = $${params.length}`); }
+    if (scannerParam) { params.push(scannerParam); conditions.push(`"scannedByName" = $${params.length}`); }
+    // Empty boxes and exchanges ARE shown in scan history as their own distinct statuses, but
+    // they're never product scans — so 'regular'/'extra' filters must exclude both, and the
+    // box/pallet totals below exclude them too (they don't count toward order quantity). A
+    // dedicated 'empty'/'exchange' filter shows only that one status.
+    if (typeParam === 'regular')  conditions.push(`"isExtra" = false AND barcode <> 'EMPTY_BOX' AND NOT "isExchange"`);
+    if (typeParam === 'extra')    conditions.push(`"isExtra" = true AND barcode <> 'EMPTY_BOX'`);
+    if (typeParam === 'empty')    conditions.push(`barcode = 'EMPTY_BOX'`);
+    if (typeParam === 'exchange') conditions.push(`"isExchange" = true`);
     if (searchParam) {
       params.push(`%${searchParam.toLowerCase()}%`);
       const n = params.length;
-      conditions.push(`(LOWER(COALESCE(ose.item_name,'')) LIKE $${n} OR LOWER(COALESCE(ose.barcode,'')) LIKE $${n} OR LOWER(COALESCE(ose.scanned_by_name,'')) LIKE $${n})`);
+      conditions.push(`(LOWER(COALESCE("itemName",'')) LIKE $${n} OR LOWER(COALESCE(barcode,'')) LIKE $${n} OR LOWER(COALESCE("scannedByName",'')) LIKE $${n})`);
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    const baseFrom = `FROM order_scan_events ose JOIN order_import_sessions ois ON ois.id = ose.session_id ${where}`;
+    const baseFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${where}`;
+    // Summary tiles are about genuine scanning activity — always exclude exchanges from them
+    // regardless of the active type filter, so "Total Boxes"/"Total Pallets" never mix in a
+    // stock-correction quantity.
+    const summaryWhere = where
+      ? `${where} AND NOT "isExchange"`
+      : `WHERE NOT "isExchange"`;
+    const summaryFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${summaryWhere}`;
 
     const [dataRes, countRes, summaryRes, scannersRes] = await Promise.all([
       pool.query(
-        `SELECT
-           ose.id,
-           ose.barcode,
-           ose.item_name        AS "itemName",
-           ose.pallets,
-           ose.total_qty        AS "totalQty",
-           ose.items_per_pallet AS "itemsPerPallet",
-           ose.loose_qty        AS "looseQty",
-           ose.is_extra         AS "isExtra",
-           (ose.barcode = 'EMPTY_BOX') AS "isEmptyBox",
-           CASE WHEN ose.item_name LIKE 'Empty Box: %' THEN SUBSTRING(ose.item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
-           ose.stv,
-           ose.scanned_by_code  AS "scannedByCode",
-           ose.scanned_by_name  AS "scannedByName",
-           ose.scanned_at       AS "scannedAt",
-           ose.voided,
-           ose.voided_at        AS "voidedAt",
-           ose.void_reason      AS "voidReason",
-           ois.csv_file_name    AS "orderName",
-           ois.plant
+        `SELECT *
          ${baseFrom}
-         ORDER BY ose.scanned_at DESC
+         ORDER BY "scannedAt" DESC
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         [...params, limit, offset],
       ),
       pool.query(`SELECT COUNT(*) AS total ${baseFrom}`, params),
       pool.query(
         `SELECT
-           COALESCE(SUM(ose.total_qty) FILTER (WHERE ose.barcode <> 'EMPTY_BOX'), 0)  AS "totalBoxes",
-           COALESCE(SUM(ose.pallets)   FILTER (WHERE ose.barcode <> 'EMPTY_BOX'), 0)  AS "totalPallets",
-           COUNT(*) FILTER (WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX') AS "extraCount",
-           COALESCE(SUM(ose.total_qty) FILTER (WHERE ose.barcode = 'EMPTY_BOX'), 0)   AS "emptyBoxCount"
-         ${baseFrom}`,
+           COALESCE(SUM("totalQty") FILTER (WHERE barcode <> 'EMPTY_BOX'), 0)  AS "totalBoxes",
+           COALESCE(SUM(pallets)    FILTER (WHERE barcode <> 'EMPTY_BOX'), 0)  AS "totalPallets",
+           COUNT(*) FILTER (WHERE "isExtra" = true AND barcode <> 'EMPTY_BOX') AS "extraCount",
+           COALESCE(SUM("totalQty") FILTER (WHERE barcode = 'EMPTY_BOX'), 0)   AS "emptyBoxCount"
+         ${summaryFrom}`,
         params,
       ),
       pool.query(
-        `SELECT DISTINCT ose.scanned_by_name AS name
-         FROM order_scan_events ose
-         WHERE ose.scanned_by_name IS NOT NULL
-         ORDER BY ose.scanned_by_name`,
+        `SELECT DISTINCT name FROM (
+           SELECT scanned_by_name AS name FROM order_scan_events WHERE scanned_by_name IS NOT NULL
+           UNION
+           SELECT u.name FROM stock_movements sm
+             JOIN users u ON u.user_code = sm.created_by_code
+             WHERE sm.type = 'exchange' AND u.name IS NOT NULL
+         ) s
+         ORDER BY name`,
       ),
     ]);
 
@@ -1515,6 +1565,127 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error generating plant stock report:', error);
     res.status(500).json({ error: 'Failed to generate plant stock report' });
+  }
+});
+
+// ── POST /api/scan-sessions/reports/exchange-stock ───────────────────────────────────────────
+// Manual stock swap between two products at ONE plant — "this physical stock was actually
+// product B, not product A". Admin-only. No dedicated table: reuses the existing
+// stock_movements ledger with a new type ('exchange') instead of adding schema — two rows are
+// written (− on fromBarcode, + on toBarcode), which is also all the Scan History "Exchange"
+// filter reads from. Never touches order_scan_events, so existing scan history is untouched.
+router.post('/reports/exchange-stock', async (req: Request, res: Response) => {
+  const role = ((req.user as any)?.role ?? '').toLowerCase().trim();
+  if (!['admin', 'super-admin', 'billing'].includes(role)) {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+
+  const fromBarcode = typeof req.body?.fromBarcode === 'string' ? req.body.fromBarcode.trim() : '';
+  const toBarcode    = typeof req.body?.toBarcode   === 'string' ? req.body.toBarcode.trim()   : '';
+  const plant        = typeof req.body?.plant       === 'string' ? req.body.plant.trim()       : '';
+  const removeQty     = Number(req.body?.removeQty);
+  const addQty        = Number(req.body?.addQty);
+  const userNote       = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 300) : '';
+
+  if (!fromBarcode || !toBarcode || !plant) {
+    return res.status(400).json({ message: 'fromBarcode, toBarcode and plant are required' });
+  }
+  if (fromBarcode.toLowerCase() === toBarcode.toLowerCase()) {
+    return res.status(400).json({ message: 'Cannot exchange a product with itself' });
+  }
+  if (!Number.isFinite(removeQty) || removeQty <= 0 || !Number.isFinite(addQty) || addQty <= 0) {
+    return res.status(400).json({ message: 'removeQty and addQty must both be greater than 0' });
+  }
+
+  // Plant scoping — a non-admin restricted to specific plants can't exchange stock at a plant
+  // they don't have access to (though this route is admin-only above, kept for defense in depth
+  // if the role check above is ever loosened).
+  const allowedPlants = getUserPlants(req.user);
+  if (allowedPlants !== null && !allowedPlants.includes(plant.toLowerCase())) {
+    return res.status(403).json({ message: 'Access denied for this plant' });
+  }
+
+  const userCode = (req.user as any)?.userCode ?? null;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const [fromProduct, toProduct] = await Promise.all([
+      client.query(`SELECT name FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`, [fromBarcode]),
+      client.query(`SELECT name FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`, [toBarcode]),
+    ]);
+    if (!fromProduct.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: `Product not found for barcode ${fromBarcode}` });
+    }
+    if (!toProduct.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: `Product not found for barcode ${toBarcode}` });
+    }
+    const fromName = fromProduct.rows[0].name as string;
+    const toName = toProduct.rows[0].name as string;
+
+    const { rows: stockRows } = await client.query(
+      `SELECT in_stock FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
+      [fromBarcode, plant],
+    );
+    const currentStock = Number(stockRows[0]?.in_stock ?? 0);
+    if (currentStock < removeQty) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: `Only ${currentStock} of "${fromName}" in stock at ${plant} — can't remove ${removeQty}.` });
+    }
+
+    // Remove from source
+    await client.query(
+      `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
+      [removeQty, fromBarcode, plant],
+    );
+    await client.query(
+      `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
+      [removeQty, fromBarcode],
+    );
+
+    // Add to target
+    await client.query(
+      `INSERT INTO product_plant_stock (barcode, plant, in_stock, extra_qty, updated_at)
+       VALUES ($1, $2, $3, 0, NOW())
+       ON CONFLICT (barcode, plant) DO UPDATE
+         SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
+      [toBarcode, plant, addQty],
+    );
+    await client.query(
+      `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2)`,
+      [addQty, toBarcode],
+    );
+
+    // Audit ledger — two rows, each stands on its own (no linking column needed). This is also
+    // the exact source Scan History's "Exchange" filter reads from.
+    const fromReason = `Exchanged ${removeQty} for ${addQty} × ${toName} (${toBarcode})${userNote ? ` — ${userNote}` : ''}`;
+    const toReason = `Exchanged ${addQty} from ${removeQty} × ${fromName} (${fromBarcode})${userNote ? ` — ${userNote}` : ''}`;
+    await client.query(
+      `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, created_by_code, created_at)
+       VALUES ($1, $2, $3, 0, 'exchange', $4, $5, NOW())`,
+      [fromBarcode, plant, -removeQty, fromReason, userCode],
+    );
+    await client.query(
+      `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, created_by_code, created_at)
+       VALUES ($1, $2, $3, 0, 'exchange', $4, $5, NOW())`,
+      [toBarcode, plant, addQty, toReason, userCode],
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      success: true,
+      from: { barcode: fromBarcode, name: fromName, removedQty: removeQty },
+      to: { barcode: toBarcode, name: toName, addedQty: addQty },
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error exchanging stock:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to exchange stock' });
+  } finally {
+    client.release();
   }
 });
 

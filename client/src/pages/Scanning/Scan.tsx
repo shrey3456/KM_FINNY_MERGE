@@ -32,6 +32,7 @@ import {
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
+import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/hooks/use-user";
@@ -222,6 +223,7 @@ export default function ScanOrderPage() {
   // ── Master View / Separate CSVs tab state ────────────────────────────────
   const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("master-view");
   const [mvSearch,    setMvSearch]    = useState("");
+  const [mvSearchOpen, setMvSearchOpen] = useState(false); // Master View: toggle the search bar
   const [mvShowFiles, setMvShowFiles] = useState(false); // toggle: show/hide source-file names in Master View
   // Clicking a totals box narrows the items table to just those rows. "" = show everything;
   // clicking the active box again clears it.
@@ -2410,9 +2412,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </span>
                   )}
                 </p>
-                <p className={`text-gray-500 truncate ${osRotated ? "text-xs mt-0.5" : "text-[10px]"}`}>
-                  {activeOrderScanSession.plant}
-                  {activeOrderScanSession.importedByName && ` · ${activeOrderScanSession.importedByName}`}
+                <p className={`flex items-center gap-1.5 text-gray-500 truncate ${osRotated ? "text-xs mt-0.5" : "text-[10px]"}`}>
+                  <PlantBadge plant={activeOrderScanSession.plant} />
+                  {activeOrderScanSession.importedByName && <span>· {activeOrderScanSession.importedByName}</span>}
                 </p>
               </div>
               {canCompletePart && (
@@ -2724,26 +2726,30 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 instead of four separate floating rounded+shadowed cards. */}
             {osTab !== "separate-csvs" && (
             <div className={`grid grid-cols-4 divide-x divide-gray-200 border border-gray-300 bg-white ${osRotated ? "text-base" : ""}`}>
-              <div className={`text-center ${osRotated ? "px-2 py-3" : "px-2 py-2"}`}>
-                <p className={`uppercase tracking-wide text-gray-400 ${osRotated ? "text-[11px]" : "text-[10px]"}`}>Total</p>
-                <p className={`font-bold text-gray-900 ${osRotated ? "text-xl" : "text-lg"}`}>{displayTotals.expected}</p>
-                <p className={`font-medium text-gray-500 ${osRotated ? "text-sm" : "text-xs"}`}>{displayTotals.palletsExpected.toFixed(2)} plt</p>
-              </div>
-              <div className={`text-center ${osRotated ? "px-2 py-3" : "px-2 py-2"}`}>
-                <p className={`uppercase tracking-wide text-gray-400 ${osRotated ? "text-[11px]" : "text-[10px]"}`}>Done</p>
-                <p className={`font-bold text-emerald-600 ${osRotated ? "text-xl" : "text-lg"}`}>{displayTotals.done}</p>
-                <p className={`font-medium text-gray-500 ${osRotated ? "text-sm" : "text-xs"}`}>{displayTotals.palletsDone.toFixed(2)} plt</p>
-              </div>
-              <div className={`text-center ${osRotated ? "px-2 py-3" : "px-2 py-2"}`}>
-                <p className={`uppercase tracking-wide text-gray-400 ${osRotated ? "text-[11px]" : "text-[10px]"}`}>Remaining</p>
-                <p className={`font-bold text-[#001d6e] ${osRotated ? "text-xl" : "text-lg"}`}>{displayTotals.remaining}</p>
-                <p className={`font-medium text-gray-500 ${osRotated ? "text-sm" : "text-xs"}`}>{displayTotals.palletsRemaining.toFixed(2)} plt</p>
-              </div>
-              <div className={`text-center ${osRotated ? "px-2 py-3" : "px-2 py-2"}`}>
-                <p className={`uppercase tracking-wide text-gray-400 ${osRotated ? "text-[11px]" : "text-[10px]"}`}>Extra</p>
-                <p className={`font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"} ${osRotated ? "text-xl" : "text-lg"}`}>{displayTotals.extra}</p>
-                <p className={`font-medium text-gray-500 ${osRotated ? "text-sm" : "text-xs"}`}>{displayTotals.palletsExtra.toFixed(2)} plt</p>
-              </div>
+              {([
+                { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
+                { key: "done", label: "Done", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
+                { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, text: "text-[#001d6e]" },
+                { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+              ] as const).map((s) => {
+                const isActive = osStatFilter === s.key;
+                return (
+                  <button
+                    key={s.label}
+                    type="button"
+                    onClick={() => setOsStatFilter(isActive ? "" : (s.key as typeof osStatFilter))}
+                    aria-pressed={isActive}
+                    title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                    className={`text-center transition-colors ${osRotated ? "px-2 py-3" : "px-2 py-2"} ${
+                      isActive ? "bg-[#001d6e]/[0.06] ring-1 ring-inset ring-[#001d6e]/30" : "hover:bg-gray-50"
+                    }`}
+                  >
+                    <p className={`uppercase tracking-wide text-gray-400 ${osRotated ? "text-[11px]" : "text-[10px]"}`}>{s.label}</p>
+                    <p className={`font-bold ${s.text} ${osRotated ? "text-xl" : "text-lg"}`}>{s.value}</p>
+                    <p className={`font-medium text-gray-500 ${osRotated ? "text-sm" : "text-xs"}`}>{s.plt.toFixed(2)} plt</p>
+                  </button>
+                );
+              })}
             </div>
             )}
 
@@ -2752,17 +2758,21 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {/* Items list — structured table (business style): square corners, grid borders,
                 full item names (no truncation), matching Master View's table. */}
             <div className="bg-white border border-gray-300 overflow-hidden">
-              {/* List header */}
-              <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-300 bg-[#001d6e]">
-                <p className="text-xs font-semibold text-white">Items</p>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-blue-200">{osDoneCount}/{osTotalCount} done</span>
-                  {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-white" />}
+              {/* List header — plain white strip (no navy bar), with a Search toggle on the right. */}
+              <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-gray-200 bg-white">
+                <span className="text-xs font-medium text-gray-500">{osDoneCount}/{osTotalCount} done</span>
+                <div className="flex items-center gap-2">
+                  {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-gray-500" />}
                   <button
-                    onClick={() => setOsSearchOpen((v) => !v)}
-                    className="text-white/80 hover:text-white"
+                    onClick={() => setOsSearchOpen((v) => { if (v) setOsSearch(""); return !v; })}
+                    className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium ${
+                      osSearchOpen
+                        ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                        : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                    }`}
                   >
-                    {osSearchOpen ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
+                    {osSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
+                    Search
                   </button>
                 </div>
               </div>
@@ -2776,7 +2786,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       value={osSearch}
                       onChange={(e) => setOsSearch(e.target.value)}
                       placeholder="Search items…"
-                      className="pl-8 h-9 text-sm rounded-none border-gray-300"
+                      className="h-9 rounded-md border-gray-200 bg-gray-50 pl-8 text-sm focus-visible:ring-1 focus-visible:ring-[#001d6e]/30 focus-visible:ring-offset-0"
                       autoFocus
                     />
                     {osSearch && (
@@ -2807,7 +2817,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </tr>
                     </thead>
                     <tbody>
-                      {osFiltered.map((item) => {
+                      {osVisible.map((item) => {
                         const credit    = osCreditByBarcode.get(normalize(item.barcode));
                         const creditQty = credit?.creditedQty ?? 0;
                         // The credit from an earlier part's extra counts toward this part's
@@ -2850,7 +2860,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           </tr>
                         );
                       })}
-                      {osFiltered.length === 0 && (
+                      {osVisible.length === 0 && (
                         <tr><td colSpan={6} className="py-10 text-center text-gray-400">
                           {osItems.length === 0 ? "Loading items…" : "No items match."}
                         </td></tr>
@@ -2869,7 +2879,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">
-                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                   </span>
                   <button
                     onClick={() => setMvShowFiles((v) => !v)}
@@ -2883,28 +2893,40 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       <Download className="h-3.5 w-3.5" /> Export
                     </button>
                   )}
-                </div>
-                <div className="relative">
-                  <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                  <Input
-                    value={mvSearch}
-                    onChange={(e) => setMvSearch(e.target.value)}
-                    placeholder="Search items…"
-                    className="pl-8 h-9 text-sm bg-white"
-                  />
-                  {mvSearch && (
-                    <button className="absolute right-2.5 top-2.5" onClick={() => setMvSearch("")}>
-                      <X className="h-4 w-4 text-gray-400" />
-                    </button>
-                  )}
+                  {/* Search toggle sits right after Export; the bar only opens when pressed. */}
+                  <button
+                    onClick={() => setMvSearchOpen((v) => { if (v) setMvSearch(""); return !v; })}
+                    className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium shadow-sm ${
+                      mvSearchOpen
+                        ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                        : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                    }`}
+                  >
+                    {mvSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />} Search
+                  </button>
                 </div>
                 {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
                 {mvData && (
                   <div className="bg-white border border-gray-300 overflow-hidden">
-                    <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-300 bg-[#001d6e]">
-                      <p className="text-xs font-semibold text-white">Items</p>
-                      <span className="text-xs text-blue-200">{filtMvItems.length} of {allMvItems.length}</span>
-                    </div>
+                    {mvSearchOpen && (
+                      <div className="border-b border-gray-200 px-3 py-2">
+                        <div className="relative">
+                          <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                          <Input
+                            value={mvSearch}
+                            onChange={(e) => setMvSearch(e.target.value)}
+                            placeholder="Search items…"
+                            className="h-9 rounded-md border-gray-200 bg-gray-50 pl-8 text-sm focus-visible:ring-1 focus-visible:ring-[#001d6e]/30 focus-visible:ring-offset-0"
+                            autoFocus
+                          />
+                          {mvSearch && (
+                            <button className="absolute right-2.5 top-2.5" onClick={() => setMvSearch("")}>
+                              <X className="h-4 w-4 text-gray-400" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     <div className="overflow-x-auto">
                       <table className={`w-full border-collapse ${osRotated ? "text-sm" : "text-xs"}`}>
                         <thead>
@@ -2919,9 +2941,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           </tr>
                         </thead>
                         <tbody>
-                          {filtMvItems.length === 0 ? (
+                          {mvVisible.length === 0 ? (
                             <tr><td colSpan={mvShowFiles ? 7 : 6} className="py-10 text-center text-gray-400">No items found</td></tr>
-                          ) : filtMvItems.map((item, idx) => {
+                          ) : mvVisible.map((item, idx) => {
                         if (item._isEmptyBox) {
                           return (
                             <div key={idx} className="flex items-center gap-3 px-4 py-3 bg-orange-50/60">
@@ -2943,6 +2965,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
                             const remain = Math.max(0, exp - done);
                             const extra = item.extraQty ?? 0;
+                            const ipp = item.itemsPerPallet ?? 0;
+                            // Pallet figure shown under each qty (qty ÷ items-per-pallet). A muted
+                            // 0.00 when there's no qty or no configured pallet size.
+                            const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
                             const isExtraOnly = item._isExtra;
                             const isDone = done >= exp && exp > 0;
                             const isPartial = done > 0 && !isDone && !isExtraOnly;
@@ -2973,10 +2999,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                     {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
                                   </td>
                                 )}
-                                <td className={`text-right tabular-nums text-gray-600 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{exp || "—"}</td>
-                                <td className={`text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{done}</td>
-                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{remain || "—"}</td>
-                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${extra > 0 ? "text-amber-600" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{extra > 0 ? `+${extra}` : "—"}</td>
+                                <td className={`text-right tabular-nums text-gray-600 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
+                                  <span className="block">{exp || "—"}</span>
+                                  <span className="block text-[10px] font-normal text-gray-400">{plt(exp)} plt</span>
+                                </td>
+                                <td className={`text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
+                                  <span className="block">{done}</span>
+                                  <span className="block text-[10px] font-normal text-gray-400">{plt(done)} plt</span>
+                                </td>
+                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
+                                  <span className="block">{remain || "—"}</span>
+                                  <span className="block text-[10px] font-normal text-gray-400">{plt(remain)} plt</span>
+                                </td>
+                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${extra > 0 ? "text-amber-600" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
+                                  <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
+                                  <span className="block text-[10px] font-normal text-gray-400">{plt(extra)} plt</span>
+                                </td>
                                 <td className={`text-center ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
                                   <span className={`inline-block font-semibold ${osRotated ? "px-2.5 py-1 text-xs" : "px-2 py-0.5 text-[11px]"} ${
                                     isExtraOnly ? "bg-orange-100 text-orange-700" :
@@ -3011,7 +3049,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">
-                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                   </span>
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading files…</p>}
@@ -3130,9 +3168,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </span>
                     )}
                   </p>
-                  <p className="text-xs text-gray-500 truncate">
-                    {activeOrderScanSession.plant}
-                    {activeOrderScanSession.importedByName && ` · loaded by ${activeOrderScanSession.importedByName}`}
+                  <p className="flex items-center gap-1.5 text-xs text-gray-500 truncate">
+                    <PlantBadge plant={activeOrderScanSession.plant} />
+                    {activeOrderScanSession.importedByName && <span>· loaded by {activeOrderScanSession.importedByName}</span>}
                   </p>
                 </div>
               </div>
@@ -3211,8 +3249,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="flex min-w-0 flex-col gap-3">
               <div className="flex flex-col gap-1.5 border bg-white p-2.5 shadow-sm">
                 <div className="flex items-baseline justify-between">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
-                  <p className="text-[11px] font-medium text-gray-400">
+                  <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
+                  <p className="text-sm font-medium text-gray-400">
                     {displayTotals.expected > 0
                       ? `${Math.round((displayTotals.done / displayTotals.expected) * 100)}% complete`
                       : "—"}
@@ -3244,11 +3282,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         }`}
                       >
                         <div className="flex items-center gap-1.5">
-                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
-                          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
                         </div>
-                        <p className={`text-lg font-bold leading-tight ${s.text}`}>{s.value}</p>
-                        <p className="text-xs font-medium text-gray-500">{s.plt.toFixed(2)} plt</p>
+                        <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                        <p className="text-sm font-semibold text-gray-500">{s.plt.toFixed(2)} plt</p>
                       </button>
                     );
                   })}
@@ -3481,7 +3519,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="space-y-4">
                   <div className="flex flex-wrap items-center gap-3">
                     <span className="border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
-                      {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                      {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                     </span>
                     <button
                       onClick={() => setMvShowFiles((v) => !v)}
@@ -3495,6 +3533,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         <Download className="h-3.5 w-3.5" /> Export CSV
                       </button>
                     )}
+                    {/* Toggle the search bar shown above the table; clearing the query when hidden
+                        so a stale filter never persists invisibly. */}
+                    <button
+                      onClick={() => setMvSearchOpen((v) => { if (v) setMvSearch(""); return !v; })}
+                      title={mvSearchOpen ? "Hide search" : "Search items"}
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium shadow-sm ${
+                        mvSearchOpen
+                          ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                          : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                      }`}
+                    >
+                      <Search className="h-3.5 w-3.5" /> Search
+                    </button>
                   </div>
                   {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
                   {mvData && (
@@ -3509,14 +3560,29 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         ))}
                       </div>
                       )}
-                      <TableCard
-                        icon={Layers}
-                        title="Items"
-                        subtitle={`${mvVisible.length} of ${allMvItems.length}`}
-                        searchValue={mvSearch}
-                        onSearchChange={setMvSearch}
-                        searchPlaceholder="Search items…"
-                      >
+                      {/* Headerless table card — the "Items" header is gone; search is opened via
+                          the Search button in the filter row and appears as a bar above the table. */}
+                      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                        {mvSearchOpen && (
+                          <div className="relative border-b border-gray-200 bg-white px-3 py-2">
+                            <Search className="pointer-events-none absolute left-5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+                            <input
+                              autoFocus
+                              value={mvSearch}
+                              onChange={(e) => setMvSearch(e.target.value)}
+                              placeholder="Search items…"
+                              className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-8 pr-8 text-sm text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                            />
+                            {mvSearch && (
+                              <button
+                                onClick={() => setMvSearch("")}
+                                className="absolute right-5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        )}
                         <DataTable<MvMergedItem>
                           className="space-y-0"
                           containerClassName="rounded-none border-0"
@@ -3548,7 +3614,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           showMobileSwipeHint
                           headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                         />
-                      </TableCard>
+                      </div>
                     </>
                   )}
                   {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
@@ -3562,7 +3628,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
-                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                   </span>
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}

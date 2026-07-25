@@ -53,6 +53,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
+import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 
 // Solid navy fill, matching the Notion Inventory action buttons.
@@ -750,7 +751,7 @@ const Users = () => {
               <span className="text-gray-400">-</span>
             ) : (
               userPlants.map((p: string) => (
-                <Badge key={p} variant="secondary" className="text-[10px]">{p}</Badge>
+                <PlantBadge key={p} plant={p} className="text-[10px]" />
               ))
             )}
           </div>

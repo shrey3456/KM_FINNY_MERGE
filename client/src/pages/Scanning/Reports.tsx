@@ -32,6 +32,7 @@ import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
 import { StatsBar } from "@/components/ui/stats-bar";
+import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -46,6 +47,7 @@ type ScanHistoryItem = {
   looseQty: number | null;
   isExtra: boolean;
   isEmptyBox?: boolean;
+  isExchange?: boolean;
   emptyBoxNote?: string | null;
   stv: string | null;
   scannedByCode: string | null;
@@ -179,7 +181,7 @@ const Reports = () => {
   // Plant options for the filter. Non-admins are already restricted server-side, so this
   // dropdown mainly lets admins narrow to one plant; picking a plant you can't see returns
   // nothing (the server ignores/blocks it).
-  const { data: plantList = [] } = useQuery<{ id: number; name: string }[]>({
+  const { data: plantList = [] } = useQuery<{ id: number; name: string; bgColor?: string; textColor?: string; borderColor?: string }[]>({
     queryKey: ["/api/plants"],
     queryFn: () => apiRequest("GET", "/api/plants", undefined, false, true),
   });
@@ -309,7 +311,7 @@ const Reports = () => {
       h.totalQty,
       h.pallets != null ? parseFloat(String(h.pallets)).toFixed(2) : "",
       h.stv ?? "",
-      h.isEmptyBox ? "Empty Box" : h.isExtra ? "Extra" : "Regular",
+      h.isExchange ? "Exchange" : h.isEmptyBox ? "Empty Box" : h.isExtra ? "Extra" : "Regular",
       h.scannedAt ? format(new Date(h.scannedAt), "yyyy-MM-dd HH:mm") : "",
     ]),
   ];
@@ -385,7 +387,7 @@ const Reports = () => {
       header: "Plant",
       width: 90,
       accessor: (row) => row.plant,
-      render: (row) => <Badge variant="outline" className="text-[11px] px-1.5 py-0">{row.plant}</Badge>,
+      render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : <span className="text-gray-300">—</span>),
     },
     {
       id: "qty",
@@ -393,8 +395,15 @@ const Reports = () => {
       width: 80,
       align: "right",
       accessor: (row) => row.totalQty,
-      cellClassName: "font-bold text-[#001d6e]",
-      render: (row) => row.totalQty.toLocaleString(),
+      cellClassName: "font-bold",
+      render: (row) =>
+        row.isExchange ? (
+          <span className={row.totalQty < 0 ? "text-red-500" : "text-emerald-600"}>
+            {row.totalQty < 0 ? row.totalQty.toLocaleString() : `+${row.totalQty.toLocaleString()}`}
+          </span>
+        ) : (
+          <span className="text-[#001d6e]">{row.totalQty.toLocaleString()}</span>
+        ),
     },
     {
       id: "pallets",
@@ -418,9 +427,11 @@ const Reports = () => {
       id: "type",
       header: "Type",
       width: 100,
-      accessor: (row) => (row.isEmptyBox ? "Empty Box" : row.isExtra ? "Extra" : "Regular"),
+      accessor: (row) => (row.isExchange ? "Exchange" : row.isEmptyBox ? "Empty Box" : row.isExtra ? "Extra" : "Regular"),
       render: (row) =>
-        row.isEmptyBox ? (
+        row.isExchange ? (
+          <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-100 text-[11px] px-1.5 border-0">Exchange</Badge>
+        ) : row.isEmptyBox ? (
           <Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 text-[11px] px-1.5 border-0">Empty Box</Badge>
         ) : row.isExtra ? (
           <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>
@@ -445,7 +456,7 @@ const Reports = () => {
             width: 56,
             align: "center" as const,
             render: (row: ScanHistoryItem) =>
-              !row.voided && (
+              !row.voided && !row.isExchange && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
                   onClick={() => setVoidTarget(row)} title="Void this scan">
                   <Trash2 className="h-3.5 w-3.5" />
@@ -523,6 +534,7 @@ const Reports = () => {
                   <SelectItem value="regular">Regular only</SelectItem>
                   <SelectItem value="extra">Extra only</SelectItem>
                   <SelectItem value="empty">Empty Box only</SelectItem>
+                  <SelectItem value="exchange">Exchange only</SelectItem>
                 </SelectContent>
               </Select>
 
@@ -533,7 +545,14 @@ const Reports = () => {
                 <SelectContent>
                   <SelectItem value="__all__">All plants</SelectItem>
                   {plantList.map((p) => (
-                    <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>
+                    <SelectItem key={p.id} value={p.name}>
+                      <span
+                        className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
+                        style={p.bgColor ? { backgroundColor: p.bgColor, color: p.textColor, borderColor: p.borderColor } : undefined}
+                      >
+                        {p.name}
+                      </span>
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -622,6 +641,7 @@ const Reports = () => {
               // Stripe by the row's stable id (not its position), so a new scan landing at the
               // top doesn't flip every row's color/number on each poll.
               const stripeEven = row.id % 2 === 0;
+              if (row.isExchange) return stripeEven ? "bg-purple-50/50" : "bg-purple-50/80";
               if (row.isEmptyBox) return stripeEven ? "bg-orange-50/50" : "bg-orange-50/80";
               if (row.voided) return "bg-gray-50 opacity-60";
               if (row.isExtra) return stripeEven ? "bg-amber-50/50" : "bg-amber-50/80";

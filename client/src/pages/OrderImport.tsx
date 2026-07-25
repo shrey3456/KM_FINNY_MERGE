@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import EditCsvDialog from "@/components/modals/EditCsvDialog";
+import { PlantBadge } from "@/components/PlantBadge";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
@@ -361,7 +362,7 @@ export default function OrderImport() {
     enabled: scanExpandedId !== null,
   });
 
-  const plantsQuery = useQuery<{ name: string }[]>({
+  const plantsQuery = useQuery<{ name: string; bgColor?: string; textColor?: string; borderColor?: string }[]>({
     queryKey: ["/api/plants"],
     queryFn: async () => (await apiRequest("GET", "/api/plants")).json(),
   });
@@ -1029,6 +1030,8 @@ export default function OrderImport() {
     : allItems;
 
   const plantOptions = (plantsQuery.data ?? []).filter((p) => p.name && p.name.trim() !== "");
+  // Plant colors from Plant Management, keyed by upper-cased name, for the plant tab pills.
+  const plantColorByName = new Map(plantOptions.map((p) => [p.name.toUpperCase(), p]));
 
   const _allScanSessions = scanSessionsQuery.data ?? [];
 
@@ -1085,10 +1088,15 @@ export default function OrderImport() {
     activeTab === "history" ? true : s.scanStatus === activeTab,
   );
   const plantTabs = Array.from(
-    // The selected plant is kept in the list even with no sessions in this status, so the active
-    // pill doesn't disappear out from under the selection when switching tabs.
+    // Show EVERY configured plant as a tab (from Plant Management), not only ones that happen to
+    // have sessions in this status — plus any plant seen on a session or currently selected, to be
+    // safe against a session whose plant was later removed from the list.
     new Set(
-      [...plantTabSource.map((s) => (s.plant ?? "").trim()), plantTab.trim()].filter(Boolean),
+      [
+        ...plantOptions.map((p) => p.name.trim()),
+        ...plantTabSource.map((s) => (s.plant ?? "").trim()),
+        plantTab.trim(),
+      ].filter(Boolean),
     ),
   ).sort((a, b) => a.localeCompare(b));
 
@@ -1324,19 +1332,28 @@ export default function OrderImport() {
                 >
                   All
                 </button>
-                {plantTabs.map((name) => (
-                  <button
-                    key={name}
-                    onClick={() => selectPlantTab(name)}
-                    className={
-                      plantTab.toLowerCase() === name.toLowerCase()
-                        ? "bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
-                        : "border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
-                    }
-                  >
-                    {name}
-                  </button>
-                ))}
+                {plantTabs.map((name) => {
+                  const isSel = plantTab.toLowerCase() === name.toLowerCase();
+                  const c = plantColorByName.get(name.toUpperCase());
+                  return (
+                    <button
+                      key={name}
+                      onClick={() => selectPlantTab(name)}
+                      // Selected: solid navy. Unselected: tinted with the plant's configured colors
+                      // from Plant Management (falls back to a plain grey pill when uncolored).
+                      style={!isSel && c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
+                      className={
+                        isSel
+                          ? "bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
+                          : c?.bgColor
+                            ? "border px-3 py-1 text-xs font-semibold"
+                            : "border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                      }
+                    >
+                      {name}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1403,7 +1420,7 @@ export default function OrderImport() {
                             <div className="flex-1 min-w-0">
                               <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                               <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                                <span className="bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
+                                <PlantBadge plant={s.plant} />
                                 {/* The date this CSV is FOR — what grouping/filters key on. Shown
                                     ahead of the upload timestamp since it's the meaningful one. */}
                                 {s.orderDate && (
@@ -1531,7 +1548,7 @@ export default function OrderImport() {
                         <div className="flex-1 min-w-0">
                           <p className="truncate text-sm font-bold text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                            <span className="bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 uppercase">{s.plant}</span>
+                            <PlantBadge plant={s.plant} />
                             {s.orderDate && (
                               <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
                                 For {s.orderDate}
@@ -1635,7 +1652,7 @@ export default function OrderImport() {
                         <div className="flex-1 min-w-0">
                           <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                            <span className="bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700 uppercase">{s.plant}</span>
+                            <PlantBadge plant={s.plant} />
                             {s.orderDate && (
                               <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
                                 For {s.orderDate}
