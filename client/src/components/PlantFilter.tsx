@@ -22,6 +22,11 @@ import { cn } from "@/lib/utils";
 interface PlantOption {
   value: string;
   label: string;
+  // Optional per-plant colors from Plant Management (hex). When present, the option renders as a
+  // colored badge matching how the plant is styled elsewhere.
+  bgColor?: string;
+  textColor?: string;
+  borderColor?: string;
 }
 
 // Default plant options (fallback if none provided)
@@ -92,11 +97,20 @@ export function PlantFilter({
                     }
                   }}
                 />
-                <label 
+                <label
                   htmlFor={`plant-${option.value}`}
                   className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer flex-1"
                 >
-                  {option.label}
+                  {option.bgColor ? (
+                    <span
+                      className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
+                      style={{ backgroundColor: option.bgColor, color: option.textColor, borderColor: option.borderColor }}
+                    >
+                      {option.label}
+                    </span>
+                  ) : (
+                    option.label
+                  )}
                 </label>
               </div>
             ))}

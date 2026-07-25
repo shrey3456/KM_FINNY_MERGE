@@ -32,6 +32,7 @@ import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
 import { StatsBar } from "@/components/ui/stats-bar";
+import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -180,7 +181,7 @@ const Reports = () => {
   // Plant options for the filter. Non-admins are already restricted server-side, so this
   // dropdown mainly lets admins narrow to one plant; picking a plant you can't see returns
   // nothing (the server ignores/blocks it).
-  const { data: plantList = [] } = useQuery<{ id: number; name: string }[]>({
+  const { data: plantList = [] } = useQuery<{ id: number; name: string; bgColor?: string; textColor?: string; borderColor?: string }[]>({
     queryKey: ["/api/plants"],
     queryFn: () => apiRequest("GET", "/api/plants", undefined, false, true),
   });
@@ -386,7 +387,7 @@ const Reports = () => {
       header: "Plant",
       width: 90,
       accessor: (row) => row.plant,
-      render: (row) => <Badge variant="outline" className="text-[11px] px-1.5 py-0">{row.plant}</Badge>,
+      render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : <span className="text-gray-300">—</span>),
     },
     {
       id: "qty",
@@ -544,7 +545,14 @@ const Reports = () => {
                 <SelectContent>
                   <SelectItem value="__all__">All plants</SelectItem>
                   {plantList.map((p) => (
-                    <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>
+                    <SelectItem key={p.id} value={p.name}>
+                      <span
+                        className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
+                        style={p.bgColor ? { backgroundColor: p.bgColor, color: p.textColor, borderColor: p.borderColor } : undefined}
+                      >
+                        {p.name}
+                      </span>
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
