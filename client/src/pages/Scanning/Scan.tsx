@@ -15,6 +15,7 @@ import {
   Loader2,
   PackageCheck,
   Package,
+  Scan,
   FileSpreadsheet,
   Layers,
   Plug,
@@ -41,7 +42,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
-import { TableCard } from "@/components/ui/table-card";
 import {
   Dialog,
   DialogContent,
@@ -223,7 +223,9 @@ export default function ScanOrderPage() {
   // ── Master View / Separate CSVs tab state ────────────────────────────────
   const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("master-view");
   const [mvSearch,    setMvSearch]    = useState("");
-  const [mvSearchOpen, setMvSearchOpen] = useState(false); // Master View: toggle the search bar
+  // Desktop Master View search — collapsed by default (just an icon button); clicking it
+  // reveals the field inline in the plant-name row.
+  const [mvSearchOpen, setMvSearchOpen] = useState(false);
   const [mvShowFiles, setMvShowFiles] = useState(false); // toggle: show/hide source-file names in Master View
   // Clicking a totals box narrows the items table to just those rows. "" = show everything;
   // clicking the active box again clears it.
@@ -269,6 +271,8 @@ export default function ScanOrderPage() {
   // from the active scan session further down.
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
+  // Desktop Part Order search — collapsed by default (icon-only toggle), matching Scan/Master View.
+  const [csvSearchOpen, setCsvSearchOpen] = useState(false);
 
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
@@ -1404,6 +1408,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     orderName: string; partIndex: number | null;
   };
   const [mvHistoryItem, setMvHistoryItem] = useState<MvMergedItem | null>(null);
+  // Collapse any expanded item history when the operator leaves Master View — otherwise it's
+  // still showing "expanded" from memory (React Query still has mvHistoryItem set) whenever
+  // they switch back to the tab, even though nothing on screen actually opened it this time.
+  useEffect(() => {
+    if (osTab !== "master-view") setMvHistoryItem(null);
+  }, [osTab]);
   const [mvVoidTarget, setMvVoidTarget] = useState<MvHistoryEvent | null>(null);
   const [mvVoidReason, setMvVoidReason] = useState("");
   // Every session/part currently loaded into this Master View — the history drill-down spans
@@ -1518,6 +1528,61 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               })}
             </tbody>
           </table>
+        </div>
+      )}
+    </div>
+  );
+
+  // Mobile counterpart to mvHistoryPanel above — the dense 6/7-column table doesn't fit a
+  // phone screen (even table-fixed squeezes every column illegibly), so this renders the same
+  // mvHistoryQuery data as a stacked card per scan event instead.
+  const mvHistoryPanelMobile = (
+    <div className="w-full bg-gray-50 p-3">
+      {mvHistoryQuery.isLoading ? (
+        <div className="flex justify-center py-6">
+          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+        </div>
+      ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
+        <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
+      ) : (
+        <div className="max-h-72 space-y-2 overflow-y-auto">
+          {mvHistoryQuery.data!.items.map((ev) => (
+            <div
+              key={ev.id}
+              className={`rounded-md border border-gray-200 bg-white p-2.5 ${ev.voided ? "opacity-60" : ""}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-gray-800">
+                  {format(new Date(ev.scannedAt), "MMM d · h:mm a")}
+                </span>
+                <span className={`inline-flex items-center justify-center rounded-full text-[11px] font-bold px-2 py-0.5 shrink-0 ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
+                  {ev.isExtra ? "+" : ""}{ev.totalQty}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-gray-600">{ev.scannedByName ?? "—"}</p>
+              <p className="text-xs text-gray-400">
+                {stripCsvExt(ev.orderName)}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
+              </p>
+              {(ev.voided || ev.isExtra || canVoidScan) && (
+                <div className="mt-1.5 flex items-center justify-between">
+                  {ev.voided ? (
+                    <span className="text-[11px] font-medium text-red-500" title={ev.voidReason ?? undefined}>Voided</span>
+                  ) : ev.isExtra ? (
+                    <span className="text-[11px] font-semibold uppercase text-amber-700">Extra</span>
+                  ) : <span />}
+                  {canVoidScan && !ev.voided && (
+                    <Button
+                      size="sm" variant="ghost"
+                      className="h-6 px-2 text-[11px] text-red-600 hover:bg-red-50 hover:text-red-700"
+                      onClick={() => setMvVoidTarget(ev)}
+                    >
+                      Void
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -1825,7 +1890,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             : isDone ? "bg-emerald-100 text-emerald-700"
             : isPartial ? "bg-amber-100 text-amber-700"
             : "bg-gray-100 text-gray-500"}`}>
-            {isExtraOnly ? "Extra" : isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+            {isExtraOnly ? "Extra" : isDone ? "Received" : isPartial ? "Partial" : "Pending"}
           </span>
         );
       },
@@ -1917,7 +1982,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
             isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
           }`}>
-            {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+            {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
           </span>
         );
       },
@@ -1929,7 +1994,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const headers = ["#", "Item Name", "Barcode", "SAP Code", "Expected Qty", "Scanned Qty", "Remaining", "Pallets", "Status", "Source Files"];
     const rows = allMvItems.map((item, idx) => {
       const remain = Math.max(0, (item.quantity ?? 0) - (item.scannedQty ?? 0));
-      const status = item._isExtra ? "Extra" : item.scannedQty >= item.quantity && item.quantity > 0 ? "Done" : item.scannedQty > 0 ? "Partial" : "Pending";
+      const status = item._isExtra ? "Extra" : item.scannedQty >= item.quantity && item.quantity > 0 ? "Received" : item.scannedQty > 0 ? "Partial" : "Pending";
       return [
         idx + 1, item.itemName ?? "", item.barcode ?? "", item.sapCode ?? "",
         item.quantity ?? 0, item.scannedQty ?? 0, remain, item.expectedPallets ?? "", status, item._files.join(" | "),
@@ -2191,7 +2256,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               done ? "bg-emerald-100 text-emerald-700"
               : partial ? "bg-amber-100 text-amber-700"
               : "bg-gray-100 text-gray-500"}`}>
-              {done ? "Done" : partial ? "Partial" : "Pending"}
+              {done ? "Received" : partial ? "Partial" : "Pending"}
             </span>
           );
         },
@@ -2728,7 +2793,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             <div className={`grid grid-cols-4 divide-x divide-gray-200 border border-gray-300 bg-white ${osRotated ? "text-base" : ""}`}>
               {([
                 { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
-                { key: "done", label: "Done", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
+                { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
                 { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, text: "text-[#001d6e]" },
                 { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
               ] as const).map((s) => {
@@ -2755,33 +2820,29 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             {osTab === "scan" && (
               <>
-            {/* Items list — structured table (business style): square corners, grid borders,
-                full item names (no truncation), matching Master View's table. */}
+            {/* Items list — matches Master View's mobile treatment: card list on a phone,
+                the detailed table only for the rotated/kiosk view. */}
             <div className="bg-white border border-gray-300 overflow-hidden">
-              {/* List header — plain white strip (no navy bar), with a Search toggle on the right. */}
-              <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-gray-200 bg-white">
+              {/* List header — plain white strip (no navy bar), with an icon-only Search toggle. */}
+              <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-gray-200 bg-white">
                 <span className="text-xs font-medium text-gray-500">{osDoneCount}/{osTotalCount} done</span>
-                <div className="flex items-center gap-2">
+                <div className="ml-auto flex items-center gap-2">
                   {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-gray-500" />}
                   <button
                     onClick={() => setOsSearchOpen((v) => { if (v) setOsSearch(""); return !v; })}
-                    className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium ${
+                    title={osSearchOpen ? "Close search" : "Search items"}
+                    className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
                       osSearchOpen
                         ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
-                        : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                        : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
                     }`}
                   >
                     {osSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
-                    Search
                   </button>
                 </div>
-              </div>
-
-              {/* Search — collapsed until the search button above is tapped */}
-              {osSearchOpen && (
-                <div className="px-3 py-2.5 border-b border-gray-300">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                {osSearchOpen && (
+                  <div className="relative w-full">
+                    <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                     <Input
                       value={osSearch}
                       onChange={(e) => setOsSearch(e.target.value)}
@@ -2795,25 +2856,25 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </button>
                     )}
                   </div>
-                </div>
-              )}
+                )}
+              </div>
 
               {/* Rows */}
               {osItemsQuery.isLoading ? (
                 <div className="flex justify-center py-10">
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
-              ) : (
-                <div ref={osCsvListScrollRef} className={`max-h-[420px] overflow-x-auto ${osRotated ? "overflow-y-hidden" : "overflow-y-auto"}`}>
-                  <table className={`w-full border-collapse ${osRotated ? "text-sm" : "text-xs"}`}>
+              ) : osRotated ? (
+                <div ref={osCsvListScrollRef} className="max-h-[420px] overflow-x-auto overflow-y-hidden">
+                  <table className="min-w-[640px] w-full border-collapse text-sm">
                     <thead>
                       <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
-                        <th className={`font-semibold border-r border-gray-300 ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>Item</th>
-                        <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Exp</th>
-                        <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Done</th>
-                        <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Left</th>
-                        <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Extra</th>
-                        <th className={`font-semibold text-center ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>Status</th>
+                        <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Done</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Extra</th>
+                        <th className="font-semibold text-center px-4 py-2.5">Status</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2834,7 +2895,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             effStatus === "complete" ? "bg-emerald-50/40" :
                             effStatus === "partial"  ? "bg-amber-50/30" : undefined
                           }`}>
-                            <td className={`border-r border-gray-200 min-w-[180px] max-w-[320px] ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
+                            <td className="border-r border-gray-200 min-w-[180px] max-w-[320px] px-4 py-2.5">
                               <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug">{item.itemName ?? "—"}</p>
                               <p className="text-gray-400 font-mono whitespace-normal break-words">
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
@@ -2845,16 +2906,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 </p>
                               )}
                             </td>
-                            <td className={`text-right tabular-nums text-gray-600 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{exp || "—"}</td>
-                            <td className={`text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{scanned}</td>
-                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${remaining > 0 ? "text-[#001d6e]" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{remaining || "—"}</td>
-                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${extra > 0 ? "text-amber-600" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{extra > 0 ? `+${extra}` : "—"}</td>
-                            <td className={`text-center ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
-                              <span className={`inline-block font-semibold ${osRotated ? "px-2.5 py-1 text-xs" : "px-2 py-0.5 text-[11px]"} ${
+                            <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">{exp || "—"}</td>
+                            <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">{scanned}</td>
+                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{remaining || "—"}</td>
+                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</td>
+                            <td className="text-center px-4 py-2.5">
+                              <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
                                 effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
                                 effStatus === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
                               }`}>
-                                {effStatus === "complete" ? "Done" : effStatus === "partial" ? "Partial" : "Pending"}
+                                {effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
                               </span>
                             </td>
                           </tr>
@@ -2867,6 +2928,84 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       )}
                     </tbody>
                   </table>
+                </div>
+              ) : (
+                /* Card list — Exp/Done/Left/Extra/Status all fold into one stacked row per item,
+                   matching the Master View mobile card treatment. */
+                <div>
+                  {osVisible.length === 0 ? (
+                    <p className="py-10 text-center text-sm text-gray-400">
+                      {osItems.length === 0 ? "Loading items…" : "No items match."}
+                    </p>
+                  ) : osVisible.map((item) => {
+                    const credit    = osCreditByBarcode.get(normalize(item.barcode));
+                    const creditQty = credit?.creditedQty ?? 0;
+                    const effScanned = (item.totalScannedQty ?? 0) + creditQty;
+                    const exp        = item.expectedQty ?? 0;
+                    const scanned    = Math.min(effScanned, exp);
+                    const remaining  = Math.max(0, exp - effScanned);
+                    const extra      = Math.max(0, (item.totalScannedQty ?? 0) - exp);
+                    const ipp        = item.itemsPerPallet ?? 0;
+                    const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
+                    const expPlt     = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
+                    const remainPlt  = ipp > 0 ? (remaining / ipp).toFixed(2) : "0.00";
+                    return (
+                      <div key={item.id} className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                        effStatus === "complete" ? "bg-emerald-50/40" : effStatus === "partial" ? "bg-amber-50/30" : undefined
+                      }`}>
+                        <span className="mt-0.5 shrink-0">
+                          {effStatus === "complete" ? (
+                            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                            </span>
+                          ) : (
+                            <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
+                              effStatus === "partial" ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                            }`}>
+                              <Scan className="h-3.5 w-3.5" />
+                            </span>
+                          )}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[15px] font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
+                          <p className="mt-0.5 font-mono text-xs text-gray-400">
+                            {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                          </p>
+                          {credit && (
+                            <p className="mt-0.5 text-xs text-purple-600" title={credit.sources.map((s) => `${s.qty} from ${s.fromCsvFileName}`).join(", ")}>
+                              ✓ {credit.creditedQty} counted from an earlier part
+                            </p>
+                          )}
+                          <p className="mt-1.5 text-sm leading-snug">
+                            <span className="font-bold text-gray-900">{scanned}</span>
+                            <span className="text-gray-400">/{exp}</span>{" "}
+                            <span className="text-gray-400">({expPlt} plt)</span>
+                            {remaining > 0 && (
+                              <>
+                                <span className="text-gray-300"> · </span>
+                                <span className="font-semibold text-[#001d6e]">{remaining} left</span>{" "}
+                                <span className="text-purple-500">(≈{remainPlt} plt)</span>
+                              </>
+                            )}
+                            {extra > 0 && (
+                              <>
+                                <span className="text-gray-300"> · </span>
+                                <span className="font-semibold text-amber-600">+{extra} extra</span>
+                              </>
+                            )}
+                          </p>
+                        </div>
+                        <span className="shrink-0">
+                          <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                            effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
+                            effStatus === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                          }`}>
+                            {effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
+                          </span>
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -2893,151 +3032,268 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       <Download className="h-3.5 w-3.5" /> Export
                     </button>
                   )}
-                  {/* Search toggle sits right after Export; the bar only opens when pressed. */}
+                  {/* Single icon-only toggle — the search field appears inline right after it. */}
                   <button
                     onClick={() => setMvSearchOpen((v) => { if (v) setMvSearch(""); return !v; })}
-                    className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium shadow-sm ${
+                    title={mvSearchOpen ? "Close search" : "Search items"}
+                    className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border shadow-sm ${
                       mvSearchOpen
                         ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
-                        : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                        : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
                     }`}
                   >
-                    {mvSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />} Search
+                    {mvSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
                   </button>
+                  {mvSearchOpen && (
+                    <div className="relative w-full">
+                      <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                      <Input
+                        value={mvSearch}
+                        onChange={(e) => setMvSearch(e.target.value)}
+                        placeholder="Search items…"
+                        className="h-9 rounded-md border-gray-200 bg-gray-50 pl-8 text-sm focus-visible:ring-1 focus-visible:ring-[#001d6e]/30 focus-visible:ring-offset-0"
+                        autoFocus
+                      />
+                      {mvSearch && (
+                        <button className="absolute right-2.5 top-2.5" onClick={() => setMvSearch("")}>
+                          <X className="h-4 w-4 text-gray-400" />
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
                 {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
                 {mvData && (
                   <div className="bg-white border border-gray-300 overflow-hidden">
-                    {mvSearchOpen && (
-                      <div className="border-b border-gray-200 px-3 py-2">
-                        <div className="relative">
-                          <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                          <Input
-                            value={mvSearch}
-                            onChange={(e) => setMvSearch(e.target.value)}
-                            placeholder="Search items…"
-                            className="h-9 rounded-md border-gray-200 bg-gray-50 pl-8 text-sm focus-visible:ring-1 focus-visible:ring-[#001d6e]/30 focus-visible:ring-offset-0"
-                            autoFocus
-                          />
-                          {mvSearch && (
-                            <button className="absolute right-2.5 top-2.5" onClick={() => setMvSearch("")}>
-                              <X className="h-4 w-4 text-gray-400" />
-                            </button>
-                          )}
-                        </div>
+                    {osRotated && (
+                      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-300 bg-[#001d6e]">
+                        <p className="text-base font-bold text-white">Merged Items</p>
+                        <span className="text-sm text-blue-200">{mvVisible.length} of {allMvItems.length}</span>
                       </div>
                     )}
-                    <div className="overflow-x-auto">
-                      <table className={`w-full border-collapse ${osRotated ? "text-sm" : "text-xs"}`}>
-                        <thead>
-                          <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
-                            <th className={`font-semibold border-r border-gray-300 ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>Item</th>
-                            {mvShowFiles && <th className={`font-semibold border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>File</th>}
-                            <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Exp</th>
-                            <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Done</th>
-                            <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Left</th>
-                            <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Extra</th>
-                            <th className={`font-semibold text-center ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {mvVisible.length === 0 ? (
-                            <tr><td colSpan={mvShowFiles ? 7 : 6} className="py-10 text-center text-gray-400">No items found</td></tr>
-                          ) : mvVisible.map((item, idx) => {
-                        if (item._isEmptyBox) {
-                          return (
-                            <div key={idx} className="flex items-center gap-3 px-4 py-3 bg-orange-50/60">
-                              <span className="shrink-0"><Package className="h-5 w-5 text-orange-500" /></span>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-orange-900 leading-snug">Empty Box</p>
-                                <p className="text-[11px] text-orange-600/80">
-                                  {item._emptyBoxQty} box{item._emptyBoxQty === 1 ? "" : "es"} logged
-                                  {item._emptyBoxCount ? ` · ${item._emptyBoxCount} entr${item._emptyBoxCount === 1 ? "y" : "ies"}` : ""} · not counted as stock
-                                </p>
-                              </div>
-                              <span className="shrink-0">
-                                <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-700">Empty Box</span>
-                              </span>
-                            </div>
-                          );
-                        }
-                            const exp = item.quantity ?? 0;
-                            const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
-                            const remain = Math.max(0, exp - done);
-                            const extra = item.extraQty ?? 0;
-                            const ipp = item.itemsPerPallet ?? 0;
-                            // Pallet figure shown under each qty (qty ÷ items-per-pallet). A muted
-                            // 0.00 when there's no qty or no configured pallet size.
-                            const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
-                            const isExtraOnly = item._isExtra;
-                            const isDone = done >= exp && exp > 0;
-                            const isPartial = done > 0 && !isDone && !isExtraOnly;
-                            const isMvExpanded = !!mvHistoryItem && mvRowKey(mvHistoryItem) === mvRowKey(item);
+
+                    {osRotated ? (
+                      <div className="overflow-x-auto">
+                        <table className="min-w-[640px] w-full border-collapse text-sm">
+                          <thead>
+                            <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                              <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
+                              {mvShowFiles && <th className="font-semibold border-r border-gray-300 px-3 py-2.5">File</th>}
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Done</th>
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Extra</th>
+                              <th className="font-semibold text-center px-4 py-2.5">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {mvVisible.length === 0 ? (
+                              <tr><td colSpan={mvShowFiles ? 7 : 6} className="py-10 text-center text-gray-400">No items found</td></tr>
+                            ) : mvVisible.map((item, idx) => {
+                          if (item._isEmptyBox) {
                             return (
-                              <Fragment key={idx}>
-                              <tr
-                                className={`border-b border-gray-200 ${
-                                  isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
-                                }`}
-                              >
-                                <td className={`border-r border-gray-200 min-w-[180px] max-w-[320px] ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
-                                  {/* Only the item NAME opens the history dropdown — clicking anywhere
-                                      else in the row (barcode, Exp/Done/Left/Extra, Status) does nothing. */}
+                              <tr key={idx} className="bg-orange-50/60">
+                                <td colSpan={mvShowFiles ? 7 : 6} className="px-4 py-3">
+                                  <div className="flex items-center gap-3">
+                                    <span className="shrink-0"><Package className="h-5 w-5 text-orange-500" /></span>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium text-orange-900 leading-snug">Empty Box</p>
+                                      <p className="text-[11px] text-orange-600/80">
+                                        {item._emptyBoxQty} box{item._emptyBoxQty === 1 ? "" : "es"} logged
+                                        {item._emptyBoxCount ? ` · ${item._emptyBoxCount} entr${item._emptyBoxCount === 1 ? "y" : "ies"}` : ""} · not counted as stock
+                                      </p>
+                                    </div>
+                                    <span className="shrink-0">
+                                      <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-700">Empty Box</span>
+                                    </span>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          }
+                              const exp = item.quantity ?? 0;
+                              const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
+                              const remain = Math.max(0, exp - done);
+                              const extra = item.extraQty ?? 0;
+                              const ipp = item.itemsPerPallet ?? 0;
+                              // Pallet figure shown under each qty (qty ÷ items-per-pallet). A muted
+                              // 0.00 when there's no qty or no configured pallet size.
+                              const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
+                              const isExtraOnly = item._isExtra;
+                              const isDone = done >= exp && exp > 0;
+                              const isPartial = done > 0 && !isDone && !isExtraOnly;
+                              const isMvExpanded = !!mvHistoryItem && mvRowKey(mvHistoryItem) === mvRowKey(item);
+                              return (
+                                <Fragment key={idx}>
+                                <tr
+                                  className={`border-b border-gray-200 ${
+                                    isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                                  }`}
+                                >
+                                  <td className="border-r border-gray-200 min-w-[180px] max-w-[320px] px-4 py-2.5">
+                                    {/* Only the item NAME opens the history dropdown — clicking anywhere
+                                        else in the row (barcode, Exp/Done/Left/Extra, Status) does nothing. */}
+                                    <button
+                                      type="button"
+                                      onClick={() => setMvHistoryItem((cur) => (cur && mvRowKey(cur) === mvRowKey(item) ? null : item))}
+                                      className="text-left font-medium text-gray-900 whitespace-normal break-words leading-snug underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
+                                    >
+                                      {item.itemName ?? "—"}
+                                    </button>
+                                    <p className="text-gray-400 font-mono whitespace-normal break-words">
+                                      {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                                    </p>
+                                  </td>
+                                  {mvShowFiles && (
+                                    <td className="text-gray-400 truncate max-w-[100px] border-r border-gray-200 px-3 py-2.5" title={item._files.map(stripCsvExt).join(", ")}>
+                                      {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
+                                    </td>
+                                  )}
+                                  <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
+                                    <span className="block">{exp || "—"}</span>
+                                    <span className="block text-[10px] font-normal text-gray-400">{plt(exp)} plt</span>
+                                  </td>
+                                  <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
+                                    <span className="block">{done}</span>
+                                    <span className="block text-[10px] font-normal text-gray-400">{plt(done)} plt</span>
+                                  </td>
+                                  <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
+                                    <span className="block">{remain || "—"}</span>
+                                    <span className="block text-[10px] font-normal text-gray-400">{plt(remain)} plt</span>
+                                  </td>
+                                  <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
+                                    <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
+                                    <span className="block text-[10px] font-normal text-gray-400">{plt(extra)} plt</span>
+                                  </td>
+                                  <td className="text-center px-4 py-2.5">
+                                    <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
+                                      isExtraOnly ? "bg-orange-100 text-orange-700" :
+                                      isDone       ? "bg-emerald-100 text-emerald-700" :
+                                      isPartial    ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                                    }`}>
+                                      {isExtraOnly ? "Extra" : isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+                                    </span>
+                                  </td>
+                                </tr>
+                                {isMvExpanded && (
+                                  <tr>
+                                    <td colSpan={mvShowFiles ? 7 : 6} className="p-0 border-b border-gray-200">
+                                      {mvHistoryPanel}
+                                    </td>
+                                  </tr>
+                                )}
+                                </Fragment>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      /* Card list — every column (Exp/Done/Left/Extra/Status) folds into a single
+                         stacked row per item, so nothing needs a side-scroll on a phone screen. */
+                      <div>
+                        {mvVisible.length === 0 ? (
+                          <p className="py-10 text-center text-sm text-gray-400">No items found</p>
+                        ) : mvVisible.map((item, idx) => {
+                          if (item._isEmptyBox) {
+                            return (
+                              <div key={idx} className="flex items-center gap-3 border-b border-gray-100 px-4 py-3 bg-orange-50/60">
+                                <span className="shrink-0"><Package className="h-5 w-5 text-orange-500" /></span>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-sm font-medium text-orange-900 leading-snug">Empty Box</p>
+                                  <p className="text-[11px] text-orange-600/80">
+                                    {item._emptyBoxQty} box{item._emptyBoxQty === 1 ? "" : "es"} logged
+                                    {item._emptyBoxCount ? ` · ${item._emptyBoxCount} entr${item._emptyBoxCount === 1 ? "y" : "ies"}` : ""} · not counted as stock
+                                  </p>
+                                </div>
+                                <span className="shrink-0">
+                                  <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-700">Empty Box</span>
+                                </span>
+                              </div>
+                            );
+                          }
+                          const exp = item.quantity ?? 0;
+                          const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
+                          const remain = Math.max(0, exp - done);
+                          const extra = item.extraQty ?? 0;
+                          const ipp = item.itemsPerPallet ?? 0;
+                          const isExtraOnly = item._isExtra;
+                          const isDone = done >= exp && exp > 0;
+                          const isPartial = done > 0 && !isDone && !isExtraOnly;
+                          const isMvExpanded = !!mvHistoryItem && mvRowKey(mvHistoryItem) === mvRowKey(item);
+                          const expPlt = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
+                          const remainPlt = ipp > 0 ? (remain / ipp).toFixed(2) : "0.00";
+                          return (
+                            <Fragment key={idx}>
+                              <div className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                                isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                              }`}>
+                                <span className="mt-0.5 shrink-0">
+                                  {isDone ? (
+                                    <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
+                                      <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                                    </span>
+                                  ) : (
+                                    <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
+                                      isExtraOnly ? "border-orange-300 text-orange-500" : isPartial ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                                    }`}>
+                                      <Scan className="h-3.5 w-3.5" />
+                                    </span>
+                                  )}
+                                </span>
+                                <div className="min-w-0 flex-1">
                                   <button
                                     type="button"
                                     onClick={() => setMvHistoryItem((cur) => (cur && mvRowKey(cur) === mvRowKey(item) ? null : item))}
-                                    className="text-left font-medium text-gray-900 whitespace-normal break-words leading-snug underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
+                                    className="text-left text-[15px] font-semibold leading-snug text-gray-900 underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
                                   >
                                     {item.itemName ?? "—"}
                                   </button>
-                                  <p className="text-gray-400 font-mono whitespace-normal break-words">
-                                    {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                                  <p className="mt-0.5 font-mono text-xs text-gray-400">
+                                    {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                                   </p>
-                                </td>
-                                {mvShowFiles && (
-                                  <td className={`text-gray-400 truncate max-w-[100px] border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`} title={item._files.map(stripCsvExt).join(", ")}>
-                                    {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
-                                  </td>
-                                )}
-                                <td className={`text-right tabular-nums text-gray-600 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
-                                  <span className="block">{exp || "—"}</span>
-                                  <span className="block text-[10px] font-normal text-gray-400">{plt(exp)} plt</span>
-                                </td>
-                                <td className={`text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
-                                  <span className="block">{done}</span>
-                                  <span className="block text-[10px] font-normal text-gray-400">{plt(done)} plt</span>
-                                </td>
-                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
-                                  <span className="block">{remain || "—"}</span>
-                                  <span className="block text-[10px] font-normal text-gray-400">{plt(remain)} plt</span>
-                                </td>
-                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${extra > 0 ? "text-amber-600" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
-                                  <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
-                                  <span className="block text-[10px] font-normal text-gray-400">{plt(extra)} plt</span>
-                                </td>
-                                <td className={`text-center ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
-                                  <span className={`inline-block font-semibold ${osRotated ? "px-2.5 py-1 text-xs" : "px-2 py-0.5 text-[11px]"} ${
+                                  {mvShowFiles && item._files.length > 0 && (
+                                    <p className="mt-0.5 text-[11px] text-gray-400" title={item._files.map(stripCsvExt).join(", ")}>
+                                      {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
+                                    </p>
+                                  )}
+                                  <p className="mt-1.5 text-sm leading-snug">
+                                    <span className="font-bold text-gray-900">{done}</span>
+                                    <span className="text-gray-400">/{exp}</span>{" "}
+                                    <span className="text-gray-400">({expPlt} plt)</span>
+                                    {remain > 0 && (
+                                      <>
+                                        <span className="text-gray-300"> · </span>
+                                        <span className="font-semibold text-[#001d6e]">{remain} left</span>{" "}
+                                        <span className="text-purple-500">(≈{remainPlt} plt)</span>
+                                      </>
+                                    )}
+                                    {extra > 0 && (
+                                      <>
+                                        <span className="text-gray-300"> · </span>
+                                        <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                      </>
+                                    )}
+                                  </p>
+                                </div>
+                                <span className="shrink-0">
+                                  <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
                                     isExtraOnly ? "bg-orange-100 text-orange-700" :
                                     isDone       ? "bg-emerald-100 text-emerald-700" :
                                     isPartial    ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
                                   }`}>
-                                    {isExtraOnly ? "Extra" : isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                                    {isExtraOnly ? "Extra" : isDone ? "Received" : isPartial ? "Partial" : "Pending"}
                                   </span>
-                                </td>
-                              </tr>
+                                </span>
+                              </div>
                               {isMvExpanded && (
-                                <tr>
-                                  <td colSpan={mvShowFiles ? 7 : 6} className="p-0 border-b border-gray-200">
-                                    {mvHistoryPanel}
-                                  </td>
-                                </tr>
+                                <div className="border-b border-gray-100">{mvHistoryPanelMobile}</div>
                               )}
-                              </Fragment>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
+                            </Fragment>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
                 {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400 py-4 text-center">No active session — load a CSV to see its Master View.</p>}
@@ -3086,52 +3342,116 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               item names — matching the Scan/Master View tables, so all three tabs
                               read as one system. */}
                           {!csvItemsQuery2.isFetching && (
-                            <div className={`overflow-x-auto ${osRotated ? "overflow-y-hidden" : "overflow-y-auto"}`}>
-                              <table className={`w-full border-collapse ${osRotated ? "text-sm" : "text-xs"}`}>
-                                <thead>
-                                  <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
-                                    <th className={`font-semibold border-r border-gray-300 ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>Item</th>
-                                    <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Exp</th>
-                                    <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Done</th>
-                                    <th className={`font-semibold text-right border-r border-gray-300 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>Left</th>
-                                    <th className={`font-semibold text-center ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>Status</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {filtCsvItems.length === 0 ? (
-                                    <tr><td colSpan={5} className="py-10 text-center text-gray-400">No items</td></tr>
-                                  ) : filtCsvItems.map((item) => {
-                                    const exp = item.quantity ?? 0;
-                                    const done = item.scannedQty ?? 0;
-                                    const remain = Math.max(0, exp - done);
-                                    const isDone = done >= exp && exp > 0;
-                                    const isPartial = done > 0 && !isDone;
-                                    return (
-                                      <tr key={item.id} className={`border-b border-gray-200 ${
-                                        isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
-                                      }`}>
-                                        <td className={`border-r border-gray-200 min-w-[180px] max-w-[320px] ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
-                                          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug">{item.itemName ?? "—"}</p>
-                                          <p className="text-gray-400 font-mono whitespace-normal break-words">
-                                            {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
-                                          </p>
-                                        </td>
-                                        <td className={`text-right tabular-nums text-gray-600 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{exp || "—"}</td>
-                                        <td className={`text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{done}</td>
-                                        <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{remain || "—"}</td>
-                                        <td className={`text-center ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
-                                          <span className={`inline-block font-semibold ${osRotated ? "px-2.5 py-1 text-xs" : "px-2 py-0.5 text-[11px]"} ${
-                                            isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
-                                          }`}>
-                                            {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                            osRotated ? (
+                              <div className="overflow-x-auto overflow-y-hidden">
+                                <table className="min-w-[640px] w-full border-collapse text-sm">
+                                  <thead>
+                                    <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+                                      <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
+                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
+                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Done</th>
+                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
+                                      <th className="font-semibold text-center px-4 py-2.5">Status</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {filtCsvItems.length === 0 ? (
+                                      <tr><td colSpan={5} className="py-10 text-center text-gray-400">No items</td></tr>
+                                    ) : filtCsvItems.map((item) => {
+                                      const exp = item.quantity ?? 0;
+                                      const done = item.scannedQty ?? 0;
+                                      const remain = Math.max(0, exp - done);
+                                      const isDone = done >= exp && exp > 0;
+                                      const isPartial = done > 0 && !isDone;
+                                      return (
+                                        <tr key={item.id} className={`border-b border-gray-200 ${
+                                          isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                                        }`}>
+                                          <td className="border-r border-gray-200 min-w-[180px] max-w-[320px] px-4 py-2.5">
+                                            <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug">{item.itemName ?? "—"}</p>
+                                            <p className="text-gray-400 font-mono whitespace-normal break-words">
+                                              {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                                            </p>
+                                          </td>
+                                          <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">{exp || "—"}</td>
+                                          <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">{done}</td>
+                                          <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{remain || "—"}</td>
+                                          <td className="text-center px-4 py-2.5">
+                                            <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
+                                              isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                                            }`}>
+                                              {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+                                            </span>
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              /* Card list — matches the Scan/Master View mobile treatment. */
+                              <div>
+                                {filtCsvItems.length === 0 ? (
+                                  <p className="py-10 text-center text-sm text-gray-400">No items</p>
+                                ) : filtCsvItems.map((item) => {
+                                  const exp = item.quantity ?? 0;
+                                  const done = item.scannedQty ?? 0;
+                                  const remain = Math.max(0, exp - done);
+                                  const isDone = done >= exp && exp > 0;
+                                  const isPartial = done > 0 && !isDone;
+                                  // ImpItem has no itemsPerPallet — back into it from the CSV's own
+                                  // expectedPallets figure so the plt annotation still lines up.
+                                  const ipp = exp > 0 && item.expectedPallets ? exp / item.expectedPallets : 0;
+                                  const expPlt = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
+                                  const remainPlt = ipp > 0 ? (remain / ipp).toFixed(2) : "0.00";
+                                  return (
+                                    <div key={item.id} className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                                      isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                                    }`}>
+                                      <span className="mt-0.5 shrink-0">
+                                        {isDone ? (
+                                          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
+                                            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
                                           </span>
-                                        </td>
-                                      </tr>
-                                    );
-                                  })}
-                                </tbody>
-                              </table>
-                            </div>
+                                        ) : (
+                                          <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
+                                            isPartial ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                                          }`}>
+                                            <Scan className="h-3.5 w-3.5" />
+                                          </span>
+                                        )}
+                                      </span>
+                                      <div className="min-w-0 flex-1">
+                                        <p className="text-[15px] font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
+                                        <p className="mt-0.5 font-mono text-xs text-gray-400">
+                                          {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                                        </p>
+                                        <p className="mt-1.5 text-sm leading-snug">
+                                          <span className="font-bold text-gray-900">{done}</span>
+                                          <span className="text-gray-400">/{exp}</span>{" "}
+                                          <span className="text-gray-400">({expPlt} plt)</span>
+                                          {remain > 0 && (
+                                            <>
+                                              <span className="text-gray-300"> · </span>
+                                              <span className="font-semibold text-[#001d6e]">{remain} left</span>{" "}
+                                              <span className="text-purple-500">(≈{remainPlt} plt)</span>
+                                            </>
+                                          )}
+                                        </p>
+                                      </div>
+                                      <span className="shrink-0">
+                                        <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                          isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                                        }`}>
+                                          {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+                                        </span>
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )
                           )}
                         </div>
                       )}
@@ -3211,7 +3531,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}
                 >
                   <SelectTrigger
-                    className={`h-9 w-52 text-sm font-semibold ${
+                    className={`h-7 w-full max-w-[9rem] justify-center text-center text-xs font-semibold sm:w-36 ${
                       osSelectedStv
                         ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
                         : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
@@ -3227,7 +3547,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </SelectContent>
                 </Select>
               ) : !osStvsQuery.isLoading && (
-                <span className="border border-dashed border-amber-300 bg-amber-50 px-3 py-1.5 text-sm text-amber-700">
+                <span className="border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
                   No STV — create one in Plant Settings
                 </span>
               )}
@@ -3263,7 +3583,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {([
                     { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                    { key: "done", label: "Done", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                    { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
                     { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-[#001d6e]", text: "text-[#001d6e]" },
                     { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-amber-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
                   ] as const).map((s) => {
@@ -3300,7 +3620,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     />
                   </div>
                   <div className="flex justify-between text-[10px] font-medium text-gray-400">
-                    <span>{displayTotals.done} done</span>
+                    <span>{displayTotals.done} received</span>
                     <span>{displayTotals.remaining} remaining</span>
                   </div>
                 </div>
@@ -3479,14 +3799,43 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             <div className="space-y-4">
               {osTab === "scan" && (
-                <TableCard
-                  icon={ScanLine}
-                  title="Items"
-                  subtitle={`${osDoneCount} / ${osTotalCount} done`}
-                  searchValue={osSearch}
-                  onSearchChange={setOsSearch}
-                  searchPlaceholder="Search by name or barcode…"
-                >
+                <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                  {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline. */}
+                  <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                    <span className="text-xs font-medium text-gray-500">{osDoneCount} / {osTotalCount} done</span>
+                    <button
+                      onClick={() => setOsSearchOpen((v) => { if (v) setOsSearch(""); return !v; })}
+                      title={osSearchOpen ? "Close search" : "Search items"}
+                      className={`ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
+                        osSearchOpen
+                          ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                          : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                      }`}
+                    >
+                      {osSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
+                    </button>
+                    {osSearchOpen && (
+                      <div className="relative w-full sm:w-64">
+                        <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                        <input
+                          value={osSearch}
+                          onChange={(e) => setOsSearch(e.target.value)}
+                          placeholder="Search by name or barcode…"
+                          autoFocus
+                          className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                        />
+                        {osSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setOsSearch("")}
+                            className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <DataTable<OsScanItem>
                     className="space-y-0"
                     containerClassName="rounded-none border-0"
@@ -3513,7 +3862,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     showMobileSwipeHint
                     headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                   />
-                </TableCard>
+                </div>
               )}
               {osTab === "master-view" && (
                 <div className="space-y-4">
@@ -3528,24 +3877,34 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     >
                       {mvShowFiles ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
                     </button>
-                    {allMvItems.length > 0 && (
-                      <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Export CSV
-                      </button>
-                    )}
-                    {/* Toggle the search bar shown above the table; clearing the query when hidden
-                        so a stale filter never persists invisibly. */}
                     <button
                       onClick={() => setMvSearchOpen((v) => { if (v) setMvSearch(""); return !v; })}
-                      title={mvSearchOpen ? "Hide search" : "Search items"}
-                      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium shadow-sm ${
-                        mvSearchOpen
-                          ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
-                          : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
-                      }`}
+                      title={mvSearchOpen ? "Close search" : "Search items"}
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 shadow-sm hover:bg-gray-50"
                     >
-                      <Search className="h-3.5 w-3.5" /> Search
+                      {mvSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
                     </button>
+                    {mvSearchOpen && (
+                      <div className="relative w-full sm:w-64">
+                        <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                        <input
+                          value={mvSearch}
+                          onChange={(e) => setMvSearch(e.target.value)}
+                          placeholder="Search items…"
+                          autoFocus
+                          className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                        />
+                        {mvSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setMvSearch("")}
+                            className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                   {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
                   {mvData && (
@@ -3561,28 +3920,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </div>
                       )}
                       {/* Headerless table card — the "Items" header is gone; search is opened via
-                          the Search button in the filter row and appears as a bar above the table. */}
+                          the icon toggle in the filter row above and appears inline there. */}
                       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-                        {mvSearchOpen && (
-                          <div className="relative border-b border-gray-200 bg-white px-3 py-2">
-                            <Search className="pointer-events-none absolute left-5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
-                            <input
-                              autoFocus
-                              value={mvSearch}
-                              onChange={(e) => setMvSearch(e.target.value)}
-                              placeholder="Search items…"
-                              className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-8 pr-8 text-sm text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
-                            />
-                            {mvSearch && (
-                              <button
-                                onClick={() => setMvSearch("")}
-                                className="absolute right-5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                              >
-                                <X className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        )}
                         <DataTable<MvMergedItem>
                           className="space-y-0"
                           containerClassName="rounded-none border-0"
@@ -3652,14 +3991,43 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </button>
                       {csvExpId === sess.id && (
                         <div className="border-t p-3">
-                          <TableCard
-                            icon={FileSpreadsheet}
-                            title="Items"
-                            subtitle={`${filtCsvItems.length} of ${csvImpItems.length} items`}
-                            searchValue={csvSearch}
-                            onSearchChange={setCsvSearch}
-                            searchPlaceholder="Search items…"
-                          >
+                          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                            {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline. */}
+                            <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                              <span className="text-xs font-medium text-gray-500">{filtCsvItems.length} of {csvImpItems.length} items</span>
+                              <button
+                                onClick={() => setCsvSearchOpen((v) => { if (v) setCsvSearch(""); return !v; })}
+                                title={csvSearchOpen ? "Close search" : "Search items"}
+                                className={`ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
+                                  csvSearchOpen
+                                    ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                                    : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                                }`}
+                              >
+                                {csvSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
+                              </button>
+                              {csvSearchOpen && (
+                                <div className="relative w-full sm:w-64">
+                                  <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                                  <input
+                                    value={csvSearch}
+                                    onChange={(e) => setCsvSearch(e.target.value)}
+                                    placeholder="Search items…"
+                                    autoFocus
+                                    className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                                  />
+                                  {csvSearch && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setCsvSearch("")}
+                                      className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+                                    >
+                                      <X className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                             <DataTable<ImpItem>
                               className="space-y-0"
                               containerClassName="rounded-none border-0"
@@ -3687,7 +4055,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               showMobileSwipeHint
                               headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                             />
-                          </TableCard>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -4196,7 +4564,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* Table */}
               {(dispatchHistory?.items?.length ?? 0) > 0 && (
                 <div className="overflow-x-auto" style={{ WebkitOverflowScrolling: "touch" }}>
-                  <table className="w-full border-collapse text-xs">
+                  <table className="w-full min-w-[720px] border-collapse text-xs">
                     <thead>
                       <tr className="bg-[#001d6e]">
                         <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c] w-8">#</th>
