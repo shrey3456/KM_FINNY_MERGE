@@ -1103,7 +1103,7 @@ export const stockMovements = pgTable("stock_movements", {
   plant: text("plant").notNull(),
   qty: integer("qty").notNull(),                 // +received / −sent (future)
   extraQty: integer("extra_qty").default(0),     // portion of qty that was extra (over-order)
-  type: text("type").notNull(),                  // 'receive' | 'dispatch' | 'adjust'
+  type: text("type").notNull(),                  // 'receive' | 'dispatch' | 'adjust' | 'exchange'
   reason: text("reason"),
   sessionId: integer("session_id"),              // order_import_sessions.id when from a scan completion
   createdByCode: text("created_by_code"),

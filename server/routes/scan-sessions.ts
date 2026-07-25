@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { format } from 'date-fns';
 import { db, pool } from '../db';
 import {
   scanSessions,
@@ -1176,6 +1177,107 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
   ) combined
 `;
 
+// Generic "+ Filter" column engine (client/src/lib/columnFilters.ts) mirrored server-side —
+// Scan History is paginated (LIMIT/OFFSET), so unlike Overall Stock's client-side matching,
+// these conditions must become real SQL to filter/paginate correctly across the whole result
+// set, not just whatever page happens to be loaded. Only columns in this allowlist are ever
+// touched by user input — the column id (and its SQL expression) is fixed server-side, so a
+// request can never reference an arbitrary column.
+const SCAN_HISTORY_FILTER_COLUMNS: Record<string, { sql: string; type: 'text' | 'number' | 'date' }> = {
+  item:      { sql: '"itemName"',  type: 'text' },
+  barcode:   { sql: 'barcode',     type: 'text' },
+  order:     { sql: '"orderName"', type: 'text' },
+  qty:       { sql: '"totalQty"',  type: 'number' },
+  pallets:   { sql: 'pallets',     type: 'number' },
+  stv:       { sql: 'stv',         type: 'text' },
+  time:      { sql: '"scannedAt"', type: 'date' },
+  plant:     { sql: '"plant"',     type: 'text' },
+};
+
+type GenericFilterCondition = { columnIds?: string[]; operator?: string; value?: unknown };
+
+// Appends zero or more SQL clauses (one per condition, columns within a condition OR'd
+// together) onto `conditions`/`params` — same shape/semantics as the frontend's matchCondition:
+// AND across conditions, OR across the columns picked into one condition.
+function applyScanHistoryColumnFilters(filtersParam: string | undefined, conditions: string[], params: any[]) {
+  if (!filtersParam) return;
+  let parsed: unknown;
+  try { parsed = JSON.parse(filtersParam); } catch { return; }
+  if (!Array.isArray(parsed)) return;
+
+  for (const raw of parsed as GenericFilterCondition[]) {
+    const columnIds = Array.isArray(raw?.columnIds) ? raw.columnIds : [];
+    const operator = typeof raw?.operator === 'string' ? raw.operator : '';
+    if (columnIds.length === 0 || !operator) continue;
+
+    const colClauses: string[] = [];
+    for (const columnId of columnIds) {
+      const col = SCAN_HISTORY_FILTER_COLUMNS[columnId];
+      if (!col) continue; // not in the allowlist — ignore rather than error
+      const clause = buildScanHistoryFilterClause(col, operator, raw.value, params);
+      if (clause) colClauses.push(clause);
+    }
+    if (colClauses.length > 0) conditions.push(`(${colClauses.join(' OR ')})`);
+  }
+}
+
+function buildScanHistoryFilterClause(
+  col: { sql: string; type: 'text' | 'number' | 'date' },
+  operator: string,
+  value: unknown,
+  params: any[],
+): string | null {
+  const push = (v: any) => { params.push(v); return `$${params.length}`; };
+
+  if (operator === 'in') {
+    const values = Array.isArray(value) ? (value as string[]) : [];
+    if (values.length === 0) return null;
+    if (col.type === 'date') {
+      return `(${values.map((v) => `DATE(${col.sql}) = ${push(v)}::date`).join(' OR ')})`;
+    }
+    if (col.type === 'number') {
+      const nums = values.map(Number).filter((n) => !Number.isNaN(n));
+      return nums.length ? `${col.sql} = ANY(${push(nums)}::numeric[])` : null;
+    }
+    return `LOWER(COALESCE(${col.sql}::text,'')) = ANY(${push(values.map((v) => v.toLowerCase()))}::text[])`;
+  }
+
+  if (col.type === 'text') {
+    const v = typeof value === 'string' ? value : '';
+    if (operator === 'empty') return `COALESCE(${col.sql}::text,'') = ''`;
+    if (operator === 'contains') return `LOWER(COALESCE(${col.sql}::text,'')) LIKE ${push(`%${v.toLowerCase()}%`)}`;
+    if (operator === 'equals') return `LOWER(COALESCE(${col.sql}::text,'')) = ${push(v.toLowerCase())}`;
+    return null;
+  }
+
+  if (col.type === 'number') {
+    if (operator === 'between') {
+      const [a, b] = Array.isArray(value) ? (value as string[]) : ['', ''];
+      if (a === '' && b === '') return null;
+      return `${col.sql} BETWEEN ${push(Number(a) || 0)} AND ${push(Number(b) || 0)}`;
+    }
+    const n = Number(value);
+    if (Number.isNaN(n)) return null;
+    if (operator === 'eq') return `${col.sql} = ${push(n)}`;
+    if (operator === 'gt') return `${col.sql} > ${push(n)}`;
+    if (operator === 'lt') return `${col.sql} < ${push(n)}`;
+    return null;
+  }
+
+  // date
+  if (operator === 'between') {
+    const [a, b] = Array.isArray(value) ? (value as string[]) : ['', ''];
+    if (!a && !b) return null;
+    return `DATE(${col.sql}) BETWEEN ${push(a || '1970-01-01')}::date AND ${push(b || '9999-12-31')}::date`;
+  }
+  const v = typeof value === 'string' ? value : '';
+  if (!v) return null;
+  if (operator === 'on') return `DATE(${col.sql}) = ${push(v)}::date`;
+  if (operator === 'before') return `${col.sql} < ${push(v)}::date`;
+  if (operator === 'after') return `${col.sql} >= ${push(v)}::date + INTERVAL '1 day'`;
+  return null;
+}
+
 router.get('/reports/scan-history', async (_req: Request, res: Response) => {
   try {
     const req = _req;
@@ -1187,6 +1289,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange'].includes(req.query.type) ? req.query.type : null;
     const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
     const plantParam   = typeof req.query.plant   === 'string' && req.query.plant.trim()   ? req.query.plant.trim()   : null;
+    const filtersParam = typeof req.query.filters === 'string' && req.query.filters.trim() ? req.query.filters.trim() : undefined;
 
     // Plant scoping: admin/super-admin/billing (allowed === null) see every plant; everyone
     // else is restricted to the plant(s) assigned to them on the Users page. A non-admin with
@@ -1194,7 +1297,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const allowedPlants = getUserPlants(req.user);
 
     const conditions: string[] = [];
-    const params: (string | boolean | string[])[] = [];
+    const params: any[] = [];
 
     if (allowedPlants !== null) {
       if (allowedPlants.length === 0) {
@@ -1219,6 +1322,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       const n = params.length;
       conditions.push(`(LOWER(COALESCE("itemName",'')) LIKE $${n} OR LOWER(COALESCE(barcode,'')) LIKE $${n} OR LOWER(COALESCE("scannedByName",'')) LIKE $${n})`);
     }
+    applyScanHistoryColumnFilters(filtersParam, conditions, params);
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const baseFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${where}`;
@@ -1274,6 +1378,55 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
   } catch (error) {
     console.error('Error generating scan history:', error);
     return res.status(500).json({ error: 'Failed to generate scan history' });
+  }
+});
+
+// ── GET /reports/scan-history/filter-values ──────────────────────────────────────────────────
+// Every distinct value for every generic "+ Filter" column, in one response — Scan History is
+// paginated (only one page of rows ever reaches the browser), so unlike Overall Stock's Values
+// checklist (built straight from the fully-loaded rows already in the browser), this has to ask
+// the server directly for what values actually exist. Scoped only by plant access (not by the
+// other active filters), same as Stock's checklists never re-narrow off client-side filters
+// either. Capped per column — scan history can have far more distinct items/barcodes than
+// Stock's product catalog, so an unbounded list isn't safe to ship to the browser.
+router.get('/reports/scan-history/filter-values', async (req: Request, res: Response) => {
+  try {
+    const allowedPlants = getUserPlants(req.user);
+    if (allowedPlants !== null && allowedPlants.length === 0) {
+      const empty: Record<string, { value: string; label: string }[]> = {};
+      for (const id of Object.keys(SCAN_HISTORY_FILTER_COLUMNS)) empty[id] = [];
+      return res.json(empty);
+    }
+    const plantWhere = allowedPlants !== null ? `WHERE LOWER("plant") = ANY($1::text[])` : '';
+    const plantParams = allowedPlants !== null ? [allowedPlants] : [];
+
+    const entries = Object.entries(SCAN_HISTORY_FILTER_COLUMNS);
+    const results = await Promise.all(entries.map(async ([id, col]) => {
+      if (col.type === 'date') {
+        const { rows } = await pool.query(
+          `SELECT DISTINCT DATE(${col.sql})::text AS d
+           FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere ? `${plantWhere} AND ${col.sql} IS NOT NULL` : `WHERE ${col.sql} IS NOT NULL`}
+           ORDER BY d DESC LIMIT 500`,
+          plantParams,
+        );
+        return [id, rows.map((r: any) => ({ value: r.d, label: format(new Date(r.d), 'MMM d, yyyy') }))] as const;
+      }
+      const { rows } = await pool.query(
+        `SELECT DISTINCT ${col.sql}::text AS v
+         FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere ? `${plantWhere} AND ${col.sql} IS NOT NULL AND ${col.sql}::text <> ''` : `WHERE ${col.sql} IS NOT NULL AND ${col.sql}::text <> ''`}
+         ORDER BY ${col.type === 'number' ? `${col.sql}` : 'v'} LIMIT 500`,
+        plantParams,
+      );
+      return [id, rows.map((r: any) => ({
+        value: r.v,
+        label: col.type === 'number' ? Number(r.v).toLocaleString() : r.v,
+      }))] as const;
+    }));
+
+    return res.json(Object.fromEntries(results));
+  } catch (error) {
+    console.error('Error fetching scan history filter values:', error);
+    return res.status(500).json({ error: 'Failed to fetch filter values' });
   }
 });
 
