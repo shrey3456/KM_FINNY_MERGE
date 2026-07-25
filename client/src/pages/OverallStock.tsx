@@ -19,6 +19,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import PageHeader from "@/components/PageHeader";
+import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
 import { StatsBar } from "@/components/ui/stats-bar";
@@ -423,6 +424,7 @@ export default function OverallStock() {
       width: 220,
       sortable: true,
       accessor: (row) => row.itemName,
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `font-medium text-gray-900 whitespace-normal break-words ${cellBorder}`,
       render: (row) =>
@@ -463,6 +465,7 @@ export default function OverallStock() {
       width: 130,
       sortable: true,
       accessor: (row) => row.category,
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `text-gray-700 ${cellBorder}`,
       render: (row) => row.category ?? dash,
@@ -473,6 +476,7 @@ export default function OverallStock() {
       width: 110,
       sortable: true,
       accessor: (row) => row.brand,
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `text-gray-700 ${cellBorder}`,
       render: (row) => row.brand ?? dash,
@@ -484,9 +488,10 @@ export default function OverallStock() {
       width: 100,
       sortable: true,
       accessor: (row) => row.plant,
+      totalable: false,
       headerClassName: headerBorder,
-      cellClassName: `font-semibold text-[#001d6e] uppercase ${cellBorder}`,
-      render: (row) => row.plant,
+      cellClassName: cellBorder,
+      render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : dash),
     },
     {
       id: "expected",
@@ -574,6 +579,7 @@ export default function OverallStock() {
       width: 120,
       sortable: true,
       accessor: (row) => row.lastArrived,
+      totalable: false,
       cellClassName: "text-gray-500 whitespace-nowrap",
       render: (row) => (row.lastArrived ? format(new Date(row.lastArrived), "MMM d, yyyy") : dash),
     },

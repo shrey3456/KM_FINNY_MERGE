@@ -316,7 +316,7 @@ export default function ProformaSlips() {
   
   // Plant filter states
   const [selectedPlants, setSelectedPlants] = useState<string[]>([]);
-  const [plantOptions, setPlantOptions] = useState<Array<{value: string, label: string}>>([]);
+  const [plantOptions, setPlantOptions] = useState<Array<{value: string; label: string; bgColor?: string; textColor?: string; borderColor?: string}>>([]);
   
   // Entries limit state - Default to 15 entries
   const [entriesLimit, setEntriesLimit] = useState<number>(15);
@@ -839,18 +839,26 @@ export default function ProformaSlips() {
         }
       });
       
-      // Convert to array of option objects
-      const plantOptionsList = Array.from(plants).map(plant => ({
-        value: plant,
-        label: plant
-      }));
-      
+      // Convert to array of option objects, attaching each plant's configured colors (matched
+      // by name, case-insensitively) from Plant Management so the filter shows the same styling.
+      const colorByName = new Map((dbPlants ?? []).map((p) => [p.name.toUpperCase(), p]));
+      const plantOptionsList = Array.from(plants).map(plant => {
+        const c = colorByName.get(plant.toUpperCase());
+        return {
+          value: plant,
+          label: plant,
+          bgColor: c?.bgColor,
+          textColor: c?.textColor,
+          borderColor: c?.borderColor,
+        };
+      });
+
       // Sort alphabetically
       plantOptionsList.sort((a, b) => a.label.localeCompare(b.label));
-      
+
       setPlantOptions(plantOptionsList);
     }
-  }, [proformaSlips]);
+  }, [proformaSlips, dbPlants]);
   
   // Handle CSV export
   const handleExportCSV = async () => {
@@ -1938,7 +1946,6 @@ export default function ProformaSlips() {
             pageSize={entriesLimit}
             onPageSizeChange={setEntriesLimit}
             pageSizeOptions={[15, 25, 50, 100]}
-            renderFooter={renderSlipFooter}
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}

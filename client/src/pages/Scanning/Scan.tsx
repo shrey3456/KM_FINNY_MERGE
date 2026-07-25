@@ -32,6 +32,7 @@ import {
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
+import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/hooks/use-user";
@@ -2411,9 +2412,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </span>
                   )}
                 </p>
-                <p className={`text-gray-500 truncate ${osRotated ? "text-xs mt-0.5" : "text-[10px]"}`}>
-                  {activeOrderScanSession.plant}
-                  {activeOrderScanSession.importedByName && ` · ${activeOrderScanSession.importedByName}`}
+                <p className={`flex items-center gap-1.5 text-gray-500 truncate ${osRotated ? "text-xs mt-0.5" : "text-[10px]"}`}>
+                  <PlantBadge plant={activeOrderScanSession.plant} />
+                  {activeOrderScanSession.importedByName && <span>· {activeOrderScanSession.importedByName}</span>}
                 </p>
               </div>
               {canCompletePart && (
@@ -2878,7 +2879,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">
-                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                   </span>
                   <button
                     onClick={() => setMvShowFiles((v) => !v)}
@@ -2964,6 +2965,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
                             const remain = Math.max(0, exp - done);
                             const extra = item.extraQty ?? 0;
+                            const ipp = item.itemsPerPallet ?? 0;
+                            // Pallet figure shown under each qty (qty ÷ items-per-pallet). A muted
+                            // 0.00 when there's no qty or no configured pallet size.
+                            const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
                             const isExtraOnly = item._isExtra;
                             const isDone = done >= exp && exp > 0;
                             const isPartial = done > 0 && !isDone && !isExtraOnly;
@@ -2994,10 +2999,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                     {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
                                   </td>
                                 )}
-                                <td className={`text-right tabular-nums text-gray-600 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{exp || "—"}</td>
-                                <td className={`text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{done}</td>
-                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{remain || "—"}</td>
-                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${extra > 0 ? "text-amber-600" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>{extra > 0 ? `+${extra}` : "—"}</td>
+                                <td className={`text-right tabular-nums text-gray-600 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
+                                  <span className="block">{exp || "—"}</span>
+                                  <span className="block text-[10px] font-normal text-gray-400">{plt(exp)} plt</span>
+                                </td>
+                                <td className={`text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
+                                  <span className="block">{done}</span>
+                                  <span className="block text-[10px] font-normal text-gray-400">{plt(done)} plt</span>
+                                </td>
+                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
+                                  <span className="block">{remain || "—"}</span>
+                                  <span className="block text-[10px] font-normal text-gray-400">{plt(remain)} plt</span>
+                                </td>
+                                <td className={`text-right tabular-nums font-semibold border-r border-gray-200 ${extra > 0 ? "text-amber-600" : "text-gray-300"} ${osRotated ? "px-3 py-2.5" : "px-2 py-2"}`}>
+                                  <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
+                                  <span className="block text-[10px] font-normal text-gray-400">{plt(extra)} plt</span>
+                                </td>
                                 <td className={`text-center ${osRotated ? "px-4 py-2.5" : "px-3 py-2"}`}>
                                   <span className={`inline-block font-semibold ${osRotated ? "px-2.5 py-1 text-xs" : "px-2 py-0.5 text-[11px]"} ${
                                     isExtraOnly ? "bg-orange-100 text-orange-700" :
@@ -3032,7 +3049,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">
-                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                   </span>
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading files…</p>}
@@ -3151,9 +3168,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </span>
                     )}
                   </p>
-                  <p className="text-xs text-gray-500 truncate">
-                    {activeOrderScanSession.plant}
-                    {activeOrderScanSession.importedByName && ` · loaded by ${activeOrderScanSession.importedByName}`}
+                  <p className="flex items-center gap-1.5 text-xs text-gray-500 truncate">
+                    <PlantBadge plant={activeOrderScanSession.plant} />
+                    {activeOrderScanSession.importedByName && <span>· loaded by {activeOrderScanSession.importedByName}</span>}
                   </p>
                 </div>
               </div>
@@ -3232,8 +3249,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="flex min-w-0 flex-col gap-3">
               <div className="flex flex-col gap-1.5 border bg-white p-2.5 shadow-sm">
                 <div className="flex items-baseline justify-between">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
-                  <p className="text-[11px] font-medium text-gray-400">
+                  <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
+                  <p className="text-sm font-medium text-gray-400">
                     {displayTotals.expected > 0
                       ? `${Math.round((displayTotals.done / displayTotals.expected) * 100)}% complete`
                       : "—"}
@@ -3265,11 +3282,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         }`}
                       >
                         <div className="flex items-center gap-1.5">
-                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
-                          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
                         </div>
-                        <p className={`text-lg font-bold leading-tight ${s.text}`}>{s.value}</p>
-                        <p className="text-xs font-medium text-gray-500">{s.plt.toFixed(2)} plt</p>
+                        <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                        <p className="text-sm font-semibold text-gray-500">{s.plt.toFixed(2)} plt</p>
                       </button>
                     );
                   })}
@@ -3502,7 +3519,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="space-y-4">
                   <div className="flex flex-wrap items-center gap-3">
                     <span className="border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
-                      {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                      {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                     </span>
                     <button
                       onClick={() => setMvShowFiles((v) => !v)}
@@ -3611,7 +3628,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
-                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
+                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                   </span>
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}
