@@ -1184,11 +1184,6 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
 // touched by user input — the column id (and its SQL expression) is fixed server-side, so a
 // request can never reference an arbitrary column.
 const SCAN_HISTORY_FILTER_COLUMNS: Record<string, { sql: string; type: 'text' | 'number' | 'date' }> = {
-  item:      { sql: '"itemName"',  type: 'text' },
-  barcode:   { sql: 'barcode',     type: 'text' },
-  order:     { sql: '"orderName"', type: 'text' },
-  qty:       { sql: '"totalQty"',  type: 'number' },
-  pallets:   { sql: 'pallets',     type: 'number' },
   stv:       { sql: 'stv',         type: 'text' },
   time:      { sql: '"scannedAt"', type: 'date' },
   plant:     { sql: '"plant"',     type: 'text' },

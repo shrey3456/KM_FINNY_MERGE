@@ -7,7 +7,6 @@ import autoTable from "jspdf-autotable";
 import {
   History, X, RefreshCw, FileDown, ChevronDown, ChevronLeft,
   Loader2, Upload, Trash2, Plus, ListFilter,
-  Boxes, Layers, AlertTriangle, PackageX,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
@@ -32,7 +31,6 @@ import { Label } from "@/components/ui/label";
 import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
-import { StatsBar } from "@/components/ui/stats-bar";
 import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
@@ -201,17 +199,12 @@ const Reports = () => {
     staleTime: 60_000,
   });
 
-  // Excel-style per-column filters — Item, Barcode, Order, Qty, Pallets, STV, Time, Plant. Scan
-  // History is server-paginated, so (unlike Overall Stock) these are sent to the server as a
-  // `filters` param rather than matched client-side — see applyScanHistoryColumnFilters on the
-  // backend. `accessor` is unused here for that same reason (no client-side matching happens);
-  // it's only present to satisfy FilterableColumn's shape.
+  // Excel-style per-column filters — STV, Time, Plant. Scan History is server-paginated, so
+  // (unlike Overall Stock) these are sent to the server as a `filters` param rather than matched
+  // client-side — see applyScanHistoryColumnFilters on the backend. `accessor` is unused here for
+  // that same reason (no client-side matching happens); it's only present to satisfy
+  // FilterableColumn's shape.
   const filterableColumns: FilterableColumn<ScanHistoryItem>[] = useMemo(() => [
-    { id: "item", label: "Item", filterType: "text", options: filterValues.item ?? [], accessor: (r) => r.itemName },
-    { id: "barcode", label: "Barcode", filterType: "text", options: filterValues.barcode ?? [], accessor: (r) => r.barcode },
-    { id: "order", label: "Order", filterType: "text", options: filterValues.order ?? [], accessor: (r) => r.orderName },
-    { id: "qty", label: "Qty", filterType: "number", options: filterValues.qty ?? [], accessor: (r) => r.totalQty },
-    { id: "pallets", label: "Pallets", filterType: "number", options: filterValues.pallets ?? [], accessor: (r) => r.pallets },
     { id: "stv", label: "STV", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
     { id: "time", label: "Time", filterType: "date", options: filterValues.time ?? [], accessor: (r) => r.scannedAt },
     { id: "plant", label: "Plant", filterType: "enum", options: filterValues.plant ?? [], accessor: (r) => r.plant },
@@ -352,10 +345,6 @@ const Reports = () => {
 
   const historyItems        = historyData?.items ?? [];
   const historyTotal        = historyData?.total ?? 0;
-  const historyTotalBoxes   = historyData?.totalBoxes ?? 0;
-  const historyTotalPallets = historyData?.totalPallets ?? 0;
-  const historyExtraCount   = historyData?.extraCount ?? 0;
-  const historyEmptyBoxCount = historyData?.emptyBoxCount ?? 0;
   const historyScanners     = historyData?.scanners ?? [];
   const historyHasMore      = historyOffset + historyItems.length < historyTotal;
 
@@ -567,24 +556,6 @@ const Reports = () => {
           icon={History}
           title="Scan History"
           description="Every individual scan event — who scanned what, when, and on which order."
-        />
-
-        {/* Summary tiles + filters — same "business report" treatment as Overall Stock:
-            squared tiles/controls (rounded-none), solid navy filter buttons, two separate
-            bordered cards with normal spacing (not merged into one box). */}
-        <StatsBar
-          className="rounded-none shadow-none border-gray-300 [&_.divide-x]:divide-gray-300"
-          stats={[
-            { icon: History, tone: "navy", value: historyTotal.toLocaleString(), label: "Total Events" },
-            { icon: Boxes, tone: "navy", value: historyTotalBoxes.toLocaleString(), label: "Total Boxes" },
-            {
-              icon: Layers, tone: "navy",
-              value: historyTotalPallets > 0 ? parseFloat(String(historyTotalPallets)).toFixed(2) : "—",
-              label: "Total Pallets",
-            },
-            { icon: AlertTriangle, tone: "amber", value: historyExtraCount.toLocaleString(), label: "Extra Events" },
-            { icon: PackageX, tone: "amber", value: historyEmptyBoxCount.toLocaleString(), label: "Empty Boxes" },
-          ]}
         />
 
         {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/

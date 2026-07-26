@@ -76,6 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       toast({
         title: "Login successful",
         description: `Welcome back to KM Finny, ${user.name || user.username}`,
+        variant: "success",
       });
     },
     onError: (error: Error) => {
@@ -102,6 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       toast({
         title: "Logged out successfully",
         description: "You have been logged out of KM Finny",
+        variant: "success",
       });
     },
     onError: (error: Error) => {

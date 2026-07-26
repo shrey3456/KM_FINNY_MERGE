@@ -111,6 +111,7 @@ const Login = ({ onLogin }: LoginProps) => {
       toast({
         title: "Login successful",
         description: `Welcome back, ${data.username}`,
+        variant: "success",
       });
       
       // Store the logged-in user info in localStorage
