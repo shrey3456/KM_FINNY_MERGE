@@ -22,6 +22,7 @@ export type ExchangeSourceRow = {
   itemName: string;
   plant: string;
   availableStock: number;
+  itemsPerPallet: number | null;
 };
 
 type ExchangeProductDialogProps = {
@@ -44,11 +45,17 @@ export default function ExchangeProductDialog({ source, onClose }: ExchangeProdu
   const [search, setSearch] = useState("");
   const [target, setTarget] = useState<Product | null>(null);
   const [removeQty, setRemoveQty] = useState("1");
+  const [removePallets, setRemovePallets] = useState("");
   const [addQty, setAddQty] = useState("1");
+  const [addPallets, setAddPallets] = useState("");
   const [reason, setReason] = useState("");
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [manualError, setManualError] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  const sourceIpp = source?.itemsPerPallet ?? 0;
+  const targetIpp = target?.itemsPerPallet ?? 0;
 
   // Reset local state every time a new source row is opened. Quantities default to the
   // source's full available stock (e.g. 20 in stock → defaults to 20, not 1) since exchanging
@@ -59,10 +66,49 @@ export default function ExchangeProductDialog({ source, onClose }: ExchangeProdu
     setSearch("");
     setTarget(null);
     setRemoveQty(String(source.availableStock || 1));
+    setRemovePallets(source.itemsPerPallet ? (source.availableStock / source.itemsPerPallet).toFixed(2) : "");
     setAddQty(String(source.availableStock || 1));
+    setAddPallets("");
     setReason("");
     setCameraError(null);
+    setManualError(null);
   }, [source]);
+
+  // Once a target is picked (or changed), recompute its Pallets field from the current Add Qty
+  // using ITS OWN items-per-pallet — the source and target are usually different products.
+  useEffect(() => {
+    if (target && target.itemsPerPallet) {
+      const n = Number(addQty);
+      setAddPallets(Number.isFinite(n) ? (n / target.itemsPerPallet).toFixed(2) : "");
+    } else {
+      setAddPallets("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target]);
+
+  // Qty and Pallets are two views of the same number — editing either recomputes the other via
+  // that product's items-per-pallet. Editing stays qty-only (disabled Pallets field) for a
+  // product with no configured pallet size.
+  const changeRemoveQty = (v: string) => {
+    setRemoveQty(v);
+    const n = Number(v);
+    if (sourceIpp > 0 && Number.isFinite(n)) setRemovePallets((n / sourceIpp).toFixed(2));
+  };
+  const changeRemovePallets = (v: string) => {
+    setRemovePallets(v);
+    const p = Number(v);
+    if (sourceIpp > 0 && Number.isFinite(p)) setRemoveQty(String(Math.round(p * sourceIpp)));
+  };
+  const changeAddQty = (v: string) => {
+    setAddQty(v);
+    const n = Number(v);
+    if (targetIpp > 0 && Number.isFinite(n)) setAddPallets((n / targetIpp).toFixed(2));
+  };
+  const changeAddPallets = (v: string) => {
+    setAddPallets(v);
+    const p = Number(v);
+    if (targetIpp > 0 && Number.isFinite(p)) setAddQty(String(Math.round(p * targetIpp)));
+  };
 
   const { data: allProducts = [] } = useQuery<Product[]>({
     queryKey: ["/api/products", "all"],
@@ -83,6 +129,29 @@ export default function ExchangeProductDialog({ source, onClose }: ExchangeProdu
       )
       .slice(0, 20);
   })();
+
+  // Lets a barcode gun (or a manually typed barcode) select the target in one motion: type/scan
+  // the code into the box, hit Enter, done — no need to find and click it in the results list.
+  // Falls back to the single narrowed-down search result if what's typed isn't an exact barcode
+  // (e.g. typing a name that only matches one product).
+  const submitManualBarcode = () => {
+    if (!source) return;
+    const code = search.trim().toLowerCase();
+    if (!code) return;
+    const exact = allProducts.find((p) => (p.barcode ?? "").toLowerCase() === code);
+    const match = exact ?? (searchResults.length === 1 ? searchResults[0] : null);
+    if (!match) {
+      setManualError(`No product found for "${search.trim()}"`);
+      return;
+    }
+    if (match.barcode.toLowerCase() === source.barcode.toLowerCase()) {
+      setManualError("That's the same product you're exchanging from — pick a different one.");
+      return;
+    }
+    setTarget(match);
+    setSearch("");
+    setManualError(null);
+  };
 
   // ── Camera scanning — same BarcodeScanner class the Scan page uses ─────────────────────────
   useEffect(() => {
@@ -199,9 +268,18 @@ export default function ExchangeProductDialog({ source, onClose }: ExchangeProdu
                 <div className="space-y-1">
                   <div className="relative">
                     <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                    <Input className="pl-8 h-9 text-sm" placeholder="Search by name or barcode…"
-                      value={search} onChange={(e) => setSearch(e.target.value)} />
+                    <Input
+                      className="pl-8 h-9 text-sm"
+                      placeholder="Search, or scan/type a barcode and press Enter…"
+                      value={search}
+                      onChange={(e) => { setSearch(e.target.value); setManualError(null); }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") { e.preventDefault(); submitManualBarcode(); }
+                      }}
+                      autoFocus
+                    />
                   </div>
+                  {manualError && <p className="text-xs text-red-600">{manualError}</p>}
                   {searchResults.length > 0 && (
                     <div className="max-h-40 overflow-y-auto rounded-md border divide-y">
                       {searchResults.map((p) => (
@@ -224,18 +302,40 @@ export default function ExchangeProductDialog({ source, onClose }: ExchangeProdu
               )}
             </div>
 
-            {/* Quantities — independent, don't have to match */}
+            {/* Quantities — independent, don't have to match. Qty and Pallets stay in sync with
+                each other via each product's own items-per-pallet; Pallets is disabled when a
+                product has no configured pallet size. */}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label className="text-xs text-gray-500">Remove from source</Label>
-                <Input type="number" min={1} value={removeQty} onChange={(e) => setRemoveQty(e.target.value)} />
+                <div className="grid grid-cols-2 gap-1.5">
+                  <Input type="number" min={1} value={removeQty} onChange={(e) => changeRemoveQty(e.target.value)} placeholder="Qty" />
+                  <Input
+                    type="number" min={0} step="0.01"
+                    value={removePallets}
+                    onChange={(e) => changeRemovePallets(e.target.value)}
+                    disabled={sourceIpp <= 0}
+                    placeholder="Pallets"
+                    title={sourceIpp <= 0 ? "No pallet size configured for this product" : undefined}
+                  />
+                </div>
                 {overStock && (
                   <p className="text-[11px] text-red-600">Only {source.availableStock} available.</p>
                 )}
               </div>
               <div className="space-y-1">
                 <Label className="text-xs text-gray-500">Add to target</Label>
-                <Input type="number" min={1} value={addQty} onChange={(e) => setAddQty(e.target.value)} />
+                <div className="grid grid-cols-2 gap-1.5">
+                  <Input type="number" min={1} value={addQty} onChange={(e) => changeAddQty(e.target.value)} placeholder="Qty" />
+                  <Input
+                    type="number" min={0} step="0.01"
+                    value={addPallets}
+                    onChange={(e) => changeAddPallets(e.target.value)}
+                    disabled={targetIpp <= 0}
+                    placeholder="Pallets"
+                    title={targetIpp <= 0 ? "No pallet size configured for this product" : undefined}
+                  />
+                </div>
               </div>
             </div>
 

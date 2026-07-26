@@ -4067,9 +4067,15 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
         </div>
 
-        {/* Empty Box dialog — manual entry (quantity + optional note), plus undo of prior entries */}
+        {/* Empty Box dialog — manual entry (quantity + optional note), plus undo of prior entries.
+            Radix portals this to document.body, outside the .kiosk-rotate-90 subtree (same as the
+            STV SelectContent above), so it doesn't inherit the page rotation on its own — it opens
+            upright and off-axis while everything else is rotated. It's centered (left/top 50% +
+            translate -50%/-50%), not corner-anchored like the Select dropdown, so a plain rotate-90
+            around its own (default, center) transform-origin lines it back up with the rotated
+            page — no origin utility needed here. */}
         <Dialog open={showEmptyBox} onOpenChange={(o) => { if (!o) setShowEmptyBox(false); }}>
-          <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osRotated ? "rotate-90" : ""}`}>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-amber-700">
                 <Package className="h-5 w-5" /> Log Empty Box

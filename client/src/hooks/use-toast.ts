@@ -7,8 +7,13 @@ import type {
 } from "@/components/ui/toast"
 
 const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 2000 // 2 seconds auto-dismiss (used for cleanup)
-const AUTO_DISMISS_DELAY = 2000 // 2 seconds auto-dismiss for notifications
+const TOAST_REMOVE_DELAY = 2000 // grace period after close before it's purged from state (cleanup only, not visible duration)
+
+// How long a toast stays on screen before auto-dismissing. Failure/destructive toasts get
+// longer (10s) since errors need more time to read and act on; everything else — success,
+// info, warning — gets 5s.
+const FAILURE_AUTO_DISMISS_DELAY = 10000
+const DEFAULT_AUTO_DISMISS_DELAY = 5000
 
 type ToasterToast = ToastProps & {
   id: string
@@ -140,8 +145,13 @@ function dispatch(action: Action) {
 
 type Toast = Omit<ToasterToast, "id">
 
+function getAutoDismissDelay(variant: ToasterToast["variant"]) {
+  return variant === "destructive" ? FAILURE_AUTO_DISMISS_DELAY : DEFAULT_AUTO_DISMISS_DELAY
+}
+
 function toast({ ...props }: Toast) {
   const id = genId()
+  const duration = props.duration ?? getAutoDismissDelay(props.variant)
 
   const update = (props: ToasterToast) =>
     dispatch({
@@ -150,19 +160,24 @@ function toast({ ...props }: Toast) {
     })
   const dismiss = () => dispatch({ type: "DISMISS_TOAST", toastId: id })
 
-  // Set up auto-dismiss timeout for notifications
-  setTimeout(() => {
+  // Auto-dismiss after `duration` — 10s for failure/destructive toasts, 5s for everything else
+  // (success, info, warning, default). Cleared if the toast is closed early (manual X, swipe).
+  const autoDismissTimeout = setTimeout(() => {
     dismiss();
-  }, AUTO_DISMISS_DELAY);
+  }, duration);
 
   dispatch({
     type: "ADD_TOAST",
     toast: {
       ...props,
       id,
+      duration,
       open: true,
       onOpenChange: (open) => {
-        if (!open) dismiss()
+        if (!open) {
+          clearTimeout(autoDismissTimeout)
+          dismiss()
+        }
       },
     },
   })
