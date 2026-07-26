@@ -77,7 +77,7 @@ export function ColumnFilterPopoverContent({
   onCancel: () => void;
 }) {
   const [tab, setTab] = useState<"values" | "condition">(
-    initial ? (initial.operator === "in" ? "values" : "condition") : (initialTab ?? "values"),
+    column.disableValues ? "condition" : initial ? (initial.operator === "in" ? "values" : "condition") : (initialTab ?? "values"),
   );
   const [selectedValues, setSelectedValues] = useState<string[]>(
     initial?.operator === "in" ? (initial.value as string[]) : [],
@@ -107,22 +107,24 @@ export function ColumnFilterPopoverContent({
 
   return (
     <div className="space-y-3">
-      <div className="flex divide-x divide-gray-300 rounded-md border border-gray-300 text-xs">
-        <button
-          type="button"
-          onClick={() => setTab("values")}
-          className={`flex-1 rounded-l-md px-2 py-1 font-medium ${tab === "values" ? "bg-[#001d6e] text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
-        >
-          Values
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab("condition")}
-          className={`flex-1 rounded-r-md px-2 py-1 font-medium ${tab === "condition" ? "bg-[#001d6e] text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
-        >
-          Condition
-        </button>
-      </div>
+      {!column.disableValues && (
+        <div className="flex divide-x divide-gray-300 rounded-md border border-gray-300 text-xs">
+          <button
+            type="button"
+            onClick={() => setTab("values")}
+            className={`flex-1 rounded-l-md px-2 py-1 font-medium ${tab === "values" ? "bg-[#001d6e] text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+          >
+            Values
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("condition")}
+            className={`flex-1 rounded-r-md px-2 py-1 font-medium ${tab === "condition" ? "bg-[#001d6e] text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+          >
+            Condition
+          </button>
+        </div>
+      )}
 
       {tab === "values" ? (
         <div className="space-y-1.5">

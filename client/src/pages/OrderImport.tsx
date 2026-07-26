@@ -26,7 +26,6 @@ import {
 } from "lucide-react";
 import EditCsvDialog from "@/components/modals/EditCsvDialog";
 import { PlantBadge } from "@/components/PlantBadge";
-import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -265,9 +264,15 @@ export default function OrderImport() {
   // Session id whose "Edit CSV" dialog is open — set from the Edit button on an Available/
   // Active row, cleared when the dialog closes.
   const [editSessionId, setEditSessionId] = useState<number | null>(null);
-  // Session whose Reports dialog is open — set from the Reports action on an Active/Completed/
-  // History row, cleared when the dialog closes. Replaces the old standalone Order Reports page.
-  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
+  // "Reports" now lives on its own page (/order-reports) instead of a dialog here — this just
+  // navigates there with every field that page's dialog needs already in the URL, so it opens
+  // straight to this session's report without a second fetch.
+  const openReports = (s: { id: number; csvFileName: string; plant: string; receivingSessionId?: number | null; partIndex?: number | null }) => {
+    const params = new URLSearchParams({ sessionId: String(s.id), csvFileName: s.csvFileName, plant: s.plant });
+    if (s.receivingSessionId) params.set("groupId", String(s.receivingSessionId));
+    if (s.partIndex != null) params.set("partIndex", String(s.partIndex));
+    navigate(`/order-reports?${params}`);
+  };
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
@@ -1583,7 +1588,7 @@ export default function OrderImport() {
                                   <Pencil className="mr-2 h-3.5 w-3.5 text-gray-500" /> Edit CSV
                                 </DropdownMenuItem>
                               )}
-                              <DropdownMenuItem onClick={() => setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
+                              <DropdownMenuItem onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
                                 <FileBarChart className="mr-2 h-3.5 w-3.5 text-gray-500" /> Reports
                               </DropdownMenuItem>
                               <DropdownMenuItem
@@ -1671,7 +1676,7 @@ export default function OrderImport() {
                             <CheckCircle2 className="h-3 w-3" /> Done
                           </span>
                           <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-none"
-                            onClick={() => setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
+                            onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
                             <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
                           </Button>
                         </div>
@@ -1797,7 +1802,7 @@ export default function OrderImport() {
                                   <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-none"
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      setReportsSession({
+                                      openReports({
                                         id: session.id, csvFileName: session.csvFileName, plant: session.plant,
                                         receivingSessionId: (session as any).receivingSessionId, partIndex: (session as any).partIndex,
                                       });
@@ -2145,7 +2150,6 @@ export default function OrderImport() {
       </AlertDialog>
 
       <EditCsvDialog sessionId={editSessionId} onClose={() => setEditSessionId(null)} />
-      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} />
     </main>
   );
 }

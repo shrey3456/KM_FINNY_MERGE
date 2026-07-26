@@ -6,7 +6,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   History, X, RefreshCw, FileDown, ChevronDown, ChevronLeft,
-  Loader2, Upload, Trash2, Plus, ListFilter,
+  Loader2, Upload, Trash2, Plus, ListFilter, Filter,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
@@ -130,6 +130,65 @@ function downloadPdf(filename: string, title: string, rows: Array<Array<string |
   doc.save(filename);
 }
 
+// A header filter icon for the "special" single-value filters (Type, Scanner) — mirrors
+// ColumnHeaderFilterButton's look/behavior (amber+filled when active, stops propagation so it
+// never also triggers the header's click-to-sort) but picks from a small fixed option list
+// instead of the generic Values/Condition engine, since these aren't real table columns with
+// their own accessor — they're server-side exact-match params.
+function SimpleFilterHeaderButton({
+  label, options, value, onChange, onClear,
+}: {
+  label: string;
+  options: { value: string; label: string }[];
+  value: string;
+  onChange: (value: string) => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const active = !!value;
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onClick={(e) => e.stopPropagation()}
+          className={`flex h-4 w-4 shrink-0 items-center justify-center normal-case ${active ? "text-amber-300" : "text-white/50 hover:text-white"}`}
+          aria-label={`Filter ${label}`}
+          title={`Filter ${label}`}
+        >
+          <Filter className="h-3 w-3" fill={active ? "currentColor" : "none"} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-52" onClick={(e) => e.stopPropagation()}>
+        <div className="space-y-2">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{label}</p>
+          <div className="space-y-0.5">
+            {options.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => { onChange(o.value); setOpen(false); }}
+                className={`block w-full rounded px-2 py-1.5 text-left text-xs ${value === o.value ? "bg-[#001d6e] text-white" : "text-gray-700 hover:bg-gray-50"}`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+          {active && (
+            <button
+              type="button"
+              onClick={() => { onClear(); setOpen(false); }}
+              className="text-[11px] text-red-500 hover:underline"
+            >
+              Clear filter
+            </button>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 const ALL_NOTION_COLUMNS = ["#", "Scanned By", "Code", "Item", "Barcode", "Order", "Plant", "Qty", "Pallets", "STV", "Type", "Time"] as const;
@@ -176,6 +235,7 @@ const Reports = () => {
     });
   };
   const removeFilter = (id: number) => setActiveFilters((prev) => prev.filter((f) => f.id !== id));
+  const clearSimpleFilter = (field: string) => setActiveFilters((prev) => prev.filter((f) => f.field !== field));
   const TYPE_OPTIONS = [
     { value: "regular", label: "Regular only" },
     { value: "extra", label: "Extra only" },
@@ -199,12 +259,18 @@ const Reports = () => {
     staleTime: 60_000,
   });
 
-  // Excel-style per-column filters — STV, Time, Plant. Scan History is server-paginated, so
-  // (unlike Overall Stock) these are sent to the server as a `filters` param rather than matched
-  // client-side — see applyScanHistoryColumnFilters on the backend. `accessor` is unused here for
-  // that same reason (no client-side matching happens); it's only present to satisfy
-  // FilterableColumn's shape.
+  // Excel-style per-column filters — Item, Barcode, Order, Qty, Pallets, STV, Time, Plant. Scan
+  // History is server-paginated, so (unlike Overall Stock) these are sent to the server as a
+  // `filters` param rather than matched client-side — see applyScanHistoryColumnFilters on the
+  // backend. `accessor` is unused here for that same reason (no client-side matching happens);
+  // it's only present to satisfy FilterableColumn's shape.
+  // Qty/Pallets skip the Values checklist (disableValues) — every distinct quantity that ever
+  // occurred isn't a useful list to pick from; typing a number/range is the only sensible way to
+  // filter these two, so only the Condition tab shows for them.
   const filterableColumns: FilterableColumn<ScanHistoryItem>[] = useMemo(() => [
+    { id: "barcode", label: "Barcode", filterType: "text", options: filterValues.barcode ?? [], accessor: (r) => r.barcode },
+    { id: "qty", label: "Qty", filterType: "number", options: [], disableValues: true, accessor: (r) => r.totalQty },
+    { id: "pallets", label: "Pallets", filterType: "number", options: [], disableValues: true, accessor: (r) => r.pallets },
     { id: "stv", label: "STV", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
     { id: "time", label: "Time", filterType: "date", options: filterValues.time ?? [], accessor: (r) => r.scannedAt },
     { id: "plant", label: "Plant", filterType: "enum", options: filterValues.plant ?? [], accessor: (r) => r.plant },
@@ -429,7 +495,7 @@ const Reports = () => {
     },
     {
       id: "item",
-      header: columnHeader("item", "Item"),
+      header: "Item",
       hideable: false,
       width: 220,
       accessor: (row) => row.itemName,
@@ -457,7 +523,7 @@ const Reports = () => {
     },
     {
       id: "order",
-      header: columnHeader("order", "Order"),
+      header: "Order",
       width: 140,
       accessor: (row) => row.orderName,
       cellClassName: "truncate",
@@ -506,7 +572,18 @@ const Reports = () => {
     },
     {
       id: "type",
-      header: "Type",
+      header: (
+        <span className="inline-flex items-center gap-1">
+          Type
+          <SimpleFilterHeaderButton
+            label="Type"
+            options={TYPE_OPTIONS}
+            value={historyType}
+            onChange={(v) => upsertSimpleFilter("type", v)}
+            onClear={() => clearSimpleFilter("type")}
+          />
+        </span>
+      ),
       width: 100,
       accessor: (row) => (row.isExchange ? "Exchange" : row.isEmptyBox ? "Empty Box" : row.isExtra ? "Extra" : "Regular"),
       render: (row) =>

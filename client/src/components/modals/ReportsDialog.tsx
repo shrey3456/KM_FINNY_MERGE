@@ -11,6 +11,7 @@ import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -341,7 +342,10 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
         </DialogContent>
       </Dialog>
 
-      {/* View-in-browser — same data as the downloads, rendered as a table instead of a file */}
+      {/* View-in-browser — same data as the downloads, rendered with the shared DataTable
+          (sortable/resizable columns) instead of a hand-rolled table. The report shape varies
+          per kind (part/group summary vs activity), so columns are built dynamically from the
+          header row rather than a fixed column list. */}
       <Dialog open={!!viewData} onOpenChange={(open) => { if (!open) setViewData(null); }}>
         <DialogContent className="max-w-5xl max-h-[85vh] flex flex-col">
           <DialogHeader>
@@ -350,32 +354,35 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
               {viewData ? `${Math.max(0, viewData.rows.length - 1)} row(s)` : ""}
             </DialogDescription>
           </DialogHeader>
-          <div className="overflow-auto rounded-md border flex-1 min-h-0">
-            <table className="w-max min-w-full border-collapse text-xs">
-              {viewData && viewData.rows.length > 0 && (
-                <thead>
-                  <tr className="bg-[#001d6e] sticky top-0">
-                    {viewData.rows[0].map((h, i) => (
-                      <th key={i} className="whitespace-nowrap border-r border-white/10 px-3 py-2 text-left font-semibold text-white">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-              )}
-              <tbody>
-                {viewData?.rows.slice(1).map((row, idx) => {
-                  const isEmpty = row.length === 0;
-                  const isSummaryRow = typeof row[0] === "string" && /^(TOTAL|CONSOLIDATED|Final Stock Added|No scans recorded)$/i.test(String(row[0]));
-                  if (isEmpty) return <tr key={idx}><td colSpan={viewData.rows[0]?.length || 1} className="h-2" /></tr>;
-                  return (
-                    <tr key={idx} className={`border-b hover:bg-gray-50 ${isSummaryRow ? "bg-slate-50 font-semibold" : idx % 2 === 0 ? "bg-white" : "bg-slate-50/40"}`}>
-                      {row.map((cell, ci) => (
-                        <td key={ci} className="whitespace-nowrap border-r px-3 py-1.5">{cell === "" || cell == null ? "—" : String(cell)}</td>
-                      ))}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="min-h-0 flex-1 overflow-auto">
+            {viewData && (
+              <DataTable<Row>
+                className="space-y-0"
+                containerClassName="rounded-none border"
+                columns={viewData.rows[0].map((h, i): DataTableColumn<Row> => ({
+                  id: String(i),
+                  header: String(h),
+                  width: 140,
+                  align: typeof viewData.rows[1]?.[i] === "number" ? "right" : "left",
+                  accessor: (row) => row[i],
+                  render: (row) => {
+                    const cell = row[i];
+                    return cell === "" || cell == null ? <span className="text-gray-300">—</span> : String(cell);
+                  },
+                }))}
+                data={viewData.rows.slice(1).filter((r) => r.length > 0)}
+                getRowId={(_row, index) => String(index)}
+                rowClassName={(row) =>
+                  typeof row[0] === "string" && /^(TOTAL|CONSOLIDATED|Final Stock Added|No scans recorded)$/i.test(String(row[0]))
+                    ? "bg-slate-50 font-semibold"
+                    : undefined
+                }
+                enableZebraStripes
+                enableColumnResizing
+                paginationMode="none"
+                headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+              />
+            )}
           </div>
           <DialogFooter className="mt-2">
             <Button variant="outline" onClick={() => setViewData(null)}>Close</Button>

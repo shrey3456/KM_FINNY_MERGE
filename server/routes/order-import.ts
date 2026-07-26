@@ -115,10 +115,17 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
       ? sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`
       : null;
 
+    // scanStatus only ever takes one of these three values (see shared/schema.ts) — validated
+    // against that fixed set rather than passed through raw.
+    const statusCondition = ['available', 'active', 'completed'].includes(String(req.query.status))
+      ? eq(orderImportSessions.scanStatus, String(req.query.status))
+      : null;
+
     const conditions = [
       eq(orderImportSessions.isDeleted, false),
       dateCondition,
       plantCondition,
+      statusCondition,
     ].filter(Boolean);
 
     const where = and(...(conditions as any[]));

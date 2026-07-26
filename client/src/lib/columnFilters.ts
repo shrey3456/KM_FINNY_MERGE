@@ -60,6 +60,10 @@ export type FilterableColumn<T = any> = {
   filterType: FilterType;
   options: FilterOption[];
   accessor: (row: T) => string | number | null | undefined;
+  /** Skip the Values checklist entirely — just the Condition form, no tab switcher. For
+   *  high-cardinality numeric columns (e.g. Qty) where "every value that ever occurred" isn't a
+   *  useful checklist; typing a number/range is the only sensible way to filter it. */
+  disableValues?: boolean;
 };
 
 export type FilterValue = string | [string, string] | string[];

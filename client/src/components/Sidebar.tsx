@@ -32,6 +32,7 @@ import {
   PackageCheck,
   ChevronsLeft,
   LayoutList,
+  PieChart,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -249,6 +250,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           // permission: "canAccessOrderManagement",
           // departments: ['billing'],
           pageKey: "order-import",
+        },
+        {
+          label: "Order Reports",
+          icon: <PieChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-reports",
+          pageKey: "order-reports",
         },
         {
           label: "Plant Management",
