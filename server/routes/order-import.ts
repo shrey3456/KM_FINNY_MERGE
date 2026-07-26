@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { db, pool } from '../db';
-import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
+import { orderImportSessions, orderImportItems, orderScanEvents, users } from '../../shared/schema';
 import { eq, desc, and, sql, inArray, asc } from 'drizzle-orm';
 import { addSseClient, removeSseClient, broadcastOrderImportUpdate } from '../lib/importEvents';
 import { seedAndActivateSession, seedSessionItems, sweepStaleCompletions, getPlantFilter, broadcastSessionDeleted, autoActivateNextInScope } from './order-scan';
@@ -161,6 +161,150 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
     res.json({ sessions, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch sessions' });
+  }
+});
+
+// GET /api/order-import/sessions/grouped?page=&pageSize=&date=&plant=&status=
+// Same underlying data as /sessions, rolled up one row per ORDER instead of one row per
+// CSV — every session sharing a receivingSessionId (the existing "same plant + same Order
+// Date" FIFO group used everywhere else: Scan Order, Master View, credits) collapses into a
+// single group with its parts nested inside. Order Reports lists orders this way so a
+// 3-CSV order shows as one row that expands to reveal all 3 parts, instead of 3 flat rows.
+router.get('/order-import/sessions/grouped', requireImportViewAccess, async (req, res) => {
+  try {
+    const page     = Math.max(1, parseInt(String(req.query.page     ?? '1')));
+    const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? '10'))));
+
+    const dateCondition = req.query.date
+      ? eq(orderImportSessions.orderDate, String(req.query.date))
+      : null;
+
+    const forcedPlant = (req as any).importViewPlant as string | null;
+    const plantCondition = forcedPlant
+      ? sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`
+      : req.query.plant
+      ? sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`
+      : null;
+
+    // Status is deliberately NOT applied here — it's checked after grouping, against the
+    // order's rolled-up status, so filtering individual sessions first couldn't split a
+    // group into an incomplete one (e.g. hiding a "completed" Part 1 while Part 2 is still
+    // "active" would make the order look like it only ever had one part).
+    const conditions = [
+      eq(orderImportSessions.isDeleted, false),
+      dateCondition,
+      plantCondition,
+    ].filter(Boolean);
+    const where = and(...(conditions as any[]));
+
+    const rawSessions = await db
+      .select({
+        id:             orderImportSessions.id,
+        plant:          orderImportSessions.plant,
+        csvFileName:    orderImportSessions.csvFileName,
+        rowCount:       orderImportSessions.rowCount,
+        importedByCode: orderImportSessions.importedByCode,
+        importedByName: users.name,
+        createdAt:      orderImportSessions.createdAt,
+        orderDate:      orderImportSessions.orderDate,
+        scanStatus:     orderImportSessions.scanStatus,
+        scanCompletedAt: orderImportSessions.scanCompletedAt,
+        receivingSessionId: orderImportSessions.receivingSessionId,
+        partIndex:      orderImportSessions.partIndex,
+      })
+      .from(orderImportSessions)
+      .leftJoin(users, eq(orderImportSessions.importedByCode, users.userCode))
+      .where(where)
+      .orderBy(asc(orderImportSessions.partIndex), asc(orderImportSessions.id));
+
+    // Scan Start — when the first item was actually scanned against this CSV, i.e.
+    // MIN(scanned_at) from its own scan events. Deliberately not scanActivatedAt: a part can
+    // sit "Loaded" for a while before anyone scans the first item, and that gap would make
+    // Scan Start misleadingly early.
+    const sessionIds = rawSessions.map((s) => s.id);
+    const firstScanRows = sessionIds.length
+      ? await db
+          .select({
+            sessionId: orderScanEvents.sessionId,
+            firstScannedAt: sql<string>`MIN(${orderScanEvents.scannedAt})`,
+          })
+          .from(orderScanEvents)
+          .where(inArray(orderScanEvents.sessionId, sessionIds))
+          .groupBy(orderScanEvents.sessionId)
+      : [];
+    const firstScanBySession = new Map(firstScanRows.map((r) => [r.sessionId, r.firstScannedAt]));
+
+    const sessions = rawSessions.map((s) => ({
+      ...s,
+      scanStartedAt: firstScanBySession.get(s.id) ?? null,
+    }));
+
+    // Group every session under its order (receivingSessionId — or its own id, for a
+    // standalone/first part that hasn't had a group id assigned yet).
+    const groupsByKey = new Map<number, typeof sessions>();
+    for (const s of sessions) {
+      const key = s.receivingSessionId ?? s.id;
+      const list = groupsByKey.get(key);
+      if (list) list.push(s); else groupsByKey.set(key, [s]);
+    }
+
+    let groups = Array.from(groupsByKey.entries()).map(([groupId, parts]) => {
+      // Order-level status, same three-state vocabulary as a single session's: "Loaded" the
+      // moment any part is being actively scanned, "Done" only once every part is, otherwise
+      // "Ready".
+      const anyActive = parts.some((p) => p.scanStatus === 'active');
+      const allCompleted = parts.every((p) => p.scanStatus === 'completed');
+      const groupStatus = anyActive ? 'active' : allCompleted ? 'completed' : 'available';
+      const latest = parts.reduce((a, b) => (new Date(b.createdAt as any) > new Date(a.createdAt as any) ? b : a));
+      const sortedParts = parts.slice().sort((a, b) => (a.partIndex ?? 0) - (b.partIndex ?? 0) || a.id - b.id);
+
+      // Order-level Scan Start — the earliest first-scan across every part, i.e. when
+      // scanning began on this order at all, regardless of which part it started with.
+      const starts = parts.map((p) => p.scanStartedAt).filter((v): v is string => !!v);
+      const scanStartedAt = starts.length
+        ? starts.reduce((min, cur) => (new Date(cur) < new Date(min) ? cur : min))
+        : null;
+
+      // Order-level Scan End — only set once EVERY part is completed, and is then the latest
+      // of their completion times (whichever part finished last is when the whole order was
+      // actually done). Left null while any part is still open, rather than showing an
+      // individual part's completion time as if the order were finished.
+      const scanCompletedAt = allCompleted
+        ? parts.reduce<string | null>((max, p) => {
+            if (!p.scanCompletedAt) return max;
+            if (!max) return p.scanCompletedAt as unknown as string;
+            return new Date(p.scanCompletedAt as any) > new Date(max) ? (p.scanCompletedAt as unknown as string) : max;
+          }, null)
+        : null;
+
+      return {
+        groupId,
+        plant: latest.plant,
+        orderDate: latest.orderDate,
+        totalParts: parts.length,
+        latestUploadedAt: latest.createdAt,
+        importedByName: latest.importedByName,
+        groupStatus,
+        scanStartedAt,
+        scanCompletedAt,
+        parts: sortedParts,
+      };
+    });
+
+    if (['available', 'active', 'completed'].includes(String(req.query.status))) {
+      groups = groups.filter((g) => g.groupStatus === req.query.status);
+    }
+
+    // Newest order first, same default ordering as the flat /sessions list.
+    groups.sort((a, b) => new Date(b.latestUploadedAt as any).getTime() - new Date(a.latestUploadedAt as any).getTime());
+
+    const total = groups.length;
+    const start = (page - 1) * pageSize;
+    const pageGroups = groups.slice(start, start + pageSize);
+
+    res.json({ groups: pageGroups, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch grouped sessions' });
   }
 });
 
