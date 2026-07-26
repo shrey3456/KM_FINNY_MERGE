@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
@@ -199,6 +199,32 @@ function playScanBeep() {
     customScanSoundBroken = true;
     playGeneratedBeep();
   }
+}
+
+// Closes/collapses something (a search box, an expanded row) as soon as a press lands outside
+// the returned ref's container — e.g. clicking anywhere else on the page hides an open search
+// bar instead of requiring an explicit cancel. `active` gates the listener so it's only attached
+// while there's actually something open to close. Uses `pointerdown` (fires before the target's
+// own `onClick`, and — unlike `mousedown` — fires consistently for touch taps too, not just a
+// mouse), so clicking/tapping the toggle button itself is seen as "inside" and only that
+// button's own handler runs — no double-toggle. Desktop/mobile both render their own markup for
+// the same tab (one hidden via CSS, not unmounted), so each needs its OWN ref/hook instance;
+// `offsetParent === null` (a reliable display:none check) skips the click-outside check
+// entirely for whichever instance's container isn't the one actually visible right now —
+// otherwise the hidden instance would see every press as "outside" and fire spuriously.
+function useOutsideClick(active: boolean, onOutside: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!active) return;
+    const handler = (e: PointerEvent) => {
+      const el = ref.current;
+      if (!el || el.offsetParent === null) return;
+      if (!el.contains(e.target as Node)) onOutside();
+    };
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
+  }, [active, onOutside]);
+  return ref;
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────
@@ -1414,6 +1440,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   useEffect(() => {
     if (osTab !== "master-view") setMvHistoryItem(null);
   }, [osTab]);
+  // Click anywhere outside the search box/expanded row and it closes on its own — no separate
+  // cancel needed. Desktop and mobile each render their own markup for this tab (one hidden via
+  // CSS, not unmounted), so each gets its own ref/hook instance — see useOutsideClick's comment.
+  const closeMvSearch = useCallback(() => { setMvSearchOpen(false); setMvSearch(""); }, []);
+  const closeMvExpand = useCallback(() => setMvHistoryItem(null), []);
+  const mvSearchDesktopRef = useOutsideClick(mvSearchOpen, closeMvSearch);
+  const mvSearchMobileRef = useOutsideClick(mvSearchOpen, closeMvSearch);
+  const mvExpandDesktopRef = useOutsideClick(mvHistoryItem !== null, closeMvExpand);
+  const mvExpandMobileRef = useOutsideClick(mvHistoryItem !== null, closeMvExpand);
+  // Same click-outside-closes treatment for the Scan tab's own search toggle.
+  const closeOsSearch = useCallback(() => { setOsSearchOpen(false); setOsSearch(""); }, []);
+  const osSearchDesktopRef = useOutsideClick(osSearchOpen, closeOsSearch);
+  const osSearchMobileRef = useOutsideClick(osSearchOpen, closeOsSearch);
   const [mvVoidTarget, setMvVoidTarget] = useState<MvHistoryEvent | null>(null);
   const [mvVoidReason, setMvVoidReason] = useState("");
   // Every session/part currently loaded into this Master View — the history drill-down spans
@@ -1704,6 +1743,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       isPartial: done > 0 && !isDone && !isExtraOnly,
     };
   };
+  // Aggregate "how many done" for the mobile blue header — mirrors osDoneCount's role for the
+  // Scan tab, just computed from Master View's own per-row state instead.
+  const mvDoneCount = allMvItems.filter((i) => !i._isEmptyBox && mvRowState(i).isDone).length;
 
   // Same totals-box filter the Scan tab uses, so clicking Done/Remaining/Extra narrows Master View
   // to those rows too. Declared after mvRowState because it calls it.
@@ -2823,24 +2865,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {/* Items list — matches Master View's mobile treatment: card list on a phone,
                 the detailed table only for the rotated/kiosk view. */}
             <div className="bg-white border border-gray-300 overflow-hidden">
-              {/* List header — plain white strip (no navy bar), with an icon-only Search toggle. */}
-              <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-gray-200 bg-white">
-                <span className="text-xs font-medium text-gray-500">{osDoneCount}/{osTotalCount} done</span>
-                <div className="ml-auto flex items-center gap-2">
-                  {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-gray-500" />}
-                  <button
-                    onClick={() => setOsSearchOpen((v) => { if (v) setOsSearch(""); return !v; })}
-                    title={osSearchOpen ? "Close search" : "Search items"}
-                    className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
-                      osSearchOpen
-                        ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
-                        : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
-                    }`}
-                  >
-                    {osSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
-                  </button>
-                </div>
-                {osSearchOpen && (
+              {/* List header — navy bar, same treatment as Master View's mobile header. Search
+                  replaces the row's content in place (rather than wrapping onto an extra line
+                  below), and there's no explicit close button — click outside to hide it. */}
+              <div ref={osSearchMobileRef} className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
+                {osSearchOpen ? (
                   <div className="relative w-full">
                     <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                     <Input
@@ -2856,6 +2885,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </button>
                     )}
                   </div>
+                ) : (
+                  <>
+                    <div className="text-white">
+                      <p className="text-sm font-bold leading-tight">{osTotalCount} items</p>
+                      <p className="text-xs text-blue-200">{osDoneCount} done</p>
+                    </div>
+                    <div className="ml-auto flex items-center gap-2">
+                      {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-white/70" />}
+                      <button
+                        onClick={() => setOsSearchOpen(true)}
+                        title="Search items"
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/25 bg-white/10 text-white hover:bg-white/20"
+                      >
+                        <Search className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -3016,65 +3062,60 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {/* ── Master View Tab (mobile) ── */}
             {osTab === "master-view" && (
               <div className="space-y-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">
-                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
-                  </span>
-                  <button
-                    onClick={() => setMvShowFiles((v) => !v)}
-                    title={mvShowFiles ? "Hide file names" : "Show file names"}
-                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 shadow-sm hover:bg-gray-50"
-                  >
-                    {mvShowFiles ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                  </button>
-                  {allMvItems.length > 0 && (
-                    <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
-                      <Download className="h-3.5 w-3.5" /> Export
-                    </button>
-                  )}
-                  {/* Single icon-only toggle — the search field appears inline right after it. */}
-                  <button
-                    onClick={() => setMvSearchOpen((v) => { if (v) setMvSearch(""); return !v; })}
-                    title={mvSearchOpen ? "Close search" : "Search items"}
-                    className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border shadow-sm ${
-                      mvSearchOpen
-                        ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
-                        : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
-                    }`}
-                  >
-                    {mvSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
-                  </button>
-                  {mvSearchOpen && (
-                    <div className="relative w-full">
-                      <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                      <Input
-                        value={mvSearch}
-                        onChange={(e) => setMvSearch(e.target.value)}
-                        placeholder="Search items…"
-                        className="h-9 rounded-md border-gray-200 bg-gray-50 pl-8 text-sm focus-visible:ring-1 focus-visible:ring-[#001d6e]/30 focus-visible:ring-offset-0"
-                        autoFocus
-                      />
-                      {mvSearch && (
-                        <button className="absolute right-2.5 top-2.5" onClick={() => setMvSearch("")}>
-                          <X className="h-4 w-4 text-gray-400" />
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
                 {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
                 {mvData && (
                   <div className="bg-white border border-gray-300 overflow-hidden">
-                    {osRotated && (
-                      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-300 bg-[#001d6e]">
-                        <p className="text-base font-bold text-white">Merged Items</p>
-                        <span className="text-sm text-blue-200">{mvVisible.length} of {allMvItems.length}</span>
-                      </div>
-                    )}
+                    {/* Navy header — same treatment as the Scan tab's mobile header. Search
+                        replaces the row's content in place (rather than wrapping onto an extra
+                        line below), and there's no explicit close button — click outside to
+                        hide it (see mvSearchMobileRef/useOutsideClick). */}
+                    <div ref={mvSearchMobileRef} className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
+                      {mvSearchOpen ? (
+                        <div className="relative w-full">
+                          <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                          <Input
+                            value={mvSearch}
+                            onChange={(e) => setMvSearch(e.target.value)}
+                            placeholder="Search items…"
+                            className="h-9 rounded-md border-gray-200 bg-gray-50 pl-8 text-sm focus-visible:ring-1 focus-visible:ring-[#001d6e]/30 focus-visible:ring-offset-0"
+                            autoFocus
+                          />
+                          {mvSearch && (
+                            <button className="absolute right-2.5 top-2.5" onClick={() => setMvSearch("")}>
+                              <X className="h-4 w-4 text-gray-400" />
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="text-white">
+                            <p className="text-xl font-bold leading-tight">Items</p>
+                            <p className="text-xs text-blue-200">{mvDoneCount} out of {allMvItems.length} done</p>
+                          </div>
+                          <div className="ml-auto flex items-center gap-2">
+                            {allMvItems.length > 0 && (
+                              <button
+                                onClick={downloadMvCsv}
+                                className="inline-flex items-center gap-1.5 rounded-md border border-white/25 bg-white/10 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/20"
+                              >
+                                <Download className="h-3.5 w-3.5" /> Export
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setMvSearchOpen(true)}
+                              title="Search items"
+                              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/25 bg-white/10 text-white hover:bg-white/20"
+                            >
+                              <Search className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
 
                     {osRotated ? (
                       <div className="overflow-x-auto">
-                        <table className="min-w-[640px] w-full border-collapse text-sm">
+                        <table className="min-w-[640px] w-full border-collapse text-base">
                           <thead>
                             <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
                               <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
@@ -3178,7 +3219,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 {isMvExpanded && (
                                   <tr>
                                     <td colSpan={mvShowFiles ? 7 : 6} className="p-0 border-b border-gray-200">
-                                      {mvHistoryPanel}
+                                      <div ref={mvExpandMobileRef}>{mvHistoryPanel}</div>
                                     </td>
                                   </tr>
                                 )}
@@ -3245,19 +3286,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   <button
                                     type="button"
                                     onClick={() => setMvHistoryItem((cur) => (cur && mvRowKey(cur) === mvRowKey(item) ? null : item))}
-                                    className="text-left text-[15px] font-semibold leading-snug text-gray-900 underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
+                                    className="text-left text-base font-semibold leading-snug text-gray-900 underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
                                   >
                                     {item.itemName ?? "—"}
                                   </button>
-                                  <p className="mt-0.5 font-mono text-xs text-gray-400">
+                                  <p className="mt-0.5 font-mono text-sm text-gray-400">
                                     {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                                   </p>
                                   {mvShowFiles && item._files.length > 0 && (
-                                    <p className="mt-0.5 text-[11px] text-gray-400" title={item._files.map(stripCsvExt).join(", ")}>
+                                    <p className="mt-0.5 text-xs text-gray-400" title={item._files.map(stripCsvExt).join(", ")}>
                                       {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
                                     </p>
                                   )}
-                                  <p className="mt-1.5 text-sm leading-snug">
+                                  <p className="mt-1.5 text-base leading-snug">
                                     <span className="font-bold text-gray-900">{done}</span>
                                     <span className="text-gray-400">/{exp}</span>{" "}
                                     <span className="text-gray-400">({expPlt} plt)</span>
@@ -3287,7 +3328,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 </span>
                               </div>
                               {isMvExpanded && (
-                                <div className="border-b border-gray-100">{mvHistoryPanelMobile}</div>
+                                <div ref={mvExpandMobileRef} className="border-b border-gray-100">{mvHistoryPanelMobile}</div>
                               )}
                             </Fragment>
                           );
@@ -3801,18 +3842,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {osTab === "scan" && (
                 <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
                   {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline. */}
-                  <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                  <div ref={osSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
                     <span className="text-xs font-medium text-gray-500">{osDoneCount} / {osTotalCount} done</span>
+                    {/* No explicit close — clicking outside (osSearchDesktopRef) hides it. */}
                     <button
-                      onClick={() => setOsSearchOpen((v) => { if (v) setOsSearch(""); return !v; })}
-                      title={osSearchOpen ? "Close search" : "Search items"}
+                      onClick={() => setOsSearchOpen(true)}
+                      title="Search items"
                       className={`ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
                         osSearchOpen
                           ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
                           : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
                       }`}
                     >
-                      {osSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
+                      <Search className="h-3.5 w-3.5" />
                     </button>
                     {osSearchOpen && (
                       <div className="relative w-full sm:w-64">
@@ -3866,51 +3908,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
               {osTab === "master-view" && (
                 <div className="space-y-4">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <span className="border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
-                      {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
-                    </span>
-                    <button
-                      onClick={() => setMvShowFiles((v) => !v)}
-                      title={mvShowFiles ? "Hide file names" : "Show file names"}
-                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 shadow-sm hover:bg-gray-50"
-                    >
-                      {mvShowFiles ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                    </button>
-                    <button
-                      onClick={() => setMvSearchOpen((v) => { if (v) setMvSearch(""); return !v; })}
-                      title={mvSearchOpen ? "Close search" : "Search items"}
-                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 shadow-sm hover:bg-gray-50"
-                    >
-                      {mvSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
-                    </button>
-                    {mvSearchOpen && (
-                      <div className="relative w-full sm:w-64">
-                        <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
-                        <input
-                          value={mvSearch}
-                          onChange={(e) => setMvSearch(e.target.value)}
-                          placeholder="Search items…"
-                          autoFocus
-                          className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
-                        />
-                        {mvSearch && (
-                          <button
-                            type="button"
-                            onClick={() => setMvSearch("")}
-                            className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
                   {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
                   {mvData && (
-                    <>
+                    <div>
                       {mvShowFiles && (
-                      <div className="flex flex-wrap gap-2">
+                      <div className="flex flex-wrap gap-2 mb-3">
                         {mvData.files.map((f) => (
                           <span key={f.sessionId} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600">
                             <Layers className="h-3 w-3 text-gray-400" />
@@ -3919,9 +3921,54 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         ))}
                       </div>
                       )}
-                      {/* Headerless table card — the "Items" header is gone; search is opened via
-                          the icon toggle in the filter row above and appears inline there. */}
+                      {/* Same card+header treatment as the Scan tab: an item-count on the left,
+                          border-b separating the header from the table, instead of a floating
+                          row above a separately-bordered card. */}
                       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                        <div ref={mvSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                          <span className="text-xs font-medium text-gray-500">{mvVisible.length} of {allMvItems.length} items</span>
+                          <div className="ml-auto flex items-center gap-2">
+                            {allMvItems.length > 0 && (
+                              <button
+                                onClick={downloadMvCsv}
+                                className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                              >
+                                <Download className="h-3.5 w-3.5" /> Export
+                              </button>
+                            )}
+                            {/* No explicit close — clicking outside (mvSearchDesktopRef) hides it. */}
+                            <button
+                              onClick={() => setMvSearchOpen(true)}
+                              title="Search items"
+                              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border shadow-sm ${
+                                mvSearchOpen ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                              }`}
+                            >
+                              <Search className="h-3.5 w-3.5" />
+                            </button>
+                            {mvSearchOpen && (
+                              <div className="relative w-full sm:w-64">
+                                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                                <input
+                                  value={mvSearch}
+                                  onChange={(e) => setMvSearch(e.target.value)}
+                                  placeholder="Search items…"
+                                  autoFocus
+                                  className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                                />
+                                {mvSearch && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setMvSearch("")}
+                                    className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
                         <DataTable<MvMergedItem>
                           className="space-y-0"
                           containerClassName="rounded-none border-0"
@@ -3940,7 +3987,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               : isPartial ? "bg-amber-50/30"
                               : undefined;
                           }}
-                          renderExpandedRow={() => mvHistoryPanel}
+                          renderExpandedRow={() => <div ref={mvExpandDesktopRef}>{mvHistoryPanel}</div>}
                           isRowExpandable={(item) => !item._isEmptyBox && !!item.barcode}
                           expandedRowId={mvHistoryItem ? mvRowKey(mvHistoryItem) : null}
                           sortMode="client"
@@ -3954,7 +4001,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                         />
                       </div>
-                    </>
+                    </div>
                   )}
                   {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
                 </div>
