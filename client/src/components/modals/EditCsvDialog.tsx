@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { hasPageWriteAccess } from "@/lib/permissions";
-import { AlertCircle, Loader2, Plus, Save, Trash2 } from "lucide-react";
+import { AlertCircle, Loader2, Pencil, Plus, Save, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -128,11 +128,29 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
 
   return (
     <Dialog open={sessionId != null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-5xl max-h-[88vh] overflow-y-auto rounded-2xl">
         <DialogHeader>
-          <DialogTitle className="text-[#001d6e]">
-            {session ? `Edit — ${session.plant} · ${session.csvFileName}` : "Edit CSV"}
-          </DialogTitle>
+          <div className="flex items-center justify-between gap-3 pr-10">
+            <DialogTitle className="flex items-center gap-2 text-xl text-[#001d6e]">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e] text-white">
+                <Pencil className="h-4 w-4" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-base font-bold leading-tight">Edit CSV</span>
+                {session && (
+                  <span className="block truncate text-xs font-normal text-gray-500">
+                    {session.plant} · {session.csvFileName}
+                  </span>
+                )}
+              </span>
+            </DialogTitle>
+            {/* Add Row lives up here next to the close button, so it doesn't take its own row. */}
+            {canWrite && !itemsQuery.isLoading && (
+              <Button variant="outline" size="sm" className="shrink-0 rounded-lg" onClick={addRow}>
+                <Plus className="h-4 w-4 mr-1" /> Add Row
+              </Button>
+            )}
+          </div>
         </DialogHeader>
 
         {!canWrite && (
@@ -150,21 +168,28 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
           </div>
         ) : (
           <>
-            {canWrite && (
-              <div className="flex justify-end">
-                <Button variant="outline" size="sm" onClick={addRow}>
-                  <Plus className="h-4 w-4 mr-1" /> Add Row
-                </Button>
-              </div>
-            )}
-            <div className="overflow-x-auto rounded-md border">
-              <table className="w-max min-w-full border-collapse text-xs">
+            <div className="overflow-x-auto rounded-xl border border-gray-200 shadow-sm">
+              {/* Fixed column widths: barcode/SAP/qty/pallets stay compact so Item Name gets the
+                  remaining space and is never truncated. table-fixed makes the widths authoritative. */}
+              <table className="w-full min-w-[720px] table-fixed border-collapse text-xs">
+                <colgroup>
+                  <col className="w-10" />
+                  <col className="w-36" />{/* Barcode — enough for a 13-digit code, no more */}
+                  <col />{/* Item Name — takes all remaining width */}
+                  <col className="w-24" />{/* SAP */}
+                  <col className="w-16" />{/* Qty */}
+                  <col className="w-16" />{/* Pallets */}
+                  <col className="w-20" />{/* Scanned */}
+                  <col className="w-12" />{/* remove */}
+                </colgroup>
                 <thead>
-                  <tr>
-                    {["#", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "Scanned", ""].map((h) => (
+                  <tr className="bg-[#001d6e]">
+                    {["#", "Barcode", "Item Name", "SAP", "Qty", "Plt", "Scanned", ""].map((h, i) => (
                       <th
-                        key={h}
-                        className="sticky top-0 whitespace-nowrap border-b border-r bg-slate-100 px-3 py-2 text-left font-semibold text-[#001d6e]"
+                        key={h || i}
+                        className={`sticky top-0 z-10 whitespace-nowrap border-r border-[#1a3a9c] bg-[#001d6e] px-2.5 py-2 font-semibold uppercase tracking-wide text-white ${
+                          i >= 4 && i <= 6 ? "text-right" : "text-left"
+                        }`}
                       >
                         {h}
                       </th>
@@ -173,65 +198,65 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
                 </thead>
                 <tbody>
                   {rows.map((row, idx) => (
-                    <tr key={row.key} className={`border-b ${idx % 2 === 1 ? "bg-gray-50" : "bg-white"}`}>
-                      <td className="border-r px-3 py-1.5 text-gray-400">{idx + 1}</td>
-                      <td className="border-r px-2 py-1">
+                    <tr key={row.key} className={`border-b border-gray-100 transition-colors hover:bg-[#001d6e]/[0.03] ${idx % 2 === 1 ? "bg-slate-50/60" : "bg-white"}`}>
+                      <td className="border-r border-gray-100 px-2.5 py-1.5 text-center text-gray-400 tabular-nums">{idx + 1}</td>
+                      <td className="border-r border-gray-100 px-1.5 py-1">
                         <Input
-                          className="h-7 text-xs"
+                          className="h-7 rounded-md font-mono text-xs"
                           value={row.barcode}
                           disabled={!canWrite}
                           onChange={(e) => updateRow(row.key, "barcode", e.target.value)}
                         />
                       </td>
-                      <td className="border-r px-2 py-1">
+                      <td className="border-r border-gray-100 px-1.5 py-1">
                         <Input
-                          className="h-7 text-xs min-w-[160px]"
+                          className="h-7 w-full rounded-md text-xs"
                           value={row.itemName}
                           disabled={!canWrite}
                           onChange={(e) => updateRow(row.key, "itemName", e.target.value)}
                         />
                       </td>
-                      <td className="border-r px-2 py-1">
+                      <td className="border-r border-gray-100 px-1.5 py-1">
                         <Input
-                          className="h-7 text-xs"
+                          className="h-7 rounded-md font-mono text-xs"
                           value={row.sapCode}
                           disabled={!canWrite}
                           onChange={(e) => updateRow(row.key, "sapCode", e.target.value)}
                         />
                       </td>
-                      <td className="border-r px-2 py-1">
+                      <td className="border-r border-gray-100 px-1.5 py-1">
                         <Input
-                          className="h-7 text-xs w-20 text-right"
+                          className="h-7 rounded-md text-right text-xs tabular-nums"
                           type="number"
                           value={row.quantity}
                           disabled={!canWrite}
                           onChange={(e) => updateRow(row.key, "quantity", e.target.value)}
                         />
                       </td>
-                      <td className="border-r px-2 py-1">
+                      <td className="border-r border-gray-100 px-1.5 py-1">
                         <Input
-                          className="h-7 text-xs w-20 text-right"
+                          className="h-7 rounded-md text-right text-xs tabular-nums"
                           type="number"
                           value={row.expectedPallets}
                           disabled={!canWrite}
                           onChange={(e) => updateRow(row.key, "expectedPallets", e.target.value)}
                         />
                       </td>
-                      <td className="border-r px-3 py-1.5 text-right">
+                      <td className="border-r border-gray-100 px-2 py-1.5 text-right">
                         {row.scannedQty > 0 ? (
                           <Badge variant="outline" className="text-emerald-700 border-emerald-200 bg-emerald-50">
-                            {row.scannedQty} done
+                            {row.scannedQty}
                           </Badge>
                         ) : (
                           <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-2 py-1 text-right">
+                      <td className="px-1 py-1 text-center">
                         {canWrite && (
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="h-7 w-7 p-0 text-red-500 hover:text-red-700"
+                            className="h-7 w-7 rounded-md p-0 text-red-500 hover:bg-red-50 hover:text-red-700"
                             onClick={() => removeRow(row)}
                             title={row.scannedQty > 0 ? "Already scanned — void the scan before removing" : "Remove"}
                           >
@@ -247,10 +272,10 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
 
             {canWrite && (
               <div className="flex justify-end gap-2 pt-1">
-                <Button variant="outline" onClick={onClose} disabled={saveMutation.isPending}>
+                <Button variant="outline" className="rounded-lg" onClick={onClose} disabled={saveMutation.isPending}>
                   Cancel
                 </Button>
-                <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || rows.length === 0}>
+                <Button className="rounded-lg bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || rows.length === 0}>
                   {saveMutation.isPending ? (
                     <Loader2 className="h-4 w-4 mr-1 animate-spin" />
                   ) : (

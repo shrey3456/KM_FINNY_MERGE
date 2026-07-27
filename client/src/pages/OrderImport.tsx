@@ -1171,14 +1171,14 @@ export default function OrderImport() {
                 <Label className="text-xs font-medium text-gray-600">Plant</Label>
                 {plantOptions.length > 0 ? (
                   <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
-                    <SelectTrigger className="h-10 text-sm rounded-none"><SelectValue placeholder="Select…" /></SelectTrigger>
+                    <SelectTrigger className="h-10 text-sm rounded-lg"><SelectValue placeholder="Select…" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="_none_">— Select —</SelectItem>
                       {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 ) : (
-                  <Input className="h-10 text-sm rounded-none" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
+                  <Input className="h-10 text-sm rounded-lg" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
                 )}
               </div>
               {/* Date */}
@@ -1190,7 +1190,7 @@ export default function OrderImport() {
                     sets orderDate via state and so isn't affected by this min. The
                     pastDateCheckQuery/isPastDateBlocked warning below stays as a second line of
                     defense against a manually typed-in past date slipping past the picker. */}
-                <Input type="date" min={todayStr} className={`h-10 text-sm w-full rounded-none ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                <Input type="date" min={todayStr} className={`h-10 text-sm w-full rounded-lg ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 {isPastDateBlocked && (
                   <p className="text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
                 )}
@@ -1201,16 +1201,16 @@ export default function OrderImport() {
                   CSV File{selectedFiles.length === 1 && <span className="text-green-600 font-medium"> · {selectedFiles[0].name}</span>}
                   {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
                 </Label>
-                <Input ref={fileRef} type="file" accept=".csv" multiple className="h-10 text-sm rounded-none"
+                <Input ref={fileRef} type="file" accept=".csv" multiple className="h-10 text-sm rounded-lg"
                   onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
               {/* Actions */}
               <div className="col-span-3 flex gap-2">
-                <Button variant="outline" className="h-10 shrink-0 rounded-none" onClick={clearForm}
+                <Button variant="outline" className="h-10 shrink-0 rounded-lg" onClick={clearForm}
                   disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
                 </Button>
-                <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-none" onClick={handleImportClick}
+                <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-lg" onClick={handleImportClick}
                   disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
                   title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
@@ -1227,7 +1227,7 @@ export default function OrderImport() {
                   {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
                 </Label>
                 <Input ref={fileRef} type="file" accept=".csv" multiple
-                  className="h-11 text-sm file:mr-3 file:py-1 file:px-3 file:border-0 file:text-xs file:font-medium file:bg-[#001d6e]/10 file:text-[#001d6e] rounded-none"
+                  className="h-11 text-sm file:mr-3 file:py-1 file:px-3 file:border-0 file:text-xs file:font-medium file:bg-[#001d6e]/10 file:text-[#001d6e] rounded-lg"
                   onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
               {/* Plant + Date on one row — Date gets a fixed minimum wide enough for the native
@@ -1238,30 +1238,30 @@ export default function OrderImport() {
                   <Label className="text-xs font-medium text-gray-600">Plant</Label>
                   {plantOptions.length > 0 ? (
                     <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
-                      <SelectTrigger className="h-11 text-sm rounded-none"><SelectValue placeholder="Select…" /></SelectTrigger>
+                      <SelectTrigger className="h-11 text-sm rounded-lg"><SelectValue placeholder="Select…" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="_none_">— Select —</SelectItem>
                         {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   ) : (
-                    <Input className="h-11 text-sm rounded-none" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
+                    <Input className="h-11 text-sm rounded-lg" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
                   )}
                 </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs font-medium text-gray-600">Order Date</Label>
-                  <Input type="date" min={todayStr} className={`h-11 w-full text-sm px-2 rounded-none ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                  <Input type="date" min={todayStr} className={`h-11 w-full text-sm px-2 rounded-lg ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 </div>
                 {isPastDateBlocked && (
                   <p className="col-span-2 text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
                 )}
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" className="h-11 px-3.5 shrink-0 rounded-none" onClick={clearForm}
+                <Button variant="outline" className="h-11 px-3.5 shrink-0 rounded-lg" onClick={clearForm}
                   disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
                 </Button>
-                <Button className="h-11 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-none" onClick={handleImportClick}
+                <Button className="h-11 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-lg" onClick={handleImportClick}
                   disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
                   title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
@@ -1369,20 +1369,20 @@ export default function OrderImport() {
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
                 <Input type="date" value={scanDate} onChange={(e) => { setScanDate(e.target.value); setScanExpandedId(null); }}
-                  className="h-8 w-[140px] text-xs rounded-none" />
+                  className="h-8 w-[140px] text-xs rounded-lg" />
                 {scanDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-none"
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-lg"
                     onClick={() => { setScanDate(todayStr); setScanExpandedId(null); }}>
                     Today
                   </Button>
                 )}
                 {scanDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-none"
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-lg"
                     onClick={() => { setScanDate(""); setScanExpandedId(null); }}>
                     <X className="h-3.5 w-3.5" />
                   </Button>
                 )}
-                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-none"
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-lg"
                   onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
                   <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
@@ -1447,7 +1447,7 @@ export default function OrderImport() {
                                 {s.rowCount}
                               </span>
                               <Button size="sm"
-                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-none"
+                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-lg"
                                 disabled={loadForScanMutation.isPending || plantBusy}
                                 title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
                                 onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
@@ -1458,14 +1458,14 @@ export default function OrderImport() {
                               </Button>
                               {canViewCsvEdit && (
                                 <Button size="sm" variant="ghost"
-                                  className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e] rounded-none"
+                                  className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e] rounded-lg"
                                   title="Edit CSV"
                                   onClick={(e) => { e.stopPropagation(); setEditSessionId(s.id); }}>
                                   <Pencil className="h-3.5 w-3.5" />
                                 </Button>
                               )}
                               <Button size="sm" variant="ghost"
-                                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30 rounded-none"
+                                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30 rounded-lg"
                                 disabled={!canDeleteOrderImport || deletePreviewMutation.isPending}
                                 title={!canDeleteOrderImport ? "Deleting a CSV is restricted to Admin" : undefined}
                                 onClick={(e) => { e.stopPropagation(); setDeleteTargetInfo({ plant: s.plant, orderDate: s.orderDate || todayStr }); deletePreviewMutation.mutate(s.id); }}>
@@ -1482,10 +1482,10 @@ export default function OrderImport() {
                               <div className="relative flex-1">
                                 <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                                 <Input value={scanItemSearch} onChange={(e) => setScanItemSearch(e.target.value)}
-                                  placeholder="Search rows…" className="pl-8 h-9 text-sm rounded-none" />
+                                  placeholder="Search rows…" className="pl-8 h-9 text-sm rounded-lg" />
                               </div>
                               {scanItemSearch && (
-                                <Button size="sm" variant="ghost" className="h-9 w-9 p-0 rounded-none"
+                                <Button size="sm" variant="ghost" className="h-9 w-9 p-0 rounded-lg"
                                   onClick={() => setScanItemSearch("")}>
                                   <X className="h-3.5 w-3.5" />
                                 </Button>
@@ -1572,17 +1572,17 @@ export default function OrderImport() {
                         {/* One primary action + a kebab menu for the rest — same on mobile and
                             desktop, avoids the old 4-button pileup that wrapped unevenly. */}
                         <div className="flex shrink-0 items-center gap-1.5">
-                          <Button size="sm" className="h-8 px-2.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-none"
+                          <Button size="sm" className="h-8 px-2.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-lg"
                             onClick={() => navigate("/scan")}>
                             <ScanLine className="sm:mr-1.5 h-3.5 w-3.5" /> <span className="hidden sm:inline">View Scan</span>
                           </Button>
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
-                              <Button size="sm" variant="outline" className="h-8 w-8 p-0 text-gray-500 border-amber-200 hover:bg-amber-100 rounded-none">
+                              <Button size="sm" variant="outline" className="h-8 w-8 p-0 text-gray-500 border-amber-200 hover:bg-amber-100 rounded-lg">
                                 <MoreVertical className="h-4 w-4" />
                               </Button>
                             </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" className="w-44 rounded-none">
+                            <DropdownMenuContent align="end" className="w-44 rounded-lg">
                               {canViewCsvEdit && (
                                 <DropdownMenuItem onClick={() => setEditSessionId(s.id)}>
                                   <Pencil className="mr-2 h-3.5 w-3.5 text-gray-500" /> Edit CSV
@@ -1620,20 +1620,20 @@ export default function OrderImport() {
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
                 <Input type="date" value={completedDate} onChange={(e) => setCompletedDate(e.target.value)}
-                  className="h-8 w-[140px] text-xs rounded-none" />
+                  className="h-8 w-[140px] text-xs rounded-lg" />
                 {completedDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-none"
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-lg"
                     onClick={() => setCompletedDate(todayStr)}>
                     Today
                   </Button>
                 )}
                 {completedDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-none"
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-lg"
                     onClick={() => setCompletedDate("")}>
                     <X className="h-3.5 w-3.5" />
                   </Button>
                 )}
-                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-none"
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-lg"
                   onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
                   <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
@@ -1675,7 +1675,7 @@ export default function OrderImport() {
                           <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
                             <CheckCircle2 className="h-3 w-3" /> Done
                           </span>
-                          <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-none"
+                          <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-lg"
                             onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
                             <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
                           </Button>
@@ -1694,21 +1694,21 @@ export default function OrderImport() {
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
                 <Input type="date" value={filterDate} onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
-                  className="h-8 w-[140px] text-xs rounded-none" />
+                  className="h-8 w-[140px] text-xs rounded-lg" />
                 {filterDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-none"
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-lg"
                     onClick={() => { setFilterDate(todayStr); setCurrentPage(1); }}>
                     Today
                   </Button>
                 )}
                 {filterDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-none"
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-lg"
                     onClick={() => { setFilterDate(""); setCurrentPage(1); }}>
                     <X className="h-3.5 w-3.5" />
                   </Button>
                 )}
                 <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1); }}>
-                  <SelectTrigger className="h-8 w-[65px] text-xs rounded-none">
+                  <SelectTrigger className="h-8 w-[65px] text-xs rounded-lg">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1779,7 +1779,7 @@ export default function OrderImport() {
                                 </div>
                               </div>
                               <div className="flex shrink-0 items-center gap-1 ml-1">
-                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-none">
+                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-lg">
                                   {session.rowCount}
                                 </Badge>
                                 {(session as any).scanStatus === "active" && (
@@ -1799,7 +1799,7 @@ export default function OrderImport() {
                                   </span>
                                 )}
                                 {((session as any).scanStatus === "completed" || (session as any).scanStatus === "active") && (
-                                  <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-none"
+                                  <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-lg"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       openReports({
@@ -1819,10 +1819,10 @@ export default function OrderImport() {
                                 <div className="relative flex-1">
                                   <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                                   <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)}
-                                    placeholder="Search rows…" className="pl-8 h-9 text-sm rounded-none" />
+                                    placeholder="Search rows…" className="pl-8 h-9 text-sm rounded-lg" />
                                 </div>
                                 {itemSearch && (
-                                  <Button size="sm" variant="ghost" className="h-9 w-9 p-0 rounded-none"
+                                  <Button size="sm" variant="ghost" className="h-9 w-9 p-0 rounded-lg"
                                     onClick={() => setItemSearch("")}>
                                     <X className="h-3.5 w-3.5" />
                                   </Button>
@@ -1876,7 +1876,7 @@ export default function OrderImport() {
                         Page {safePage} of {totalPages} · {totalSessions} sessions
                       </span>
                       <div className="flex items-center gap-1">
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-none"
+                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-lg"
                           disabled={safePage <= 1} onClick={() => setCurrentPage(safePage - 1)}>
                           ← Prev
                         </Button>
@@ -1892,13 +1892,13 @@ export default function OrderImport() {
                             ) : (
                               <Button key={p} size="sm"
                                 variant={p === safePage ? "default" : "outline"}
-                                className={`h-8 w-8 p-0 text-xs rounded-none ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
+                                className={`h-8 w-8 p-0 text-xs rounded-lg ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
                                 onClick={() => setCurrentPage(p as number)}>
                                 {p}
                               </Button>
                             )
                           )}
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-none"
+                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-lg"
                           disabled={safePage >= totalPages} onClick={() => setCurrentPage(safePage + 1)}>
                           Next →
                         </Button>
@@ -1918,7 +1918,7 @@ export default function OrderImport() {
         open={showMappingDialog}
         onOpenChange={(open) => { if (!open) { setShowMappingDialog(false); } }}
       >
-        <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col rounded-none">
+        <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col rounded-lg">
           <DialogHeader>
             <DialogTitle>Map CSV Columns</DialogTitle>
             <DialogDescription>
@@ -1959,7 +1959,7 @@ export default function OrderImport() {
                           value={mapping[field.key] || SKIP}
                           onValueChange={(v) => setMapping((m) => ({ ...m, [field.key]: v }))}
                         >
-                          <SelectTrigger className={`sm:flex-1 h-9 text-sm rounded-none ${!matched ? "border-dashed text-gray-400" : ""}`}>
+                          <SelectTrigger className={`sm:flex-1 h-9 text-sm rounded-lg ${!matched ? "border-dashed text-gray-400" : ""}`}>
                             <SelectValue placeholder="— skip this field —" />
                           </SelectTrigger>
                           <SelectContent>
@@ -2021,7 +2021,7 @@ export default function OrderImport() {
             {uploadProgress && (
               <span className="mr-auto self-center text-xs text-gray-500">File {uploadProgress.current} of {uploadProgress.total}</span>
             )}
-            <Button variant="outline" className="rounded-none"
+            <Button variant="outline" className="rounded-lg"
               onClick={() => {
                 // Cancel aborts the whole queue.
                 setShowMappingDialog(false);
@@ -2034,7 +2034,7 @@ export default function OrderImport() {
             </Button>
             <Button onClick={handleConfirmImport}
               disabled={isBatchImporting || !csvData}
-              className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-none">
+              className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-lg">
               {isBatchImporting ? (
                 <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>
               ) : (
@@ -2047,7 +2047,7 @@ export default function OrderImport() {
 
       {/* ── Deactivate confirmation ── */}
       <AlertDialog open={deactivateTarget !== null} onOpenChange={(open) => { if (!open) setDeactivateTarget(null); }}>
-        <AlertDialogContent className="rounded-none">
+        <AlertDialogContent className="rounded-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>Deactivate this session?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -2067,7 +2067,7 @@ export default function OrderImport() {
 
       {/* ── Complete confirmation ── */}
       <AlertDialog open={completeTarget !== null} onOpenChange={(open) => { if (!open) setCompleteTarget(null); }}>
-        <AlertDialogContent className="rounded-none">
+        <AlertDialogContent className="rounded-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>Mark session as completed?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -2087,7 +2087,7 @@ export default function OrderImport() {
 
       {/* ── Delete confirmation ── */}
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) { setDeleteTarget(null); setDeletePreview(null); setDeleteTargetInfo(null); } }}>
-        <AlertDialogContent className="rounded-none">
+        <AlertDialogContent className="rounded-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this CSV?</AlertDialogTitle>
             <AlertDialogDescription>

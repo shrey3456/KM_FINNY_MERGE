@@ -200,9 +200,9 @@ function downloadPdf(
 
 const PAGE_SIZE = 20;
 
-// Solid navy fill, matching the Notion Inventory action buttons. Squared off (rounded-none)
+// Solid navy fill, matching the Notion Inventory action buttons. Squared off (rounded-lg)
 // for the business-report look — no soft/pill-shaped filter controls.
-const FILTER_BTN_CLASS = "h-8 rounded-none border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
+const FILTER_BTN_CLASS = "h-8 rounded-lg border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -740,10 +740,10 @@ export default function OverallStock() {
           description="Live plant-wise inventory. Stock reflects all boxes received (extras included); Excess and Ordered quantity are reported separately."
         />
 
-        {/* Summary tiles — squared off (rounded-none, no shadow, stronger divider) to match the
+        {/* Summary tiles — squared off (rounded-lg, no shadow, stronger divider) to match the
             business-report treatment applied to the table below. */}
         <StatsBar
-          className="rounded-none shadow-none border-gray-300 [&_.divide-x]:divide-gray-300"
+          className="rounded-lg shadow-none border-gray-300 [&_.divide-x]:divide-gray-300"
           wrapLabels
         
           stats={[
@@ -776,7 +776,7 @@ export default function OverallStock() {
           icon={LayoutList}
           title="Stock by Plant"
           subtitle={search ? `${filtered.length} of ${rows.length} rows` : `${rows.length} item · plant rows`}
-          className="rounded-none shadow-none border-gray-300"
+          className="rounded-lg shadow-none border-gray-300"
           headerActions={
             <>
               <CollapsibleSearch
