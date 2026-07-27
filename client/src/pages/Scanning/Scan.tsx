@@ -2538,7 +2538,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             </div>
 
             {/* Full-width progress bar */}
-            <Progress value={osPct} className={`rounded-none ${osRotated ? "h-2" : "h-1.5"}`} />
+            <Progress value={osPct} className={`rounded-lg ${osRotated ? "h-2" : "h-1.5"}`} />
 
             {/* Scanner section — hidden on Separate CSVs (no scanning happens there) */}
             {osTab !== "separate-csvs" && (
@@ -2578,7 +2578,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       setOsSelectedStv(nextValue);
                     }}
                   >
-                    <SelectTrigger className={`rounded-none justify-center text-center font-semibold border-2 ${
+                    <SelectTrigger className={`rounded-lg justify-center text-center font-semibold border-2 ${
                       osSelectedStv ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-500"
                     } ${osRotated ? "h-11 w-56 text-base" : "h-8 w-44 text-sm"}`}>
                       <SelectValue placeholder="Select STV…" />
@@ -2739,11 +2739,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }}
                       placeholder="Type item name or barcode…"
                       disabled={!!osPending}
-                      className={`font-mono w-full rounded-none border-gray-300 ${osRotated ? "text-lg h-14" : "text-sm h-10"}`}
+                      className={`font-mono w-full rounded-lg border-gray-300 ${osRotated ? "text-lg h-14" : "text-sm h-10"}`}
                       autoFocus
                     />
                     {osManualFocused && osSuggestions.length > 0 && (
-                      <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-none border border-gray-300 bg-white shadow-lg overflow-hidden">
+                      <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-300 bg-white shadow-lg overflow-hidden">
                         {osSuggestions.map((item, idx) => (
                           <button
                             key={item.id}
@@ -2773,7 +2773,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }
                       setOsManualCode(""); setOsSuggIdx(-1);
                     }}
-                    className={`bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 p-0 rounded-none ${osRotated ? "h-14 w-14" : "h-10 w-10"}`}
+                    className={`bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 p-0 rounded-lg ${osRotated ? "h-14 w-14" : "h-10 w-10"}`}
                   >
                     <ScanLine className={osRotated ? "h-6 w-6" : "h-4 w-4"} />
                   </Button>
@@ -2864,7 +2864,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <>
             {/* Items list — matches Master View's mobile treatment: card list on a phone,
                 the detailed table only for the rotated/kiosk view. */}
-            <div className="bg-white border border-gray-300 overflow-hidden">
+            <div className="bg-white border border-gray-300 overflow-hidden rounded-xl">
               {/* List header — navy bar, same treatment as Master View's mobile header. Search
                   replaces the row's content in place (rather than wrapping onto an extra line
                   below), and there's no explicit close button — click outside to hide it. */}
@@ -3064,7 +3064,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-3">
                 {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
                 {mvData && (
-                  <div className="bg-white border border-gray-300 overflow-hidden">
+                  <div className="bg-white border border-gray-300 overflow-hidden rounded-xl">
                     {/* Navy header — same treatment as the Scan tab's mobile header. Search
                         replaces the row's content in place (rather than wrapping onto an extra
                         line below), and there's no explicit close button — click outside to
@@ -3539,7 +3539,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <Progress value={osPct} className="w-28 h-2" />
                 <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
                 {canCompletePart && (
-                  <Button size="sm" className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
+                  <Button size="sm" className="h-8 px-3 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
                     Complete
                   </Button>
                 )}
@@ -3553,7 +3553,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <button
                     key={t}
                     onClick={() => setOsTab(t)}
-                    className={`flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium transition-colors ${
+                    className={`flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${
                       osTab === t
                         ? "bg-[#001d6e] text-white"
                         : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
@@ -3572,7 +3572,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}
                 >
                   <SelectTrigger
-                    className={`h-7 w-full max-w-[9rem] justify-center text-center text-xs font-semibold sm:w-36 ${
+                    className={`h-7 w-full max-w-[9rem] justify-center rounded-lg text-center text-xs font-semibold sm:w-36 ${
                       osSelectedStv
                         ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
                         : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
@@ -3608,7 +3608,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   a single unit. items-start on the row keeps this card at its natural height rather
                   than stretching to match the taller scanner column. */}
               <div className="flex min-w-0 flex-col gap-3">
-              <div className="flex flex-col gap-1.5 border bg-white p-2.5 shadow-sm">
+              <div className="flex flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
                 <div className="flex items-baseline justify-between">
                   <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
                   <p className="text-sm font-medium text-gray-400">
@@ -3636,7 +3636,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         onClick={() => setOsStatFilter(isActive ? "" : s.key)}
                         aria-pressed={isActive}
                         title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                        className={`border px-2.5 py-1 text-left transition-colors ${
+                        className={`rounded-lg border px-2.5 py-1 text-left transition-colors ${
                           isActive
                             ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
                             : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
@@ -3654,9 +3654,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
 
                 <div className="space-y-1">
-                  <div className="h-2 w-full overflow-hidden bg-gray-100">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
                     <div
-                      className="h-full bg-emerald-500 transition-[width] duration-300"
+                      className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
                       style={{ width: `${displayTotals.expected > 0 ? Math.min(100, (displayTotals.done / displayTotals.expected) * 100) : 0}%` }}
                     />
                   </div>
@@ -3694,26 +3694,26 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* Scanner controls sit beside the totals: STV picker, then the mode buttons under it.
                   Padding/gaps match the Order Totals card (p-2.5/gap-1.5) so the two cards read as
                   the same height and the items table can start higher on screen. */}
-              <div className="flex flex-col gap-1 border bg-white p-2 shadow-sm">
+              <div className="flex flex-col gap-1 rounded-xl border bg-white p-2 shadow-sm">
                 {/* Equal-width halves via grid-cols-2; both share one height so they read as a pair. */}
                 <div className="grid grid-cols-2 gap-2">
                   <Button
                     variant={osScanMode === "camera" ? "default" : "outline"}
                     title="Camera"
-                    className={`h-7 w-full text-xs font-semibold ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    className={`h-7 w-full rounded-lg text-xs font-semibold ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
                     onClick={() => setOsScanMode("camera")}>
                     <Camera className="mr-1.5 h-4 w-4" /> Camera
                   </Button>
                   <Button
                     variant={osScanMode === "manual" ? "default" : "outline"}
                     title="Manual — or plug in a barcode gun and scan"
-                    className={`h-7 w-full text-xs font-semibold ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    className={`h-7 w-full rounded-lg text-xs font-semibold ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
                     onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}>
                     <Keyboard className="mr-1.5 h-4 w-4" /> Manual
                   </Button>
                 </div>
                 {/* Camera card — always in DOM so ref stays set; hidden via display:none when not in camera mode */}
-                <Card className="shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
+                <Card className="rounded-xl shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
                   <div className="relative bg-black" style={{ height: "150px" }}>
                     <video
                       ref={osVideoDesktopRef}
@@ -3750,7 +3750,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </Card>
 
                 {osScanMode === "manual" && (
-                  <Card className="shadow-sm">
+                  <Card className="rounded-xl shadow-sm">
                     <CardContent className="p-2 space-y-1">
                       <Label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Enter item name or barcode</Label>
                       <div className="relative flex gap-2">
@@ -3779,11 +3779,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             }}
                             placeholder="Type item name or barcode…"
                             disabled={!!osPending}
-                            className="font-mono text-xs h-7 w-full"
+                            className="font-mono text-xs h-7 w-full rounded-lg"
                             autoFocus
                           />
                           {osManualFocused && osSuggestions.length > 0 && (
-                            <div className="absolute left-0 right-0 top-full z-50 mt-1 border border-gray-200 bg-white shadow-lg overflow-hidden">
+                            <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
                               {osSuggestions.map((item, idx) => (
                                 <button
                                   key={item.id}
@@ -3809,7 +3809,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             }
                             setOsManualCode(""); setOsSuggIdx(-1);
                           }}
-                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 h-7 w-7 p-0">
+                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 h-7 w-7 p-0 rounded-lg">
                           <ScanLine className="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -3824,7 +3824,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     variant="outline"
                     disabled={!activeOrderScanSession || activeOrderScanSession.scanStatus === "completed" || !!osPending}
                     onClick={() => { setEmptyBoxQty("1"); setEmptyBoxNote(""); setShowEmptyBox(true); }}
-                    className="flex-1 h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                    className="flex-1 h-7 rounded-lg text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
                   >
                     <Package className="h-4 w-4 mr-1.5" /> Empty Box
                   </Button>
@@ -3931,7 +3931,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             {allMvItems.length > 0 && (
                               <button
                                 onClick={downloadMvCsv}
-                                className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
                               >
                                 <Download className="h-3.5 w-3.5" /> Export
                               </button>
@@ -3940,7 +3940,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             <button
                               onClick={() => setMvSearchOpen(true)}
                               title="Search items"
-                              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border shadow-sm ${
+                              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border shadow-sm ${
                                 mvSearchOpen ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
                               }`}
                             >
@@ -4013,7 +4013,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <span className="border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
+                  <span className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
                     {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                   </span>
                 </div>
@@ -4297,7 +4297,20 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
         {/* Scan confirmation dialog */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>
-          <DialogContent className="w-[calc(100%-2rem)] max-w-2xl sm:max-w-3xl">
+          <DialogContent className="w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl overflow-hidden rounded-2xl p-0 sm:rounded-2xl">
+            {/* Two columns: full-height product image on the left, all controls on the right. */}
+            <div className="flex flex-col sm:flex-row">
+              {osResolvedImageName && (
+                <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
+                  <img
+                    src={`/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`}
+                    alt=""
+                    className="max-h-96 w-full object-contain sm:max-h-full"
+                    onError={(e) => { const el = e.currentTarget as HTMLImageElement; if (el.parentElement) el.parentElement.style.display = "none"; }}
+                  />
+                </div>
+              )}
+              <div className="min-w-0 flex-1 p-6">
             <DialogHeader>
               <DialogTitle className={`flex items-center gap-2.5 text-2xl ${
                 !osPending?.matchedItem ? "text-red-700"
@@ -4310,32 +4323,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     ? <><AlertTriangle className="h-7 w-7" /> Extra item</>
                     : <><CheckCircle2 className="h-7 w-7" /> Match found</>}
               </DialogTitle>
-              <div className="flex gap-5 items-start pt-3">
-                {osResolvedImageName && (
-                  <img
-                    src={`/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`}
-                    alt=""
-                    className="h-44 w-44 shrink-0 object-contain bg-gray-50 border border-gray-100"
-                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-                  />
+              <DialogDescription className="text-left space-y-1.5 min-w-0 pt-3">
+                <p className="font-semibold text-gray-900 text-lg">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
+                <p className="font-mono text-base text-gray-400">{osPending?.barcode}</p>
+                {!osPending?.matchedItem && (
+                  <p className="text-base text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
                 )}
-                <DialogDescription className="text-left space-y-1.5 flex-1 min-w-0">
-                  <p className="font-semibold text-gray-900 text-lg">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
-                  <p className="font-mono text-base text-gray-400">{osPending?.barcode}</p>
-                  {!osPending?.matchedItem && (
-                    <p className="text-base text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
-                  )}
-                  {osItemIsComplete && (
-                    <p className="text-base text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
-                  )}
-                </DialogDescription>
-              </div>
+                {osItemIsComplete && (
+                  <p className="text-base text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
+                )}
+              </DialogDescription>
             </DialogHeader>
 
             <div className="space-y-4 py-1">
               {/* Inventory + CSV info */}
               {(osPending?.inventoryProduct || osPending?.matchedItem) && (
-                <div className="bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-1">
+                <div className="rounded-xl bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-1">
                   {osPending.inventoryProduct?.sapCode && (
                     <p>SAP: <span className="font-mono font-bold text-gray-700">{osPending.inventoryProduct.sapCode}</span></p>
                   )}
@@ -4380,7 +4383,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       setOsSelectedStv(nextValue);
                     }}
                   >
-                    <SelectTrigger className={`w-full ${!osSelectedStv ? "border-dashed text-gray-400" : ""}`}>
+                    <SelectTrigger className={`w-full rounded-xl ${!osSelectedStv ? "border-dashed text-gray-400" : ""}`}>
                       <SelectValue placeholder="Select STV…" />
                     </SelectTrigger>
                     <SelectContent>
@@ -4393,62 +4396,114 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
               )}
               
-              {/* Qty input — editing boxes recalculates pallets */}
+              {/* Qty input — editing boxes recalculates pallets; −/+ step one box at a time. */}
               <div className="space-y-1">
                 <Label className="text-sm">Qty (boxes)</Label>
-                <Input
-                  data-gun-qty="os"
-                  type="number" min={0}
-                  value={osQty === 0 ? "" : osQty}
-                  onChange={(e) => {
-                    const q = parseInt(e.target.value) || 0;
-                    setOsQty(q);
-                    setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
-                  }}
-                  onBlur={(e) => {
-                    if (!e.target.value || parseInt(e.target.value) < 1) {
-                      setOsQty(1);
-                      setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      handleOsConfirmScan();
-                    }
-                  }}
-                  className="text-center text-3xl font-bold h-14"
-                  autoFocus
-                />
+                <div className="flex items-stretch gap-2">
+                  <Button
+                    type="button" variant="outline"
+                    className="h-14 w-14 shrink-0 rounded-xl text-2xl font-bold"
+                    onClick={() => {
+                      const q = Math.max(1, osQty - 1);
+                      setOsQty(q);
+                      setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                    }}
+                    aria-label="Decrease quantity"
+                  >
+                    −
+                  </Button>
+                  <Input
+                    data-gun-qty="os"
+                    type="number" min={0}
+                    value={osQty === 0 ? "" : osQty}
+                    onChange={(e) => {
+                      const q = parseInt(e.target.value) || 0;
+                      setOsQty(q);
+                      setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                    }}
+                    onBlur={(e) => {
+                      if (!e.target.value || parseInt(e.target.value) < 1) {
+                        setOsQty(1);
+                        setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleOsConfirmScan();
+                      }
+                    }}
+                    className="text-center text-3xl font-bold h-14 flex-1 rounded-xl"
+                    autoFocus
+                  />
+                  <Button
+                    type="button" variant="outline"
+                    className="h-14 w-14 shrink-0 rounded-xl text-2xl font-bold"
+                    onClick={() => {
+                      const q = osQty + 1;
+                      setOsQty(q);
+                      setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                    }}
+                    aria-label="Increase quantity"
+                  >
+                    +
+                  </Button>
+                </div>
               </div>
 
               {/* Pallets input — editing pallets recalculates boxes (2-way conversion) */}
               {plt > 1 && (
-                <div className="bg-[#001d6e]/5 border border-[#001d6e]/20 px-4 py-3 flex items-center justify-between gap-3">
+                <div className="rounded-xl bg-[#001d6e]/5 border border-[#001d6e]/20 px-4 py-3 flex items-center justify-between gap-3">
                   <div className="flex-1">
                     <Label className="text-xs text-gray-500">Pallets</Label>
-                    <Input
-                      type="number" min={0} step="0.01"
-                      value={osPalletsInput}
-                      onChange={(e) => {
-                        const raw = e.target.value;
-                        setOsPalletsInput(raw);
-                        const p = parseFloat(raw);
-                        if (!isNaN(p) && p >= 0) setOsQty(Math.round(p * plt));
-                      }}
-                      onBlur={() => {
-                        if (osPalletsInput === "" || isNaN(parseFloat(osPalletsInput))) {
-                          setOsPalletsInput((osQty / plt).toFixed(2));
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          handleOsConfirmScan();
-                        }
-                      }}
-                      className="text-2xl font-bold text-[#001d6e] h-11 bg-white"
-                    />
+                    <div className="flex items-stretch gap-2">
+                      <Button
+                        type="button" variant="outline"
+                        className="h-11 w-11 shrink-0 rounded-xl bg-white text-xl font-bold text-[#001d6e]"
+                        onClick={() => {
+                          const p = Math.max(0, Math.round(((parseFloat(osPalletsInput) || 0) - 1) * 100) / 100);
+                          setOsPalletsInput(p.toFixed(2));
+                          setOsQty(Math.max(1, Math.round(p * plt)));
+                        }}
+                        aria-label="Decrease pallets"
+                      >
+                        −
+                      </Button>
+                      <Input
+                        type="number" min={0} step="0.01"
+                        value={osPalletsInput}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          setOsPalletsInput(raw);
+                          const p = parseFloat(raw);
+                          if (!isNaN(p) && p >= 0) setOsQty(Math.round(p * plt));
+                        }}
+                        onBlur={() => {
+                          if (osPalletsInput === "" || isNaN(parseFloat(osPalletsInput))) {
+                            setOsPalletsInput((osQty / plt).toFixed(2));
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleOsConfirmScan();
+                          }
+                        }}
+                        className="text-2xl font-bold text-[#001d6e] h-11 bg-white flex-1 rounded-xl"
+                      />
+                      <Button
+                        type="button" variant="outline"
+                        className="h-11 w-11 shrink-0 rounded-xl bg-white text-xl font-bold text-[#001d6e]"
+                        onClick={() => {
+                          const p = Math.round(((parseFloat(osPalletsInput) || 0) + 1) * 100) / 100;
+                          setOsPalletsInput(p.toFixed(2));
+                          setOsQty(Math.round(p * plt));
+                        }}
+                        aria-label="Increase pallets"
+                      >
+                        +
+                      </Button>
+                    </div>
                   </div>
                   <div className="text-right shrink-0">
                     <p className="text-xs text-gray-500">Pallet size</p>
@@ -4459,20 +4514,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             </div>
 
             <DialogFooter className="gap-2">
-              <Button variant="outline" onClick={() => { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); }}>
+              <Button variant="outline" className="rounded-xl" onClick={() => { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); }}>
                 Cancel
               </Button>
               <Button
                 onClick={handleOsConfirmScan}
                 disabled={osScanMutation.isPending || (stvs.length > 0 && !osSelectedStv)}
-                className={(!osPending?.matchedItem || osItemIsComplete)
+                className={`rounded-xl ${(!osPending?.matchedItem || osItemIsComplete)
                   ? "bg-amber-600 hover:bg-amber-700 text-white"
-                  : "bg-[#001d6e] hover:bg-[#00154b] text-white"}
+                  : "bg-[#001d6e] hover:bg-[#00154b] text-white"}`}
               >
                 {osScanMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {(!osPending?.matchedItem || osItemIsComplete) ? "Log as Extra" : "Confirm Scan"}
               </Button>
             </DialogFooter>
+              </div>
+            </div>
           </DialogContent>
         </Dialog>
 
