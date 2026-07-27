@@ -133,7 +133,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
     try { return JSON.parse((currentUser as any)?.allowedPages || "[]"); } catch { return []; }
   })();
 
-  // Group menu items by categories as shown in the image
+  // Department-wise grouping (Dispatch/Sales/Billing/Steer), plus MAIN/ADMIN and two small
+  // leftover groups (OPERATIONS, INVENTORY) for pages that don't belong to any named
+  // department. Same pages/routes as before — this only changes which section each item
+  // renders under. Proforma Slips and Dispatch each appear in two department sections
+  // (same path/pageKey both times — access control is per-item via pageKey, so this is safe).
   const menuCategories: SidebarMenuCategory[] = [
     {
       title: "MAIN",
@@ -161,19 +165,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
       ],
     },
     {
-      title: "OPERATIONS",
+      title: "DISPATCH",
       items: [
-        {
-          label: "Load Operations",
-          icon: (
-            <Factory
-              className="h-5 w-5 mr-3 text-[#001d6e]"
-              style={{ fill: "#4d7eff" }}
-            />
-          ),
-          path: "/load-operations",
-          pageKey: "load-operations",
-        },
         {
           label: "Print Operations",
           icon: (
@@ -186,11 +179,59 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "print-operations",
         },
         {
+          label: "Scan Order",
+          icon: <ScanLine className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/scan",
+          badge: hasScanBadge ? 1 : 0,
+          pageKey: "scan-order",
+        },
+        {
+          label: "Scan History",
+          icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/reports",
+          pageKey: "scan-history",
+        },
+        {
+          label: "Stock Overview",
+          icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/overall-stock",
+          pageKey: "overall-stock",
+        },
+      ],
+    },
+    {
+      title: "SALES",
+      items: [
+        {
           label: "Proforma Slips",
           icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/proforma-slips",
           pageKey: "proforma",
         },
+        {
+          label: "Order Management",
+          icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-import",
+          pageKey: "order-import",
+        },
+        {
+          label: "Order Reports",
+          icon: <PieChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-reports",
+          pageKey: "order-reports",
+        },
+        {
+          label: "Inventory",
+          icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/notion-inventory",
+          pageKey: "notion-inventory",
+          permission: "canAccessInventory",
+        },
+      ],
+    },
+    {
+      title: "BILLING",
+      items: [
         {
           label: "Dispatch",
           icon: (
@@ -202,6 +243,17 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/dispatch",
           pageKey: "dispatch",
         },
+        {
+          label: "Proforma Slips",
+          icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/proforma-slips",
+          pageKey: "proforma",
+        },
+      ],
+    },
+    {
+      title: "STEER",
+      items: [
         {
           label: "Expense Voucher",
           icon: (
@@ -224,38 +276,21 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/toll-voucher",
           pageKey: "toll-voucher",
         },
+      ],
+    },
+    {
+      title: "OPERATIONS",
+      items: [
         {
-          label: "Scan Order",
-          icon: <ScanLine className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/scan",
-          badge: hasScanBadge ? 1 : 0,
-          pageKey: "scan-order",
-        },
-        {
-          label: "Stock Overview",
-          icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/overall-stock",
-          pageKey: "overall-stock",
-        },
-        {
-          label: "Scan History",
-          icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/reports",
-          pageKey: "scan-history",
-        },
-        {
-          label: "Order Management",
-          icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/order-import",
-          // permission: "canAccessOrderManagement",
-          // departments: ['billing'],
-          pageKey: "order-import",
-        },
-        {
-          label: "Order Reports",
-          icon: <PieChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/order-reports",
-          pageKey: "order-reports",
+          label: "Load Operations",
+          icon: (
+            <Factory
+              className="h-5 w-5 mr-3 text-[#001d6e]"
+              style={{ fill: "#4d7eff" }}
+            />
+          ),
+          path: "/load-operations",
+          pageKey: "load-operations",
         },
         {
           label: "Plant Management",
@@ -273,17 +308,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
     {
       title: "INVENTORY",
       items: [
-         {
-          label: "Inventory",
-          icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/notion-inventory",
-          pageKey: "notion-inventory",
-        },
         {
           label: "Purchases",
           icon: <ShoppingCart className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/purchases",
           pageKey: "purchases",
+          permission: "canAccessInventory",
         },
       ],
     },

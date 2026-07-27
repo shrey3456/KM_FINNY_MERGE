@@ -3,6 +3,7 @@ import { pool } from '../db';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
 import { broadcastOrderImportUpdate } from '../lib/importEvents';
 import { getUserPlants } from './order-scan';
+import { splitPallets, resplitEventsExtraFlag } from '../lib/orderScanRemap';
 
 // ============================================================================
 // ORDER IMPORT EDIT — a focused, non-admin-gated page for fixing mistakes in a
@@ -175,7 +176,7 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import-edi
     }
 
     const { rows: existingRows } = await client.query(
-      `SELECT oi.id, oi.barcode,
+      `SELECT oi.id, oi.barcode, oi.quantity,
          COALESCE((
            SELECT SUM(osi.total_scanned_qty) FROM order_scan_items osi
            WHERE osi.order_import_item_id = oi.id
@@ -186,8 +187,8 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import-edi
        FROM order_import_items oi WHERE oi.session_id = $1`,
       [id],
     );
-    const existingById = new Map<number, { barcode: string | null; scannedQty: number }>(
-      existingRows.map((r: any) => [r.id, { barcode: r.barcode, scannedQty: r.scannedQty }]),
+    const existingById = new Map<number, { barcode: string | null; quantity: number; scannedQty: number }>(
+      existingRows.map((r: any) => [r.id, { barcode: r.barcode, quantity: Number(r.quantity ?? 0), scannedQty: r.scannedQty }]),
     );
 
     const submittedIds = new Set(items.filter((i) => i.id != null).map((i) => i.id as number));
@@ -295,6 +296,71 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import-edi
             `UPDATE order_scan_events SET barcode = $1 WHERE session_id = $2 AND LOWER(barcode) = LOWER($3)`,
             [barcode, id, oldBarcode],
           );
+        }
+
+        // Quantity edits must propagate to any order_scan_items row(s) already tied to this
+        // item — expected_qty there is a snapshot taken at scan time (see order-scan.ts's
+        // /scan handler) and never auto-follows later CSV edits. Left stale: Master
+        // View/Reports keep showing the OLD expected qty forever, and physical quantity
+        // scanned beyond it stays flagged "Extra" even after the CSV is corrected upward to
+        // account for it (or, on a decrease, previously-regular scans that now exceed the
+        // smaller expected qty stay flagged as regular). Re-split the same way
+        // remapDeletedSessionScans does when a session's items are replaced wholesale.
+        const quantityChanged = Number(existing.quantity) !== Number(quantity);
+        if (quantityChanged) {
+          const { rows: scanItemRows } = await client.query(
+            `SELECT id, items_per_pallet AS "itemsPerPallet"
+             FROM order_scan_items
+             WHERE order_import_item_id = $1
+                OR (order_import_item_id IS NULL AND session_id = $2 AND LOWER(barcode) = LOWER($3))`,
+            [item.id, id, barcode],
+          );
+
+          for (const scanItemRow of scanItemRows) {
+            const { rows: eventRows } = await client.query(
+              `SELECT id, total_qty, is_extra FROM order_scan_events
+               WHERE scan_item_id = $1 AND voided IS NOT TRUE ORDER BY id ASC`,
+              [scanItemRow.id],
+            );
+            const physicalQty = eventRows.reduce((s: number, e: any) => s + Number(e.total_qty ?? 0), 0);
+            const oldExtraQty = eventRows.reduce((s: number, e: any) => s + (e.is_extra ? Number(e.total_qty ?? 0) : 0), 0);
+
+            const itemsPerPallet = Number(scanItemRow.itemsPerPallet ?? 0);
+            const newOrderQty = Math.min(physicalQty, quantity);
+            const newExtraQty = physicalQty - newOrderQty;
+            const { pallets, looseQty } = splitPallets(newOrderQty, itemsPerPallet);
+            const status = physicalQty <= 0 ? 'pending'
+              : newOrderQty >= quantity && quantity > 0 ? 'complete'
+              : newOrderQty > 0 ? 'partial' : 'pending';
+
+            await client.query(
+              `UPDATE order_scan_items
+               SET expected_qty = $1, total_scanned_qty = $2, scanned_pallets = $3, scanned_loose_qty = $4, status = $5
+               WHERE id = $6`,
+              [quantity, newOrderQty, pallets, looseQty, status, scanItemRow.id],
+            );
+
+            if (physicalQty > 0) {
+              await resplitEventsExtraFlag(client, eventRows, newOrderQty, itemsPerPallet);
+
+              // in_stock already counts every physical box regardless of order/extra split (see
+              // the comment on that convention in scan-sessions.ts) — only extra_qty, the
+              // "how much of it was over-order" subset, needs correcting here.
+              const extraDelta = newExtraQty - oldExtraQty;
+              if (extraDelta !== 0 && barcode) {
+                await client.query(
+                  `UPDATE product_plant_stock SET extra_qty = GREATEST(0, extra_qty + $1), updated_at = NOW()
+                   WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
+                  [extraDelta, barcode, session.plant],
+                );
+                await client.query(
+                  `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
+                   VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW())`,
+                  [barcode, session.plant, extraDelta, `Quantity correction (order-import edit): ${existing.quantity} -> ${quantity}`, id],
+                );
+              }
+            }
+          }
         }
       } else {
         await client.query(

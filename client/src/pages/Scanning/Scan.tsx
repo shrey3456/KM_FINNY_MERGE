@@ -1727,9 +1727,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   const mvRowState = (item: MvMergedItem) => {
     const exp = item.quantity ?? 0;
     const extra = item.extraQty ?? 0;
-    // scannedQty includes over-scans, so subtract them to get real progress against the CSV —
-    // otherwise a row's Done would double-count what the Extra column already reports.
-    const done = Math.max(0, (item.scannedQty ?? 0) - extra);
+    // Done is the full physical count for this item — order-matched portion plus any extra —
+    // not just the order-matched portion. E.g. expected 10, 10 scanned regular + 10 extra
+    // shows Done: 20 (Extra Qty still separately shows 10 alongside it).
+    const done = item.scannedQty ?? 0;
     const isExtraOnly = item._isExtra;
     const isDone = done >= exp && exp > 0;
     return {
@@ -1744,8 +1745,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     };
   };
   // Aggregate "how many done" for the mobile blue header — mirrors osDoneCount's role for the
-  // Scan tab, just computed from Master View's own per-row state instead.
-  const mvDoneCount = allMvItems.filter((i) => !i._isEmptyBox && mvRowState(i).isDone).length;
+  // Scan tab, just computed from Master View's own per-row state instead. Extra-only rows (no
+  // matching CSV line, badge shows "Extra" not "Received") still count toward this total — the
+  // boxes were physically received, so they belong in the done tally even though they're
+  // broken out separately as Extra in the per-row status.
+  const mvDoneCount = allMvItems.filter((i) => !i._isEmptyBox && (mvRowState(i).isDone || mvRowState(i).isExtraOnly)).length;
 
   // Same totals-box filter the Scan tab uses, so clicking Done/Remaining/Extra narrows Master View
   // to those rows too. Declared after mvRowState because it calls it.
@@ -3154,7 +3158,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             );
                           }
                               const exp = item.quantity ?? 0;
-                              const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
+                              // Done is the full physical count (order + extra), matching mvRowState.
+                              const done = item.scannedQty ?? 0;
                               const remain = Math.max(0, exp - done);
                               const extra = item.extraQty ?? 0;
                               const ipp = item.itemsPerPallet ?? 0;
@@ -3255,7 +3260,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             );
                           }
                           const exp = item.quantity ?? 0;
-                          const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
+                          // Done is the full physical count (order + extra), matching mvRowState.
+                          const done = item.scannedQty ?? 0;
                           const remain = Math.max(0, exp - done);
                           const extra = item.extraQty ?? 0;
                           const ipp = item.itemsPerPallet ?? 0;

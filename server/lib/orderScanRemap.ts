@@ -1,8 +1,8 @@
 import type { PoolClient } from 'pg';
 
 // Splits a total qty into {pallets, looseQty} — the same convention used by /scan's
-// splitPallets in order-scan.ts (kept local here to avoid a cross-file export just for this).
-function splitPallets(qty: number, itemsPerPallet: number) {
+// splitPallets in order-scan.ts.
+export function splitPallets(qty: number, itemsPerPallet: number) {
   return {
     pallets: itemsPerPallet > 0 ? Math.floor(qty / itemsPerPallet) : qty,
     looseQty: itemsPerPallet > 0 ? qty % itemsPerPallet : 0,
@@ -194,7 +194,7 @@ export async function remapDeletedSessionScans(
 // equals the overflow beyond newOrderQty — group-report/master-view read the extra total from
 // events, not from the item row (see orderGroupReport.ts). Mirrors the split-at-boundary logic
 // in /scan (order-scan.ts). eventRows must already be ordered chronologically (id ASC).
-async function resplitEventsExtraFlag(
+export async function resplitEventsExtraFlag(
   client: PoolClient,
   eventRows: Array<{ id: number; total_qty: number; is_extra: boolean }>,
   newOrderQty: number,
