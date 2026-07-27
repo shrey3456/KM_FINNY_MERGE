@@ -2547,7 +2547,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <p className="flex items-center gap-1.5 text-[11px] text-gray-400"><Plug className="h-3 w-3" />Barcode gun: plug in and scan</p>
 
               {/* Camera / Manual tabs */}
-              <div className="flex border border-gray-300 divide-x divide-gray-300 bg-white">
+              <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
                 <button
                   onClick={() => setOsScanMode("camera")}
                   className={`flex-1 flex items-center justify-center gap-1.5 font-semibold transition-colors ${osRotated ? "py-3 text-sm" : "py-2 text-xs"} ${
@@ -2604,7 +2604,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   STV list hadn't been set up). */}
               {!osStvsQuery.isLoading && stvs.length === 0 && (
                 <div className="flex items-center">
-                  <span className="border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                  <span className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
                     No STV — create one in Plant Settings
                   </span>
                 </div>
@@ -2618,6 +2618,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   /* Responsive height: 50% of viewport width, clamped 190–250px */
                   height: "clamp(190px, 50vw, 250px)",
                   borderRadius: "16px",
+                  overflow: "hidden",
                 }}
               >
                 <video
@@ -2787,7 +2788,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   variant="outline"
                   disabled={!activeOrderScanSession || activeOrderScanSession.scanStatus === "completed" || !!osPending}
                   onClick={() => { setEmptyBoxQty("1"); setEmptyBoxNote(""); setShowEmptyBox(true); }}
-                  className="flex-1 h-9 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                  className="flex-1 h-9 rounded-lg text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
                 >
                   <Package className="h-4 w-4 mr-1.5" /> Empty Box
                 </Button>
@@ -2806,7 +2807,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             {/* ── Tab strip — one joined, bordered segmented control (business style) instead of
                 separate floating rounded pills. Scanner above stays put across tabs. ── */}
-            <div className="flex border border-gray-300 divide-x divide-gray-300 bg-white">
+            <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
               {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
                 <button
                   key={t}
@@ -2832,7 +2833,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 One unified bordered strip with internal dividers (business/report style),
                 instead of four separate floating rounded+shadowed cards. */}
             {osTab !== "separate-csvs" && (
-            <div className={`grid grid-cols-4 divide-x divide-gray-200 border border-gray-300 bg-white ${osRotated ? "text-base" : ""}`}>
+            <div className={`grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white ${osRotated ? "text-base" : ""}`}>
               {([
                 { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
                 { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
@@ -4324,13 +4325,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     : <><CheckCircle2 className="h-7 w-7" /> Match found</>}
               </DialogTitle>
               <DialogDescription className="text-left space-y-1.5 min-w-0 pt-3">
-                <p className="font-semibold text-gray-900 text-lg">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
-                <p className="font-mono text-base text-gray-400">{osPending?.barcode}</p>
+                <p className="font-bold text-gray-900 text-2xl leading-snug">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
+                <p className="font-mono text-lg text-gray-400">{osPending?.barcode}</p>
                 {!osPending?.matchedItem && (
-                  <p className="text-base text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
+                  <p className="text-lg text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
                 )}
                 {osItemIsComplete && (
-                  <p className="text-base text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
+                  <p className="text-lg text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
                 )}
               </DialogDescription>
             </DialogHeader>
@@ -4338,12 +4339,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             <div className="space-y-4 py-1">
               {/* Inventory + CSV info */}
               {(osPending?.inventoryProduct || osPending?.matchedItem) && (
-                <div className="rounded-xl bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-1">
+                <div className="rounded-xl bg-gray-50 px-4 py-3 text-base text-gray-600 space-y-1.5">
                   {osPending.inventoryProduct?.sapCode && (
                     <p>SAP: <span className="font-mono font-bold text-gray-700">{osPending.inventoryProduct.sapCode}</span></p>
                   )}
                   {osPending.matchedItem && (
-                    <div className={`space-y-0.5 ${osPending.inventoryProduct ? "border-t border-gray-200 pt-1" : ""}`}>
+                    <div className={`space-y-1 ${osPending.inventoryProduct ? "border-t border-gray-200 pt-1.5" : ""}`}>
                       <p>
                         Items per pallet:{" "}
                         <strong>{osPending.plantPalletSize || "—"}</strong>
@@ -4396,70 +4397,74 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
               )}
               
-              {/* Qty input — editing boxes recalculates pallets; −/+ step one box at a time. */}
-              <div className="space-y-1">
-                <Label className="text-sm">Qty (boxes)</Label>
-                <div className="flex items-stretch gap-2">
-                  <Button
-                    type="button" variant="outline"
-                    className="h-14 w-14 shrink-0 rounded-xl text-2xl font-bold"
-                    onClick={() => {
-                      const q = Math.max(1, osQty - 1);
-                      setOsQty(q);
-                      setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
-                    }}
-                    aria-label="Decrease quantity"
-                  >
-                    −
-                  </Button>
-                  <Input
-                    data-gun-qty="os"
-                    type="number" min={0}
-                    value={osQty === 0 ? "" : osQty}
-                    onChange={(e) => {
-                      const q = parseInt(e.target.value) || 0;
-                      setOsQty(q);
-                      setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
-                    }}
-                    onBlur={(e) => {
-                      if (!e.target.value || parseInt(e.target.value) < 1) {
-                        setOsQty(1);
-                        setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
-                      }
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        handleOsConfirmScan();
-                      }
-                    }}
-                    className="text-center text-3xl font-bold h-14 flex-1 rounded-xl"
-                    autoFocus
-                  />
-                  <Button
-                    type="button" variant="outline"
-                    className="h-14 w-14 shrink-0 rounded-xl text-2xl font-bold"
-                    onClick={() => {
-                      const q = osQty + 1;
-                      setOsQty(q);
-                      setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
-                    }}
-                    aria-label="Increase quantity"
-                  >
-                    +
-                  </Button>
+              {/* Qty (boxes) and Pallets side by side — each with −/+ steppers. Editing either one
+                  recalculates the other (2-way box↔pallet conversion). */}
+              <div className={`grid gap-3 ${plt > 1 ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+                {/* Qty — −/+ step one box at a time. */}
+                <div className="space-y-1">
+                  <Label className="text-sm">Qty (boxes)</Label>
+                  {/* One bordered box holding −, the number, and + together. */}
+                  <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
+                    <Button
+                      type="button" variant="ghost"
+                      className="h-14 w-14 shrink-0 rounded-none border-r border-gray-200 text-3xl font-bold text-gray-500 hover:bg-gray-100"
+                      onClick={() => {
+                        const q = Math.max(1, osQty - 1);
+                        setOsQty(q);
+                        setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                      }}
+                      aria-label="Decrease quantity"
+                    >
+                      −
+                    </Button>
+                    <Input
+                      data-gun-qty="os"
+                      type="number" min={0}
+                      value={osQty === 0 ? "" : osQty}
+                      onChange={(e) => {
+                        const q = parseInt(e.target.value) || 0;
+                        setOsQty(q);
+                        setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                      }}
+                      onBlur={(e) => {
+                        if (!e.target.value || parseInt(e.target.value) < 1) {
+                          setOsQty(1);
+                          setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleOsConfirmScan();
+                        }
+                      }}
+                      className="text-center text-3xl font-bold h-14 flex-1 rounded-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                      autoFocus
+                    />
+                    <Button
+                      type="button" variant="ghost"
+                      className="h-14 w-14 shrink-0 rounded-none border-l border-gray-200 text-3xl font-bold text-gray-500 hover:bg-gray-100"
+                      onClick={() => {
+                        const q = osQty + 1;
+                        setOsQty(q);
+                        setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                      }}
+                      aria-label="Increase quantity"
+                    >
+                      +
+                    </Button>
+                  </div>
                 </div>
-              </div>
 
-              {/* Pallets input — editing pallets recalculates boxes (2-way conversion) */}
-              {plt > 1 && (
-                <div className="rounded-xl bg-[#001d6e]/5 border border-[#001d6e]/20 px-4 py-3 flex items-center justify-between gap-3">
-                  <div className="flex-1">
-                    <Label className="text-xs text-gray-500">Pallets</Label>
-                    <div className="flex items-stretch gap-2">
+                {/* Pallets — −/+ step one full pallet; only shown when a pallet size is configured. */}
+                {plt > 1 && (
+                  <div className="space-y-1">
+                    <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {plt}/pallet</span></Label>
+                    {/* One bordered box holding −, the pallet count, and + together. */}
+                    <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-[#001d6e]/30 bg-white focus-within:border-[#001d6e]">
                       <Button
-                        type="button" variant="outline"
-                        className="h-11 w-11 shrink-0 rounded-xl bg-white text-xl font-bold text-[#001d6e]"
+                        type="button" variant="ghost"
+                        className="h-14 w-14 shrink-0 rounded-none border-r border-[#001d6e]/15 text-3xl font-bold text-[#001d6e] hover:bg-[#001d6e]/5"
                         onClick={() => {
                           const p = Math.max(0, Math.round(((parseFloat(osPalletsInput) || 0) - 1) * 100) / 100);
                           setOsPalletsInput(p.toFixed(2));
@@ -4489,11 +4494,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             handleOsConfirmScan();
                           }
                         }}
-                        className="text-2xl font-bold text-[#001d6e] h-11 bg-white flex-1 rounded-xl"
+                        className="text-center text-3xl font-bold text-[#001d6e] h-14 flex-1 rounded-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
                       />
                       <Button
-                        type="button" variant="outline"
-                        className="h-11 w-11 shrink-0 rounded-xl bg-white text-xl font-bold text-[#001d6e]"
+                        type="button" variant="ghost"
+                        className="h-14 w-14 shrink-0 rounded-none border-l border-[#001d6e]/15 text-3xl font-bold text-[#001d6e] hover:bg-[#001d6e]/5"
                         onClick={() => {
                           const p = Math.round(((parseFloat(osPalletsInput) || 0) + 1) * 100) / 100;
                           setOsPalletsInput(p.toFixed(2));
@@ -4505,12 +4510,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </Button>
                     </div>
                   </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-xs text-gray-500">Pallet size</p>
-                    <p className="text-lg font-semibold text-gray-700">{plt} <span className="text-xs font-normal text-gray-400">boxes</span></p>
-                  </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
             <DialogFooter className="gap-2">
