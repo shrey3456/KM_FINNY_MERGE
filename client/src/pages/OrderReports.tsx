@@ -197,7 +197,7 @@ export default function OrderReports() {
           icon={PieChart}
           title="Order Import Sessions"
           subtitle={`${filtered.length} of ${total} sessions`}
-          className="rounded-lg shadow-none border-gray-300"
+          className="rounded-xl shadow-none border-gray-300"
           headerActions={
             <>
               <CollapsibleSearch value={searchText} onChange={setSearchText} placeholder="File, plant, importer…" />
@@ -263,9 +263,9 @@ export default function OrderReports() {
                     <div className="flex items-center justify-between text-xs text-gray-500">
                       <span>Page {currentPage} of {totalPages} · {total} sessions</span>
                       <div className="flex gap-2">
-                        <Button variant="outline" size="sm" className="rounded-lg" disabled={currentPage <= 1}
+                        <Button variant="outline" size="sm" className="rounded-xl" disabled={currentPage <= 1}
                           onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                        <Button variant="outline" size="sm" className="rounded-lg" disabled={currentPage >= totalPages}
+                        <Button variant="outline" size="sm" className="rounded-xl" disabled={currentPage >= totalPages}
                           onClick={() => setCurrentPage((p) => p + 1)}>Next</Button>
                       </div>
                     </div>

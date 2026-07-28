@@ -5,7 +5,7 @@ import Sidebar from './Sidebar';
 import MobileNavigation from './MobileNavigation';
 import InstallPrompt from './InstallPrompt';
 import finnyLogo from '@assets/finny-logo.png';
-import { Home, Menu } from 'lucide-react';
+import { Home, Menu, ChevronUp, ChevronDown } from 'lucide-react';
 import { formatUsername } from '@/lib/format-username';
 
 interface LayoutProps {
@@ -26,6 +26,16 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  // Scan page only: let the operator collapse the "Welcome" header to reclaim vertical space for
+  // the items table. Remembered across reloads since a scanning station keeps the same preference.
+  const isScanPage = location === '/scan';
+  const [scanHeaderHidden, setScanHeaderHidden] = useState(
+    () => localStorage.getItem('scanHeaderHidden') === 'true',
+  );
+  useEffect(() => {
+    localStorage.setItem('scanHeaderHidden', String(scanHeaderHidden));
+  }, [scanHeaderHidden]);
+  const hideHeader = isScanPage && scanHeaderHidden;
   
   useEffect(() => {
     // Get user information from localStorage
@@ -64,20 +74,31 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
       
       {/* Main content area */}
       <div className="flex flex-col flex-1 overflow-hidden">
-        {/* Header for desktop with hamburger menu */}
+        {/* Header for desktop with hamburger menu — collapsible on the scan page. */}
+        {!hideHeader && (
         <div className="hidden lg:flex items-center w-full bg-white border-b border-gray-200">
-          <button 
+          <button
             onClick={toggleSidebar}
             className="p-3 text-[#001d6e] hover:bg-gray-100 transition-colors rounded-md mx-2"
             aria-label={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
           >
             <Menu className="h-6 w-6" />
           </button>
-          <Header 
-            userName={currentUser?.username || ''} 
+          <Header
+            userName={currentUser?.username || ''}
             userRole={currentUser?.role || ''}
           />
+          {isScanPage && (
+            <button
+              onClick={() => setScanHeaderHidden(true)}
+              className="mr-3 ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 hover:text-[#001d6e]"
+              title="Hide header for more scanning space"
+            >
+              <ChevronUp className="h-4 w-4" /> Hide header
+            </button>
+          )}
         </div>
+        )}
         
         {/* Mobile Header with tribe logo, welcome text and (on non-home pages) a home icon - Hidden on messages and profile */}
         {/* Mobile Sidebar Drawer */}
@@ -97,7 +118,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
           </div>
         )}
 
-        <div className={`lg:hidden bg-white border-b border-gray-200 p-4 w-full ${location === '/messages' || location === '/profile' ? 'hidden' : ''}`}>
+        <div className={`lg:hidden bg-white border-b border-gray-200 p-4 w-full ${location === '/messages' || location === '/profile' || hideHeader ? 'hidden' : ''}`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-4">
               <button
@@ -151,6 +172,17 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
           </div>
         </div>
         
+        {/* When the scan header is collapsed, a small floating pill brings it back. */}
+        {hideHeader && (
+          <button
+            onClick={() => setScanHeaderHidden(false)}
+            className="fixed left-1/2 top-2 z-40 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-[#001d6e] px-4 py-1.5 text-xs font-semibold text-white shadow-lg transition-colors hover:bg-[#00154b]"
+            title="Show header"
+          >
+            <ChevronDown className="h-4 w-4" /> Show header
+          </button>
+        )}
+
         {/* Page content */}
         <main className="flex-1 overflow-y-auto bg-white">
           <div className="px-4 sm:px-6">

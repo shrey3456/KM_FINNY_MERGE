@@ -1425,7 +1425,7 @@ export default function ProformaSlips() {
           </div>
 
           {canAddSlips && (
-            <div className="rounded-lg border p-4 bg-white">
+            <div className="rounded-xl border p-4 bg-white">
               <h4 className="text-sm font-semibold mb-2">Add Items to Proforma Slip</h4>
               <div className="relative">
                 <Input
@@ -1841,7 +1841,7 @@ export default function ProformaSlips() {
         <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div className="flex items-center gap-3">
-              <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg bg-[#001d6e] text-white">
+              <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-full bg-[#001d6e] text-white">
                 <FileText className="h-4 w-4 sm:h-5 sm:w-5" />
               </div>
               <div>

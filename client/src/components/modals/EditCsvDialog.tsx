@@ -132,7 +132,7 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
         <DialogHeader>
           <div className="flex items-center justify-between gap-3 pr-10">
             <DialogTitle className="flex items-center gap-2 text-xl text-[#001d6e]">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e] text-white">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#001d6e] text-white">
                 <Pencil className="h-4 w-4" />
               </span>
               <span className="min-w-0">
@@ -146,7 +146,7 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
             </DialogTitle>
             {/* Add Row lives up here next to the close button, so it doesn't take its own row. */}
             {canWrite && !itemsQuery.isLoading && (
-              <Button variant="outline" size="sm" className="shrink-0 rounded-lg" onClick={addRow}>
+              <Button variant="outline" size="sm" className="shrink-0 rounded-xl" onClick={addRow}>
                 <Plus className="h-4 w-4 mr-1" /> Add Row
               </Button>
             )}
@@ -272,10 +272,10 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
 
             {canWrite && (
               <div className="flex justify-end gap-2 pt-1">
-                <Button variant="outline" className="rounded-lg" onClick={onClose} disabled={saveMutation.isPending}>
+                <Button variant="outline" className="rounded-xl" onClick={onClose} disabled={saveMutation.isPending}>
                   Cancel
                 </Button>
-                <Button className="rounded-lg bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || rows.length === 0}>
+                <Button className="rounded-xl bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || rows.length === 0}>
                   {saveMutation.isPending ? (
                     <Loader2 className="h-4 w-4 mr-1 animate-spin" />
                   ) : (
