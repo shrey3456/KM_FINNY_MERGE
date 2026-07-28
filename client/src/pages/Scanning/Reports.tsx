@@ -79,8 +79,8 @@ type ScanHistoryResponse = {
 const HISTORY_PAGE_SIZE = 20;
 
 // Solid navy fill, matching Overall Stock / Notion Inventory's filter buttons. Squared off
-// (rounded-lg) for the business-report look — no soft/pill-shaped filter controls.
-const FILTER_BTN_CLASS = "h-8 rounded-lg border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
+// (rounded-xl) for the business-report look — no soft/pill-shaped filter controls.
+const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
 // Column ids that can be hidden via the column-visibility toggle — mirrors historyColumns
 // below. "#", Scanned By, Item and Void always stay visible (hideable: false there), so they
@@ -656,7 +656,7 @@ const Reports = () => {
               </span>
             </span>
           }
-          className="rounded-lg shadow-none border-gray-300"
+          className="rounded-xl shadow-none border-gray-300"
           headerActions={
             <>
               <CollapsibleSearch
@@ -899,9 +899,9 @@ const Reports = () => {
                           : "No events"}
                       </span>
                       <div className="flex gap-2">
-                        <Button variant="outline" size="sm" className="rounded-lg" disabled={historyPage <= 1}
+                        <Button variant="outline" size="sm" className="rounded-xl" disabled={historyPage <= 1}
                           onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                        <Button variant="outline" size="sm" className="rounded-lg" disabled={!historyHasMore}
+                        <Button variant="outline" size="sm" className="rounded-xl" disabled={!historyHasMore}
                           onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
                       </div>
                     </div>
@@ -939,7 +939,7 @@ const Reports = () => {
                 {notionColumns.length === ALL_NOTION_COLUMNS.length ? "Deselect all" : "Select all"}
               </button>
             </div>
-            <div className="grid grid-cols-3 gap-x-4 gap-y-2 rounded-lg border bg-gray-50 p-3">
+            <div className="grid grid-cols-3 gap-x-4 gap-y-2 rounded-xl border bg-gray-50 p-3">
               {ALL_NOTION_COLUMNS.map((col) => (
                 <div key={col} className="flex items-center gap-1.5">
                   <Checkbox

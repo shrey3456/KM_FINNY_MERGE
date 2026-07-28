@@ -1851,7 +1851,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     },
     {
       id: "doneQty",
-      header: "Done Qty",
+      header: "Received Qty",
       width: 90,
       align: "right",
       sortable: true,
@@ -1903,7 +1903,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     },
     {
       id: "donePlt",
-      header: "Done Plt",
+      header: "Received Plt",
       width: 90,
       align: "right",
       cellClassName: "tabular-nums font-semibold",
@@ -1951,7 +1951,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     : csvImpItems;
 
   // Part Order (Separate CSVs) columns — mirrors the Scan/Master View column layout
-  // (Item, Barcode/SAP, Exp/Remain/Done Qty, Status) so all three tabs read as one system.
+  // (Item, Barcode/SAP, Exp/Remain/Received Qty, Status) so all three tabs read as one system.
   const csvColumns: DataTableColumn<ImpItem>[] = [
     {
       id: "itemName",
@@ -2000,7 +2000,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     },
     {
       id: "doneQty",
-      header: "Done Qty",
+      header: "Received Qty",
       width: 90,
       align: "right",
       sortable: true,
@@ -2215,7 +2215,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       },
       {
         id: "doneQty",
-        header: "Done Qty",
+        header: "Received Qty",
         width: 90,
         align: "right",
         sortable: true,
@@ -2270,7 +2270,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       },
       {
         id: "donePlt",
-        header: "Done Plt",
+        header: "Received Plt",
         width: 90,
         align: "right",
         cellClassName: "tabular-nums font-semibold",
@@ -2351,7 +2351,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     });
 
     // Computed the same way every Master View row already displays its own pallet figures
-    // (quantity / itemsPerPallet — see the "Exp Plt"/"Done Plt"/etc. table cells and the
+    // (quantity / itemsPerPallet — see the "Exp Plt"/"Received Plt"/etc. table cells and the
     // mobile list below) rather than the CSV's raw "Expected Pallets" column, which has no
     // guaranteed relationship to itemsPerPallet and previously made this total disagree
     // with what every row underneath it actually shows.
@@ -2542,7 +2542,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             </div>
 
             {/* Full-width progress bar */}
-            <Progress value={osPct} className={`rounded-lg ${osRotated ? "h-2" : "h-1.5"}`} />
+            <Progress value={osPct} className={`rounded-xl ${osRotated ? "h-2" : "h-1.5"}`} />
 
             {/* Scanner section — hidden on Separate CSVs (no scanning happens there) */}
             {osTab !== "separate-csvs" && (
@@ -2582,7 +2582,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       setOsSelectedStv(nextValue);
                     }}
                   >
-                    <SelectTrigger className={`rounded-lg justify-center text-center font-semibold border-2 ${
+                    <SelectTrigger className={`rounded-xl justify-center text-center font-semibold border-2 ${
                       osSelectedStv ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-500"
                     } ${osRotated ? "h-11 w-56 text-base" : "h-8 w-44 text-sm"}`}>
                       <SelectValue placeholder="Select STV…" />
@@ -2608,7 +2608,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   STV list hadn't been set up). */}
               {!osStvsQuery.isLoading && stvs.length === 0 && (
                 <div className="flex items-center">
-                  <span className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                  <span className="rounded-xl border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
                     No STV — create one in Plant Settings
                   </span>
                 </div>
@@ -2744,11 +2744,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }}
                       placeholder="Type item name or barcode…"
                       disabled={!!osPending}
-                      className={`font-mono w-full rounded-lg border-gray-300 ${osRotated ? "text-lg h-14" : "text-sm h-10"}`}
+                      className={`font-mono w-full rounded-xl border-gray-300 ${osRotated ? "text-lg h-14" : "text-sm h-10"}`}
                       autoFocus
                     />
                     {osManualFocused && osSuggestions.length > 0 && (
-                      <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-300 bg-white shadow-lg overflow-hidden">
+                      <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-xl border border-gray-300 bg-white shadow-lg overflow-hidden">
                         {osSuggestions.map((item, idx) => (
                           <button
                             key={item.id}
@@ -2778,7 +2778,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }
                       setOsManualCode(""); setOsSuggIdx(-1);
                     }}
-                    className={`bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 p-0 rounded-lg ${osRotated ? "h-14 w-14" : "h-10 w-10"}`}
+                    className={`bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 p-0 rounded-xl ${osRotated ? "h-14 w-14" : "h-10 w-10"}`}
                   >
                     <ScanLine className={osRotated ? "h-6 w-6" : "h-4 w-4"} />
                   </Button>
@@ -2792,7 +2792,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   variant="outline"
                   disabled={!activeOrderScanSession || activeOrderScanSession.scanStatus === "completed" || !!osPending}
                   onClick={() => { setEmptyBoxQty("1"); setEmptyBoxNote(""); setShowEmptyBox(true); }}
-                  className="flex-1 h-9 rounded-lg text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                  className="flex-1 h-9 rounded-full text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
                 >
                   <Package className="h-4 w-4 mr-1.5" /> Empty Box
                 </Button>
@@ -2841,8 +2841,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {([
                 { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
                 { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
-                { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, text: "text-[#001d6e]" },
-                { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, text: "text-red-600" },
+                { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-orange-500" : "text-gray-300" },
               ] as const).map((s) => {
                 const isActive = osStatFilter === s.key;
                 return (
@@ -2858,7 +2858,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   >
                     <p className={`uppercase tracking-wide text-gray-400 ${osRotated ? "text-[11px]" : "text-[10px]"}`}>{s.label}</p>
                     <p className={`font-bold ${s.text} ${osRotated ? "text-xl" : "text-lg"}`}>{s.value}</p>
-                    <p className={`font-medium text-gray-500 ${osRotated ? "text-sm" : "text-xs"}`}>{s.plt.toFixed(2)} plt</p>
+                    <p className={`font-bold ${s.text} ${osRotated ? "text-lg" : "text-base"}`}>{s.plt.toFixed(2)} plt</p>
                   </button>
                 );
               })}
@@ -2894,7 +2894,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <>
                     <div className="text-white">
                       <p className="text-sm font-bold leading-tight">{osTotalCount} items</p>
-                      <p className="text-xs text-blue-200">{osDoneCount} done</p>
+                      <p className="text-xs text-blue-200">{osDoneCount} received</p>
                     </div>
                     <div className="ml-auto flex items-center gap-2">
                       {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-white/70" />}
@@ -2922,7 +2922,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
                         <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
                         <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
-                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Done</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Received</th>
                         <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
                         <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Extra</th>
                         <th className="font-semibold text-center px-4 py-2.5">Status</th>
@@ -3095,7 +3095,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         <>
                           <div className="text-white">
                             <p className="text-xl font-bold leading-tight">Items</p>
-                            <p className="text-xs text-blue-200">{mvDoneCount} out of {allMvItems.length} done</p>
+                            <p className="text-xs text-blue-200">{mvDoneCount} out of {allMvItems.length} received</p>
                           </div>
                           <div className="ml-auto flex items-center gap-2">
                             {allMvItems.length > 0 && (
@@ -3126,7 +3126,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
                               {mvShowFiles && <th className="font-semibold border-r border-gray-300 px-3 py-2.5">File</th>}
                               <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
-                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Done</th>
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Received</th>
                               <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
                               <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Extra</th>
                               <th className="font-semibold text-center px-4 py-2.5">Status</th>
@@ -3397,7 +3397,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                     <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
                                       <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
                                       <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
-                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Done</th>
+                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Received</th>
                                       <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
                                       <th className="font-semibold text-center px-4 py-2.5">Status</th>
                                     </tr>
@@ -3544,9 +3544,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <Progress value={osPct} className="w-28 h-2" />
-                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
+                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} received</span>
                 {canCompletePart && (
-                  <Button size="sm" className="h-8 px-3 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
+                  <Button size="sm" className="h-8 px-3 rounded-full text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
                     Complete
                   </Button>
                 )}
@@ -3560,7 +3560,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <button
                     key={t}
                     onClick={() => setOsTab(t)}
-                    className={`flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${
+                    className={`flex items-center gap-1.5 rounded-xl px-4 py-1.5 text-sm font-medium transition-colors ${
                       osTab === t
                         ? "bg-[#001d6e] text-white"
                         : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
@@ -3579,7 +3579,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}
                 >
                   <SelectTrigger
-                    className={`h-7 w-full max-w-[9rem] justify-center rounded-lg text-center text-xs font-semibold sm:w-36 ${
+                    className={`h-7 w-full max-w-[9rem] justify-center rounded-full text-center text-xs font-semibold sm:w-36 ${
                       osSelectedStv
                         ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
                         : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
@@ -3632,8 +3632,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   {([
                     { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
                     { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
-                    { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-[#001d6e]", text: "text-[#001d6e]" },
-                    { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-amber-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                    { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
+                    { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-orange-500", text: displayTotals.extra > 0 ? "text-orange-500" : "text-gray-300" },
                   ] as const).map((s) => {
                     const isActive = osStatFilter === s.key;
                     return (
@@ -3643,7 +3643,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         onClick={() => setOsStatFilter(isActive ? "" : s.key)}
                         aria-pressed={isActive}
                         title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                        className={`rounded-lg border px-2.5 py-1 text-left transition-colors ${
+                        className={`rounded-xl border px-2.5 py-1 text-left transition-colors ${
                           isActive
                             ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
                             : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
@@ -3654,7 +3654,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
                         </div>
                         <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
-                        <p className="text-sm font-semibold text-gray-500">{s.plt.toFixed(2)} plt</p>
+                        <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
                       </button>
                     );
                   })}
@@ -3707,14 +3707,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <Button
                     variant={osScanMode === "camera" ? "default" : "outline"}
                     title="Camera"
-                    className={`h-7 w-full rounded-lg text-xs font-semibold ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    className={`h-7 w-full rounded-full text-xs font-semibold ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
                     onClick={() => setOsScanMode("camera")}>
                     <Camera className="mr-1.5 h-4 w-4" /> Camera
                   </Button>
                   <Button
                     variant={osScanMode === "manual" ? "default" : "outline"}
                     title="Manual — or plug in a barcode gun and scan"
-                    className={`h-7 w-full rounded-lg text-xs font-semibold ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    className={`h-7 w-full rounded-full text-xs font-semibold ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
                     onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}>
                     <Keyboard className="mr-1.5 h-4 w-4" /> Manual
                   </Button>
@@ -3786,11 +3786,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             }}
                             placeholder="Type item name or barcode…"
                             disabled={!!osPending}
-                            className="font-mono text-xs h-7 w-full rounded-lg"
+                            className="font-mono text-xs h-7 w-full rounded-full"
                             autoFocus
                           />
                           {osManualFocused && osSuggestions.length > 0 && (
-                            <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                            <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
                               {osSuggestions.map((item, idx) => (
                                 <button
                                   key={item.id}
@@ -3816,7 +3816,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             }
                             setOsManualCode(""); setOsSuggIdx(-1);
                           }}
-                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 h-7 w-7 p-0 rounded-lg">
+                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 h-7 w-7 p-0 rounded-full">
                           <ScanLine className="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -3831,7 +3831,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     variant="outline"
                     disabled={!activeOrderScanSession || activeOrderScanSession.scanStatus === "completed" || !!osPending}
                     onClick={() => { setEmptyBoxQty("1"); setEmptyBoxNote(""); setShowEmptyBox(true); }}
-                    className="flex-1 h-7 rounded-lg text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                    className="flex-1 h-7 rounded-full text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
                   >
                     <Package className="h-4 w-4 mr-1.5" /> Empty Box
                   </Button>
@@ -3850,7 +3850,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
                   {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline. */}
                   <div ref={osSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
-                    <span className="text-xs font-medium text-gray-500">{osDoneCount} / {osTotalCount} done</span>
+                    <span className="text-xs font-medium text-gray-500">{osDoneCount} / {osTotalCount} received</span>
                     {/* No explicit close — clicking outside (osSearchDesktopRef) hides it. */}
                     <button
                       onClick={() => setOsSearchOpen(true)}
@@ -3902,9 +3902,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       return done ? "bg-emerald-50/40" : partial ? "bg-amber-50/30" : undefined;
                     }}
                     sortMode="client"
-                    paginationMode="client"
-                    defaultPageSize={10}
-                    pageSizeOptions={[10, 25, 50, 100]}
                     enableColumnResizing
                     isStickyHeader
                     maxHeight="560px"
@@ -3938,7 +3935,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             {allMvItems.length > 0 && (
                               <button
                                 onClick={downloadMvCsv}
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
                               >
                                 <Download className="h-3.5 w-3.5" /> Export
                               </button>
@@ -3947,7 +3944,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             <button
                               onClick={() => setMvSearchOpen(true)}
                               title="Search items"
-                              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border shadow-sm ${
+                              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border shadow-sm ${
                                 mvSearchOpen ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
                               }`}
                             >
@@ -3998,12 +3995,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           isRowExpandable={(item) => !item._isEmptyBox && !!item.barcode}
                           expandedRowId={mvHistoryItem ? mvRowKey(mvHistoryItem) : null}
                           sortMode="client"
-                          paginationMode="client"
-                          defaultPageSize={10}
-                          pageSizeOptions={[10, 25, 50, 100]}
                           enableColumnVisibility
                           columnVisibility={mvVisibleColumnIds}
                           enableColumnResizing
+                          isStickyHeader
+                          maxHeight="560px"
                           showMobileSwipeHint
                           headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                         />
@@ -4020,7 +4016,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <span className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
+                  <span className="rounded-xl border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
                     {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
                   </span>
                 </div>
@@ -4102,10 +4098,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 return isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined;
                               }}
                               sortMode="client"
-                              paginationMode="client"
-                              defaultPageSize={10}
-                              pageSizeOptions={[10, 25, 50, 100]}
                               enableColumnResizing
+                              isStickyHeader
+                              maxHeight="560px"
                               showMobileSwipeHint
                               headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                             />
