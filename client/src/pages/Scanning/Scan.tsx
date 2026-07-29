@@ -3920,7 +3920,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     sortMode="client"
                     enableColumnResizing
                     isStickyHeader
-                    maxHeight="560px"
+                    maxHeight="max(420px, calc(100vh - 340px))"
                     showMobileSwipeHint
                     headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                   />
@@ -4012,7 +4012,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           columnVisibility={mvVisibleColumnIds}
                           enableColumnResizing
                           isStickyHeader
-                          maxHeight="560px"
+                          maxHeight="max(420px, calc(100vh - 340px))"
                           showMobileSwipeHint
                           headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                         />
@@ -4113,7 +4113,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               sortMode="client"
                               enableColumnResizing
                               isStickyHeader
-                              maxHeight="560px"
+                              maxHeight="max(420px, calc(100vh - 340px))"
                               showMobileSwipeHint
                               headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                             />
