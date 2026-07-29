@@ -1433,22 +1433,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     voided: boolean | null; voidedAt: string | null; voidReason: string | null;
     orderName: string; partIndex: number | null;
   };
-  const [mvHistoryItem, setMvHistoryItem] = useState<MvMergedItem | null>(null);
-  // Collapse any expanded item history when the operator leaves Master View — otherwise it's
-  // still showing "expanded" from memory (React Query still has mvHistoryItem set) whenever
-  // they switch back to the tab, even though nothing on screen actually opened it this time.
+  // Item-history drill-down lives on the SCAN tab: click an item to expand its arrival history
+  // below the row. (Was previously on Master View; moved here so Master View is view-only.)
+  const [osHistoryItem, setOsHistoryItem] = useState<OsScanItem | null>(null);
+  // Collapse any expanded item history when the operator leaves the Scan tab.
   useEffect(() => {
-    if (osTab !== "master-view") setMvHistoryItem(null);
+    if (osTab !== "scan") setOsHistoryItem(null);
   }, [osTab]);
   // Click anywhere outside the search box/expanded row and it closes on its own — no separate
   // cancel needed. Desktop and mobile each render their own markup for this tab (one hidden via
   // CSS, not unmounted), so each gets its own ref/hook instance — see useOutsideClick's comment.
   const closeMvSearch = useCallback(() => { setMvSearchOpen(false); setMvSearch(""); }, []);
-  const closeMvExpand = useCallback(() => setMvHistoryItem(null), []);
+  const closeOsHistory = useCallback(() => setOsHistoryItem(null), []);
   const mvSearchDesktopRef = useOutsideClick(mvSearchOpen, closeMvSearch);
   const mvSearchMobileRef = useOutsideClick(mvSearchOpen, closeMvSearch);
-  const mvExpandDesktopRef = useOutsideClick(mvHistoryItem !== null, closeMvExpand);
-  const mvExpandMobileRef = useOutsideClick(mvHistoryItem !== null, closeMvExpand);
+  const osExpandDesktopRef = useOutsideClick(osHistoryItem !== null, closeOsHistory);
+  const osExpandMobileRef = useOutsideClick(osHistoryItem !== null, closeOsHistory);
   // Same click-outside-closes treatment for the Scan tab's own search toggle.
   const closeOsSearch = useCallback(() => { setOsSearchOpen(false); setOsSearch(""); }, []);
   const osSearchDesktopRef = useOutsideClick(osSearchOpen, closeOsSearch);
@@ -1459,13 +1459,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // all of them (not just one file), matching what "history of this item in this order" means.
   const mvSessionIds = (mvQuery.data?.files ?? []).map((f) => f.sessionId);
   const mvHistoryQuery = useQuery<{ items: MvHistoryEvent[] }>({
-    queryKey: ["/api/order-import/master-view/item-history", mvHistoryItem?.barcode, mvSessionIds.join(",")],
+    queryKey: ["/api/order-import/master-view/item-history", osHistoryItem?.barcode, osGroupSessionIds.join(",")],
     queryFn: () =>
       apiRequest(
         "GET",
-        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(mvHistoryItem!.barcode!)}&sessionIds=${mvSessionIds.join(",")}`,
+        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(osHistoryItem!.barcode!)}&sessionIds=${osGroupSessionIds.join(",")}`,
       ).then((r) => r.json()),
-    enabled: !!mvHistoryItem?.barcode && mvSessionIds.length > 0,
+    enabled: !!osHistoryItem?.barcode && osGroupSessionIds.length > 0,
   });
   const mvVoidMutation = useMutation({
     mutationFn: (payload: { id: number; reason: string }) =>
@@ -1785,8 +1785,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       sortable: true,
       accessor: (i) => i.itemName,
       cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
-      // Clicking the ITEM NAME specifically (not the row, not any other column) toggles the
-      // inline history panel below this row — see the DataTable's renderExpandedRow prop.
+      // Master View is view-only — no click-to-expand history here (moved to the Scan tab).
       render: (i) =>
         i._isEmptyBox ? (
           <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-800">
@@ -1794,13 +1793,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {i._emptyBoxCount ? ` (${i._emptyBoxCount})` : ""}
           </span>
         ) : (
-          <button
-            type="button"
-            onClick={() => setMvHistoryItem((cur) => (cur && mvRowKey(cur) === mvRowKey(i) ? null : i))}
-            className="text-left underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
-          >
-            {i.itemName ?? "—"}
-          </button>
+          <span>{i.itemName ?? "—"}</span>
         ),
     },
     {
@@ -2157,11 +2150,24 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         sortable: true,
         accessor: (i) => i.itemName,
         cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
+        // Clicking the item NAME toggles the inline arrival-history panel below this row — see
+        // the DataTable's renderExpandedRow prop.
         render: (item) => {
           const { credit } = osRowState(item);
+          const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
           return (
             <>
-              <span className="block">{item.itemName ?? "—"}</span>
+              <button
+                type="button"
+                disabled={!item.barcode}
+                // Stop the trigger's pointerdown reaching the outside-click handler, which would
+                // otherwise close-then-the-click-reopens (leaving it stuck open).
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => setOsHistoryItem((cur) => (cur && cur.id === item.id ? null : item))}
+                className={`block text-left underline decoration-dotted underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e] disabled:no-underline disabled:hover:text-inherit ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
+              >
+                {item.itemName ?? "—"}
+              </button>
               {credit && (
                 <span
                   className="block truncate text-[10px] font-normal text-purple-600"
@@ -2941,13 +2947,24 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const remaining  = Math.max(0, exp - effScanned);
                         const extra      = Math.max(0, (item.totalScannedQty ?? 0) - exp);
                         const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
+                        const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
                         return (
-                          <tr key={item.id} className={`border-b border-gray-200 ${
+                          <Fragment key={item.id}>
+                          <tr className={`border-b border-gray-200 ${
                             effStatus === "complete" ? "bg-emerald-50/40" :
                             effStatus === "partial"  ? "bg-amber-50/30" : undefined
                           }`}>
                             <td className="border-r border-gray-200 min-w-[180px] max-w-[320px] px-4 py-2.5">
-                              <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug">{item.itemName ?? "—"}</p>
+                              {/* Item name opens the arrival-history dropdown below the row. */}
+                              <button
+                                type="button"
+                                disabled={!item.barcode}
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onClick={() => setOsHistoryItem((cur) => (cur && cur.id === item.id ? null : item))}
+                                className={`text-left font-medium text-gray-900 whitespace-normal break-words leading-snug underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
+                              >
+                                {item.itemName ?? "—"}
+                              </button>
                               <p className="text-gray-400 font-mono whitespace-normal break-words">
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                               </p>
@@ -2970,6 +2987,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               </span>
                             </td>
                           </tr>
+                          {isOpen && (
+                            <tr>
+                              <td colSpan={6} className="p-0 border-b border-gray-200">
+                                <div ref={osExpandMobileRef}>{mvHistoryPanelMobile}</div>
+                              </td>
+                            </tr>
+                          )}
+                          </Fragment>
                         );
                       })}
                       {osVisible.length === 0 && (
@@ -3169,7 +3194,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               const isExtraOnly = item._isExtra;
                               const isDone = done >= exp && exp > 0;
                               const isPartial = done > 0 && !isDone && !isExtraOnly;
-                              const isMvExpanded = !!mvHistoryItem && mvRowKey(mvHistoryItem) === mvRowKey(item);
                               return (
                                 <Fragment key={idx}>
                                 <tr
@@ -3178,15 +3202,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   }`}
                                 >
                                   <td className="border-r border-gray-200 min-w-[180px] max-w-[320px] px-4 py-2.5">
-                                    {/* Only the item NAME opens the history dropdown — clicking anywhere
-                                        else in the row (barcode, Exp/Done/Left/Extra, Status) does nothing. */}
-                                    <button
-                                      type="button"
-                                      onClick={() => setMvHistoryItem((cur) => (cur && mvRowKey(cur) === mvRowKey(item) ? null : item))}
-                                      className="text-left font-medium text-gray-900 whitespace-normal break-words leading-snug underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
-                                    >
+                                    {/* Master View is view-only — no click-to-expand history. */}
+                                    <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug">
                                       {item.itemName ?? "—"}
-                                    </button>
+                                    </p>
                                     <p className="text-gray-400 font-mono whitespace-normal break-words">
                                       {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                                     </p>
@@ -3222,13 +3241,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                     </span>
                                   </td>
                                 </tr>
-                                {isMvExpanded && (
-                                  <tr>
-                                    <td colSpan={mvShowFiles ? 7 : 6} className="p-0 border-b border-gray-200">
-                                      <div ref={mvExpandMobileRef}>{mvHistoryPanel}</div>
-                                    </td>
-                                  </tr>
-                                )}
                                 </Fragment>
                               );
                             })}
@@ -3268,7 +3280,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           const isExtraOnly = item._isExtra;
                           const isDone = done >= exp && exp > 0;
                           const isPartial = done > 0 && !isDone && !isExtraOnly;
-                          const isMvExpanded = !!mvHistoryItem && mvRowKey(mvHistoryItem) === mvRowKey(item);
                           const expPlt = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
                           const remainPlt = ipp > 0 ? (remain / ipp).toFixed(2) : "0.00";
                           return (
@@ -3290,13 +3301,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   )}
                                 </span>
                                 <div className="min-w-0 flex-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => setMvHistoryItem((cur) => (cur && mvRowKey(cur) === mvRowKey(item) ? null : item))}
-                                    className="text-left text-base font-semibold leading-snug text-gray-900 underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e]"
-                                  >
+                                  <p className="text-base font-semibold leading-snug text-gray-900">
                                     {item.itemName ?? "—"}
-                                  </button>
+                                  </p>
                                   <p className="mt-0.5 font-mono text-sm text-gray-400">
                                     {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                                   </p>
@@ -3334,9 +3341,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   </span>
                                 </span>
                               </div>
-                              {isMvExpanded && (
-                                <div ref={mvExpandMobileRef} className="border-b border-gray-100">{mvHistoryPanelMobile}</div>
-                              )}
                             </Fragment>
                           );
                         })}
@@ -3901,6 +3905,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       const { done, partial } = osRowState(item);
                       return done ? "bg-emerald-50/40" : partial ? "bg-amber-50/30" : undefined;
                     }}
+                    renderExpandedRow={() => <div ref={osExpandDesktopRef}>{mvHistoryPanel}</div>}
+                    isRowExpandable={(item) => !!item.barcode}
+                    expandedRowId={osHistoryItem ? String(osHistoryItem.id) : null}
                     sortMode="client"
                     enableColumnResizing
                     isStickyHeader
@@ -3991,9 +3998,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               : isPartial ? "bg-amber-50/30"
                               : undefined;
                           }}
-                          renderExpandedRow={() => <div ref={mvExpandDesktopRef}>{mvHistoryPanel}</div>}
-                          isRowExpandable={(item) => !item._isEmptyBox && !!item.barcode}
-                          expandedRowId={mvHistoryItem ? mvRowKey(mvHistoryItem) : null}
                           sortMode="client"
                           enableColumnVisibility
                           columnVisibility={mvVisibleColumnIds}
