@@ -409,8 +409,8 @@ export default function OverallStock() {
   // Options for the unified "+ Filter" picker's list step — Plant/Date plus every generic
   // column, minus whichever are already active (each dimension can only be added once).
   const filterPickerOptions = useMemo(() => {
+    // Plant is intentionally NOT here — plant filtering is done via the plant tab strip, not "+ Filter".
     const dims = [
-      { key: "plant", label: "Plant" },
       { key: "date", label: "Date" },
       ...filterableColumns.map((c) => ({ key: c.id, label: c.label })),
     ];
@@ -971,12 +971,14 @@ export default function OverallStock() {
                 </PopoverContent>
               </Popover>
 
-              {(activeFilters.length > 0 || Object.keys(columnConditions).length > 0) && (
+              {/* Plant is excluded — it's owned by the plant tabs, so Clear all neither counts it
+                  nor clears it (that would silently switch the tab back to All). */}
+              {(activeFilters.some((f) => f.field !== "plant") || Object.keys(columnConditions).length > 0) && (
                 <Button
                   size="sm"
                   variant="ghost"
                   className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900"
-                  onClick={() => { setActiveFilters([]); setColumnConditions({}); setPageIndex(0); }}
+                  onClick={() => { setActiveFilters((prev) => prev.filter((f) => f.field === "plant")); setColumnConditions({}); setPageIndex(0); }}
                 >
                   Clear all
                 </Button>
@@ -984,18 +986,18 @@ export default function OverallStock() {
 
               {/* Every active filter (Plant/Date + column filters) in one list, in case the
                   individual chips scroll out of view or there are too many to scan at a glance. */}
-              {(activeFilters.filter((f) => f.value).length + Object.keys(columnConditions).length) > 0 && (
+              {(activeFilters.filter((f) => f.value && f.field !== "plant").length + Object.keys(columnConditions).length) > 0 && (
                 <Popover>
                   <PopoverTrigger asChild>
                     <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
                       <ListFilter className="h-3.5 w-3.5 mr-1" />
-                      Filters ({activeFilters.filter((f) => f.value).length + Object.keys(columnConditions).length})
+                      Filters ({activeFilters.filter((f) => f.value && f.field !== "plant").length + Object.keys(columnConditions).length})
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent align="start" className="w-72">
                     <div className="space-y-0.5">
                       <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Active filters</p>
-                      {activeFilters.filter((f) => f.value).map((f) => (
+                      {activeFilters.filter((f) => f.value && f.field !== "plant").map((f) => (
                         <div key={f.id} className="flex items-center justify-between gap-2 rounded px-1.5 py-1 text-xs hover:bg-gray-50">
                           <span className="text-gray-700">{describeSimpleFilter(f.field, f.value)}</span>
                           <button type="button" onClick={() => removeFilter(f.id)} className="text-gray-400 hover:text-red-500" aria-label="Remove filter">
