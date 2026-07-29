@@ -1472,7 +1472,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       apiRequest("POST", `/api/order-scan/events/${payload.id}/void`, { reason: payload.reason }).then((r) => r.json()),
     onSuccess: () => {
       // Same order_scan_events table Scan History reads from — voiding here is already visible
-      // there with no extra sync step; just invalidate every cache that could show this event.
+      // there with no extra sync step; invalidate every cache that could show this event so the
+      // page reflects it live (no manual refresh). The "/api/order-scan/sessions" prefix covers
+      // the Scan tab's items list, group credits, extras, etc. — refreshing the qty/status the
+      // voided scan affected.
+      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
@@ -1702,14 +1706,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
       )
     : allMvItems.slice().sort((a, b) => {
-        // Whatever was scanned most recently THIS page-load floats to the very top, mirroring the
-        // Scan tab's behavior so the operator can see what they just scanned without hunting for
-        // it. Everything not scanned this session has seq 0 and keeps its original merge order
-        // (Array.prototype.sort is stable, so equal keys don't get shuffled).
-        const seq = osScanSeqRef.current.byBarcode;
-        const aSeq = seq.get(normalize(a.barcode)) ?? 0;
-        const bSeq = seq.get(normalize(b.barcode)) ?? 0;
-        return bSeq - aSeq;
+        // Fully-RECEIVED (complete) rows group at the top; within them, the one edited/scanned
+        // most recently THIS page-load floats highest (so an edit brings it back up). A partial
+        // scan does NOT float a row — incomplete rows keep their original merge order below the
+        // received group (Array.prototype.sort is stable, so equal keys don't get shuffled).
+        // Inline completion test (mvRowState isn't defined yet at this point in the module):
+        // fully received when real progress (scanned minus over-scans) meets the ordered qty.
+        const isRecv = (i: MvMergedItem) => {
+          const exp = i.quantity ?? 0;
+          const done = Math.max(0, (i.scannedQty ?? 0) - (i.extraQty ?? 0));
+          return exp > 0 && done >= exp;
+        };
+        const aDone = isRecv(a) ? 1 : 0;
+        const bDone = isRecv(b) ? 1 : 0;
+        if (aDone !== bDone) return bDone - aDone;         // received first
+        if (!aDone) return 0;                              // both incomplete → keep original order
+        const seq = osScanSeqRef.current.byBarcode;         // both received → most-recent first
+        return (seq.get(normalize(b.barcode)) ?? 0) - (seq.get(normalize(a.barcode)) ?? 0);
       });
 
   // The existing Eye toggle drives the Files column's visibility.
@@ -2059,26 +2072,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         )
       : osItems
     ).slice().sort((a, b) => {
-      // PRIMARY: whatever was scanned most recently THIS session floats to the very top —
-      // every scan bumps osScanSeqRef in onMutate, so the item just scanned always wins
-      // position 1 (a monotonic client counter, immune to the optimistic-vs-server timestamp
-      // skew that a lastScannedAt comparison suffers from). Items not scanned this session have
-      // seq 0 and fall through to the ordering below.
-      const seq = osScanSeqRef.current.byId;
-      const aSeq = seq.get(a.id) ?? 0;
-      const bSeq = seq.get(b.id) ?? 0;
-      if (aSeq !== bSeq) return bSeq - aSeq;
-      // SECONDARY: for items only scanned in a PRIOR page-load (all carry the server's own
-      // timestamp convention, so they're mutually consistent), most-recent first. Guard against
-      // an unparseable value (NaN) so it cleanly falls through to the status/id tiebreakers.
-      const parseAt = (v: string | null) => { const t = v ? new Date(v).getTime() : 0; return Number.isNaN(t) ? 0 : t; };
-      const aScannedAt = parseAt(a.lastScannedAt);
-      const bScannedAt = parseAt(b.lastScannedAt);
-      if (aScannedAt !== bScannedAt) return bScannedAt - aScannedAt;
-      const rank = (s: string) => s === "complete" ? 0 : s === "partial" ? 1 : 2;
-      const diff = rank(a.status) - rank(b.status);
-      if (diff !== 0) return diff;
-      // Within same status group keep original order (by id)
+      // Fully-RECEIVED (complete) rows group at the top; within them the most-recently
+      // scanned/edited THIS session floats highest (an edit brings it back up). A partial scan
+      // does NOT float a row — incomplete rows keep their natural order below the received group.
+      const isRecv = (i: OsScanItem) => (i.expectedQty ?? 0) > 0 && (i.totalScannedQty ?? 0) >= (i.expectedQty ?? 0);
+      const aDone = isRecv(a) ? 1 : 0;
+      const bDone = isRecv(b) ? 1 : 0;
+      if (aDone !== bDone) return bDone - aDone;                        // received first
+      if (aDone) {
+        // Both received → most-recently-touched first (monotonic client counter, immune to the
+        // optimistic-vs-server timestamp skew a lastScannedAt comparison suffers from).
+        const seq = osScanSeqRef.current.byId;
+        const s = (seq.get(b.id) ?? 0) - (seq.get(a.id) ?? 0);
+        if (s !== 0) return s;
+        return a.id - b.id;
+      }
+      // Both incomplete → keep original order (by id), so partial scans don't reshuffle.
       return a.id - b.id;
     });
     // An item counts as done when its scanned qty PLUS any cross-part credit reaches
