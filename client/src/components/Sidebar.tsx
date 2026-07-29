@@ -243,12 +243,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/dispatch",
           pageKey: "dispatch",
         },
-        {
-          label: "Proforma Slips",
-          icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/proforma-slips",
-          pageKey: "proforma",
-        },
       ],
     },
     {
