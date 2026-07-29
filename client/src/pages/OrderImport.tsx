@@ -1304,13 +1304,13 @@ export default function OrderImport() {
                   onClick={() => selectStatusTab(tab.key)}
                   className={
                     activeTab === tab.key
-                      ? "bg-[#001d6e] text-white px-4 py-1.5 text-sm font-medium"
-                      : "bg-white border border-gray-200 text-gray-600 px-4 py-1.5 text-sm font-medium hover:bg-gray-50"
+                      ? "rounded-full bg-[#001d6e] text-white px-4 py-1.5 text-sm font-medium"
+                      : "rounded-full bg-white border border-gray-200 text-gray-600 px-4 py-1.5 text-sm font-medium hover:bg-gray-50"
                   }
                 >
                   {tab.label}
                   {tab.count > 0 && (
-                    <span className={`ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center px-1 text-xs font-semibold ${
+                    <span className={`ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1 text-xs font-semibold ${
                       activeTab === tab.key ? "bg-white/20 text-white" : "bg-gray-100 text-gray-600"
                     }`}>
                       {tab.count}
@@ -1331,8 +1331,8 @@ export default function OrderImport() {
                   onClick={() => selectPlantTab("")}
                   className={
                     plantTab === ""
-                      ? "bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
-                      : "border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                      ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
+                      : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
                   }
                 >
                   All
@@ -1349,10 +1349,10 @@ export default function OrderImport() {
                       style={!isSel && c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
                       className={
                         isSel
-                          ? "bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
+                          ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
                           : c?.bgColor
-                            ? "border px-3 py-1 text-xs font-semibold"
-                            : "border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                            ? "rounded-full border px-3 py-1 text-xs font-semibold"
+                            : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
                       }
                     >
                       {name}

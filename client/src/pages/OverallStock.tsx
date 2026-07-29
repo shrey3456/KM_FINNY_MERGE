@@ -271,8 +271,8 @@ export default function OverallStock() {
       return next;
     });
 
-  // All configured plants — used to populate the plant switcher for admins.
-  const { data: allPlants = [] } = useQuery<{ id: number; name: string }[]>({
+  // All configured plants — used to populate the plant switcher/tabs for admins.
+  const { data: allPlants = [] } = useQuery<{ id: number; name: string; bgColor?: string; textColor?: string; borderColor?: string }[]>({
     queryKey: ["/api/plants"],
     queryFn: () => apiRequest("GET", "/api/plants", undefined, false, true),
   });
@@ -296,6 +296,15 @@ export default function OverallStock() {
   // The plant chosen via a chip, if any — sent to the server to scope the query, same as the
   // date preset below. Extras is a purely client-side "+ Filter" dimension (see filterFields).
   const activePlant = activeFilters.find((f) => f.field === "plant")?.value || "";
+  // Plant tabs drive the same plant filter as the "+ Filter" chip — clicking one sets/replaces
+  // the plant condition (empty = "All"), so the server query, labels and exports all follow.
+  const setPlantTab = (name: string) => {
+    setActiveFilters((prev) => {
+      const others = prev.filter((f) => f.field !== "plant");
+      return name ? [...others, { id: ++filterIdRef.current, field: "plant", value: name }] : others;
+    });
+    setPageIndex(0);
+  };
 
   // Plant-wise stock. Server enforces access: admins get every plant, others only theirs.
   const stockUrl = buildUrl("/api/scan-sessions/reports/plant-stock", {
@@ -769,6 +778,41 @@ export default function OverallStock() {
             }] : []),
           ]}
         />
+
+        {/* Plant tabs — quick switch to view a single plant's stock (or All). Each plant tab is
+            filled with that plant's configured Plant Management colors; the active tab gets a navy
+            ring so it's clear which is selected. "All" is solid navy. */}
+        {plantOptions.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Plant</span>
+            <button
+              onClick={() => setPlantTab("")}
+              className={
+                activePlant === ""
+                  ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                  : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+              }
+            >
+              All
+            </button>
+            {plantOptions.map((name) => {
+              const isSel = activePlant.toUpperCase() === name.toUpperCase();
+              const c = allPlants.find((p) => p.name.toUpperCase() === name.toUpperCase());
+              return (
+                <button
+                  key={name}
+                  onClick={() => setPlantTab(name)}
+                  style={c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
+                  className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                    c?.bgColor ? "border" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                  } ${isSel ? "ring-2 ring-[#001d6e] ring-offset-1" : ""}`}
+                >
+                  {name}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Table card — search, sort, every filter (Plant/Date + column filters), column
             visibility, and export all live in this one row now, right under the table title. */}
