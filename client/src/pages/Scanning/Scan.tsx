@@ -2842,7 +2842,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
                 { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
                 { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, text: "text-red-600" },
-                { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-orange-500" : "text-gray-300" },
+                { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
               ] as const).map((s) => {
                 const isActive = osStatFilter === s.key;
                 return (
@@ -3633,7 +3633,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
                     { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
                     { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
-                    { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-orange-500", text: displayTotals.extra > 0 ? "text-orange-500" : "text-gray-300" },
+                    { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-orange-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
                   ] as const).map((s) => {
                     const isActive = osStatFilter === s.key;
                     return (
@@ -3643,13 +3643,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         onClick={() => setOsStatFilter(isActive ? "" : s.key)}
                         aria-pressed={isActive}
                         title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                        className={`rounded-xl border px-2.5 py-1 text-left transition-colors ${
+                        className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
                           isActive
                             ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
                             : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
                         }`}
                       >
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center justify-center gap-1.5">
                           <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
                           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
                         </div>
