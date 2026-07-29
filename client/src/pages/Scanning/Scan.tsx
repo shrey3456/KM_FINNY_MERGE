@@ -2518,8 +2518,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             whenever osRotated is true — regardless of real viewport width — is what
             actually makes the rotated view usable.
         ════════════════════════════════════════════════════ */}
-        <div className={`flex-col h-full overflow-y-auto ${osRotated ? "flex" : "flex sm:hidden"}`}>
-
+<div className={`flex-col h-full overflow-y-auto ${osRotated ? "flex" : "flex lg:hidden"}`}>
           {/* ── Sticky header + scanner ── */}
           <div className="sticky top-0 z-20 bg-white shadow-sm">
 
@@ -3525,7 +3524,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         </div>
 
         {/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */}
-        <div className={osRotated ? "hidden" : "hidden sm:block"}>
+      <div className={osRotated ? "hidden" : "hidden lg:block"}>        
           <div className="mx-auto max-w-7xl space-y-3">
 
             {/* Header row */}
