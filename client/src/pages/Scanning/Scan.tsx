@@ -3226,19 +3226,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   )}
                                   <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
                                     <span className="block">{exp || "—"}</span>
-                                    <span className="block text-[10px] font-normal text-gray-400">{plt(exp)} plt</span>
+                                    <span className="block text-xs font-bold text-gray-400">{plt(exp)} plt</span>
                                   </td>
                                   <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
                                     <span className="block">{done}</span>
-                                    <span className="block text-[10px] font-normal text-gray-400">{plt(done)} plt</span>
+                                    <span className="block text-xs font-bold text-gray-400">{plt(done)} plt</span>
                                   </td>
                                   <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
                                     <span className="block">{remain || "—"}</span>
-                                    <span className="block text-[10px] font-normal text-gray-400">{plt(remain)} plt</span>
+                                    <span className="block text-xs font-bold text-gray-400">{plt(remain)} plt</span>
                                   </td>
                                   <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
                                     <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
-                                    <span className="block text-[10px] font-normal text-gray-400">{plt(extra)} plt</span>
+                                    <span className="block text-xs font-bold text-gray-400">{plt(extra)} plt</span>
                                   </td>
                                   <td className="text-center px-4 py-2.5">
                                     <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${

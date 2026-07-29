@@ -466,7 +466,7 @@ const Users = () => {
                   maxLength={4}
                   pattern="[0-9]{4}"
                   inputMode="numeric"
-                  className="w-32 tracking-[0.4em] font-mono"
+                  className={`font-mono tracking-[0.4em] placeholder:tracking-normal placeholder:font-sans ${isEdit ? "w-64" : "w-32"}`}
                   {...field}
                   value={field.value || ''}
                 />

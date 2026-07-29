@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import { AlertCircle, Loader2, Pencil, Plus, Save, Trash2 } from "lucide-react";
@@ -26,6 +27,10 @@ interface EditableItem {
   scannedQty: number;
 }
 
+// Just enough of the Notion-synced product catalog to search by and auto-fill from — see the
+// itemName search/autocomplete on newly-added rows below.
+type CatalogProduct = { id: number; name: string; barcode: string; sapCode?: string | null };
+
 let tempKeyCounter = 0;
 function newTempKey() {
   tempKeyCounter += 1;
@@ -48,6 +53,73 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
   const canWrite = hasPageWriteAccess("order-import-edit");
 
   const [rows, setRows] = useState<EditableItem[]>([]);
+
+  // Full product catalog (synced from Notion) — searched by name/barcode/SAP as the operator
+  // types an item name on a newly-added row, so barcode + SAP code auto-fill from a pick
+  // instead of being typed by hand and risking a typo.
+  const { data: productsRaw } = useQuery<any>({
+    queryKey: ["/api/products", { all: "true" }],
+  });
+  const products: CatalogProduct[] = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.results ?? []);
+
+  // Which row's item-name dropdown is open — only ever a row without an id yet (a brand-new,
+  // unsaved row). Existing rows keep their plain, freely-editable text inputs untouched.
+  const [suggestKey, setSuggestKey] = useState<string | null>(null);
+  const suggestRow = rows.find((r) => r.key === suggestKey);
+  const productMatches = useMemo(() => {
+    const q = suggestRow?.itemName.trim().toLowerCase();
+    if (!q) return [];
+    return products
+      .filter((p) =>
+        p.name?.toLowerCase().includes(q) ||
+        p.barcode?.toLowerCase().includes(q) ||
+        p.sapCode?.toLowerCase().includes(q)
+      )
+      .slice(0, 8);
+  }, [products, suggestRow?.itemName]);
+
+  // The dropdown is rendered fixed-position (see the bottom of this component), not nested
+  // inside the table — the table's own overflow-x-auto wrapper forces its overflow-y to
+  // "auto" too (a plain CSS rule: the two axes can't be independently visible/clipped), which
+  // silently clipped an absolutely-positioned dropdown to nothing for a newly-added row (always
+  // the last row, with zero room below it inside that wrapper). Measuring the input's on-screen
+  // position and rendering fixed instead escapes that clipping ancestor entirely.
+  const itemNameRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const [suggestPos, setSuggestPos] = useState<{ top: number; left: number; width: number } | null>(null);
+
+  // Tracked in a ref alongside the state so the blur handler's setTimeout (which closes over a
+  // stale suggestKey from whatever render it was scheduled in) can read the CURRENT value
+  // instead — otherwise a fast focus-to-another-row blur could close the wrong row's dropdown.
+  const suggestKeyRef = useRef<string | null>(null);
+  useEffect(() => { suggestKeyRef.current = suggestKey; }, [suggestKey]);
+
+  function openSuggest(key: string) {
+    setSuggestKey(key);
+    const el = itemNameRefs.current[key];
+    if (el) {
+      const r = el.getBoundingClientRect();
+      setSuggestPos({ top: r.bottom, left: r.left, width: r.width });
+    }
+  }
+  function closeSuggest() {
+    setSuggestKey(null);
+    setSuggestPos(null);
+  }
+  // A stale-positioned dropdown left open through a scroll (dialog body or page) would drift
+  // away from its input — simplest robust fix is to just close it, same as a blur would.
+  useEffect(() => {
+    if (!suggestKey) return;
+    const onScroll = () => closeSuggest();
+    window.addEventListener("scroll", onScroll, true);
+    return () => window.removeEventListener("scroll", onScroll, true);
+  }, [suggestKey]);
+
+  function selectProduct(key: string, product: CatalogProduct) {
+    setRows((prev) => prev.map((r) => (r.key === key
+      ? { ...r, itemName: product.name, barcode: product.barcode, sapCode: product.sapCode ?? "" }
+      : r)));
+    closeSuggest();
+  }
 
   const itemsQuery = useQuery({
     queryKey: ["/api/order-import-edit/sessions", sessionId, "items"],
@@ -210,10 +282,17 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
                       </td>
                       <td className="border-r border-gray-100 px-1.5 py-1">
                         <Input
+                          ref={(el) => { itemNameRefs.current[row.key] = el; }}
                           className="h-7 w-full rounded-md text-xs"
                           value={row.itemName}
                           disabled={!canWrite}
-                          onChange={(e) => updateRow(row.key, "itemName", e.target.value)}
+                          placeholder={row.id == null ? "Search product name/barcode/SAP…" : undefined}
+                          onChange={(e) => {
+                            updateRow(row.key, "itemName", e.target.value);
+                            if (row.id == null) openSuggest(row.key);
+                          }}
+                          onFocus={() => { if (row.id == null) openSuggest(row.key); }}
+                          onBlur={() => setTimeout(() => { if (suggestKeyRef.current === row.key) closeSuggest(); }, 150)}
                         />
                       </td>
                       <td className="border-r border-gray-100 px-1.5 py-1">
@@ -288,6 +367,35 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
           </>
         )}
       </DialogContent>
+
+      {/* Portaled to document.body rather than rendered inline: DialogContent itself carries a
+          CSS transform (translate-x/-y, for its open/close animation), and a transformed
+          ancestor becomes the containing block for position:fixed descendants — so a fixed
+          dropdown left inside it would be positioned relative to the dialog, not the viewport,
+          silently landing in the wrong place. Portaling to body escapes that entirely. */}
+      {suggestKey && suggestPos && createPortal(
+        <div
+          className="fixed z-[100] max-h-56 overflow-y-auto rounded-lg border border-gray-200 bg-white text-left text-xs shadow-lg"
+          style={{ top: suggestPos.top + 4, left: suggestPos.left, width: suggestPos.width }}
+        >
+          {productMatches.length === 0 ? (
+            <p className="px-2.5 py-2 text-gray-400">No matching product — type it manually.</p>
+          ) : (
+            productMatches.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onMouseDown={(e) => { e.preventDefault(); selectProduct(suggestKey, p); }}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-gray-50"
+              >
+                <span className="min-w-0 flex-1 truncate font-medium text-gray-900">{p.name}</span>
+                <span className="shrink-0 font-mono text-[10px] text-gray-400">{p.barcode}</span>
+              </button>
+            ))
+          )}
+        </div>,
+        document.body,
+      )}
     </Dialog>
   );
 }

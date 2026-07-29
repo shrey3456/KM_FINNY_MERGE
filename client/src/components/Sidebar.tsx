@@ -214,12 +214,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/order-import",
           pageKey: "order-import",
         },
-        {
-          label: "Order Reports",
-          icon: <PieChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/order-reports",
-          pageKey: "order-reports",
-        },
+        // {
+        //   label: "Order Reports",
+        //   icon: <PieChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
+        //   path: "/order-reports",
+        //   pageKey: "order-reports",
+        // },
         {
           label: "Inventory",
           icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
