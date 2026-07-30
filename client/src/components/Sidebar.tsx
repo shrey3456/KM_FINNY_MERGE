@@ -31,6 +31,7 @@ import {
   FileUp,
   PackageCheck,
   ChevronsLeft,
+  ChevronDown,
   LayoutList,
   PieChart,
 } from "lucide-react";
@@ -86,6 +87,15 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
 
   const [profileImageUrl, setProfileImageUrl] = useState<string | null>(null);
   const [imageError, setImageError] = useState(false);
+  // Collapsible category (department) sections — click a heading to show/hide its items. Tracks
+  // which sections are collapsed (default: none, i.e. all expanded).
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const toggleSection = (title: string) =>
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      next.has(title) ? next.delete(title) : next.add(title);
+      return next;
+    });
 
   useEffect(() => {
     // Handle profile image - check if user has profileImage data or load from API
@@ -339,20 +349,39 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
   // Get user permissions for conditional rendering
   // const userPermissions = getCurrentUserPermissions();
 
-  // Filter categories based on user permissions
+  // Whether a single menu item is visible to this user (access control). Extracted so both the
+  // render AND the "hide empty department" check below use the exact same rule.
+  const isItemVisible = (item: SidebarMenuItem) => {
+    const it = item as any;
+    if (it.adminOnly && !isSuperAdmin) return false;
+    if (it.roles) return it.roles.includes(userRole);
+    if (it.pageKey && !isAdminRole && allowedPages.includes(it.pageKey)) return true;
+    if (it.permission) {
+      return userPermissions[it.permission as keyof typeof userPermissions] === true
+        || it.departments?.includes(userDepartment) === true;
+    }
+    if (it.pageKey && !isAdminRole) {
+      return allowedPages.includes(it.pageKey);
+    }
+    return true;
+  };
+
+  // Filter categories based on user permissions, then drop any department that has NO items the
+  // user can access — an empty section heading is just noise.
   const filteredCategories = menuCategories.filter((category) => {
     if (category.title === "ADMIN") {
       // Show ADMIN category if user has canManageUsers OR has role-based access to any item
       const hasRoleBasedItem = category.items.some(
         (item) => (item as any).roles?.includes(userRole)
       );
-      return userPermissions.canManageUsers || hasRoleBasedItem;
+      if (!userPermissions.canManageUsers && !hasRoleBasedItem) return false;
     }
     // Hide INVENTORY category for users without inventory access
     if (category.title === "INVENTORY" && !userPermissions.canAccessInventory) {
       return false;
     }
-    return true;
+    // No accessible items → hide the whole department.
+    return category.items.some(isItemVisible);
   });
 
   return (
@@ -370,31 +399,23 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
 
       {/* Sidebar content */}
       <div className="flex-1 py-2 overflow-y-auto">
-        {filteredCategories.map((category, index) => (
+        {filteredCategories.map((category, index) => {
+          const isCollapsed = collapsedSections.has(category.title);
+          return (
           <div key={index} className="mb-6 px-4">
-            <h3 className="text-xs font-medium text-gray-700 mb-2">
-              {category.title}
-            </h3>
-            <ul className="space-y-1">
+            {/* Click the department heading to show/hide its items. */}
+            <button
+              type="button"
+              onClick={() => toggleSection(category.title)}
+              className="mb-2 flex w-full items-center justify-between text-xs font-medium text-gray-700 hover:text-[#001d6e]"
+              aria-expanded={!isCollapsed}
+            >
+              <span>{category.title}</span>
+              <ChevronDown className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${isCollapsed ? "-rotate-90" : ""}`} />
+            </button>
+            <ul className={`space-y-1 ${isCollapsed ? "hidden" : ""}`}>
               {category.items
-                .filter((item) => {
-                  const it = item as any;
-                  if (it.adminOnly && !isSuperAdmin) return false;
-                  // Role-based access: only show to listed roles
-                  if (it.roles) return it.roles.includes(userRole);
-                
-                  if (it.pageKey && !isAdminRole && allowedPages.includes(it.pageKey)) return true;
-                 
-                  if (it.permission) {
-                    return userPermissions[it.permission as keyof typeof userPermissions] === true
-                      || it.departments?.includes(userDepartment) === true;
-                  }
-                  // Page-based access control for non-admin users
-                  if (it.pageKey && !isAdminRole) {
-                    return allowedPages.includes(it.pageKey);
-                  }
-                  return true;
-                })
+                .filter(isItemVisible)
                 .map((item) => {
                   // @ts-ignore
                   if (item.disabled) {
@@ -432,7 +453,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
                 })}
             </ul>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Logout at bottom */}
