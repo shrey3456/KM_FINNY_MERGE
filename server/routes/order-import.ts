@@ -482,7 +482,25 @@ router.get('/order-import/sessions/:id/items', requireImportViewAccess, async (r
              OR (osi.order_import_item_id IS NULL
                  AND osi.session_id = oi.session_id
                  AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
-          ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus"
+          ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus",
+        (SELECT COALESCE(SUM(ose.total_qty), 0)::int
+          FROM order_scan_events ose
+          JOIN order_scan_items osi ON osi.id = ose.scan_item_id
+          WHERE ose.is_extra = true AND ose.voided IS NOT TRUE
+            AND (osi.order_import_item_id = oi.id
+                 OR (osi.order_import_item_id IS NULL
+                     AND osi.session_id = oi.session_id
+                     AND osi.barcode IS NOT DISTINCT FROM oi.barcode))
+        )                                       AS "extraQty",
+        (SELECT MAX(ose.scanned_at)
+          FROM order_scan_events ose
+          JOIN order_scan_items osi ON osi.id = ose.scan_item_id
+          WHERE ose.voided IS NOT TRUE
+            AND (osi.order_import_item_id = oi.id
+                 OR (osi.order_import_item_id IS NULL
+                     AND osi.session_id = oi.session_id
+                     AND osi.barcode IS NOT DISTINCT FROM oi.barcode))
+        )                                       AS "lastScannedAt"
       FROM order_import_items oi
       WHERE oi.session_id = $1
       ORDER BY oi.id

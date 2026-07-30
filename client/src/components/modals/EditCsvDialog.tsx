@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { hasPageWriteAccess } from "@/lib/permissions";
-import { AlertCircle, Loader2, Pencil, Plus, Save, Trash2 } from "lucide-react";
+import { AlertCircle, Loader2, Pencil, Plus, Save, Search, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -28,8 +28,35 @@ interface EditableItem {
 }
 
 // Just enough of the Notion-synced product catalog to search by and auto-fill from — see the
-// itemName search/autocomplete on newly-added rows below.
-type CatalogProduct = { id: number; name: string; barcode: string; sapCode?: string | null };
+// itemName search/autocomplete on newly-added rows below. itemsPerPallet/pallets/valPlt/indPlt
+// drive the Quantity <-> Pallets auto-calc in the Add Item dialog.
+type CatalogProduct = {
+  id: number; name: string; barcode: string; sapCode?: string | null;
+  itemsPerPallet?: number | null; pallets?: number | null;
+  valPlt?: number | null; indPlt?: number | null;
+};
+
+// Same fallback chain used across the app (see Scan.tsx's _resolveMvPalletSize): plant-specific
+// pallet size first, then the generic itemsPerPallet/pallets fields, then a "*NNN" hint in the
+// product name itself. Returns 0 (not 1) when nothing is configured, so callers can tell
+// "no pallet data" apart from "genuinely 1 per pallet".
+function resolvePalletSize(product: CatalogProduct | null, plant: string | undefined): number {
+  if (!product) return 0;
+  const plantLower = (plant ?? "").toLowerCase();
+  let size = 0;
+  if (plantLower.includes("val")) {
+    size = Number(product.valPlt) || Number(product.itemsPerPallet) || Number(product.pallets) || 0;
+  } else if (plantLower.includes("ind")) {
+    size = Number(product.indPlt) || Number(product.itemsPerPallet) || Number(product.pallets) || 0;
+  } else {
+    size = Number(product.itemsPerPallet) || Number(product.pallets) || 0;
+  }
+  if (size === 0 && product.name) {
+    const m = product.name.match(/\*(\d{1,5})/);
+    if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) size = n; }
+  }
+  return size;
+}
 
 let tempKeyCounter = 0;
 function newTempKey() {
@@ -54,71 +81,75 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
 
   const [rows, setRows] = useState<EditableItem[]>([]);
 
-  // Full product catalog (synced from Notion) — searched by name/barcode/SAP as the operator
-  // types an item name on a newly-added row, so barcode + SAP code auto-fill from a pick
-  // instead of being typed by hand and risking a typo.
+  // Full product catalog (synced from Notion) — searched by name/barcode/SAP in the "Add Item"
+  // dialog below, so a picked product's barcode + SAP code auto-fill instead of being typed
+  // by hand and risking a typo.
   const { data: productsRaw } = useQuery<any>({
     queryKey: ["/api/products", { all: "true" }],
   });
   const products: CatalogProduct[] = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.results ?? []);
 
-  // Which row's item-name dropdown is open — only ever a row without an id yet (a brand-new,
-  // unsaved row). Existing rows keep their plain, freely-editable text inputs untouched.
-  const [suggestKey, setSuggestKey] = useState<string | null>(null);
-  const suggestRow = rows.find((r) => r.key === suggestKey);
-  const productMatches = useMemo(() => {
-    const q = suggestRow?.itemName.trim().toLowerCase();
+  // "Add Item" dialog — a separate small dialog (rather than an inline empty row growing at
+  // the bottom of the big table) so the product search has a normal, uncluttered place to
+  // live: no clipping-ancestor tricks needed, and picking a result can't be confused with
+  // editing an existing row's own item name.
+  const [addItemOpen, setAddItemOpen] = useState(false);
+  const [addSearch, setAddSearch] = useState("");
+  const [addPicked, setAddPicked] = useState<CatalogProduct | null>(null);
+  const [addQty, setAddQty] = useState("0");
+  const [addPallets, setAddPallets] = useState("");
+
+  // Barcodes already present as a row in this CSV — excluded from suggestions below so you
+  // don't accidentally add a duplicate row for an item that's already there (if it needs a
+  // qty change, that's an edit to its existing row, not a second row for the same barcode).
+  const existingBarcodes = useMemo(
+    () => new Set(rows.map((r) => r.barcode.trim().toLowerCase()).filter(Boolean)),
+    [rows],
+  );
+
+  // Computed separately from the exclusion filter below so the empty-results message can tell
+  // apart "nothing matches this search at all" from "it matches, but every match is already a
+  // row in this CSV" — the two need different messages, not just a blank list either way.
+  const addTextMatches = useMemo(() => {
+    const q = addSearch.trim().toLowerCase();
     if (!q) return [];
-    return products
-      .filter((p) =>
-        p.name?.toLowerCase().includes(q) ||
-        p.barcode?.toLowerCase().includes(q) ||
-        p.sapCode?.toLowerCase().includes(q)
-      )
-      .slice(0, 8);
-  }, [products, suggestRow?.itemName]);
+    return products.filter((p) =>
+      p.name?.toLowerCase().includes(q) ||
+      p.barcode?.toLowerCase().includes(q) ||
+      p.sapCode?.toLowerCase().includes(q)
+    );
+  }, [products, addSearch]);
+  const addMatches = useMemo(
+    () => addTextMatches.filter((p) => !existingBarcodes.has((p.barcode ?? "").trim().toLowerCase())).slice(0, 8),
+    [addTextMatches, existingBarcodes],
+  );
+  // True when the search matched something, but every match got filtered out for already being
+  // a row in this CSV — as opposed to genuinely matching nothing at all.
+  const addAllMatchesAlreadyInCsv = addTextMatches.length > 0 && addMatches.length === 0;
 
-  // The dropdown is rendered fixed-position (see the bottom of this component), not nested
-  // inside the table — the table's own overflow-x-auto wrapper forces its overflow-y to
-  // "auto" too (a plain CSS rule: the two axes can't be independently visible/clipped), which
-  // silently clipped an absolutely-positioned dropdown to nothing for a newly-added row (always
-  // the last row, with zero room below it inside that wrapper). Measuring the input's on-screen
-  // position and rendering fixed instead escapes that clipping ancestor entirely.
-  const itemNameRefs = useRef<Record<string, HTMLInputElement | null>>({});
-  const [suggestPos, setSuggestPos] = useState<{ top: number; left: number; width: number } | null>(null);
-
-  // Tracked in a ref alongside the state so the blur handler's setTimeout (which closes over a
-  // stale suggestKey from whatever render it was scheduled in) can read the CURRENT value
-  // instead — otherwise a fast focus-to-another-row blur could close the wrong row's dropdown.
-  const suggestKeyRef = useRef<string | null>(null);
-  useEffect(() => { suggestKeyRef.current = suggestKey; }, [suggestKey]);
-
-  function openSuggest(key: string) {
-    setSuggestKey(key);
-    const el = itemNameRefs.current[key];
-    if (el) {
-      const r = el.getBoundingClientRect();
-      setSuggestPos({ top: r.bottom, left: r.left, width: r.width });
-    }
+  function resetAddDialog() {
+    setAddItemOpen(false);
+    setAddSearch("");
+    setAddPicked(null);
+    setAddQty("0");
+    setAddPallets("");
   }
-  function closeSuggest() {
-    setSuggestKey(null);
-    setSuggestPos(null);
-  }
-  // A stale-positioned dropdown left open through a scroll (dialog body or page) would drift
-  // away from its input — simplest robust fix is to just close it, same as a blur would.
-  useEffect(() => {
-    if (!suggestKey) return;
-    const onScroll = () => closeSuggest();
-    window.addEventListener("scroll", onScroll, true);
-    return () => window.removeEventListener("scroll", onScroll, true);
-  }, [suggestKey]);
 
-  function selectProduct(key: string, product: CatalogProduct) {
-    setRows((prev) => prev.map((r) => (r.key === key
-      ? { ...r, itemName: product.name, barcode: product.barcode, sapCode: product.sapCode ?? "" }
-      : r)));
-    closeSuggest();
+  function confirmAddItem() {
+    if (!addPicked) return;
+    setRows((prev) => [
+      ...prev,
+      {
+        key: newTempKey(),
+        barcode: addPicked.barcode,
+        itemName: addPicked.name,
+        sapCode: addPicked.sapCode ?? "",
+        quantity: addQty || "0",
+        expectedPallets: addPallets,
+        scannedQty: 0,
+      },
+    ]);
+    resetAddDialog();
   }
 
   const itemsQuery = useQuery({
@@ -189,14 +220,23 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
     setRows((prev) => prev.filter((r) => r.key !== row.key));
   }
 
-  function addRow() {
-    setRows((prev) => [
-      ...prev,
-      { key: newTempKey(), barcode: "", itemName: "", sapCode: "", quantity: "0", expectedPallets: "", scannedQty: 0 },
-    ]);
-  }
-
   const session = itemsQuery.data?.session;
+
+  // Quantity <-> Pallets auto-calc in the Add Item dialog, once a product (and therefore a
+  // pallet size for this session's plant) is picked. Each field only recomputes the OTHER one
+  // on its own change — never both from a shared effect — so rounding on one side can't fight
+  // the other field while the operator is still typing it.
+  const addPalletSize = resolvePalletSize(addPicked, session?.plant);
+  function handleAddQtyChange(value: string) {
+    setAddQty(value);
+    const n = Number(value);
+    if (addPalletSize > 0 && Number.isFinite(n)) setAddPallets((n / addPalletSize).toFixed(2));
+  }
+  function handleAddPalletsChange(value: string) {
+    setAddPallets(value);
+    const n = Number(value);
+    if (addPalletSize > 0 && Number.isFinite(n)) setAddQty(String(Math.round(n * addPalletSize)));
+  }
 
   return (
     <Dialog open={sessionId != null} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -218,7 +258,7 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
             </DialogTitle>
             {/* Add Row lives up here next to the close button, so it doesn't take its own row. */}
             {canWrite && !itemsQuery.isLoading && (
-              <Button variant="outline" size="sm" className="shrink-0 rounded-xl" onClick={addRow}>
+              <Button variant="outline" size="sm" className="shrink-0 rounded-xl" onClick={() => setAddItemOpen(true)}>
                 <Plus className="h-4 w-4 mr-1" /> Add Row
               </Button>
             )}
@@ -282,17 +322,10 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
                       </td>
                       <td className="border-r border-gray-100 px-1.5 py-1">
                         <Input
-                          ref={(el) => { itemNameRefs.current[row.key] = el; }}
                           className="h-7 w-full rounded-md text-xs"
                           value={row.itemName}
                           disabled={!canWrite}
-                          placeholder={row.id == null ? "Search product name/barcode/SAP…" : undefined}
-                          onChange={(e) => {
-                            updateRow(row.key, "itemName", e.target.value);
-                            if (row.id == null) openSuggest(row.key);
-                          }}
-                          onFocus={() => { if (row.id == null) openSuggest(row.key); }}
-                          onBlur={() => setTimeout(() => { if (suggestKeyRef.current === row.key) closeSuggest(); }, 150)}
+                          onChange={(e) => updateRow(row.key, "itemName", e.target.value)}
                         />
                       </td>
                       <td className="border-r border-gray-100 px-1.5 py-1">
@@ -368,34 +401,101 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
         )}
       </DialogContent>
 
-      {/* Portaled to document.body rather than rendered inline: DialogContent itself carries a
-          CSS transform (translate-x/-y, for its open/close animation), and a transformed
-          ancestor becomes the containing block for position:fixed descendants — so a fixed
-          dropdown left inside it would be positioned relative to the dialog, not the viewport,
-          silently landing in the wrong place. Portaling to body escapes that entirely. */}
-      {suggestKey && suggestPos && createPortal(
-        <div
-          className="fixed z-[100] max-h-56 overflow-y-auto rounded-lg border border-gray-200 bg-white text-left text-xs shadow-lg"
-          style={{ top: suggestPos.top + 4, left: suggestPos.left, width: suggestPos.width }}
-        >
-          {productMatches.length === 0 ? (
-            <p className="px-2.5 py-2 text-gray-400">No matching product — type it manually.</p>
+      {/* Nested dialog, opened on top of the main Edit CSV dialog by the "Add Row" button.
+          Search first, pick a product (fills barcode/SAP from the catalog), then set qty/pallets. */}
+      <Dialog open={addItemOpen} onOpenChange={(open) => { if (!open) resetAddDialog(); }}>
+        <DialogContent className="max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-lg text-[#001d6e]">
+              <Plus className="h-4 w-4" /> Add Item
+            </DialogTitle>
+          </DialogHeader>
+
+          {!addPicked ? (
+            // min-w-0: DialogContent is display:grid, and a grid item's default min-width is
+            // "auto" — the intrinsic minimum size of its content, which for a long, unbroken
+            // font-mono barcode string can force this whole row wider than the rest of the
+            // dialog (max-w-md), even though the text itself has `truncate` on it further down.
+            // min-w-0 here (and on the results list + each row below) removes that floor so
+            // truncation actually gets a chance to apply instead of being overridden by it.
+            <div className="min-w-0">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-gray-400" />
+                <Input
+                  autoFocus
+                  className="pl-8"
+                  placeholder="Search product name, barcode, or SAP code…"
+                  value={addSearch}
+                  onChange={(e) => setAddSearch(e.target.value)}
+                />
+              </div>
+              {addSearch.trim() && (
+                <div className="mt-2 max-h-64 min-w-0 overflow-y-auto overflow-x-hidden rounded-lg border border-gray-200">
+                  {addMatches.length === 0 ? (
+                    <p className="px-2.5 py-3 text-center text-xs text-gray-400">
+                      {addAllMatchesAlreadyInCsv
+                        ? "Already in this CSV — edit its quantity from the row in the table, not a new one."
+                        : "No matching product found."}
+                    </p>
+                  ) : (
+                    addMatches.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => setAddPicked(p)}
+                        className="flex w-full min-w-0 items-center gap-2 border-b border-gray-100 px-2.5 py-2 text-left text-sm last:border-0 hover:bg-gray-50"
+                      >
+                        <span className="min-w-0 flex-1 truncate font-medium text-gray-900">{p.name}</span>
+                        <span className="shrink-0 font-mono text-[11px] text-gray-400">{p.barcode}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
           ) : (
-            productMatches.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onMouseDown={(e) => { e.preventDefault(); selectProduct(suggestKey, p); }}
-                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-gray-50"
-              >
-                <span className="min-w-0 flex-1 truncate font-medium text-gray-900">{p.name}</span>
-                <span className="shrink-0 font-mono text-[10px] text-gray-400">{p.barcode}</span>
-              </button>
-            ))
+            <div className="min-w-0 space-y-3">
+              <div className="flex items-start justify-between gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-gray-900">{addPicked.name}</p>
+                  <p className="font-mono text-xs text-gray-500">
+                    {addPicked.barcode}{addPicked.sapCode ? ` · SAP ${addPicked.sapCode}` : ""}
+                  </p>
+                </div>
+                <Button variant="ghost" size="sm" className="h-7 shrink-0 text-xs" onClick={() => setAddPicked(null)}>
+                  Change
+                </Button>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-500">Quantity</label>
+                  <Input type="number" value={addQty} onChange={(e) => handleAddQtyChange(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-500">Expected Pallets</label>
+                  <Input type="number" value={addPallets} onChange={(e) => handleAddPalletsChange(e.target.value)} />
+                </div>
+              </div>
+              {addPalletSize > 0 && (
+                <p className="text-[11px] text-gray-400">{addPalletSize} per pallet for this plant</p>
+              )}
+            </div>
           )}
-        </div>,
-        document.body,
-      )}
+
+          <DialogFooter>
+            <Button variant="outline" className="rounded-xl" onClick={resetAddDialog}>
+              Cancel
+            </Button>
+            <Button
+              className="rounded-xl bg-[#001d6e] hover:bg-[#00154b] text-white"
+              disabled={!addPicked}
+              onClick={confirmAddItem}
+            >
+              <Plus className="h-4 w-4 mr-1" /> Add
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }

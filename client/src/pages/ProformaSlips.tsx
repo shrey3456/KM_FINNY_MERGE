@@ -1635,43 +1635,55 @@ export default function ProformaSlips() {
 
   const renderSlipFooter = (ctx: DataTableFooterContext) => {
     const filteredSlips = getFilteredSlips();
+    // Which columns are ACTUALLY rendering right now — mirrors data-table.tsx's own
+    // visibleColumns logic exactly (visibility-toggle set, plus anything hideable:false which
+    // always shows regardless) — so a totals cell only ever lands under the column it's meant
+    // for, even as columns get hidden/shown via the toggle. Selection adds its own leading
+    // (empty) cell when enabled, matching the checkbox column DataTable renders in that case.
+    const visibleCols = slipColumns.filter((c) => visibleColumnIds.has(c.id) || c.hideable === false);
+    const totalQty = filteredSlips.reduce((sum, slip) => sum + (slip.totalQuantity || 0), 0);
+    const uniqueParties = Array.from(new Set(filteredSlips.map((slip) => slip.partyName))).length;
+    const uniqueVehicles = Array.from(new Set(filteredSlips.filter((slip) => slip.vehicleNumber).map((slip) => slip.vehicleNumber))).length;
     return (
       <TableFooter className="bg-muted/30">
         {filteredSlips.length > 0 && (
           <TableRow className="font-medium border-t-2">
-            <TableCell className="font-bold text-center">Total</TableCell>
-            <TableCell></TableCell> {/* Order Date */}
-            <TableCell className="text-center">
-              {filteredSlips.length}
-            </TableCell>
-            <TableCell className="text-center">
-              {Array.from(new Set(filteredSlips.map(slip => slip.partyName))).length}
-            </TableCell>
-            <TableCell></TableCell> {/* Plant */}
-            <TableCell className="text-center">
-              {filteredSlips.reduce((sum, slip) => sum + (slip.totalQuantity || 0), 0)}
-            </TableCell>
-            <TableCell></TableCell> {/* Total Volume */}
-            <TableCell className="text-center">
-              {Array.from(new Set(filteredSlips.filter(slip => slip.vehicleNumber).map(slip => slip.vehicleNumber))).length}
-            </TableCell>
-            <TableCell></TableCell> {/* Driver */}
-            <TableCell>
-              <div className="flex items-center justify-end gap-1 ml-auto">
-                <span className="text-xs whitespace-nowrap">Show entries:</span>
-                <select
-                  className="h-6 text-xs border rounded px-1 bg-background"
-                  value={ctx.pageSize}
-                  onChange={(e) => ctx.setPageSize(Number(e.target.value))}
-                  aria-label="Number of entries to display"
-                >
-                  <option value={15}>15</option>
-                  <option value={25}>25</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                </select>
-              </div>
-            </TableCell>
+            {canEditSlips && <TableCell></TableCell>}
+            {visibleCols.map((col) => {
+              switch (col.id) {
+                case 'orderDate':
+                  return <TableCell key={col.id} className="font-bold whitespace-nowrap">Total</TableCell>;
+                case 'orderNumber':
+                  return <TableCell key={col.id} className="text-center whitespace-nowrap">{filteredSlips.length} slips</TableCell>;
+                case 'partyName':
+                  return <TableCell key={col.id} className="text-center whitespace-nowrap">{uniqueParties} parties</TableCell>;
+                case 'totalQuantity':
+                  return <TableCell key={col.id} className="text-right font-bold">{totalQty}</TableCell>;
+                case 'vehicleNumber':
+                  return <TableCell key={col.id} className="text-center">{uniqueVehicles}</TableCell>;
+                case 'actions':
+                  return (
+                    <TableCell key={col.id}>
+                      <div className="flex items-center justify-end gap-1">
+                        <span className="text-xs whitespace-nowrap">Entries:</span>
+                        <select
+                          className="h-6 text-xs border rounded px-1 bg-background"
+                          value={ctx.pageSize}
+                          onChange={(e) => ctx.setPageSize(Number(e.target.value))}
+                          aria-label="Number of entries to display"
+                        >
+                          <option value={15}>15</option>
+                          <option value={25}>25</option>
+                          <option value={50}>50</option>
+                          <option value={100}>100</option>
+                        </select>
+                      </div>
+                    </TableCell>
+                  );
+                default:
+                  return <TableCell key={col.id}></TableCell>;
+              }
+            })}
           </TableRow>
         )}
 
@@ -1922,6 +1934,7 @@ export default function ProformaSlips() {
             enableRowSelection={canEditSlips}
             selectedRowIds={selectedSlipIds.map(String)}
             onSelectedRowIdsChange={(ids) => setSelectedSlipIds(ids.map(Number))}
+            renderFooter={renderSlipFooter}
             renderBulkActions={() => (
               <>
                 <span className="text-sm text-muted-foreground">
