@@ -2952,13 +2952,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
               ) : (
                 <>
-                  {/* Below 480px (genuinely small phones, not the rotated kiosk — that always
-                      gets the table regardless of raw viewport width) the table's columns get
-                      too cramped to read without constant horizontal scrolling, so each item's
-                      fields stack as labeled lines instead. min-[480px]:hidden is a pure-CSS
-                      breakpoint — no JS width tracking needed. */}
+                  {/* This is the narrow-screen fallback: fields stack as labeled lines instead
+                      of table columns. It hides — i.e. the table below takes over — once EITHER
+                      the viewport reaches 480px wide OR the device is physically turned to
+                      landscape, whichever comes first. The landscape check matters on its own
+                      because a phone rotated sideways should always get the table (same as the
+                      rotated kiosk view), even if its landscape width happens to still be under
+                      480px on a smaller device. Pure CSS (width + orientation media queries) —
+                      no JS tracking needed. */}
                   {!osRotated && (
-                    <div className="min-[480px]:hidden">
+                    <div className="min-[480px]:hidden landscape:hidden">
                       {osVisible.length === 0 ? (
                         <p className="py-10 text-center text-sm text-gray-400">
                           {osItems.length === 0 ? "Loading items…" : "No items match."}
@@ -3034,17 +3037,18 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       })}
                     </div>
                   )}
-                  {/* 480px and up, and always when rotated: the table. The bounded max-h +
-                      disabled vertical scroll stays rotated-only — a CSS rotation swaps which
-                      axis native scroll moves on (see the ScrollNudgeButtons comment above), so
-                      kiosk mode replaces it with the nudge buttons; normal mobile just scrolls
-                      the page vertically as usual, with only the wide table itself scrolling
-                      horizontally. */}
+                  {/* 480px and up, landscape orientation, and always when rotated: the table.
+                      The bounded max-h + disabled vertical scroll stays rotated-only — a CSS
+                      rotation swaps which axis native scroll moves on (see the
+                      ScrollNudgeButtons comment above), so kiosk mode replaces it with the
+                      nudge buttons; normal mobile (including a hand-rotated phone in landscape)
+                      just scrolls the page vertically as usual, with only the wide table itself
+                      scrolling horizontally. */}
                   <div
                     ref={osCsvListScrollRef}
                     className={
                       osRotated ? "max-h-[420px] overflow-x-auto overflow-y-hidden"
-                        : "hidden overflow-x-auto min-[480px]:block"
+                        : "hidden overflow-x-auto min-[480px]:block landscape:block"
                     }
                   >
                   <table className="min-w-[640px] w-full border-collapse text-sm">
@@ -3189,11 +3193,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       )}
                     </div>
 
-                    {/* Below 480px, stacked fields instead of table columns — same as the Scan
-                        tab's mobile table above. Master View is view-only, so no click-to-expand
-                        history here (that's Scan-tab-only). */}
+                    {/* Below 480px, or when the device is physically turned to landscape,
+                        stacked fields instead of table columns — same as the Scan tab's mobile
+                        table above. Master View is view-only, so no click-to-expand history
+                        here (that's Scan-tab-only). */}
                     {!osRotated && (
-                      <div className="min-[480px]:hidden">
+                      <div className="min-[480px]:hidden landscape:hidden">
                         {mvVisible.length === 0 ? (
                           <p className="py-10 text-center text-sm text-gray-400">No items found</p>
                         ) : mvVisible.map((item, idx) => {
@@ -3284,7 +3289,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         })}
                       </div>
                     )}
-                    <div className={osRotated ? "overflow-x-auto" : "hidden overflow-x-auto min-[480px]:block"}>
+                    <div className={osRotated ? "overflow-x-auto" : "hidden overflow-x-auto min-[480px]:block landscape:block"}>
                       <table className="min-w-[640px] w-full border-collapse text-base">
                           <thead>
                             <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
@@ -3357,19 +3362,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   )}
                                   <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
                                     <span className="block">{exp || "—"}</span>
-                                    <span className="block text-xs font-bold text-gray-400">{plt(exp)} plt</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{plt(exp)} plt</span>
                                   </td>
                                   <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
                                     <span className="block">{done}</span>
-                                    <span className="block text-xs font-bold text-gray-400">{plt(done)} plt</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{plt(done)} plt</span>
                                   </td>
                                   <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
                                     <span className="block">{remain || "—"}</span>
-                                    <span className="block text-xs font-bold text-gray-400">{plt(remain)} plt</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{plt(remain)} plt</span>
                                   </td>
                                   <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
                                     <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
-                                    <span className="block text-xs font-bold text-gray-400">{plt(extra)} plt</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
                                   </td>
                                   <td className="text-center px-4 py-2.5">
                                     <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
