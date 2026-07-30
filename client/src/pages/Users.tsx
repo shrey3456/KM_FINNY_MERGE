@@ -55,6 +55,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
+import { hasPageViewAccess, hasPageWriteAccess } from "@/lib/permissions";
 
 // Solid navy fill, matching the Notion Inventory action buttons.
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
@@ -428,6 +429,13 @@ const Users = () => {
     const watchedRole = form.watch("role");
     const isAdminRole = watchedRole === "admin" || watchedRole === "super-admin";
 
+    // You can only grant access you have yourself: the Allowed Pages / Write Access dropdowns list
+    // only pages the CURRENT admin can read or write (admins/super-admins pass everything, so they
+    // still see the full list). Keeps a limited manager from handing out pages they can't access.
+    const grantablePages = CONTROLLABLE_PAGES.filter(
+      (p) => hasPageViewAccess(p.key) || hasPageWriteAccess(p.key),
+    );
+
     return (
       <div className="space-y-6">
         <FormSection icon={IdCard} title="Account">
@@ -627,7 +635,7 @@ const Users = () => {
             <FormControl>
               <MultiSelectField
                 label="pages"
-                options={CONTROLLABLE_PAGES}
+                options={grantablePages}
                 selected={field.value ?? []}
                 onChange={(val) => {
                   field.onChange(val);
@@ -651,7 +659,7 @@ const Users = () => {
         {/* Write Access multi-select — subset of Allowed Pages; the rest are read-only for this user */}
         <FormField control={form.control} name="pageWriteAccess" render={({ field }) => {
           const allowed: string[] = form.watch("allowedPages") ?? [];
-          const writableOptions = CONTROLLABLE_PAGES.filter((p) => allowed.includes(p.key));
+          const writableOptions = grantablePages.filter((p) => allowed.includes(p.key));
           return (
             <FormItem>
               <FormLabel>Write Access</FormLabel>
