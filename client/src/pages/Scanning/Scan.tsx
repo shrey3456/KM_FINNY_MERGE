@@ -311,11 +311,26 @@ export default function ScanOrderPage() {
   useEffect(() => {
     localStorage.setItem("scanOrderRotated", String(osRotated));
   }, [osRotated]);
+  // Natural portrait orientation (window taller than wide) — a laptop/tablet held or resized to
+  // portrait should get the same single-column, larger-text layout as the manual Rotate mode,
+  // just WITHOUT the 90° kiosk rotation (the screen is already upright).
+  const [isPortrait, setIsPortrait] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(orientation: portrait)");
+    const onChange = () => setIsPortrait(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  // Drives the compact single-column layout + larger sizing (manual rotate OR natural portrait).
+  // The actual 90° CSS rotation stays tied to osRotated only.
+  const bigView = osRotated || isPortrait;
   const RotateToggleButton = () => (
     <button
       onClick={() => setOsRotated((r) => !r)}
       className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-      title={osRotated ? "Rotate back to normal" : "Rotate for a portrait-mounted screen"}
+      title={bigView ? "Rotate back to normal" : "Rotate for a portrait-mounted screen"}
     >
       <RotateCw className="h-5 w-5" />
       <span className="hidden text-xs font-semibold sm:inline">{osRotated ? "Un-rotate" : "Rotate"}</span>
@@ -2539,45 +2554,45 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             whenever osRotated is true — regardless of real viewport width — is what
             actually makes the rotated view usable.
         ════════════════════════════════════════════════════ */}
-<div className={`flex-col h-full overflow-y-auto ${osRotated ? "flex" : "flex lg:hidden"}`}>
+<div className={`flex-col h-full overflow-y-auto ${bigView ? "flex" : "flex lg:hidden"}`}>
           {/* ── Sticky header + scanner ── */}
           <div className="sticky top-0 z-20 bg-white shadow-sm">
 
             {/* Session info row — bordered sections instead of a loose flex row, so title /
                 complete action / progress read as distinct fields rather than floating text. */}
-            <div className={`flex items-stretch divide-x divide-gray-200 border-b border-gray-300 ${osRotated ? "text-sm" : ""}`}>
-              <div className={`flex-1 min-w-0 ${osRotated ? "px-4 py-3" : "px-3 py-2"}`}>
+            <div className={`flex items-stretch divide-x divide-gray-200 border-b border-gray-300 ${bigView ? "text-sm" : ""}`}>
+              <div className={`flex-1 min-w-0 ${bigView ? "px-4 py-3" : "px-3 py-2"}`}>
                 <p
-                  className={`font-bold text-gray-900 truncate leading-tight ${osRotated ? "text-base" : "text-xs"}`}
+                  className={`font-bold text-gray-900 truncate leading-tight ${bigView ? "text-base" : "text-xs"}`}
                   title={stripCsvExt(activeOrderScanSession.csvFileName)}
                 >
                   {scanFmtUploadDate(activeOrderScanSession.orderDate)}
                   {(osGroupCreditsQuery.data?.totalParts ?? 0) > 1 && (
-                    <span className={`ml-1.5 inline-block bg-purple-100 font-semibold text-purple-700 ${osRotated ? "px-2 py-0.5 text-xs" : "px-1.5 py-0.5 text-[10px]"}`}>
+                    <span className={`ml-1.5 inline-block bg-purple-100 font-semibold text-purple-700 ${bigView ? "px-2 py-0.5 text-xs" : "px-1.5 py-0.5 text-[10px]"}`}>
                       Part {osGroupCreditsQuery.data?.partIndex} of {osGroupCreditsQuery.data?.totalParts}
                     </span>
                   )}
                 </p>
-                <p className={`flex items-center gap-1.5 text-gray-500 truncate ${osRotated ? "text-xs mt-0.5" : "text-[10px]"}`}>
+                <p className={`flex items-center gap-1.5 text-gray-500 truncate ${bigView ? "text-xs mt-0.5" : "text-[10px]"}`}>
                   <PlantBadge plant={activeOrderScanSession.plant} />
                   {activeOrderScanSession.importedByName && <span>· {activeOrderScanSession.importedByName}</span>}
                 </p>
               </div>
               {canCompletePart && (
-                <div className={`flex items-center justify-center shrink-0 ${osRotated ? "px-4" : "px-2"}`}>
-                  <Button size="sm" className={`bg-emerald-600 hover:bg-emerald-700 text-white shrink-0 ${osRotated ? "h-9 px-4 text-sm" : "h-7 px-2.5 text-[11px]"}`} onClick={() => setShowForceComplete(true)}>
+                <div className={`flex items-center justify-center shrink-0 ${bigView ? "px-4" : "px-2"}`}>
+                  <Button size="sm" className={`bg-emerald-600 hover:bg-emerald-700 text-white shrink-0 ${bigView ? "h-9 px-4 text-sm" : "h-7 px-2.5 text-[11px]"}`} onClick={() => setShowForceComplete(true)}>
                     Complete
                   </Button>
                 </div>
               )}
-              <div className={`shrink-0 text-right flex flex-col justify-center ${osRotated ? "px-4 py-3" : "px-3 py-2"}`}>
-                <p className={`font-bold text-[#001d6e] ${osRotated ? "text-base" : "text-xs"}`}>{osDoneCount}/{osTotalCount}</p>
-                <p className={`text-gray-400 ${osRotated ? "text-xs" : "text-[10px]"}`}>{osPct}%</p>
+              <div className={`shrink-0 text-right flex flex-col justify-center ${bigView ? "px-4 py-3" : "px-3 py-2"}`}>
+                <p className={`font-bold text-[#001d6e] ${bigView ? "text-base" : "text-xs"}`}>{osDoneCount}/{osTotalCount}</p>
+                <p className={`text-gray-400 ${bigView ? "text-xs" : "text-[10px]"}`}>{osPct}%</p>
               </div>
             </div>
 
             {/* Full-width progress bar */}
-            <Progress value={osPct} className={`rounded-xl ${osRotated ? "h-2" : "h-1.5"}`} />
+            <Progress value={osPct} className={`rounded-xl ${bigView ? "h-2" : "h-1.5"}`} />
 
             {/* Scanner section — hidden on Separate CSVs (no scanning happens there) */}
             {osTab !== "separate-csvs" && (
@@ -2589,19 +2604,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
                 <button
                   onClick={() => setOsScanMode("camera")}
-                  className={`flex-1 flex items-center justify-center gap-1.5 font-semibold transition-colors ${osRotated ? "py-3 text-sm" : "py-2 text-xs"} ${
+                  className={`flex-1 flex items-center justify-center gap-1.5 font-semibold transition-colors ${bigView ? "py-3 text-sm" : "py-2 text-xs"} ${
                     osScanMode === "camera" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"
                   }`}
                 >
-                  <Camera className={osRotated ? "h-4 w-4" : "h-3.5 w-3.5"} /> Camera
+                  <Camera className={bigView ? "h-4 w-4" : "h-3.5 w-3.5"} /> Camera
                 </button>
                 <button
                   onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}
-                  className={`flex-1 flex items-center justify-center gap-1.5 font-semibold transition-colors ${osRotated ? "py-3 text-sm" : "py-2 text-xs"} ${
+                  className={`flex-1 flex items-center justify-center gap-1.5 font-semibold transition-colors ${bigView ? "py-3 text-sm" : "py-2 text-xs"} ${
                     osScanMode === "manual" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"
                   }`}
                 >
-                  <Keyboard className={osRotated ? "h-4 w-4" : "h-3.5 w-3.5"} /> Manual
+                  <Keyboard className={bigView ? "h-4 w-4" : "h-3.5 w-3.5"} /> Manual
                 </button>
               </div>
 
@@ -2609,7 +2624,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   Bolder fill + explicit label so it reads as an active selector, not muted text. */}
               {stvs.length > 0 && (
                 <div className="flex items-center gap-2">
-                  <span className={`shrink-0 font-semibold uppercase tracking-wide text-gray-400 ${osRotated ? "text-xs" : "text-[10px]"}`}>STV</span>
+                  <span className={`shrink-0 font-semibold uppercase tracking-wide text-gray-400 ${bigView ? "text-xs" : "text-[10px]"}`}>STV</span>
                   <Select
                     value={osSelectedStv || NO_STV}
                     onValueChange={(v) => {
@@ -2619,7 +2634,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   >
                     <SelectTrigger className={`rounded-xl justify-center text-center font-semibold border-2 ${
                       osSelectedStv ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-500"
-                    } ${osRotated ? "h-11 w-56 text-base" : "h-8 w-44 text-sm"}`}>
+                    } ${bigView ? "h-11 w-56 text-base" : "h-8 w-44 text-sm"}`}>
                       <SelectValue placeholder="Select STV…" />
                     </SelectTrigger>
                     {/* Radix portals this dropdown to document.body, outside the .kiosk-rotate-90
@@ -2779,7 +2794,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }}
                       placeholder="Type item name or barcode…"
                       disabled={!!osPending}
-                      className={`font-mono w-full rounded-xl border-gray-300 ${osRotated ? "text-lg h-14" : "text-sm h-10"}`}
+                      className={`font-mono w-full rounded-xl border-gray-300 ${bigView ? "text-lg h-14" : "text-sm h-10"}`}
                       autoFocus
                     />
                     {osManualFocused && osSuggestions.length > 0 && (
@@ -2813,9 +2828,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }
                       setOsManualCode(""); setOsSuggIdx(-1);
                     }}
-                    className={`bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 p-0 rounded-xl ${osRotated ? "h-14 w-14" : "h-10 w-10"}`}
+                    className={`bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 p-0 rounded-xl ${bigView ? "h-14 w-14" : "h-10 w-10"}`}
                   >
-                    <ScanLine className={osRotated ? "h-6 w-6" : "h-4 w-4"} />
+                    <ScanLine className={bigView ? "h-6 w-6" : "h-4 w-4"} />
                   </Button>
                 </div>
               )}
@@ -2842,7 +2857,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
 
           {/* ── Scrollable content below sticky scanner ── */}
-          <div ref={osTabBodyScrollRef} className={`flex-1 px-4 py-3 space-y-3 ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
+          <div ref={osTabBodyScrollRef} className={`flex-1 px-4 py-3 space-y-3 ${bigView ? "overflow-hidden" : "overflow-y-auto"}`}>
 
             {/* ── Tab strip — one joined, bordered segmented control (business style) instead of
                 separate floating rounded pills. Scanner above stays put across tabs. ── */}
@@ -2852,7 +2867,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   key={t}
                   onClick={() => setOsTab(t)}
                   className={`flex flex-1 items-center justify-center font-medium transition-colors ${
-                    osRotated ? "gap-2 px-4 py-3 text-base" : "gap-1.5 px-3 py-2 text-xs"
+                    bigView ? "gap-2 px-4 py-3 text-base" : "gap-1.5 px-3 py-2 text-xs"
                   } ${
                     osTab === t
                       ? "bg-[#001d6e] text-white"
@@ -2860,9 +2875,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   }`}
                 >
                   {t === "scan"
-                    ? <ScanLine className={osRotated ? "h-5 w-5" : "h-3.5 w-3.5"} />
-                    : t === "master-view" ? <Layers className={osRotated ? "h-5 w-5" : "h-3.5 w-3.5"} />
-                    : <FileSpreadsheet className={osRotated ? "h-5 w-5" : "h-3.5 w-3.5"} />}
+                    ? <ScanLine className={bigView ? "h-5 w-5" : "h-3.5 w-3.5"} />
+                    : t === "master-view" ? <Layers className={bigView ? "h-5 w-5" : "h-3.5 w-3.5"} />
+                    : <FileSpreadsheet className={bigView ? "h-5 w-5" : "h-3.5 w-3.5"} />}
                   {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Part Order"}
                 </button>
               ))}
@@ -2872,7 +2887,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 One unified bordered strip with internal dividers (business/report style),
                 instead of four separate floating rounded+shadowed cards. */}
             {osTab !== "separate-csvs" && (
-            <div className={`grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white ${osRotated ? "text-base" : ""}`}>
+            <div className={`grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white ${bigView ? "text-base" : ""}`}>
               {([
                 { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
                 { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
@@ -2887,13 +2902,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     onClick={() => setOsStatFilter(isActive ? "" : (s.key as typeof osStatFilter))}
                     aria-pressed={isActive}
                     title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                    className={`text-center transition-colors ${osRotated ? "px-2 py-3" : "px-2 py-2"} ${
+                    className={`text-center transition-colors ${bigView ? "px-2 py-3" : "px-2 py-2"} ${
                       isActive ? "bg-[#001d6e]/[0.06] ring-1 ring-inset ring-[#001d6e]/30" : "hover:bg-gray-50"
                     }`}
                   >
-                    <p className={`uppercase tracking-wide text-gray-400 ${osRotated ? "text-[11px]" : "text-[10px]"}`}>{s.label}</p>
-                    <p className={`font-bold ${s.text} ${osRotated ? "text-xl" : "text-lg"}`}>{s.value}</p>
-                    <p className={`font-bold ${s.text} ${osRotated ? "text-lg" : "text-base"}`}>{s.plt.toFixed(2)} plt</p>
+                    <p className={`uppercase tracking-wide text-gray-400 ${bigView ? "text-[11px]" : "text-[10px]"}`}>{s.label}</p>
+                    <p className={`font-bold ${s.text} ${bigView ? "text-xl" : "text-lg"}`}>{s.value}</p>
+                    <p className={`font-bold ${s.text} ${bigView ? "text-lg" : "text-base"}`}>{s.plt.toFixed(2)} plt</p>
                   </button>
                 );
               })}
@@ -3047,7 +3062,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <div
                     ref={osCsvListScrollRef}
                     className={
-                      osRotated ? "max-h-[420px] overflow-x-auto overflow-y-hidden"
+                      bigView ? "max-h-[420px] overflow-x-auto overflow-y-hidden"
                         : "hidden overflow-x-auto min-[480px]:block landscape:block"
                     }
                   >
@@ -3076,6 +3091,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const extra      = Math.max(0, (item.totalScannedQty ?? 0) - exp);
                         const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
                         const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
+                        // Pallet figure under each qty (qty ÷ items-per-pallet), same as Master View.
+                        const ipp = item.itemsPerPallet ?? 0;
+                        const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
                         return (
                           <Fragment key={item.id}>
                           <tr className={`border-b border-gray-200 ${
@@ -3102,10 +3120,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 </p>
                               )}
                             </td>
-                            <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">{exp || "—"}</td>
-                            <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">{scanned}</td>
-                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{remaining || "—"}</td>
-                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</td>
+                            <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
+                              <span className="block text-lg">{exp || "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(exp)} plt</span>
+                            </td>
+                            <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
+                              <span className="block text-lg">{scanned}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(scanned)} plt</span>
+                            </td>
+                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
+                              <span className="block text-lg">{remaining || "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(remaining)} plt</span>
+                            </td>
+                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
+                              <span className="block text-lg">{extra > 0 ? `+${extra}` : "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
+                            </td>
                             <td className="text-center px-4 py-2.5">
                               <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
                                 effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
@@ -3289,7 +3319,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         })}
                       </div>
                     )}
-                    <div className={osRotated ? "overflow-x-auto" : "hidden overflow-x-auto min-[480px]:block landscape:block"}>
+                    <div className={bigView ? "overflow-x-auto" : "hidden overflow-x-auto min-[480px]:block landscape:block"}>
                       <table className="min-w-[640px] w-full border-collapse text-base">
                           <thead>
                             <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
@@ -3361,19 +3391,19 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                     </td>
                                   )}
                                   <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
-                                    <span className="block">{exp || "—"}</span>
+                                    <span className="block text-lg">{exp || "—"}</span>
                                     <span className="block text-sm font-extrabold text-gray-500">{plt(exp)} plt</span>
                                   </td>
                                   <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
-                                    <span className="block">{done}</span>
+                                    <span className="block text-lg">{done}</span>
                                     <span className="block text-sm font-extrabold text-gray-500">{plt(done)} plt</span>
                                   </td>
                                   <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
-                                    <span className="block">{remain || "—"}</span>
+                                    <span className="block text-lg">{remain || "—"}</span>
                                     <span className="block text-sm font-extrabold text-gray-500">{plt(remain)} plt</span>
                                   </td>
                                   <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
-                                    <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
+                                    <span className="block text-lg">{extra > 0 ? `+${extra}` : "—"}</span>
                                     <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
                                   </td>
                                   <td className="text-center px-4 py-2.5">
@@ -3440,7 +3470,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               item names — matching the Scan/Master View tables, so all three tabs
                               read as one system. */}
                           {!csvItemsQuery2.isFetching && (
-                            osRotated ? (
+                            bigView ? (
                               <div className="overflow-x-auto overflow-y-hidden">
                                 <table className="min-w-[640px] w-full border-collapse text-sm">
                                   <thead>
@@ -3593,7 +3623,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         </div>
 
         {/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */}
-      <div className={osRotated ? "hidden" : "hidden lg:block"}>        
+      <div className={bigView ? "hidden" : "hidden lg:block"}>        
           <div className="mx-auto max-w-7xl space-y-3">
 
             {/* Header row */}
