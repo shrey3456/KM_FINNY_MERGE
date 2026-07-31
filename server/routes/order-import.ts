@@ -1022,13 +1022,34 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       WHERE oi.session_id = ANY($1::int[])
       ORDER BY oi.session_id, oi.id
     `, [sessionIds]);
+    // Most-recent scan timestamp per session+barcode — lets any view (Master View, the new
+    // standalone Order Master View page) show the just-scanned item at the top instead of
+    // whatever order the CSV/merge happened to produce. MAX() so a barcode scanned more than
+    // once (e.g. a partial then a top-up) reflects the latest touch, not the first.
+    const { rows: lastScanRows } = await pool.query(`
+      SELECT session_id AS "sessionId", barcode, MAX(scanned_at) AS "lastScannedAt"
+      FROM order_scan_events
+      WHERE session_id = ANY($1::int[]) AND voided IS NOT TRUE AND barcode IS NOT NULL
+      GROUP BY session_id, barcode
+    `, [sessionIds]);
+    const lastScannedByKey = new Map<string, string>();
+    for (const r of lastScanRows) {
+      if (r.lastScannedAt) lastScannedByKey.set(`${r.sessionId}::${String(r.barcode).toLowerCase()}`, r.lastScannedAt);
+    }
+
     const allItems: Array<{
       id: number; sessionId: number; barcode: string | null; itemName: string | null;
       sapCode: string | null; quantity: number | null; expectedPallets: number | null;
       scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
+      lastScannedAt?: string | null;
     }> = rawItems.map((item: any) => {
       const credited = item.barcode ? creditedQtyByKey.get(`${item.sessionId}::${item.barcode}`) ?? 0 : 0;
-      return credited > 0 ? { ...item, scannedQty: (item.scannedQty ?? 0) + credited } : item;
+      const lastScannedAt = item.barcode
+        ? lastScannedByKey.get(`${item.sessionId}::${String(item.barcode).toLowerCase()}`) ?? null
+        : null;
+      return credited > 0
+        ? { ...item, scannedQty: (item.scannedQty ?? 0) + credited, lastScannedAt }
+        : { ...item, lastScannedAt };
     });
 
     // Group items by sessionId
@@ -1048,7 +1069,8 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         ose.session_id          AS "sessionId",
         ose.barcode,
         MAX(ose.item_name)      AS "itemName",
-        SUM(ose.total_qty)::int AS "scannedQty"
+        SUM(ose.total_qty)::int AS "scannedQty",
+        MAX(ose.scanned_at)     AS "lastScannedAt"
       FROM order_scan_events ose
       WHERE ose.session_id = ANY($1::int[])
         AND ose.is_extra = true
@@ -1076,6 +1098,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         scannedQty: remaining ?? ex.scannedQty,
         scanStatus: 'extra',
         isExtra: true,
+        lastScannedAt: ex.lastScannedAt ?? null,
       });
       itemsBySession.set(ex.sessionId, list);
     });
