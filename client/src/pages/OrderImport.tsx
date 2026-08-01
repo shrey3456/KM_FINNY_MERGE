@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import EditCsvDialog from "@/components/modals/EditCsvDialog";
+import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import { PlantBadge } from "@/components/PlantBadge";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
@@ -264,14 +265,15 @@ export default function OrderImport() {
   // Session id whose "Edit CSV" dialog is open — set from the Edit button on an Available/
   // Active row, cleared when the dialog closes.
   const [editSessionId, setEditSessionId] = useState<number | null>(null);
-  // "Reports" now lives on its own page (/order-reports) instead of a dialog here — this just
-  // navigates there with every field that page's dialog needs already in the URL, so it opens
-  // straight to this session's report without a second fetch.
+  // Reports live entirely inside Order Management now — no separate /order-reports page.
+  // Opens the Reports dialog right here so an operator mid-upload/scan-review never leaves
+  // this page just to check a report.
+  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
   const openReports = (s: { id: number; csvFileName: string; plant: string; receivingSessionId?: number | null; partIndex?: number | null }) => {
-    const params = new URLSearchParams({ sessionId: String(s.id), csvFileName: s.csvFileName, plant: s.plant });
-    if (s.receivingSessionId) params.set("groupId", String(s.receivingSessionId));
-    if (s.partIndex != null) params.set("partIndex", String(s.partIndex));
-    navigate(`/order-reports?${params}`);
+    setReportsSession({
+      id: s.id, csvFileName: s.csvFileName, plant: s.plant,
+      receivingSessionId: s.receivingSessionId, partIndex: s.partIndex,
+    });
   };
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
@@ -2150,6 +2152,7 @@ export default function OrderImport() {
       </AlertDialog>
 
       <EditCsvDialog sessionId={editSessionId} onClose={() => setEditSessionId(null)} />
+      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} />
     </main>
   );
 }

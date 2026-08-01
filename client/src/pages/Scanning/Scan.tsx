@@ -294,12 +294,16 @@ export default function ScanOrderPage() {
     window.addEventListener("pointerup", onUp);
   };
 
-  // No csvDate/csvPlant here: the Separate CSVs tab filters by mvDate/mvPlant, which are derived
-  // from the active scan session further down.
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
   // Desktop Part Order search — collapsed by default (icon-only toggle), matching Scan/Master View.
   const [csvSearchOpen, setCsvSearchOpen] = useState(false);
+  // Part Order's own date/plant filter — "" means "follow the currently active order" (the old,
+  // only behavior). Setting either lets the operator browse a different day's uploaded CSVs
+  // without leaving Scan Order or disturbing the active scanning session.
+  const [csvDate,  setCsvDate]  = useState("");
+  const [csvPlant, setCsvPlant] = useState("");
+  const resetCsvBrowse = () => { setCsvDate(""); setCsvPlant(""); setCsvExpId(null); setCsvSearch(""); };
 
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
@@ -461,6 +465,12 @@ export default function ScanOrderPage() {
     ? String(activeOrderScanSession.orderDate).slice(0, 10)
     : "";
 
+  // Part Order CAN browse a different day — csvDate/csvPlant (blank by default) fall back to
+  // the active order's own date/plant, same starting point Master View always uses.
+  const csvEffDate  = csvDate  || mvDate;
+  const csvEffPlant = csvPlant || mvPlant;
+  const csvBrowsingOtherDate = csvEffDate !== mvDate || csvEffPlant !== mvPlant;
+
   // ── Embedded order-scan state (admin-loaded CSV) ───────────────────────────
   // Two video elements exist (mobile sm:hidden block + desktop hidden sm:block block).
   // They MUST have separate refs — a shared ref would attach to the last-rendered
@@ -573,7 +583,15 @@ export default function ScanOrderPage() {
     const id = activeOrderScanSession?.id ?? null;
     const prev = osPrevSessionIdRef.current;
     osPrevSessionIdRef.current = id;
-    if (prev !== null && id !== null && prev !== id) setOsSelectedStv("");
+    if (prev !== null && id !== null && prev !== id) {
+      setOsSelectedStv("");
+      // A genuinely new active order loaded — snap Part Order's date/plant browse back to
+      // following it, so switching orders doesn't leave the operator stranded looking at
+      // whatever other date they'd browsed to under the previous order.
+      setCsvDate("");
+      setCsvPlant("");
+      setCsvExpId(null);
+    }
     osScanSeqRef.current = { seq: 0, byId: new Map(), byBarcode: new Map() };
   }, [activeOrderScanSession?.id]);
 
@@ -1289,14 +1307,14 @@ export default function ScanOrderPage() {
   });
 
   const csvSessQuery = useQuery<{ sessions: ImpSession[]; total: number }>({
-    queryKey: ["/api/order-import/sessions", "scan-page", mvDate, mvPlant],
+    queryKey: ["/api/order-import/sessions", "scan-page", csvEffDate, csvEffPlant],
     queryFn: () => {
       const p = new URLSearchParams({ page: "1", pageSize: "100" });
-      if (mvDate)  p.set("date",  mvDate);
-      if (mvPlant) p.set("plant", mvPlant);
+      if (csvEffDate)  p.set("date",  csvEffDate);
+      if (csvEffPlant) p.set("plant", csvEffPlant);
       return apiRequest("GET", `/api/order-import/sessions?${p}`).then((r) => r.json());
     },
-    enabled: osTab === "separate-csvs" && !!mvDate,
+    enabled: osTab === "separate-csvs" && !!csvEffDate,
     staleTime: 0,
     refetchOnMount: true,
     refetchInterval: wsConnected ? 30000 : 8000,
@@ -3432,12 +3450,32 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">
-                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
-                  </span>
+                  <Input
+                    type="date"
+                    value={csvEffDate}
+                    onChange={(e) => { setCsvDate(e.target.value); setCsvExpId(null); setCsvSearch(""); }}
+                    className="h-8 w-[136px] text-xs"
+                  />
+                  <Select
+                    value={csvEffPlant || "_all_"}
+                    onValueChange={(v) => { setCsvPlant(v === "_all_" ? "" : v); setCsvExpId(null); setCsvSearch(""); }}
+                  >
+                    <SelectTrigger className="h-8 w-[110px] text-xs"><SelectValue placeholder="Plant" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_all_">All plants</SelectItem>
+                      {(allPlants ?? []).map((p: any) => (
+                        <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {csvBrowsingOtherDate && (
+                    <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-[#001d6e]" onClick={resetCsvBrowse}>
+                      Back to current order
+                    </Button>
+                  )}
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading files…</p>}
-                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400 py-4 text-center">No uploaded files for this order.</p>}
+                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400 py-4 text-center">No CSVs found for this date{csvEffPlant ? ` / ${csvEffPlant}` : ""}.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
                     <div key={sess.id} className="border bg-white shadow-sm overflow-hidden">
@@ -4127,12 +4165,32 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <span className="rounded-xl border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
-                    {mvPlant ? <span className="inline-flex items-center gap-1.5"><PlantBadge plant={mvPlant} /> · {mvDate}</span> : "No active session"}
-                  </span>
+                  <Input
+                    type="date"
+                    value={csvEffDate}
+                    onChange={(e) => { setCsvDate(e.target.value); setCsvExpId(null); setCsvSearch(""); }}
+                    className="h-8 w-[140px] text-xs"
+                  />
+                  <Select
+                    value={csvEffPlant || "_all_"}
+                    onValueChange={(v) => { setCsvPlant(v === "_all_" ? "" : v); setCsvExpId(null); setCsvSearch(""); }}
+                  >
+                    <SelectTrigger className="h-8 w-[130px] text-xs"><SelectValue placeholder="Plant" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_all_">All plants</SelectItem>
+                      {(allPlants ?? []).map((p: any) => (
+                        <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {csvBrowsingOtherDate && (
+                    <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-[#001d6e]" onClick={resetCsvBrowse}>
+                      Back to current order
+                    </Button>
+                  )}
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}
-                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No uploaded files for this order.</p>}
+                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No CSVs found for this date{csvEffPlant ? ` / ${csvEffPlant}` : ""}.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
                     <div key={sess.id} className="border bg-white shadow-sm overflow-hidden">

@@ -228,9 +228,10 @@ const Home = () => {
             </Link>
           </div>
 
-          {/* Reports Button — goes to Order Reports (separate from Scan History above) */}
+          {/* Reports Button — order reports live inside Order Management now (per-row
+              Reports dialog), not a separate page, so this points there. */}
           <div className="flex flex-col items-center">
-            <Link href="/order-reports" className="flex flex-col items-center">
+            <Link href="/order-import" className="flex flex-col items-center">
               <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
                 <PieChart className="h-7 w-7 text-[#001d6e]" />
               </div>

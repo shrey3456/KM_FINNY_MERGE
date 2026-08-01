@@ -33,7 +33,6 @@ import {
   ChevronsLeft,
   ChevronDown,
   LayoutList,
-  PieChart,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
