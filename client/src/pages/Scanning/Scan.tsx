@@ -87,6 +87,7 @@ type MvItem = {
   id: number; barcode: string | null; itemName: string | null;
   sapCode: string | null; quantity: number | null; expectedPallets: number | null;
   scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
+  lastScannedAt?: string | null;
 };
 type MvFile = {
   sessionId: number; csvFileName: string; rowCount: number | null;
@@ -102,6 +103,9 @@ type MvMergedItem = {
   _files: string[]; _isExtra: boolean;
   // Distinct synthetic "Empty Box" entry — not a product, never counted toward order qty.
   _isEmptyBox?: boolean; _emptyBoxCount?: number; _emptyBoxQty?: number;
+  // Server-side latest scan touch for this barcode — correct across reloads and other devices,
+  // used as a fallback for osScanSeqRef (this client's own instant feedback) when sorting.
+  _lastScannedAt?: string | null;
 };
 type ImpSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
@@ -1699,7 +1703,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
             quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
             itemsPerPallet: _resolveMvPalletSize(invProduct, mvPlant),
-            _files: [], _isExtra: true,
+            _files: [], _isExtra: true, _lastScannedAt: null,
           };
           groups.set(key, g);
         }
@@ -1717,6 +1721,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         // another file's CSV that same day is not really extra once merged — only
         // flag it Extra if every contributing row was an extra (no real CSV row anywhere).
         if (!item.isExtra) g._isExtra = false;
+        // Latest touch across every contributing part — server-side, so it's correct even
+        // right after a reload or when the scan happened on a different device/kiosk.
+        if (item.lastScannedAt && (!g._lastScannedAt || new Date(item.lastScannedAt) > new Date(g._lastScannedAt))) {
+          g._lastScannedAt = item.lastScannedAt;
+        }
       });
     });
     const merged = Array.from(groups.values());
@@ -1729,25 +1738,38 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         barcode: null, itemName: "Empty Box", sapCode: null,
         quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
         itemsPerPallet: 0, _files: [], _isExtra: false,
-        _isEmptyBox: true, _emptyBoxCount: ebCount, _emptyBoxQty: ebQty,
+        _isEmptyBox: true, _emptyBoxCount: ebCount, _emptyBoxQty: ebQty, _lastScannedAt: null,
       });
     }
     return merged;
   })();
+  // Whatever was scanned most recently floats straight to the top, same as the Scan tab — no
+  // status check: partial, completing, or extra-on-an-already-received row all float the same
+  // way. A scan just made on THIS device always outranks pure server data (osScanSeqRef's
+  // monotonic counter is set the instant the optimistic update lands, before the server
+  // round-trip even returns); once that local signal is gone (session change, or the scan
+  // happened on a different device/kiosk, or the page was reloaded), the server's own
+  // lastScannedAt takes over so the order is still correct. A row never touched at all keeps
+  // its original merge order (Array.prototype.sort is stable).
+  const mvRecencySort = (a: MvMergedItem, b: MvMergedItem) => {
+    const seq = osScanSeqRef.current.byBarcode;
+    const aSeq = seq.get(normalize(a.barcode)) ?? 0;
+    const bSeq = seq.get(normalize(b.barcode)) ?? 0;
+    const aServer = a._lastScannedAt ? new Date(a._lastScannedAt).getTime() : 0;
+    const bServer = b._lastScannedAt ? new Date(b._lastScannedAt).getTime() : 0;
+    const LOCAL_SCAN_OFFSET = 1e15; // dwarfs any real timestamp, so a local seq always wins
+    const aRank = aSeq > 0 ? LOCAL_SCAN_OFFSET + aSeq : aServer;
+    const bRank = bSeq > 0 ? LOCAL_SCAN_OFFSET + bSeq : bServer;
+    return bRank - aRank;
+  };
   const filtMvItems = mvSearch
-    ? allMvItems.filter((i) =>
-        [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
-      )
-    : allMvItems.slice().sort((a, b) => {
-        // Whatever was scanned most recently THIS page-load floats straight to the top, same as
-        // the Scan tab — no status check: partial, completing, or extra-on-an-already-received
-        // row all float the same way. A row never touched this page-load (seq 0 for both) keeps
-        // its original merge order (Array.prototype.sort is stable).
-        const seq = osScanSeqRef.current.byBarcode;
-        const aSeq = seq.get(normalize(a.barcode)) ?? 0;
-        const bSeq = seq.get(normalize(b.barcode)) ?? 0;
-        return bSeq - aSeq;
-      });
+    ? allMvItems
+        .filter((i) =>
+          [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
+        )
+        .slice()
+        .sort(mvRecencySort)
+    : allMvItems.slice().sort(mvRecencySort);
 
   // The existing Eye toggle drives the Files column's visibility.
   const mvVisibleColumnIds = new Set(
