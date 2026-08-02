@@ -4421,9 +4421,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </DialogContent>
         </Dialog>
 
-        {/* Multi-match selection dialog */}
+        {/* Multi-match selection dialog — Radix portals this to document.body, outside the
+            .kiosk-rotate-90 subtree, so (like the Empty Box dialog) it needs the rotate class
+            applied manually or it opens upright while the rest of the kiosk screen is rotated. */}
         <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) { setOsMultiMatch(null); resetOsConfirmation(); } }}>
-          <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osRotated ? "rotate-90" : ""}`}>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
                 <AlertTriangle className="h-5 w-5 text-amber-500" />
@@ -4484,7 +4486,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
         {/* Scan confirmation dialog */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>
-          <DialogContent className="w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl overflow-hidden rounded-2xl p-0 sm:rounded-2xl">
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl overflow-hidden rounded-2xl p-0 sm:rounded-2xl ${osRotated ? "rotate-90" : ""}`}>
             {/* Two columns: full-height product image on the left, all controls on the right. */}
             <div className="flex flex-col sm:flex-row">
               {osResolvedImageName && (

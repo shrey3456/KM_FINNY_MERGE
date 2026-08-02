@@ -240,10 +240,7 @@ export default function OverallStock() {
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
   // Date control: "single" shows one editable date input, "range" shows editable From + To.
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
-  const [dateOpen, setDateOpen] = useState(false); // controls the Date popover (Done closes it)
-  // Staged date value while the popover is open — edits don't touch the applied filter (and so
-  // don't refetch) until Done is clicked. Initialized from the applied value each time it opens.
-  const [dateDraft, setDateDraft] = useState("");
+  const [dateOpen, setDateOpen] = useState(false); // controls the Date popover
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
   );
@@ -297,9 +294,6 @@ export default function OverallStock() {
     return { from: "", to: "" };
   }, [dateValue]);
   const dateIsRange = dateValue.startsWith("r:");
-  // Draft (staged) from/to used by the popover inputs while editing, before Done commits it.
-  const draftFrom = dateDraft.startsWith("d:") ? dateDraft.slice(2) : dateDraft.startsWith("r:") ? (dateDraft.split(":")[1] ?? "") : "";
-  const draftTo = dateDraft.startsWith("d:") ? dateDraft.slice(2) : dateDraft.startsWith("r:") ? (dateDraft.split(":")[2] ?? "") : "";
 
   // Presets compute an explicit d:/r: value (see encoding above) rather than storing a keyword.
   const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
@@ -847,7 +841,7 @@ export default function OverallStock() {
 
               {/* Standalone Date control — sits BEFORE "+ Filter". Single date or from/to range,
                   both editable; opening it starts in the mode matching the current selection. */}
-              <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) { setDateDraft(dateValue); setDatePickMode(dateIsRange ? "range" : "single"); } }}>
+              <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) { setDatePickMode(dateIsRange ? "range" : "single"); } }}>
                 <PopoverTrigger asChild>
                   <Button
                     size="sm"
@@ -894,8 +888,13 @@ export default function OverallStock() {
                         <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
                         <input
                           type="date"
-                          value={draftFrom}
-                          onChange={(e) => setDateDraft(e.target.value ? `d:${e.target.value}` : "")}
+                          value={fromDate}
+                          onChange={(e) => {
+                            upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "");
+                            // A single date is one complete pick — apply and close right away,
+                            // same as tapping a quick-range preset.
+                            if (e.target.value) setDateOpen(false);
+                          }}
                           className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
                         />
                       </div>
@@ -905,9 +904,9 @@ export default function OverallStock() {
                           <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
                           <input
                             type="date"
-                            value={draftFrom}
-                            max={draftTo || undefined}
-                            onChange={(e) => setDateDraft(`r:${e.target.value}:${draftTo}`)}
+                            value={fromDate}
+                            max={toDate || undefined}
+                            onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
                             className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
                           />
                         </div>
@@ -915,9 +914,9 @@ export default function OverallStock() {
                           <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
                           <input
                             type="date"
-                            value={draftTo}
-                            min={draftFrom || undefined}
-                            onChange={(e) => setDateDraft(`r:${draftFrom}:${e.target.value}`)}
+                            value={toDate}
+                            min={fromDate || undefined}
+                            onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
                             className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
                           />
                         </div>
@@ -933,8 +932,9 @@ export default function OverallStock() {
                             type="button"
                             onClick={() => {
                               const v = datePresetValue(o.value);
-                              setDateDraft(v);
+                              upsertSimpleFilter("date", v);
                               setDatePickMode(v.startsWith("r:") ? "range" : "single");
+                              setDateOpen(false);
                             }}
                             className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
                           >
@@ -944,26 +944,18 @@ export default function OverallStock() {
                       </div>
                     </div>
 
-                    {/* Done (left) commits the staged date → the table updates only now. Clear date
-                        (right) wipes it. Nothing refetches while you edit above. */}
-                    <div className="flex items-center justify-between pt-1">
-                      <button
-                        type="button"
-                        onClick={() => { upsertSimpleFilter("date", dateDraft); setDateOpen(false); }}
-                        className="text-xs font-semibold text-[#001d6e] hover:underline"
-                      >
-                        Done
-                      </button>
-                      {(dateDraft || dateValue) && (
+                    {/* Every pick above applies immediately (no Done button) — this just clears it. */}
+                    {dateValue && (
+                      <div className="flex items-center justify-end pt-1">
                         <button
                           type="button"
-                          onClick={() => { setDateDraft(""); upsertSimpleFilter("date", ""); setDateOpen(false); }}
+                          onClick={() => { upsertSimpleFilter("date", ""); setDateOpen(false); }}
                           className="text-[11px] text-red-500 hover:underline"
                         >
                           Clear date
                         </button>
-                      )}
-                    </div>
+                      </div>
+                    )}
                   </div>
                 </PopoverContent>
               </Popover>

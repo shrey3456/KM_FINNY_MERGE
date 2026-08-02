@@ -20,6 +20,16 @@
   }
 }
 
+/* When the sidebar is hidden (Layout.tsx toggles the "sidebar-hidden" class on the main content
+   wrapper), pages built on the common "max-w-Nxl mx-auto" centering pattern get back the width
+   the sidebar used to occupy (its own w-64 / 16rem) instead of leaving it as blank gutters on
+   either side. Centrally scoped here so it applies to every page using that convention without
+   editing each one individually. */
+.sidebar-hidden .max-w-4xl { max-width: 72rem; }
+.sidebar-hidden .max-w-5xl { max-width: 80rem; }
+.sidebar-hidden .max-w-6xl { max-width: 88rem; }
+.sidebar-hidden .max-w-7xl { max-width: 96rem; }
+
 /* Hide spinner buttons for number inputs */
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
