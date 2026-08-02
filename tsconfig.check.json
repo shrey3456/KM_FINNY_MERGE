@@ -1,5 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "exclude": ["node_modules","build","dist","**/*.test.ts","**/LoadOperationsBackup.tsx","**/LoadOperationsOriginal.tsx"],
-  "compilerOptions": { "incremental": false }
-}
