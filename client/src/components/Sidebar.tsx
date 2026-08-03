@@ -33,6 +33,7 @@ import {
   ChevronsLeft,
   ChevronDown,
   LayoutList,
+  Layers,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -229,6 +230,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
         //   path: "/order-reports",
         //   pageKey: "order-reports",
         // },
+        {
+          label: "Order Master View",
+          icon: <Layers className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-master-view",
+          pageKey: "order-master-view",
+        },
         {
           label: "Inventory",
           icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,

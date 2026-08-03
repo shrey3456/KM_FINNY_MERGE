@@ -10,6 +10,7 @@ export const CONTROLLABLE_PAGES = [
   { key: "overall-stock", label: "Overall Stock" },
   { key: "scan-history", label: "Scan History" },
   { key: "order-import", label: "Order Management" },
+  { key: "order-master-view", label: "Order Master View" },
   { key: "order-import-edit", label: "Edit Order Import CSV" },
   { key: "notion-inventory", label: "Inventory" },
   { key: "purchases", label: "Purchases" },
