@@ -230,26 +230,21 @@ export default function ProformaSlips() {
   const userDept = String(currentUserInfo?.department || '').toLowerCase().trim();
   const userDesig = String(currentUserInfo?.designation || '').toLowerCase().trim();
   
-  const isITDep= ['IT', 'information technology', 'it'].includes(userDept);
-  const ismanagment = ['management', 'manager', 'head', 'director'].includes(userDept);
-  // Department: Billing, Designation: Head (Case insensitive check)
-  const isBillingHead = userDept === 'billing' && userDesig === 'head';
-
   // Write access to Proforma Slips is granted per-page by admin (Allowed Pages /
-  // Write Access on the User Management page) rather than by the old global
-  // read/read-write role string.
+  // Write Access on the User Management page) rather than by department/designation.
   const isReadWriteUser = hasPageWriteAccess("proforma");
   const isread = !hasPageWriteAccess("proforma") && !isAdminOrSuper;
 
-  // Lock/Unlock permissions: Admin, Super-Admin, IT, Management, Billing Head
-  const canLockUnlockSlips = (isAdminOrSuper || isITDep || ismanagment || isBillingHead) && (isReadWriteUser || isAdminOrSuper);
+  // Adding, editing, deleting a slip, and adding/editing/deleting its line items are all
+  // ONE permission — Write Access to "proforma" (or admin/super-admin). No more separate
+  // canAddSlips/canEditSlips (they were always the same check under two different names).
+  const canWriteSlips = isAdminOrSuper || isReadWriteUser;
 
-
-  // Add new slips: Admin, Super-Admin, and Read-Write users
-  const canAddSlips = isAdminOrSuper || isReadWriteUser;
-
-  // Only Admin/Super-Admin can edit and delete slips
-  const canEditSlips = isAdminOrSuper || isReadWriteUser;
+  // Lock/Unlock: admin/super-admin, OR Write Access to BOTH "print-operations" AND
+  // "proforma" — needs both page grants, not just one. No more department/designation
+  // special-casing (IT/Management/Billing-Head are gone — grant Write Access on both of
+  // those page keys instead).
+  const canLockUnlockSlips = isAdminOrSuper || (hasPageWriteAccess('print-operations') && hasPageWriteAccess('proforma'));
 
   console.log('DEBUG PROFORMA PERMISSIONS:', {
     source: remoteUser ? 'remote' : 'local',
@@ -259,11 +254,7 @@ export default function ProformaSlips() {
     isAdminOrSuper,
     isReadWriteUser,
     canLockUnlockSlips,
-    canAddSlips,
-    canEditSlips,
-    isITDep,
-    ismanagment,
-    isBillingHead
+    canWriteSlips,
   });
 
   
@@ -1350,7 +1341,7 @@ export default function ProformaSlips() {
               </DropdownMenuItem>
             )}
 
-            {canEditSlips && (
+            {canWriteSlips && (
               <DropdownMenuItem onClick={() => openEditDialog(slip)}>
                 <FileEdit className="mr-2 h-4 w-4" /> Edit Details
               </DropdownMenuItem>
@@ -1359,7 +1350,7 @@ export default function ProformaSlips() {
             <DropdownMenuItem
               onClick={() => toggleRowExpansion(slip)}
             >
-              {canAddSlips ? (
+              {canWriteSlips ? (
                 <>
                   <Edit className="mr-2 h-4 w-4" /> Manage Items
                 </>
@@ -1382,7 +1373,7 @@ export default function ProformaSlips() {
               <FileDown className="mr-2 h-4 w-4" /> Export This Slip
             </DropdownMenuItem>
 
-            {canEditSlips && (
+            {canWriteSlips && (
               <DropdownMenuItem
                 onClick={() => openDeleteDialog(slip)}
                 className="text-destructive focus:text-destructive"
@@ -1424,7 +1415,7 @@ export default function ProformaSlips() {
             <h3 className="text-lg font-medium">Inventory Items</h3>
           </div>
 
-          {canAddSlips && (
+          {canWriteSlips && (
             <div className="rounded-xl border p-4 bg-white">
               <h4 className="text-sm font-semibold mb-2">Add Items to Proforma Slip</h4>
               <div className="relative">
@@ -1549,7 +1540,7 @@ export default function ProformaSlips() {
                       {item.itemName || `Product #${item.productId}`}
                     </TableCell>
                     <TableCell className="text-center">
-                      {canAddSlips ? (
+                      {canWriteSlips ? (
                         <div className="flex items-center justify-center">
                           <Button
                             variant="outline"
@@ -1586,7 +1577,7 @@ export default function ProformaSlips() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {canAddSlips && (
+                      {canWriteSlips && (
                         <div className="flex justify-end gap-2">
                           <Button
                             variant="ghost"
@@ -1607,7 +1598,7 @@ export default function ProformaSlips() {
               {(!slipItems[slip.id] || slipItems[slip.id].length === 0) && (
                 <TableRow>
                   <TableCell colSpan={5} className="h-24 text-center">
-                    {canAddSlips ? "No items in this slip. Use the search bar above to add items." : "No items in this slip."}
+                    {canWriteSlips ? "No items in this slip. Use the search bar above to add items." : "No items in this slip."}
                   </TableCell>
                 </TableRow>
               )}
@@ -1648,7 +1639,7 @@ export default function ProformaSlips() {
       <TableFooter className="bg-muted/30">
         {filteredSlips.length > 0 && (
           <TableRow className="font-medium border-t-2">
-            {canEditSlips && <TableCell></TableCell>}
+            {canWriteSlips && <TableCell></TableCell>}
             {visibleCols.map((col) => {
               switch (col.id) {
                 case 'orderDate':
@@ -1840,7 +1831,7 @@ export default function ProformaSlips() {
           )}
 
           {/* New Slips: available to admins and read-write users */}
-          {canAddSlips && (
+          {canWriteSlips && (
             <Button onClick={() => setIsNewSlipDialogOpen(true)} size="sm">
               <Plus className="mr-2 h-4 w-4" /> New Slip
             </Button>
@@ -1931,7 +1922,7 @@ export default function ProformaSlips() {
             onRowClick={(slip) => toggleRowExpansion(slip)}
             renderExpandedRow={renderSlipExpandedRow}
             expandedRowId={selectedSlip ? String(selectedSlip.id) : null}
-            enableRowSelection={canEditSlips}
+            enableRowSelection={canWriteSlips}
             selectedRowIds={selectedSlipIds.map(String)}
             onSelectedRowIdsChange={(ids) => setSelectedSlipIds(ids.map(Number))}
             renderFooter={renderSlipFooter}

@@ -4488,6 +4488,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/proforma-slips/order/:orderNumber",
     async (req: Request, res: Response) => {
       try {
+        if (!req.isAuthenticated || !req.isAuthenticated()) {
+          return res.status(401).json({ message: "Not authenticated" });
+        }
         const orderNumber = req.params.orderNumber;
         if (!orderNumber) {
           return res.status(400).json({ message: "Order number is required" });
@@ -4727,6 +4730,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.delete(
     "/proforma-slips/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -4796,6 +4800,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Proforma Slip Items endpoints
   apiRouter.post(
     "/proforma-slips/:slipId/items",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         const slipId = parseInt(req.params.slipId);
@@ -4896,6 +4901,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.put(
     "/proforma-slip-items/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         console.time("updateProformaSlipItem");
@@ -4961,6 +4967,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.delete(
     "/proforma-slip-items/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         console.time("deleteProformaSlipItem");
@@ -5023,6 +5030,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Optimized batch update endpoint for proforma slip items
   apiRouter.post(
     "/proforma-slip-items/batch-update",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       console.log(
         `Batch update request received for ${req.body.items?.length || 0} items`,

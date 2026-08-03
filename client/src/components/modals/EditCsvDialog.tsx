@@ -238,6 +238,35 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
     if (addPalletSize > 0 && Number.isFinite(n)) setAddQty(String(Math.round(n * addPalletSize)));
   }
 
+  // Same Quantity <-> Pallets auto-calc, but for a row already in the table — matched to a
+  // catalog product by its own barcode (rather than a freshly-picked one) since an existing
+  // row was either typed by hand originally or came from the CSV import itself.
+  const productByBarcode = useMemo(() => {
+    const map = new Map<string, CatalogProduct>();
+    for (const p of products) {
+      const key = (p.barcode ?? "").trim().toLowerCase();
+      if (key) map.set(key, p);
+    }
+    return map;
+  }, [products]);
+
+  function rowPalletSize(row: EditableItem): number {
+    const product = productByBarcode.get(row.barcode.trim().toLowerCase()) ?? null;
+    return resolvePalletSize(product, session?.plant);
+  }
+  function handleRowQtyChange(row: EditableItem, value: string) {
+    updateRow(row.key, "quantity", value);
+    const ipp = rowPalletSize(row);
+    const n = Number(value);
+    if (ipp > 0 && Number.isFinite(n)) updateRow(row.key, "expectedPallets", (n / ipp).toFixed(2));
+  }
+  function handleRowPalletsChange(row: EditableItem, value: string) {
+    updateRow(row.key, "expectedPallets", value);
+    const ipp = rowPalletSize(row);
+    const n = Number(value);
+    if (ipp > 0 && Number.isFinite(n)) updateRow(row.key, "quantity", String(Math.round(n * ipp)));
+  }
+
   return (
     <Dialog open={sessionId != null} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="max-w-5xl max-h-[88vh] overflow-y-auto rounded-2xl">
@@ -342,7 +371,7 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
                           type="number"
                           value={row.quantity}
                           disabled={!canWrite}
-                          onChange={(e) => updateRow(row.key, "quantity", e.target.value)}
+                          onChange={(e) => handleRowQtyChange(row, e.target.value)}
                         />
                       </td>
                       <td className="border-r border-gray-100 px-1.5 py-1">
@@ -351,7 +380,7 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
                           type="number"
                           value={row.expectedPallets}
                           disabled={!canWrite}
-                          onChange={(e) => updateRow(row.key, "expectedPallets", e.target.value)}
+                          onChange={(e) => handleRowPalletsChange(row, e.target.value)}
                         />
                       </td>
                       <td className="border-r border-gray-100 px-2 py-1.5 text-right">

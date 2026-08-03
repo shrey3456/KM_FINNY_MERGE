@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique } from "drizzle-orm/pg-core";
+`import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1112,3 +1112,4 @@ export const stockMovements = pgTable("stock_movements", {
 
 export type ProductPlantStock = typeof productPlantStock.$inferSelect;
 export type StockMovement = typeof stockMovements.$inferSelect;
+````````

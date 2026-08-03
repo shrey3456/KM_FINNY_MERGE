@@ -4,6 +4,7 @@ import { Client } from '@notionhq/client';
 import type { Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { plants, insertPlantSchema } from '../../shared/schema';
+import { requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -619,7 +620,10 @@ router.delete('/plants/:id', async (req: Request, res: Response) => {
 });
 
 // Lock a proforma slip after print - CHECK IF PLANT ALLOWS LOCKING
-router.post('/proforma-slips/order/:orderNumber/lock', async (req: Request, res: Response) => {
+// Same rule as Unlock below: admin/super-admin, or Write Access to BOTH
+// "print-operations" AND "proforma" — chaining two single-key checks means both must
+// pass (an admin still short-circuits past both via requirePageWrite's own bypass).
+router.post('/proforma-slips/order/:orderNumber/lock', requirePageWrite('print-operations'), requirePageWrite('proforma'), async (req: Request, res: Response) => {
   try {
     const orderNumber = String(req.params.orderNumber).trim();
     const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
@@ -664,29 +668,12 @@ router.post('/proforma-slips/order/:orderNumber/lock', async (req: Request, res:
   }
 });
 
-// Unlock a proforma slip (admin/super-admin OR Head-Billing)
-router.post('/proforma-slips/order/:orderNumber/unlock', async (req: Request, res: Response) => {
+// Unlock a proforma slip — admin/super-admin, or Write Access to BOTH "print-operations"
+// AND "proforma" on the Users page (department/designation special-casing removed — grant
+// Write Access on both of those page keys instead of relying on IT/Management/Billing-Head).
+router.post('/proforma-slips/order/:orderNumber/unlock', requirePageWrite('print-operations'), requirePageWrite('proforma'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user || (req as any).session?.user;
-    if (!user) {
-      return res.status(403).json({ success: false, message: 'Not authenticated' });
-    }
-
-    const role = String(user.role || '').toLowerCase();
-    const dept = String(user.department || '').toLowerCase();
-    const desig = String(user.designation || '').toLowerCase();
-
-    const isAdminOrSuper = ['admin', 'superadmin', 'super admin', 'super-admin'].includes(role);
-    // User requested "department is billing and designation is head"
-    const isHeadBilling = dept === 'billing' && desig === 'head';
-    const isITDep= ['IT', 'information technology', 'it'].includes(dept);
-    const ismanagment = ['management', 'manager', 'head', 'director'].includes(dept);
-
-    console.log(`🔐 Unlock request by ${user.name || user.username} (Role: ${role}, Dept: ${dept}, Desig: ${desig}) - Admin/Super: ${isAdminOrSuper}, Head-Billing: ${isHeadBilling}, IT: ${isITDep}, Management: ${ismanagment}`)  ;
-    if (!isAdminOrSuper && !isHeadBilling && !isITDep && !ismanagment) {
-      return res.status(403).json({ success: false, message: 'Access denied: Requires Admin or Billing-Head or IT or Management' });
-    }
-
     const orderNumber = String(req.params.orderNumber).trim();
     const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
     if (!slip) return res.status(404).json({ success: false, message: 'Proforma slip not found' });

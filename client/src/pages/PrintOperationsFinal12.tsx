@@ -92,18 +92,14 @@ const PrintOperations: React.FC = () => {
   })();
   const currentUserRole = String(currentUser?.role || '').toLowerCase();
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
-  // Write access to Print Operations is granted per-page by admin (Allowed Pages /
-  // Write Access on the User Management page) rather than the old global role string.
-  const isread = !hasPageWriteAccess("print-operations") && !isAdminOrSuper;
 
   const rawDepartment = String(currentUser?.department || '').trim().toLowerCase();
   const rawDesignation = String(currentUser?.designation || '').trim().toLowerCase();
-  
-  const isITDep= ['IT', 'information technology', 'it'].includes(rawDepartment);
-  const ismanagment = ['management', 'manager', 'head', 'director'].includes(rawDepartment);
-  // Department: Billing, Designation: Head
-  console.log(isITDep,ismanagment)
-  const canUnlockSlips = !isread && (isAdminOrSuper || isITDep || ismanagment || (rawDepartment === 'billing' && rawDesignation === 'head'));
+
+  // Unlocking is admin/super-admin, or anyone an admin has granted Write Access to this
+  // page on the Users page — no more department/designation special-casing (IT, Management,
+  // Billing+Head are gone; grant them Write Access on this page key instead).
+  const canUnlockSlips = isAdminOrSuper || hasPageWriteAccess("print-operations");
 
   // NEW: Get current user info and time for use in both print function and preview
   // CHANGED: Use Name instead of Role
