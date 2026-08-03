@@ -81,6 +81,9 @@ type OsScanItem = {
   expectedQty: number; itemsPerPallet: number;
   scannedPallets: number; scannedLooseQty: number; totalScannedQty: number;
   status: string; lastScannedAt: string | null;
+  // Set on synthetic rows the Scan tab builds for extras scanned that aren't on this part's CSV
+  // (unmatched barcodes) — see osExtraOnlyRows. Not present on real CSV items.
+  _isExtraOnly?: boolean;
 };
 
 type MvItem = {
@@ -2150,7 +2153,33 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // ── Embedded order-scan view (replaces dashboard when admin CSV is active) ─
   if (activeOrderScanSession) {
     const osItems = osItemsQuery.data ?? [];
-    const osFiltered = (osSearch
+    // Extras scanned that aren't on THIS part's CSV at all (unmatched barcodes logged as extras)
+    // have no CSV row, so without this they'd be invisible on the Scan tab even though they count
+    // toward the Extra/Received totals. Surface them as their own "Extra" rows (kept OUT of
+    // osItems so the item counts + totals math above stay unchanged — they're display-only here).
+    // Over-scans of items that ARE on the CSV already show on that item's own Extra column, so
+    // those are excluded (matched by barcode).
+    const osExtraOnlyRows: OsScanItem[] = (osExtrasQuery.data ?? [])
+      .filter((e) => e.barcode && !osItems.some((i) => normalize(i.barcode ?? "") === normalize(e.barcode)))
+      .map((e, idx) => {
+        const invProduct = productLookup.get(normalize(e.barcode)) ?? null;
+        return {
+          id: -1_000_000 - idx, // synthetic negative id — never collides with a real DB row id
+          sessionId: activeOrderScanSession.id,
+          barcode: e.barcode,
+          itemName: e.itemName ?? invProduct?.name ?? e.barcode,
+          sapCode: invProduct?.sapCode ?? null,
+          expectedQty: 0,
+          itemsPerPallet: _computePlantPalletSize(null, invProduct),
+          scannedPallets: 0,
+          scannedLooseQty: 0,
+          totalScannedQty: e.totalQty ?? 0,
+          status: "extra",
+          lastScannedAt: e.lastScannedAt,
+          _isExtraOnly: true,
+        };
+      });
+    const osCsvSorted = (osSearch
       ? osItems.filter((i) =>
           [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(osSearch.toLowerCase()))
         )
@@ -2165,6 +2194,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       if (aSeq !== bSeq) return bSeq - aSeq;
       return a.id - b.id;
     });
+    // Extra-only rows sit after the CSV rows, filtered by the same search term.
+    const osExtraFiltered = osSearch
+      ? osExtraOnlyRows.filter((i) =>
+          [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(osSearch.toLowerCase()))
+        )
+      : osExtraOnlyRows;
+    const osFiltered = [...osCsvSorted, ...osExtraFiltered];
     // An item counts as done when its scanned qty PLUS any cross-part credit reaches
     // expected — so a line fully covered by an earlier part's extra shows as done here too.
     const osIsItemDone = (i: OsScanItem) => {
@@ -2189,6 +2225,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       const credit = osCreditByBarcode.get(normalize(item.barcode));
       const exp = item.expectedQty ?? 0;
       const effScanned = (item.totalScannedQty ?? 0) + (credit?.creditedQty ?? 0);
+      const isExtraOnly = !!item._isExtraOnly;
       const done = exp > 0 && effScanned >= exp;
       return {
         credit,
@@ -2197,8 +2234,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         rem: Math.max(0, exp - effScanned),
         extra: extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0,
         ipp: item.itemsPerPallet ?? 0,
-        done,
-        partial: !done && effScanned > 0,
+        // An extra-only row is never "done"/"partial" — it has no order qty to fulfil; it's
+        // purely an over-arrival, so it reads as its own "Extra" state instead.
+        done: done && !isExtraOnly,
+        partial: !done && effScanned > 0 && !isExtraOnly,
+        isExtraOnly,
       };
     };
 
@@ -2221,8 +2261,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         align: "center",
         hideable: false,
         render: (item) => {
-          const { done, partial } = osRowState(item);
-          return done ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
+          const { done, partial, isExtraOnly } = osRowState(item);
+          return isExtraOnly ? <AlertTriangle className="mx-auto h-4 w-4 text-orange-500" />
+            : done ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
             : partial ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
             : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
         },
@@ -2288,7 +2329,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         sortable: true,
         accessor: (i) => i.expectedQty ?? 0,
         cellClassName: "text-gray-600 font-medium tabular-nums",
-        render: (i) => i.expectedQty,
+        render: (i) => i.expectedQty || <span className="text-gray-300">—</span>,
       },
       {
         id: "remainQty",
@@ -2312,7 +2353,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         accessor: (i) => osRowState(i).doneQty,
         cellClassName: "tabular-nums font-bold",
         render: (item) => {
-          const { doneQty, done, partial } = osRowState(item);
+          const { doneQty, done, partial, isExtraOnly } = osRowState(item);
+          if (isExtraOnly) return <span className="text-gray-300">—</span>;
           return (
             <span
               className={done ? "text-emerald-700" : partial ? "text-amber-700" : "text-gray-400"}
@@ -2386,13 +2428,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         width: 90,
         align: "center",
         render: (i) => {
-          const { done, partial } = osRowState(i);
+          const { done, partial, isExtraOnly } = osRowState(i);
           return (
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-              done ? "bg-emerald-100 text-emerald-700"
+              isExtraOnly ? "bg-orange-100 text-orange-700"
+              : done ? "bg-emerald-100 text-emerald-700"
               : partial ? "bg-amber-100 text-amber-700"
               : "bg-gray-100 text-gray-500"}`}>
-              {done ? "Received" : partial ? "Partial" : "Pending"}
+              {isExtraOnly ? "Extra" : done ? "Received" : partial ? "Partial" : "Pending"}
             </span>
           );
         },
@@ -2929,7 +2972,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             <div className={`grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white ${bigView ? "text-base" : ""}`}>
               {([
                 { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
-                { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
+                { key: "done", label: "Received", value: displayTotals.done + displayTotals.extra, plt: displayTotals.palletsDone + displayTotals.palletsExtra, text: "text-emerald-600" },
                 { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, text: "text-red-600" },
                 { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
               ] as const).map((s) => {
@@ -3029,17 +3072,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const remaining  = Math.max(0, exp - effScanned);
                         const extra      = Math.max(0, (item.totalScannedQty ?? 0) - exp);
                         const ipp        = item.itemsPerPallet ?? 0;
-                        const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
+                        const isExtraOnly = !!item._isExtraOnly;
+                        const effStatus  = isExtraOnly ? "extra" : exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
                         const expPlt     = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
                         const remainPlt  = ipp > 0 ? (remaining / ipp).toFixed(2) : "0.00";
                         return (
                           <div key={item.id} className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
-                            effStatus === "complete" ? "bg-emerald-50/40" : effStatus === "partial" ? "bg-amber-50/30" : undefined
+                            effStatus === "extra" ? "bg-orange-50/40" : effStatus === "complete" ? "bg-emerald-50/40" : effStatus === "partial" ? "bg-amber-50/30" : undefined
                           }`}>
                             <span className="mt-0.5 shrink-0">
                               {effStatus === "complete" ? (
                                 <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
                                   <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                                </span>
+                              ) : effStatus === "extra" ? (
+                                <span className="flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed border-orange-300 text-orange-500">
+                                  <AlertTriangle className="h-3.5 w-3.5" />
                                 </span>
                               ) : (
                                 <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
@@ -3060,9 +3108,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 </p>
                               )}
                               <p className="mt-1.5 text-sm leading-snug">
-                                <span className="font-bold text-gray-900">{scanned}</span>
-                                <span className="text-gray-400">/{exp}</span>{" "}
-                                <span className="text-gray-400">({expPlt} plt)</span>
+                                {!isExtraOnly && (
+                                  <>
+                                    <span className="font-bold text-gray-900">{scanned}</span>
+                                    <span className="text-gray-400">/{exp}</span>{" "}
+                                    <span className="text-gray-400">({expPlt} plt)</span>
+                                  </>
+                                )}
                                 {remaining > 0 && (
                                   <>
                                     <span className="text-gray-300"> · </span>
@@ -3072,7 +3124,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 )}
                                 {extra > 0 && (
                                   <>
-                                    <span className="text-gray-300"> · </span>
+                                    {!isExtraOnly && <span className="text-gray-300"> · </span>}
                                     <span className="font-semibold text-amber-600">+{extra} extra</span>
                                   </>
                                 )}
@@ -3080,10 +3132,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             </div>
                             <span className="shrink-0">
                               <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                effStatus === "extra" ? "bg-orange-100 text-orange-700" :
                                 effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
                                 effStatus === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
                               }`}>
-                                {effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
+                                {effStatus === "extra" ? "Extra" : effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
                               </span>
                             </span>
                           </div>
@@ -3128,7 +3181,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const scanned    = Math.min(effScanned, exp);
                         const remaining  = Math.max(0, exp - effScanned);
                         const extra      = Math.max(0, (item.totalScannedQty ?? 0) - exp);
-                        const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
+                        const isExtraOnly = !!item._isExtraOnly;
+                        const effStatus  = isExtraOnly ? "extra" : exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
                         const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
                         // Pallet figure under each qty (qty ÷ items-per-pallet), same as Master View.
                         const ipp = item.itemsPerPallet ?? 0;
@@ -3136,6 +3190,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         return (
                           <Fragment key={item.id}>
                           <tr className={`border-b border-gray-200 ${
+                            effStatus === "extra" ? "bg-orange-50/40" :
                             effStatus === "complete" ? "bg-emerald-50/40" :
                             effStatus === "partial"  ? "bg-amber-50/30" : undefined
                           }`}>
@@ -3164,8 +3219,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               <span className="block text-sm font-extrabold text-gray-500">{plt(exp)} plt</span>
                             </td>
                             <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
-                              <span className="block text-lg">{scanned}</span>
-                              <span className="block text-sm font-extrabold text-gray-500">{plt(scanned)} plt</span>
+                              <span className="block text-lg">{isExtraOnly ? "—" : scanned}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{isExtraOnly ? "" : `${plt(scanned)} plt`}</span>
                             </td>
                             <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
                               <span className="block text-lg">{remaining || "—"}</span>
@@ -3177,10 +3232,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             </td>
                             <td className="text-center px-4 py-2.5">
                               <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
+                                effStatus === "extra" ? "bg-orange-100 text-orange-700" :
                                 effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
                                 effStatus === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
                               }`}>
-                                {effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
+                                {effStatus === "extra" ? "Extra" : effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
                               </span>
                             </td>
                           </tr>
@@ -3792,7 +3848,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {([
                     { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                    { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                    { key: "done", label: "Received", value: displayTotals.done + displayTotals.extra, plt: displayTotals.palletsDone + displayTotals.palletsExtra, dot: "bg-emerald-500", text: "text-emerald-600" },
                     { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
                     { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-orange-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
                   ] as const).map((s) => {
@@ -4059,8 +4115,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     hasActiveFilters={!!osSearch}
                     enableZebraStripes
                     rowClassName={(item) => {
-                      const { done, partial } = osRowState(item);
-                      return done ? "bg-emerald-50/40" : partial ? "bg-amber-50/30" : undefined;
+                      const { done, partial, isExtraOnly } = osRowState(item);
+                      return isExtraOnly ? "bg-orange-50/40" : done ? "bg-emerald-50/40" : partial ? "bg-amber-50/30" : undefined;
                     }}
                     renderExpandedRow={() => <div ref={osExpandDesktopRef}>{mvHistoryPanel}</div>}
                     isRowExpandable={(item) => !!item.barcode}
