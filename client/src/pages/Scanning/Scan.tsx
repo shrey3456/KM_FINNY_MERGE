@@ -3697,7 +3697,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </span>
                     )}
                   </p>
-                  <p className="flex items-center gap-1.5 text-xs text-gray-500 truncate">
+                  <p className="mt-1.5 flex items-center gap-1.5 text-xs text-gray-500 truncate">
                     <PlantBadge plant={activeOrderScanSession.plant} />
                     {activeOrderScanSession.importedByName && <span>· loaded by {activeOrderScanSession.importedByName}</span>}
                   </p>
@@ -4484,10 +4484,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           <div className="fixed inset-0 z-40 pointer-events-none bg-green-400/25" />
         )}
 
-        {/* Scan confirmation dialog */}
+        {/* Scan confirmation dialog. Radix portals it to <body>, outside the .kiosk-rotate-90
+            container, so on a portrait-mounted (rotated) screen it would otherwise appear upright
+            while everything else is turned. rotate-90 composes with Radix's centering transform
+            (translate(-50%,-50%)) to turn the whole dialog to match — so it reads correctly on the
+            physical portrait screen (and only looks sideways in a normal landscape screenshot).
+            When rotated, its on-screen width/height are swapped: size it against the SWAPPED
+            viewport axes (w/max-w in vh, max-h in vw) with scroll so it always fits. */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>
-          <DialogContent className={`w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl overflow-hidden rounded-2xl p-0 sm:rounded-2xl ${osRotated ? "rotate-90" : ""}`}>
-            {/* Two columns: full-height product image on the left, all controls on the right. */}
+          <DialogContent
+            className={osRotated
+              ? "w-[92vh] max-w-[92vh] max-h-[92vw] overflow-y-auto rounded-2xl p-0 rotate-90"
+              : "w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl p-0"}
+          >
+            {/* Two columns: full-height product image on the left, all controls on the right.
+                Under rotate-90 (clockwise), CSS-left maps to physical-top — so image-left reads as
+                image-on-top with the details below it on the physical portrait screen. */}
             <div className="flex flex-col sm:flex-row">
               {osResolvedImageName && (
                 <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
@@ -4587,7 +4599,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               
               {/* Qty (boxes) and Pallets side by side — each with −/+ steppers. Editing either one
                   recalculates the other (2-way box↔pallet conversion). */}
-              <div className={`grid gap-3 ${plt > 1 ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+              {/* Off-rotation: Qty + Pallets side by side (sm:grid-cols-2). Rotated: keep a single
+                  CSS column — the rotate-90 turns that vertical stack into the side-by-side pair
+                  the kiosk layout expects (a CSS two-column grid would rotate into a stacked pair). */}
+              <div className={`grid gap-3 ${plt > 1 && !osRotated ? "sm:grid-cols-2" : "grid-cols-1"}`}>
                 {/* Qty — −/+ step one box at a time. */}
                 <div className="space-y-1">
                   <Label className="text-sm">Qty (boxes)</Label>
