@@ -144,6 +144,11 @@ const pendingUpdates = new Map<number, Record<string, any>>();
 const pendingCreates: any[] = [];
 const pendingImageUrlByProductId = new Map<number, string>();
 const pendingImageUrlByCreateIndex = new Map<number, string>();
+// Whether the detect run that produced the current pending batch was a "Sync Photos"
+// (syncImages=true) run. Apply only ever touches images when this is true — a "Sync Notion"
+// (syncImages=false) detect still records image URLs above (new products need them once
+// created), but Apply must not silently download/check photos the user never asked for.
+let pendingSyncImages = false;
 
 // ─── Notion property helpers ──────────────────────────────────────────────────
 
@@ -481,6 +486,7 @@ export async function detectChangesFromNotion(triggeredBy = 'system', syncImages
     };
 
     pendingReport = report;
+    pendingSyncImages = syncImages;
     pendingUpdates.clear();
     pendingCreates.length = 0;
     pendingImageUrlByProductId.clear();
@@ -538,62 +544,56 @@ export async function applyPendingChanges(): Promise<SyncReport> {
   try {
     const errors: string[] = [...pendingReport.errors];
     let updated = 0, created = 0;
+    const syncImages = pendingSyncImages;
 
+    // Field updates first — plain DB writes, no network calls, so sequential is fine (and
+    // keeps error attribution simple). Image work is collected separately below and run
+    // concurrently, and ONLY when this pending batch came from a "Sync Photos" detect run —
+    // a "Sync Notion" (fast, no photos) detect must stay photo-free all the way through Apply.
     for (const [productId, updates] of pendingUpdates.entries()) {
       try {
         await storage.updateProduct(productId, updates);
         updated++;
       } catch (err) {
         errors.push(`Update product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
-        continue;
-      }
-      const imageUrl = pendingImageUrlByProductId.get(productId);
-      if (imageUrl) {
-        try {
-          const current = await storage.getProduct(productId);
-          const result = await syncProductImage(productId, imageUrl, current?.productImageHash);
-          if (result) await storage.updateProduct(productId, result);
-        } catch (err) {
-          errors.push(`Image for product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
-        }
       }
     }
 
-    // Products with a Notion image but no OTHER field change never appear in
-    // pendingUpdates above (they're "skipped" as unchanged in computeChanges) — but their
-    // image still needs to be checked/cached at least once. Handle every remaining tracked
-    // image URL here so a product's picture doesn't stay perpetually un-synced just because
-    // the rest of its data already matches.
     let imagesSynced = 0;
-    for (const [productId, imageUrl] of pendingImageUrlByProductId.entries()) {
-      if (pendingUpdates.has(productId)) continue; // already handled above
-      try {
-        const current = await storage.getProduct(productId);
-        const result = await syncProductImage(productId, imageUrl, current?.productImageHash);
-        if (result) {
-          await storage.updateProduct(productId, result);
-          imagesSynced++;
-        }
-      } catch (err) {
-        errors.push(`Image for product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    if (syncImages) {
+      // Every tracked image URL for an EXISTING product — whether or not it also had a field
+      // update above — checked/downloaded 8 at a time instead of one at a time (mirrors the
+      // same concurrency fix already used in detectChangesFromNotion's image loop).
+      await mapWithConcurrency(
+        [...pendingImageUrlByProductId.entries()],
+        8,
+        async ([productId, imageUrl]) => {
+          try {
+            const current = await storage.getProduct(productId);
+            const result = await syncProductImage(productId, imageUrl, current?.productImageHash);
+            if (result) {
+              await storage.updateProduct(productId, result);
+              imagesSynced++;
+            }
+          } catch (err) {
+            errors.push(`Image for product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        },
+      );
+      if (imagesSynced > 0) console.log(`[Notion Inventory Sync] Cached ${imagesSynced} product image(s) on apply`);
     }
-    if (imagesSynced > 0) console.log(`[Notion Inventory Sync] Cached ${imagesSynced} product image(s) with no other field changes`);
 
+    // Creates are sequential (each needs a real id before its image can be synced), but the
+    // image downloads for the newly-created products are then batched concurrently below —
+    // same skip-when-not-syncImages rule as existing products.
+    const createdImageWork: { productId: number; imageUrl: string }[] = [];
     for (let i = 0; i < pendingCreates.length; i++) {
       const data = pendingCreates[i];
       try {
         const newProduct = await storage.createProduct(data as any);
         created++;
         const imageUrl = pendingImageUrlByCreateIndex.get(i);
-        if (imageUrl) {
-          try {
-            const result = await syncProductImage(newProduct.id, imageUrl, null);
-            if (result) await storage.updateProduct(newProduct.id, result);
-          } catch (err) {
-            errors.push(`Image for new product ${newProduct.id}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
+        if (imageUrl && syncImages) createdImageWork.push({ productId: newProduct.id, imageUrl });
       } catch (createErr) {
         // Most commonly a barcode conflict with a prior import that has no Notion ID —
         // surfaced now (was silently swallowed before) so a "detected but not applied"
@@ -601,6 +601,19 @@ export async function applyPendingChanges(): Promise<SyncReport> {
         const label = data?.name || data?.barcode || `row ${i + 1}`;
         errors.push(`Create "${label}": ${createErr instanceof Error ? createErr.message : String(createErr)}`);
       }
+    }
+    if (createdImageWork.length > 0) {
+      await mapWithConcurrency(createdImageWork, 8, async ({ productId, imageUrl }) => {
+        try {
+          const result = await syncProductImage(productId, imageUrl, null);
+          if (result) {
+            await storage.updateProduct(productId, result);
+            imagesSynced++;
+          }
+        } catch (err) {
+          errors.push(`Image for new product ${productId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      });
     }
 
     const report: SyncReport = { ...pendingReport, updated, created, errors, imagesCached: (pendingReport.imagesCached ?? 0) + imagesSynced };
@@ -611,8 +624,9 @@ export async function applyPendingChanges(): Promise<SyncReport> {
     pendingCreates.length = 0;
     pendingImageUrlByProductId.clear();
     pendingImageUrlByCreateIndex.clear();
+    pendingSyncImages = false;
 
-    console.log(`[Notion Inventory Sync] Applied — updated: ${updated}, created: ${created}`);
+    console.log(`[Notion Inventory Sync] Applied — updated: ${updated}, created: ${created}${syncImages ? `, images: ${imagesSynced}` : ' (photos skipped — Sync Notion run)'}`);
     return report;
   } finally {
     isSyncing = false;
@@ -673,6 +687,7 @@ export async function fullSyncFromNotion(triggeredBy = 'system'): Promise<SyncRe
     pendingReport = null;
     pendingUpdates.clear();
     pendingCreates.length = 0;
+    pendingSyncImages = false;
 
     console.log(`[Notion Inventory Sync] Full sync done — created: ${created}, errors: ${errors.length}`);
     return report;

@@ -73,9 +73,15 @@ type PlantStockResponse = {
   dateMode?: boolean;
   from?: string | null;
   to?: string | null;
-  // Set only when from/to pin down exactly one date — the date Expected Qty was computed for.
+  // Set only when ONE date applies to everything Expected Qty was computed for — an explicit
+  // date filter, a single plant selected, or every active plant coincidentally on the same
+  // date. Null when plants are on different active dates — activeDatesByPlant carries each
+  // plant's own date in that case instead.
   expectedDate?: string | null;
   expectedTotal?: number | null;
+  // Each plant's own currently-active session's order date (lowercased plant key) — used to
+  // label the "All plants" tile sensibly when there's no single shared date to show.
+  activeDatesByPlant?: Record<string, string>;
 };
 
 // One dated entry from the stock_movements ledger for a single (barcode, plant) — powers the
@@ -338,10 +344,15 @@ export default function OverallStock() {
   // True when a date range is active: the Stock/Extra numbers then mean "received in this
   // window" rather than "total on hand", so the UI labels them differently.
   const dateMode = stockData?.dateMode ?? false;
-  // Expected Qty (sum of every CSV's ordered quantity across all parts for one date) only
-  // populates when from/to pin down exactly ONE date — set server-side as expectedDate.
+  // Expected Qty (sum of every CSV's ordered quantity across all parts) — server resolves
+  // WHICH date(s) per plant (explicit filter, or each plant's own currently-active session),
+  // so this tile can be present (expectedTotal != null) even when expectedDate is null because
+  // the plants in view are on different active dates. activeDatesByPlant then carries each
+  // plant's own date for a per-plant-aware label.
   const expectedDate = stockData?.expectedDate ?? null;
   const expectedTotal = stockData?.expectedTotal ?? 0;
+  const hasExpected = stockData?.expectedTotal != null;
+  const activeDatesByPlant = stockData?.activeDatesByPlant ?? {};
 
   const rows = stockData?.items ?? [];
   // null = admin (may pick any plant). Array = restricted user → lock the switcher to these.
@@ -864,11 +875,17 @@ export default function OverallStock() {
               value: totalExtra.toLocaleString(),
               label: `Excess Stock (Over-Order) · ${totalExtraPallets.toFixed(2)} plt`,
             },
-            ...(expectedDate ? [{
+            ...(hasExpected ? [{
               icon: CalendarDays,
               tone: "navy" as const,
               value: expectedTotal.toLocaleString(),
-              label: `Today's Total Order Qty (${expectedDate}) · ${expectedPalletsTotal.toFixed(2)} plt`,
+              // One shared date (explicit filter, one plant selected, or every active plant
+              // coincidentally matches) shows that date. Otherwise (plants on different active
+              // dates, e.g. Valsad on the 19th while Indore is still on the 10th) there's no
+              // single date to print, so each plant's own active date is listed instead.
+              label: expectedDate
+                ? `Today's Total Order Qty (${expectedDate}) · ${expectedPalletsTotal.toFixed(2)} plt`
+                : `Current Active Orders (${Object.entries(activeDatesByPlant).map(([p, d]) => `${p.toUpperCase()} ${d}`).join(", ")}) · ${expectedPalletsTotal.toFixed(2)} plt`,
             }] : []),
           ]}
         />

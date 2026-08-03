@@ -1487,8 +1487,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // dated row, so when a range is given we aggregate that instead. The result deliberately
     // covers ONLY what was received inside the window — earlier stock is not carried in, so
     // the numbers mean "received in this period", not "balance as of".
-    // NOTE: only 'receive' rows exist today (nothing writes dispatch/adjust yet), so this is
-    // inbound movement. Outbound will fold in automatically once it starts writing negatives.
+    //
+    // "Date" here means the ORDER's date (order_import_sessions.order_date — the date picked at
+    // CSV upload), NOT the real-world moment the box was physically scanned. Those two can differ
+    // by days: a CSV dated the 19th may not finish being scanned until the 30th. Every scan-driven
+    // row (receive/adjust) carries session_id, which resolves back to that order's date via the
+    // join below; only manual Product Exchange rows have no session_id, so they fall back to their
+    // own created_at (they aren't tied to any order — revisit later if that needs order-linking too).
     const from = typeof req.query.from === 'string' ? req.query.from.trim() : '';
     const to = typeof req.query.to === 'string' ? req.query.to.trim() : '';
     const extrasOnly = req.query.extrasOnly === 'true' || req.query.extrasOnly === '1';
@@ -1503,18 +1508,19 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     let sourceSql = 'product_plant_stock';
     if (dateMode) {
       const dateConds: string[] = [];
-      if (from) { params.push(from); dateConds.push(`created_at::date >= $${params.length}::date`); }
-      if (to)   { params.push(to);   dateConds.push(`created_at::date <= $${params.length}::date`); }
+      if (from) { params.push(from); dateConds.push(`COALESCE(ois.order_date::date, sm.created_at::date) >= $${params.length}::date`); }
+      if (to)   { params.push(to);   dateConds.push(`COALESCE(ois.order_date::date, sm.created_at::date) <= $${params.length}::date`); }
       sourceSql = `(
-        SELECT barcode,
-               plant,
-               SUM(qty)::int       AS in_stock,
-               SUM(extra_qty)::int AS extra_qty,
-               MAX(created_at)     AS updated_at
-        FROM stock_movements
+        SELECT sm.barcode,
+               sm.plant,
+               SUM(sm.qty)::int       AS in_stock,
+               SUM(sm.extra_qty)::int AS extra_qty,
+               MAX(sm.created_at)     AS updated_at
+        FROM stock_movements sm
+        LEFT JOIN order_import_sessions ois ON ois.id = sm.session_id
         WHERE ${dateConds.join(' AND ')}
-        GROUP BY barcode, plant
-        HAVING SUM(qty) <> 0 OR SUM(extra_qty) <> 0
+        GROUP BY sm.barcode, sm.plant
+        HAVING SUM(sm.qty) <> 0 OR SUM(sm.extra_qty) <> 0
       )`;
     }
 
@@ -1589,63 +1595,58 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       };
     });
 
-    // ── Expected Qty — sum of every CSV's ordered quantity for ONE specific order date ──────
-    // Only meaningful for a single day (summing across a range would blend unrelated orders
-    // together), so this only activates when from/to pin down exactly one date — e.g. the
-    // "Today"/"Yesterday" presets (which set from === to), or the user filling in just `from`.
-    // Answers "if I uploaded 3 CSVs (parts) for the 17th, what's the total ordered qty per
-    // item?" — summed across ALL parts of that date's FIFO group, not just one file.
-    // With NO date filter at all, default to the OLDEST order date that hasn't finished scanning
-    // yet (scan_status 'active' or 'available'), scoped to the same plants as the rest of this
-    // report. This keeps Expected Qty pinned to yesterday's CSV while it's still being scanned,
-    // and only rolls over to today once every earlier order is 'completed'. This default is
-    // scoped ONLY to expected-qty — it never flips dateMode (still `!!(from || to)`), so
-    // Stock/Extra keep showing running totals as before, unaffected by this default.
-    let singleDate: string | null = null;
+    // ── Expected Qty — sum of every CSV's ordered quantity for the order date(s) currently
+    // relevant per plant ──────────────────────────────────────────────────────────────────
+    // Explicit date filter (from/to pin down one day, e.g. the "Today"/"Yesterday" presets or
+    // the user filling in just `from`): that ONE date applies to every plant, same as before.
+    // No filter at all: each plant uses its OWN currently ACTIVE session's order date instead
+    // of one shared date — Valsad might be actively scanning the 19th while Indore is still on
+    // the 10th, and each plant's Expected reflects its own reality. This replaced two earlier,
+    // broken defaults: "literal today" (usually empty — most days nothing's uploaded yet) and
+    // before that "oldest pending order across ALL plants" (which silently applied ONE plant's
+    // backlog date to every plant, pulling in unrelated already-completed orders that happened
+    // to share that date — see the 7180-vs-1940 mismatch this replaced). "All" plants now sums
+    // each plant's own active-date total — never one date force-applied across plants that
+    // aren't even on it.
+    let singleDate: string | null = null;   // set only when exactly one date is in play — what the client shows as "(date)" in the tile label.
+    let activePairs: { plant: string; orderDate: string }[] = [];
     if (from && (!to || to === from)) {
       singleDate = from;
     } else if (!from && !to) {
-      const pendingParams: any[] = [];
-      const pendingConds: string[] = ['is_deleted = false', "scan_status IN ('active', 'available')"];
-      if (allowed !== null) { pendingParams.push(allowed); pendingConds.push(`LOWER(plant) = ANY($${pendingParams.length}::text[])`); }
-      if (plantParam) { pendingParams.push(plantParam.toLowerCase()); pendingConds.push(`LOWER(plant) = $${pendingParams.length}`); }
-      const { rows: pendingRows } = await pool.query(
-        `SELECT MIN(order_date) AS "minDate" FROM order_import_sessions WHERE ${pendingConds.join(' AND ')}`,
-        pendingParams,
+      const activeParams: any[] = [];
+      const activeConds: string[] = [`scan_status = 'active'`, 'is_deleted = false'];
+      if (allowed !== null) { activeParams.push(allowed); activeConds.push(`LOWER(plant) = ANY($${activeParams.length}::text[])`); }
+      if (plantParam) { activeParams.push(plantParam.toLowerCase()); activeConds.push(`LOWER(plant) = $${activeParams.length}`); }
+      const { rows: activeRows } = await pool.query(
+        `SELECT LOWER(plant) AS plant, order_date AS "orderDate" FROM order_import_sessions WHERE ${activeConds.join(' AND ')}`,
+        activeParams,
       );
-      const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
-      singleDate = pendingRows[0]?.minDate ?? todayIST;
+      activePairs = activeRows.map((r: any) => ({ plant: r.plant, orderDate: r.orderDate }));
+      const distinctDates = new Set(activePairs.map((p) => p.orderDate));
+      if (distinctDates.size === 1) singleDate = activePairs[0]?.orderDate ?? null;
     }
+    // Surfaced to the client so "All" can label itself sensibly even when the plants
+    // underneath it are on different active dates (no single date to print in that case).
+    const activeDatesByPlant: Record<string, string> = {};
+    for (const p of activePairs) activeDatesByPlant[p.plant] = p.orderDate;
+
     const expectedByKey = new Map<string, number>();
     let expectedTotal = 0;
     const expectedOnlyRows: typeof items = [];
-    if (singleDate) {
-      const expParams: any[] = [singleDate];
-      const expConds: string[] = ['ois.order_date = $1', 'ois.is_deleted = false'];
-      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
-      if (plantParam) { expParams.push(plantParam.toLowerCase()); expConds.push(`LOWER(oii.plant) = $${expParams.length}`); }
-      const { rows: expRows } = await pool.query(`
-        SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
-        FROM order_import_items oii
-        JOIN order_import_sessions ois ON ois.id = oii.session_id
-        WHERE ${expConds.join(' AND ')}
-        GROUP BY oii.barcode, oii.plant
-        HAVING SUM(oii.quantity) <> 0
-      `, expParams);
 
+    // Shared by both query shapes below: turns raw (barcode, plant, expectedQty) rows into
+    // expectedByKey/expectedTotal, plus synthetic zero-stock rows for barcodes that were
+    // ordered but have nothing scanned/stocked yet at all (so the full ordered qty is still
+    // visible before a single box is scanned).
+    async function applyExpectedRows(expRows: any[]) {
       const unmatchedBarcodes = new Set<string>();
-      for (const r of expRows as any[]) {
+      for (const r of expRows) {
         const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
         const qty = Number(r.expectedQty) || 0;
         expectedByKey.set(key, qty);
         expectedTotal += qty;
         if (r.barcode) unmatchedBarcodes.add(r.barcode);
       }
-
-      // Some ordered barcodes may have nothing scanned yet at all — no stock row exists for
-      // them. Build a synthetic row for those (inStock/extraQty = 0) so the full ordered qty
-      // is visible even before a single box is scanned. Product metadata is fetched separately
-      // (rather than joined into the GROUP BY above) to keep that aggregate query simple.
       const barcodesNeedingLookup = [...unmatchedBarcodes];
       const productByBarcode = new Map<string, any>();
       if (barcodesNeedingLookup.length > 0) {
@@ -1657,8 +1658,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         );
         for (const p of prodRows as any[]) productByBarcode.set(String(p.barcode).toLowerCase(), p);
       }
-
-      for (const r of expRows as any[]) {
+      for (const r of expRows) {
         const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
         if (items.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key)) continue;
         const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
@@ -1679,7 +1679,42 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       }
     }
 
-    const itemsWithExpected = singleDate
+    if (singleDate) {
+      // Explicit filter, or every active plant coincidentally on the same date — one shared date.
+      const expParams: any[] = [singleDate];
+      const expConds: string[] = ['ois.order_date = $1', 'ois.is_deleted = false'];
+      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
+      if (plantParam) { expParams.push(plantParam.toLowerCase()); expConds.push(`LOWER(oii.plant) = $${expParams.length}`); }
+      const { rows: expRows } = await pool.query(`
+        SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
+        FROM order_import_items oii
+        JOIN order_import_sessions ois ON ois.id = oii.session_id
+        WHERE ${expConds.join(' AND ')}
+        GROUP BY oii.barcode, oii.plant
+        HAVING SUM(oii.quantity) <> 0
+      `, expParams);
+      await applyExpectedRows(expRows);
+    } else if (activePairs.length > 0) {
+      // Multiple plants on genuinely different active dates — join each item's session against
+      // its OWN plant's active date instead of one date applied everywhere.
+      const expParams: any[] = [];
+      const valuesSql = activePairs
+        .map((p) => { expParams.push(p.plant, p.orderDate); return `($${expParams.length - 1}::text, $${expParams.length}::text)`; })
+        .join(', ');
+      const { rows: expRows } = await pool.query(`
+        SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
+        FROM order_import_items oii
+        JOIN order_import_sessions ois ON ois.id = oii.session_id
+        JOIN (VALUES ${valuesSql}) AS active(plant, order_date) ON LOWER(ois.plant) = active.plant AND ois.order_date = active.order_date
+        WHERE ois.is_deleted = false
+        GROUP BY oii.barcode, oii.plant
+        HAVING SUM(oii.quantity) <> 0
+      `, expParams);
+      await applyExpectedRows(expRows);
+    }
+
+    const hasExpected = singleDate != null || activePairs.length > 0;
+    const itemsWithExpected = hasExpected
       ? [...items, ...expectedOnlyRows].map((it: any) => ({
           ...it,
           expectedQty: expectedByKey.get(`${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}`) ?? null,
@@ -1708,7 +1743,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     res.json({
       items: itemsWithExpected, total: itemsWithExpected.length, plants: allowed,
       emptyBoxByPlant, emptyBoxTotal, dateMode, from: from || null, to: to || null,
-      expectedDate: singleDate, expectedTotal: singleDate ? expectedTotal : null,
+      // expectedDate: one date when it applies to everything (explicit filter, single plant,
+      // or every active plant coincidentally matches) — null when plants are on different
+      // active dates, in which case activeDatesByPlant carries each plant's own date instead.
+      expectedDate: singleDate, expectedTotal: hasExpected ? expectedTotal : null,
+      activeDatesByPlant,
     });
   } catch (error) {
     console.error('Error generating plant stock report:', error);

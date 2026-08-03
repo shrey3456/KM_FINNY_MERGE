@@ -51,6 +51,10 @@ type ScanEvent = {
   isExtra: boolean | null; stv: string | null;
   scannedByCode: string | null; scannedByName: string | null; scannedAt: string | null;
   partIndex: number | null; csvFileName: string | null;
+  // Voided scans are kept in this list (never dropped — same "kept in history" rule as Scan
+  // History), just clearly marked, so the raw event count here can differ from the Summary
+  // report's Received total (which already excludes voided) without looking unexplained.
+  voided: boolean | null; voidedAt: string | null; voidReason: string | null;
 };
 type ScanActivity = { scope: string; totalEvents: number; events: ScanEvent[] };
 
@@ -124,7 +128,7 @@ function buildActivityRows(data: ScanActivity, scope: "part" | "group"): Row[] {
   const groupCols = scope === "group";
   const header: Row = [
     "#", ...(groupCols ? ["Part", "File"] : []),
-    "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time",
+    "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time", "Void",
   ];
   const rows: Row[] = [header];
   data.events.forEach((e, idx) => rows.push([
@@ -132,6 +136,7 @@ function buildActivityRows(data: ScanActivity, scope: "part" | "group"): Row[] {
     e.scannedByName ?? "", e.scannedByCode ?? "", e.barcode ?? "", e.itemName ?? "",
     e.pallets ?? 0, e.looseQty ?? 0, e.totalQty ?? 0, e.isExtra ? "Extra" : "Regular",
     e.stv ?? "", fmtIST(e.scannedAt),
+    e.voided ? `Voided${e.voidedAt ? ` (${fmtIST(e.voidedAt)})` : ""}${e.voidReason ? ` — ${e.voidReason}` : ""}` : "",
   ]));
   if (data.events.length === 0) rows.push(["No scans recorded"]);
   return rows;
@@ -375,6 +380,11 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
                 rowClassName={(row) =>
                   typeof row[0] === "string" && /^(TOTAL|CONSOLIDATED|Final Stock Added|No scans recorded)$/i.test(String(row[0]))
                     ? "bg-slate-50 font-semibold"
+                    // Activity rows' "Void" column starts with "Voided" when set — grey these
+                    // out so a cancelled scan reads as cancelled at a glance, same treatment
+                    // Scan History gives voided rows, instead of looking like a normal one.
+                    : row.some((c) => typeof c === "string" && c.startsWith("Voided"))
+                    ? "bg-red-50/50 text-gray-400"
                     : undefined
                 }
                 enableZebraStripes

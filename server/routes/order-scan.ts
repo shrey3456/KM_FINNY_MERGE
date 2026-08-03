@@ -405,10 +405,12 @@ export async function seedAndActivateSession(id: number, userCode: string | null
 // ordered by partIndex — so an unrelated 'available' session for the same plant can never
 // jump the queue. Otherwise fall back to plant-wide behaviour. Either way, only proceed if
 // nothing else in that scope is already active (avoid stealing an active lock).
+export type ActivatedNext = { id: number; csvFileName: string; partIndex: number | null };
+
 export async function autoActivateNextInScope(
   completed: { id: number; plant: string; receivingSessionId: number | null; csvFileName: string },
   userCode: string | null,
-): Promise<number | null> {
+): Promise<ActivatedNext | null> {
   // Only one session may be active per plant, so check plant-wide (not just within the group)
   // before promoting anything — otherwise we'd try to activate while another order is mid-scan.
   const activeForPlant = await db.select({ id: orderImportSessions.id })
@@ -468,7 +470,7 @@ export async function autoActivateNextInScope(
     return null;
   }
   console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${completed.id}`);
-  return next.id;
+  return { id: next.id, csvFileName: next.csvFileName, partIndex: next.partIndex };
 }
 
 // Auto Complete's derived-completion check only ever runs inside a /scan request, when a
@@ -517,7 +519,6 @@ export async function sweepStaleCompletions(groupId: number, plant: string, user
     if (!rowCount) continue;
 
     console.log(`[order-scan] sweep auto-completed stale part ${s.id} (${s.csvFileName}) after it lost 'last part' status`);
-    broadcastScanEvent(s.id, { type: 'part-completed', csvFileName: s.csvFileName, partIndex: s.partIndex });
 
     // Make any "already covered by an earlier part" credit real now that this part is
     // actually completed — same reasoning as the manual /complete endpoint.
@@ -533,10 +534,17 @@ export async function sweepStaleCompletions(groupId: number, plant: string, user
       creditClient.release();
     }
 
-    await autoActivateNextInScope(
+    const activated = await autoActivateNextInScope(
       { id: s.id, plant: s.plant, receivingSessionId: groupId, csvFileName: s.csvFileName },
       userCode,
     );
+    broadcastScanEvent(s.id, {
+      type: 'part-completed',
+      csvFileName: s.csvFileName,
+      partIndex: s.partIndex,
+      nextCsvFileName: activated?.csvFileName ?? null,
+      nextPartIndex: activated?.partIndex ?? null,
+    });
   }
 }
 
@@ -722,9 +730,19 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
 
     // Date filter: compare the stored timestamp's date directly (server local time),
     // consistent with how order-import.ts filters. No timezone conversion needed.
+    // With no explicit ?date=, "recent" means uploaded in the last 48h OR completed in the
+    // last 48h — not just uploaded. A CSV can sit as 'active'/'available' for weeks (exempt
+    // from this window below via its own OR branch) while it's worked through as backlog; the
+    // moment it's marked 'completed' it loses that exemption, so without also checking
+    // scanCompletedAt here it would vanish from Available/Active/Completed the instant it
+    // finished, just because its original upload date was long past 48h ago.
+    const RECENT_WINDOW_MS = 48 * 60 * 60 * 1000;
     const dateCondition = req.query.date
       ? sql`${orderImportSessions.createdAt}::date = ${String(req.query.date)}::date`
-      : gte(orderImportSessions.createdAt, new Date(Date.now() - 48 * 60 * 60 * 1000));
+      : or(
+          gte(orderImportSessions.createdAt, new Date(Date.now() - RECENT_WINDOW_MS)),
+          gte(orderImportSessions.scanCompletedAt, new Date(Date.now() - RECENT_WINDOW_MS)),
+        );
 
     const statusFilter = req.query.status ? String(req.query.status).trim() : null;
 
@@ -945,13 +963,6 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, as
       [new Date(), id],
     );
     const completed = completedRows[0];
-    if (completed) {
-      broadcastScanEvent(completed.id, {
-        type: 'part-completed',
-        csvFileName: completed.csvFileName,
-        partIndex: completed.partIndex,
-      });
-    }
 
     // Make any "already covered by an earlier part" credit real (writes to the later part's
     // actual total_scanned_qty/status), instead of leaving it as a display-only number that
@@ -971,9 +982,22 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, as
       }
     }
 
-    const nextSessionId = completed
+    const next = completed
       ? await autoActivateNextInScope(completed, (req.user as any)?.userCode ?? null)
       : null;
+
+    // Broadcast AFTER auto-activation resolves so the "big" completion popup on the Scan
+    // page can say what's next in the same message, instead of a bare "Part X Complete"
+    // that leaves the operator wondering what just got loaded in front of them.
+    if (completed) {
+      broadcastScanEvent(completed.id, {
+        type: 'part-completed',
+        csvFileName: completed.csvFileName,
+        partIndex: completed.partIndex,
+        nextCsvFileName: next?.csvFileName ?? null,
+        nextPartIndex: next?.partIndex ?? null,
+      });
+    }
 
     // Stock is no longer applied here. Every scan now applies its own stock delta
     // immediately (see applyLiveScanStock in the /scan handler above), so by the time a
@@ -983,10 +1007,106 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, as
     // applySessionStock is kept as a standalone reconciliation tool (not called from any
     // route) for manually fixing stock drift if it's ever needed, not as part of this flow.
 
-    res.json({ success: true, nextSessionId });
+    res.json({ success: true, nextSessionId: next?.id ?? null });
     broadcastOrderImportUpdate();
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Complete failed' });
+  }
+});
+
+// ── POST /api/order-scan/sessions/:id/reopen ─────────────────────────────────
+// Undoes an accidental "Complete" click. Deliberately narrow: only the MOST RECENTLY
+// completed session for that plant is eligible — reopening an older completed CSV would let
+// scanning resume out of FIFO order against history that later parts/credits already treated
+// as final (reconcileCredits may have already handed this part's leftover extras to a LATER
+// part — reopening doesn't touch that, it only lets more scanning happen here). If completing
+// this session auto-activated a next one, that session is demoted back to 'available' so this
+// one can retake the 'active' slot — but only if the auto-activated session has no scans of
+// its own yet; if it does, the admin needs to deal with that session directly instead of
+// having it silently pushed aside.
+router.post('/order-scan/sessions/:id/reopen', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: sessRows } = await client.query(
+      `SELECT id, plant, scan_status AS "scanStatus", scan_completed_at AS "scanCompletedAt",
+              csv_file_name AS "csvFileName", part_index AS "partIndex"
+       FROM order_import_sessions WHERE id = $1 AND is_deleted = false FOR UPDATE`,
+      [id],
+    );
+    const session = sessRows[0];
+    if (!session) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Session not found' });
+    }
+    if (session.scanStatus !== 'completed') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Only a completed session can be reopened.' });
+    }
+
+    // Must be the LAST completed session for this plant — nothing else completed after it.
+    const { rows: laterRows } = await client.query(
+      `SELECT id FROM order_import_sessions
+       WHERE LOWER(plant) = LOWER($1) AND is_deleted = false AND scan_status = 'completed'
+         AND (scan_completed_at > $2 OR (scan_completed_at = $2 AND id > $3))
+       LIMIT 1`,
+      [session.plant, session.scanCompletedAt, id],
+    );
+    if (laterRows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Only the most recently completed session for this plant can be reopened.' });
+    }
+
+    // Whatever auto-activated after this one completed must step aside first.
+    const { rows: activeRows } = await client.query(
+      `SELECT id, csv_file_name AS "csvFileName" FROM order_import_sessions
+       WHERE LOWER(plant) = LOWER($1) AND is_deleted = false AND scan_status = 'active' AND id <> $2
+       FOR UPDATE`,
+      [session.plant, id],
+    );
+    const activeNext = activeRows[0];
+    if (activeNext) {
+      const { rows: scannedRows } = await client.query(
+        `SELECT COUNT(*)::int AS cnt FROM order_scan_items WHERE session_id = $1 AND total_scanned_qty > 0`,
+        [activeNext.id],
+      );
+      if ((scannedRows[0]?.cnt ?? 0) > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          message: `"${activeNext.csvFileName}" is already active and has scans on it — handle that session first, then reopen this one.`,
+        });
+      }
+      await client.query(
+        `UPDATE order_import_sessions
+         SET scan_status = 'available', scan_activated_by_code = NULL, scan_activated_at = NULL
+         WHERE id = $1`,
+        [activeNext.id],
+      );
+    }
+
+    await client.query(
+      `UPDATE order_import_sessions SET scan_status = 'active', scan_completed_at = NULL WHERE id = $1`,
+      [id],
+    );
+
+    await client.query('COMMIT');
+
+    broadcastScanEvent(id, {
+      type: 'session-reopened',
+      csvFileName: session.csvFileName,
+      partIndex: session.partIndex,
+    });
+    broadcastOrderImportUpdate();
+    res.json({ success: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Reopen failed' });
+  } finally {
+    client.release();
   }
 });
 
@@ -1389,11 +1509,17 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     for (const sid of newlyCompleted) {
       const s = sessions.find((x: any) => x.id === sid);
       if (!s) continue;
-      broadcastScanEvent(sid, { type: 'part-completed', csvFileName: s.csvFileName, partIndex: s.partIndex });
       const activated = await autoActivateNextInScope(
         { id: sid, plant: s.plant, receivingSessionId: anchorSession.receivingSessionId, csvFileName: s.csvFileName },
         userCode,
       );
+      broadcastScanEvent(sid, {
+        type: 'part-completed',
+        csvFileName: s.csvFileName,
+        partIndex: s.partIndex,
+        nextCsvFileName: activated?.csvFileName ?? null,
+        nextPartIndex: activated?.partIndex ?? null,
+      });
       if (activated) broadcastOrderImportUpdate();
     }
 

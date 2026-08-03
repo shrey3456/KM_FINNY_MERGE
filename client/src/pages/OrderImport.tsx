@@ -17,6 +17,7 @@ import {
   PackageCheck,
   Pencil,
   RefreshCw,
+  RotateCcw,
   ScanLine,
   Search,
   StopCircle,
@@ -791,6 +792,21 @@ export default function OrderImport() {
     onSettled: () => refetchAllSessionQueries(),
   });
 
+  // Undo an accidental Complete click. Server enforces the real rule (only the most recently
+  // completed session per plant is eligible) — the button is also only ever shown for that one
+  // session (see lastCompletedIdByPlant below), so a 400 here should be rare, not the normal path.
+  const reopenMutation = useMutation({
+    mutationFn: async (id: number) =>
+      (await apiRequest("POST", `/api/order-scan/sessions/${id}/reopen`)).json(),
+    onSuccess: () => {
+      toast({ title: "Session reopened", description: "Scanning can continue on it now.", className: "bg-green-50 border-green-200 text-green-900" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Reopen failed", description: err.message, variant: "destructive" });
+    },
+    onSettled: () => refetchAllSessionQueries(),
+  });
+
   if (!isImportRole) {
     return (
       <main className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
@@ -1073,6 +1089,20 @@ export default function OrderImport() {
     (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!completedDate  || (s.orderDate ?? "").slice(0, 10) === completedDate)
   );
+  // Reopen is only ever offered for the SINGLE most-recently-completed session per plant —
+  // computed over every completed session (unfiltered by the tab's own plant/date pickers,
+  // same as activePlantsSet above), so the button stays correct regardless of what's filtered
+  // into view. The server enforces the same rule independently; this just keeps the button
+  // from ever being shown where it would immediately 400.
+  const lastCompletedIdByPlant = new Map<string, { id: number; completedAt: string }>();
+  for (const s of _allScanSessions) {
+    if (s.scanStatus !== "completed" || !s.scanCompletedAt) continue;
+    const key = (s.plant ?? "").toLowerCase();
+    const cur = lastCompletedIdByPlant.get(key);
+    if (!cur || s.scanCompletedAt > cur.completedAt || (s.scanCompletedAt === cur.completedAt && s.id > cur.id)) {
+      lastCompletedIdByPlant.set(key, { id: s.id, completedAt: s.scanCompletedAt });
+    }
+  }
   // Tab badge counts deliberately ignore the plant row, so each status always advertises its full
   // total. Without this, picking a plant on one tab silently shrinks every other tab's count and
   // you lose sight of what's waiting elsewhere. The per-tab date filters still apply.
@@ -1681,6 +1711,20 @@ export default function OrderImport() {
                             onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
                             <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
                           </Button>
+                          {/* Only for the single most-recently-completed session per plant — an
+                              accidental Complete click, not a general "reopen any history" tool. */}
+                          {lastCompletedIdByPlant.get((s.plant ?? "").toLowerCase())?.id === s.id && (
+                            <Button size="sm" variant="outline"
+                              className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50 rounded-full"
+                              disabled={reopenMutation.isPending}
+                              title="Undo an accidental Complete — continue scanning this session"
+                              onClick={() => reopenMutation.mutate(s.id)}>
+                              {reopenMutation.isPending && reopenMutation.variables === s.id
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" />
+                                : <RotateCcw className="h-3.5 w-3.5 sm:mr-1" />}
+                              <span className="hidden sm:inline">Reopen</span>
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </div>

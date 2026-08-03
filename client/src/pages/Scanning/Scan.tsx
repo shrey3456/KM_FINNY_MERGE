@@ -1119,12 +1119,19 @@ export default function ScanOrderPage() {
   // which covers both this manual path and the automatic one with the same banner.
   const [showForceComplete, setShowForceComplete] = useState(false);
 
-  // Shows a prominent "Part Complete" banner for 10s whenever a part finishes — whether via
-  // this manual button, Auto Complete firing mid-scan, or the stale-part sweep after a new
-  // CSV upload. Driven entirely by the WS 'part-completed' message (see the WS effect below)
-  // so all three trigger paths are handled uniformly, without needing separate client logic
-  // for "I just clicked Complete" vs "the server completed something on its own."
-  const [osPartCompleteBanner, setOsPartCompleteBanner] = useState<{ csvFileName: string; partIndex: number } | null>(null);
+  // Shows a big, hard-to-miss "Part Complete" popup for 14s whenever a part finishes —
+  // whether via this manual button, Auto Complete firing mid-scan, or the stale-part sweep
+  // after a new CSV upload. Driven entirely by the WS 'part-completed' message (see the WS
+  // effect below) so all three trigger paths are handled uniformly, without needing separate
+  // client logic for "I just clicked Complete" vs "the server completed something on its own."
+  // Also carries what CSV/part the plant switched TO (nextCsvFileName/nextPartIndex), so the
+  // same popup answers "what just finished" AND "what am I scanning now" in one glance —
+  // the two things that matter most the instant the active CSV changes underneath you.
+  const [osPartCompleteBanner, setOsPartCompleteBanner] = useState<{
+    kind: 'completed' | 'reopened';
+    csvFileName: string; partIndex: number;
+    nextCsvFileName: string | null; nextPartIndex: number | null;
+  } | null>(null);
   const osPartCompleteBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const osCompleteMutation = useMutation({
@@ -1192,9 +1199,29 @@ export default function ScanOrderPage() {
 
           if (data.type === 'part-completed') {
             if (osPartCompleteBannerTimerRef.current) clearTimeout(osPartCompleteBannerTimerRef.current);
-            setOsPartCompleteBanner({ csvFileName: data.csvFileName, partIndex: data.partIndex });
-            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 10000);
+            setOsPartCompleteBanner({
+              kind: 'completed',
+              csvFileName: data.csvFileName, partIndex: data.partIndex,
+              nextCsvFileName: data.nextCsvFileName ?? null, nextPartIndex: data.nextPartIndex ?? null,
+            });
+            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 14000);
             queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
+          if (data.type === 'session-reopened') {
+            // An admin undid an accidental Complete — the plant's active session just
+            // changed back underneath whoever's looking at this page, same as a normal
+            // CSV switch, so it deserves the same big, impossible-to-miss treatment.
+            if (osPartCompleteBannerTimerRef.current) clearTimeout(osPartCompleteBannerTimerRef.current);
+            setOsPartCompleteBanner({
+              kind: 'reopened',
+              csvFileName: data.csvFileName, partIndex: data.partIndex,
+              nextCsvFileName: null, nextPartIndex: null,
+            });
+            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 14000);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
             queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
             return;
           }
@@ -2491,26 +2518,61 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
         )}
 
-        {/* ── "Part Complete" banner — fires for every way a part can finish (manual Complete
-            button, Auto Complete mid-scan, or the stale-part sweep after a new upload), driven
-            by the WS 'part-completed' message. Fixed/centered so it's visible regardless of
-            which tab or viewport is showing; auto-dismisses after 10s, or on click. ── */}
+        {/* ── Big "Part Complete" / "Reopened" popup — fires for every way a part can finish
+            (manual Complete button, Auto Complete mid-scan, the stale-part sweep after a new
+            upload) or get reopened (admin undoing an accidental Complete), driven by the WS
+            'part-completed' / 'session-reopened' messages. Deliberately large and dimmed behind
+            (not a slim corner toast) so a CSV switching underneath an operator is impossible to
+            miss — click anywhere to dismiss early, otherwise auto-dismisses after 14s. When the
+            active CSV also changed (nextCsvFileName), that's shown in the same popup so "what
+            just finished" and "what am I scanning now" land in one glance. ── */}
         {osPartCompleteBanner && (
           <div
-            className="fixed inset-x-0 top-3 z-[100] flex justify-center px-3 pointer-events-none"
+            className="fixed inset-0 z-[110] flex items-start justify-center bg-black/50 px-4 pt-10 sm:pt-16 animate-in fade-in cursor-pointer"
             role="status"
+            onClick={() => setOsPartCompleteBanner(null)}
           >
-            <button
-              type="button"
-              onClick={() => setOsPartCompleteBanner(null)}
-              className="pointer-events-auto flex items-center gap-2.5 rounded-full bg-emerald-600 pl-3 pr-4 py-2.5 text-white shadow-lg ring-1 ring-emerald-700/30 animate-in fade-in slide-in-from-top-2"
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className={`w-full max-w-lg cursor-default overflow-hidden rounded-2xl shadow-2xl ring-1 ring-black/10 animate-in fade-in zoom-in-95 slide-in-from-top-4 ${
+                osPartCompleteBanner.kind === "reopened" ? "bg-amber-600" : "bg-emerald-600"
+              }`}
             >
-              <CheckCircle2 className="h-5 w-5 shrink-0" />
-              <span className="text-sm font-semibold">
-                Part {osPartCompleteBanner.partIndex} Complete
-                <span className="ml-1.5 font-normal opacity-90">— {stripCsvExt(osPartCompleteBanner.csvFileName)}</span>
-              </span>
-            </button>
+              <div className="flex items-start gap-4 p-6 text-white">
+                {osPartCompleteBanner.kind === "reopened" ? (
+                  <Undo2 className="h-10 w-10 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="h-10 w-10 shrink-0" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="text-2xl font-bold leading-tight">
+                    {osPartCompleteBanner.kind === "reopened"
+                      ? `Part ${osPartCompleteBanner.partIndex} Reopened`
+                      : `Part ${osPartCompleteBanner.partIndex} Complete`}
+                  </p>
+                  <p className="mt-1 break-words text-base font-medium opacity-90">
+                    {stripCsvExt(osPartCompleteBanner.csvFileName)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOsPartCompleteBanner(null)}
+                  className="shrink-0 rounded-full p-1 text-white/80 hover:bg-white/10 hover:text-white"
+                  aria-label="Dismiss"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              {osPartCompleteBanner.nextCsvFileName && (
+                <div className="border-t border-white/20 bg-black/10 px-6 py-3 text-white">
+                  <p className="text-xs font-semibold uppercase tracking-wide opacity-75">Now scanning</p>
+                  <p className="mt-0.5 break-words text-lg font-bold">
+                    Part {osPartCompleteBanner.nextPartIndex ?? "?"}
+                    <span className="ml-1.5 font-normal opacity-90">— {stripCsvExt(osPartCompleteBanner.nextCsvFileName)}</span>
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
