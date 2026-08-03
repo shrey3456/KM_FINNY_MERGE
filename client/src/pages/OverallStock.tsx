@@ -15,9 +15,6 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
-} from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import PageHeader from "@/components/PageHeader";
@@ -563,15 +560,30 @@ export default function OverallStock() {
       totalable: false,
       headerClassName: headerBorder,
       cellClassName: `font-medium text-gray-900 whitespace-normal break-words ${cellBorder}`,
-      render: (row) =>
-        row.isEmptyBox ? (
-          <span className="inline-flex items-center gap-1.5" title={row.emptyBoxCount ? `${row.emptyBoxCount} entr${row.emptyBoxCount === 1 ? "y" : "ies"}` : undefined}>
-            <span>Empty Box</span>
-            <span className="inline-flex items-center bg-orange-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-orange-700">No product</span>
-          </span>
-        ) : (
-          row.itemName
-        ),
+      // Clicking the name toggles an inline arrival-history panel below the row (see the
+      // DataTable's renderExpandedRow prop) — same drill-down behavior as the Scan tab, instead
+      // of opening a separate dialog.
+      render: (row) => {
+        if (row.isEmptyBox) {
+          return (
+            <span className="inline-flex items-center gap-1.5" title={row.emptyBoxCount ? `${row.emptyBoxCount} entr${row.emptyBoxCount === 1 ? "y" : "ies"}` : undefined}>
+              <span>Empty Box</span>
+              <span className="inline-flex items-center bg-orange-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-orange-700">No product</span>
+            </span>
+          );
+        }
+        const isOpen = !!detailRow && detailRow.barcode === row.barcode && detailRow.plant === row.plant;
+        return (
+          <button
+            type="button"
+            disabled={!row.barcode}
+            onClick={() => setDetailRow((cur) => (cur && cur.barcode === row.barcode && cur.plant === row.plant ? null : row))}
+            className={`text-left underline decoration-dotted underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e] disabled:no-underline disabled:hover:text-inherit ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
+          >
+            {row.itemName}
+          </button>
+        );
+      },
     },
     {
       id: "barcode",
@@ -749,6 +761,78 @@ export default function OverallStock() {
         ) : null,
     } satisfies DataTableColumn<PlantStockRow>] : []),
   ];
+
+  // Inline arrival-history drill-down — rendered as the DataTable's expanded row when an item
+  // name is clicked (detailRow set). Same stock_movements ledger the old dialog showed, now
+  // shown as a dropdown panel below the row (matching the Scan tab). Sticky-left + width-capped
+  // so it stays visible without its own horizontal scroll inside the wide, side-scrolling table.
+  const movementsPanel = (
+    <div className="sticky left-0 w-full max-w-3xl bg-gray-50 p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[#001d6e]">
+        <History className="h-4 w-4 shrink-0" />
+        <span className="text-sm font-semibold">{detailRow?.itemName ?? "Item"}</span>
+        <span className="font-mono text-xs text-gray-400">{detailRow?.barcode} · {detailRow?.plant}</span>
+      </div>
+      {movementsLoading ? (
+        <div className="flex justify-center py-8">
+          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+        </div>
+      ) : (movementsData?.items?.length ?? 0) === 0 ? (
+        <p className="py-6 text-center text-sm text-gray-400">No stock movements yet for this item.</p>
+      ) : (
+        <div className="max-h-[360px] overflow-y-auto border border-gray-300">
+          <table className="w-full border-collapse text-xs">
+            <thead>
+              <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+                <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
+                <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order / CSV</th>
+                <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Qty</th>
+                <th className="px-3 py-2 text-right font-semibold">Extra</th>
+              </tr>
+            </thead>
+            <tbody>
+              {movementsData!.items.map((m) => {
+                const isNegative = m.qty < 0;
+                const movementBadge = m.type === "dispatch"
+                  ? <span className="inline-block bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">Dispatched</span>
+                  : m.type === "adjust"
+                  ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Adjusted</span>
+                  : m.type === "exchange"
+                  ? <span className="inline-block bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700">Exchanged</span>
+                  : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
+                return (
+                  <tr key={m.id} className="border-b border-gray-200 bg-white">
+                    <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
+                      <div className="flex flex-col gap-1">
+                        <span>{m.arrivedAt ? format(new Date(m.arrivedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                        {movementBadge}
+                      </div>
+                    </td>
+                    <td className="border-r border-gray-200 px-3 py-2 text-gray-600">
+                      {m.orderName ? (
+                        <>
+                          {m.orderName}
+                          {m.partIndex ? <span className="text-gray-400"> · Part {m.partIndex}</span> : null}
+                        </>
+                      ) : (
+                        <span className="text-gray-400" title={m.reason ?? undefined}>{m.reason ?? "—"}</span>
+                      )}
+                    </td>
+                    <td className={`border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums ${isNegative ? "text-red-500" : "text-[#001d6e]"}`}>
+                      {isNegative ? m.qty : `+${m.qty}`}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-amber-600">
+                      {m.extraQty ? (isNegative ? m.extraQty : `+${m.extraQty}`) : <span className="text-gray-300">—</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
@@ -1158,9 +1242,10 @@ export default function OverallStock() {
             columns={stockColumns}
             data={displayRows}
             getRowId={(row) => `${row.isEmptyBox ? "EB" : row.barcode}-${row.plant}`}
-            rowClassName={(row) => (row.isEmptyBox ? "bg-orange-50/40" : "cursor-pointer")}
-            onRowClick={(row) => setDetailRow(row)}
-            isRowClickable={(row) => !row.isEmptyBox && !!row.barcode}
+            rowClassName={(row) => (row.isEmptyBox ? "bg-orange-50/40" : undefined)}
+            renderExpandedRow={() => movementsPanel}
+            isRowExpandable={(row) => !row.isEmptyBox && !!row.barcode}
+            expandedRowId={detailRow ? `${detailRow.isEmptyBox ? "EB" : detailRow.barcode}-${detailRow.plant}` : null}
             emptyState={`No stock yet${activePlant ? ` for ${activePlant}` : ""}. Stock appears here once an order is completed.`}
             noResultsState="No stock rows match your search."
             hasActiveFilters={!!search || activeFilters.length > 0 || Object.keys(columnConditions).length > 0}
@@ -1181,91 +1266,6 @@ export default function OverallStock() {
           />
         </TableCard>
       </div>
-
-      {/* ── Stock movement history drill-down — every dated entry from the stock_movements
-          ledger for the clicked (barcode, plant). Deliberately generalized to cover BOTH
-          directions, not just inbound: today every row is a receive/adjust (party-order
-          dispatch — outbound, stock-decreasing — isn't built yet), but once it is, its rows
-          land in this same ledger/table with type='dispatch' and a negative qty. The "Date &
-          Movement" column (was "Arrived" — inbound-only wording) shows the date PLUS a
-          Received/Dispatched/Adjusted badge so both directions read correctly without any
-          further UI change when dispatch ships. ── */}
-      <Dialog open={!!detailRow} onOpenChange={(open) => { if (!open) setDetailRow(null); }}>
-        <DialogContent className="max-w-xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
-              <History className="h-5 w-5" />
-              {detailRow?.itemName ?? "Item"}
-            </DialogTitle>
-            <DialogDescription className="font-mono text-xs">
-              {detailRow?.barcode} · {detailRow?.plant}
-            </DialogDescription>
-          </DialogHeader>
-
-          {movementsLoading ? (
-            <div className="flex justify-center py-10">
-              <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-            </div>
-          ) : (movementsData?.items?.length ?? 0) === 0 ? (
-            <p className="py-8 text-center text-sm text-gray-400">No stock movements yet for this item.</p>
-          ) : (
-            <div className="max-h-[420px] overflow-y-auto border border-gray-300">
-              <table className="w-full border-collapse text-xs">
-                <thead>
-                  <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
-                    <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
-                    <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order / CSV</th>
-                    <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Qty</th>
-                    <th className="px-3 py-2 text-right font-semibold">Extra</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {movementsData!.items.map((m) => {
-                    const isNegative = m.qty < 0;
-                    // type is the source of truth for direction (qty sign can be negative for
-                    // BOTH a dispatch and a reversal/void adjust) — badge them distinctly so
-                    // "stock going out because of a party order" reads differently from
-                    // "a mistaken scan being undone".
-                    const movementBadge = m.type === "dispatch"
-                      ? <span className="inline-block bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">Dispatched</span>
-                      : m.type === "adjust"
-                      ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Adjusted</span>
-                      : m.type === "exchange"
-                      ? <span className="inline-block bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700">Exchanged</span>
-                      : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
-                    return (
-                      <tr key={m.id} className="border-b border-gray-200">
-                        <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
-                          <div className="flex flex-col gap-1">
-                            <span>{m.arrivedAt ? format(new Date(m.arrivedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
-                            {movementBadge}
-                          </div>
-                        </td>
-                        <td className="border-r border-gray-200 px-3 py-2 text-gray-600">
-                          {m.orderName ? (
-                            <>
-                              {m.orderName}
-                              {m.partIndex ? <span className="text-gray-400"> · Part {m.partIndex}</span> : null}
-                            </>
-                          ) : (
-                            <span className="text-gray-400" title={m.reason ?? undefined}>{m.reason ?? "—"}</span>
-                          )}
-                        </td>
-                        <td className={`border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums ${isNegative ? "text-red-500" : "text-[#001d6e]"}`}>
-                          {isNegative ? m.qty : `+${m.qty}`}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-amber-600">
-                          {m.extraQty ? (isNegative ? m.extraQty : `+${m.extraQty}`) : <span className="text-gray-300">—</span>}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
 
       <ExchangeProductDialog source={exchangeSource} onClose={() => setExchangeSource(null)} />
     </div>
