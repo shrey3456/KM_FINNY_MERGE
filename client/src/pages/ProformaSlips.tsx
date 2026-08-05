@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
 import { ProformaSlipAPIImport } from "@/components/ProformaSlipAPIImport";
@@ -88,17 +88,19 @@ import {
   Search,
   CheckCircle,
   Calendar as CalendarIcon,
+  CalendarDays,
   FilterX,
   FileText,
   Calculator,
   RefreshCw,
+  ListFilter,
 } from "lucide-react";
 import { format, isWithinInterval, startOfDay, endOfDay, parseISO } from "date-fns";
 import { type ProformaSlip, type ProformaSlipItem, type Product } from "@shared/schema";
 import { PlantBadge } from "@/components/PlantBadge";
-import { SingleDateFilter } from "@/components/SingleDateFilter";
-import { PlantFilter } from "@/components/PlantFilter";
-import { useSingleDateFilter, SingleDateFilterStorage } from "@/hooks/useSingleDateFilter";
+import { ColumnFilterPopoverContent, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
+import { CollapsibleSearch } from "@/components/ui/collapsible-search";
+import { type FilterableColumn, type FilterCondition, conditionSummary, isConditionEmpty, matchAllConditions } from "@/lib/columnFilters";
 
 // Form schema for creating/editing proforma slips
 const proformaSlipFormSchema = z.object({
@@ -190,10 +192,49 @@ export default function ProformaSlips() {
     }));
   };
   
-  //
-  const { savedDate, isLocked, isInitialized, setLocked } = useSingleDateFilter('proforma-page');
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
-  const [isDateFilterActive, setIsDateFilterActive] = useState(false);
+  // ── Filters — same model as Overall Stock ────────────────────────────────────
+  // Plant is a tab strip (single active plant, "" = All). Date is its own standalone control
+  // (single day "d:YYYY-MM-DD" or range "r:from:to", both editable, plus quick-range presets).
+  // Every other column gets an Excel-style per-column filter via the shared column-filter engine.
+  const [activePlantTab, setActivePlantTab] = useState<string>("");
+  const [dateValue, setDateValue] = useState<string>("");
+  const [dateOpen, setDateOpen] = useState(false);
+  const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
+  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>({});
+  const [filterPickerOpen, setFilterPickerOpen] = useState(false);
+  const [filterPickerKey, setFilterPickerKey] = useState("");
+  const [filterPickerSearch, setFilterPickerSearch] = useState("");
+
+  const { from: fromStr, to: toStr } = (() => {
+    if (dateValue.startsWith("d:")) { const d = dateValue.slice(2); return { from: d, to: d }; }
+    if (dateValue.startsWith("r:")) { const [, f, t] = dateValue.split(":"); return { from: f ?? "", to: t ?? "" }; }
+    return { from: "", to: "" };
+  })();
+  const dateIsRange = dateValue.startsWith("r:");
+  const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
+  const datePresetValue = (key: string): string => {
+    const d = new Date();
+    if (key === "today") return `d:${isoOf(d)}`;
+    if (key === "yday") { const y = new Date(d); y.setDate(y.getDate() - 1); return `d:${isoOf(y)}`; }
+    if (key === "week") { const w = new Date(d); w.setDate(w.getDate() - 6); return `r:${isoOf(w)}:${isoOf(d)}`; }
+    if (key === "month") return `r:${isoOf(new Date(d.getFullYear(), d.getMonth(), 1))}:${isoOf(d)}`;
+    return "";
+  };
+  const DATE_PRESETS = [
+    { value: "today", label: "Today" },
+    { value: "yday", label: "Yesterday" },
+    { value: "week", label: "This week" },
+    { value: "month", label: "This month" },
+  ];
+  const describeDate = (v: string) => {
+    if (v.startsWith("d:")) { try { return format(new Date(v.slice(2)), "MMM d, yyyy"); } catch { return v.slice(2); } }
+    if (v.startsWith("r:")) { const [, f, t] = v.split(":"); const fmt = (s: string) => { try { return s ? format(new Date(s), "MMM d") : "…"; } catch { return s || "…"; } }; return `${fmt(f)} → ${fmt(t)}`; }
+    return v;
+  };
+  const setColumnCondition = (columnId: string, condition: FilterCondition) =>
+    setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
+  const clearColumnCondition = (columnId: string) =>
+    setColumnConditions((prev) => { const next = { ...prev }; delete next[columnId]; return next; });
   
   // Fetch fresh user data to ensure permissions are up to date
   const { data: remoteUser } = useQuery<any>({
@@ -266,56 +307,7 @@ export default function ProformaSlips() {
     isBillingHead
   });
 
-  
-  // Initialize date filter based on saved filter
-  useEffect(() => {
-    if (isInitialized) {
-      // If we have a saved filter (locked or not), always use it when navigating to this page
-      if (savedDate) {
-        console.log("Using saved date filter:", savedDate, "locked:", isLocked);
-        setSelectedDate(savedDate);
-        setIsDateFilterActive(true);
-      } 
-      // We no longer set today as the default date - require explicit user selection
-      else if (!selectedDate) {
-        console.log("No default date filter applied today");
-        const today = new Date();
-        setSelectedDate(today);
-        setIsDateFilterActive(true);
-      }
-    }
-  }, [isInitialized, isLocked, savedDate]);
-  
-  // When the page is unmounted or date filter changes, save the current filter if it's locked
-  useEffect(() => {
-    if (isInitialized && isLocked && selectedDate) {
-      // Save the current filter to ensure it persists when navigating pages
-      console.log("Saving proforma date filter:", selectedDate);
-      SingleDateFilterStorage.saveDateFilter('proforma-page', selectedDate);
-    }
-  }, [isInitialized, isLocked, selectedDate]);
-  
-  // Extra effect to handle lock changes specifically
-  useEffect(() => {
-    if (isInitialized && isLocked && selectedDate) {
-      // When locking, explicitly save the current date filter again
-      console.log("Locking changed - saving proforma date filter:", selectedDate, "locked:", isLocked);
-      SingleDateFilterStorage.saveDateFilter('proforma-page', selectedDate);
-    }
-  }, [isInitialized, isLocked]);
-  
-  // Cleanup effect to save current filter on page unmount
-  useEffect(() => {
-    return () => {
-      if (isLocked && selectedDate) {
-        console.log("Saving proforma date filter on unmount:", selectedDate);
-        SingleDateFilterStorage.saveDateFilter('proforma-page', selectedDate);
-      }
-    };
-  }, [isLocked, selectedDate]);
-  
-  // Plant filter states
-  const [selectedPlants, setSelectedPlants] = useState<string[]>([]);
+  // Plant tab options (name + configured colors), derived from the loaded slips + Plant Management.
   const [plantOptions, setPlantOptions] = useState<Array<{value: string; label: string; bgColor?: string; textColor?: string; borderColor?: string}>>([]);
   
   // Entries limit state - Default to 15 entries
@@ -381,20 +373,16 @@ export default function ProformaSlips() {
   
   // Fetch all proforma slips
   const { data: proformaSlips, isLoading } = useQuery<ProformaSlip[]>({
-    queryKey: ['/api/proforma-slips', selectedDate, isDateFilterActive],
+    queryKey: ['/api/proforma-slips', fromStr, toStr],
     queryFn: async () => {
       // Base URL with high limit (100000) to tell the server we want all proforma slips
       let url = `/api/proforma-slips?limit=100000&_t=${Date.now()}`;
-      
-      // Always include date filter parameters if available
-      if (selectedDate) {
-        const formattedDate = format(selectedDate, 'yyyy-MM-dd');
-        url += `&startOrderDate=${formattedDate}&endOrderDate=${formattedDate}`;
-        console.log(`Proforma slips request with filter: date=${formattedDate}`);
-      } else {
-        console.log('No date filter applied to proforma slips request');
-      }
-      
+      // Date window (from the standalone Date control) narrows the payload server-side; the
+      // client re-filters too (it parses every stored orderDate format), so this is just an
+      // optimization, not the source of truth.
+      if (fromStr) url += `&startOrderDate=${fromStr}`;
+      if (toStr)   url += `&endOrderDate=${toStr}`;
+
       const res = await apiRequest('GET', url);
       lastRefreshTimeRef.current = Date.now();
       return res.json();
@@ -968,104 +956,79 @@ export default function ProformaSlips() {
     });
   };
   
-  // State for order date filter
-  const [selectedOrderDate, setSelectedOrderDate] = useState<string | null>(null);
-  
-  // Reset date filters
-  const resetDateFilters = () => {
-    setSelectedDate(null);
-    setIsDateFilterActive(false);
-    setSelectedOrderDate(null);
-  };
-  
-  // Filter slips by date range and specific order date
-  useEffect(() => {
-    if (proformaSlips && proformaSlips.length > 0) {
-      const uniquePlants = Array.from(
-        new Set(
-          proformaSlips
-            .filter(slip => slip.plant && slip.plant.trim() !== '')
-            .map(slip => slip.plant)
-        )
-      );
-      
-      const sorted = uniquePlants
-        .filter((plant): plant is string => !!plant) 
-        .sort((a, b) => a.localeCompare(b));
-      
-      const plantOpts = sorted.map(plant => ({
-        value: plant,
-        label: plant
-      }));
-      
-      setPlantOptions(plantOpts);
-    }
+  // Excel-style per-column filters — every column except Plant (tab strip) and Order Date (its
+  // own Date control). Options are the column's own distinct values, same as Overall Stock.
+  const filterableColumns: FilterableColumn<LockedProformaSlip>[] = useMemo(() => {
+    const slips = (proformaSlips ?? []) as LockedProformaSlip[];
+    const textOptions = (pick: (s: LockedProformaSlip) => string | null | undefined) =>
+      Array.from(new Set(slips.map(pick).filter((v): v is string => !!v)))
+        .sort((a, b) => a.localeCompare(b))
+        .map((v) => ({ value: v, label: v }));
+    const numberOptions = (pick: (s: LockedProformaSlip) => number | null | undefined) =>
+      Array.from(new Set(slips.map(pick).filter((v): v is number => v != null)))
+        .sort((a, b) => a - b)
+        .map((v) => ({ value: String(v), label: v.toLocaleString() }));
+    return [
+      { id: "orderNumber", label: "Order No.", filterType: "text", options: textOptions((s) => s.orderNumber), accessor: (s) => s.orderNumber },
+      { id: "partyName", label: "Party Name", filterType: "enum", options: textOptions((s) => s.partyName), accessor: (s) => s.partyName },
+      { id: "totalQuantity", label: "Total Qty", filterType: "number", options: numberOptions((s) => s.totalQuantity), accessor: (s) => s.totalQuantity ?? null },
+      { id: "totalVolume", label: "Total Volume", filterType: "text", options: textOptions((s) => s.totalVolume), accessor: (s) => s.totalVolume },
+      { id: "vehicleNumber", label: "Vehicle No.", filterType: "text", options: textOptions((s) => s.vehicleNumber), accessor: (s) => s.vehicleNumber },
+      { id: "driverName", label: "Driver", filterType: "text", options: textOptions((s) => s.driverName), accessor: (s) => s.driverName },
+    ];
   }, [proformaSlips]);
+
+  const filterPickerOptions = useMemo(() => {
+    const dims = filterableColumns.map((c) => ({ key: c.id, label: c.label }));
+    const q = filterPickerSearch.trim().toLowerCase();
+    return dims.filter((d) => !columnConditions[d.key] && (!q || d.label.toLowerCase().includes(q)));
+  }, [filterableColumns, columnConditions, filterPickerSearch]);
+  const pickedFilterColumn = filterableColumns.find((c) => c.id === filterPickerKey) ?? null;
+  const columnConditionList = useMemo(() => Object.values(columnConditions), [columnConditions]);
+
+  // Renders a column header's label plus its Excel-style filter icon (for filterable columns).
+  const columnHeader = (id: string, label: string) => {
+    const col = filterableColumns.find((c) => c.id === id);
+    if (!col) return label;
+    return (
+      <span className="inline-flex items-center gap-1">
+        {label}
+        <ColumnHeaderFilterButton
+          column={col}
+          condition={columnConditions[id]}
+          onChange={(c) => setColumnCondition(id, c)}
+          onRemove={() => clearColumnCondition(id)}
+        />
+      </span>
+    );
+  };
+
+  // Slip's order date within the active Date-control window (inclusive), parsing whatever format
+  // it's stored in. yyyy-MM-dd string comparison keeps date ordering correct.
+  const slipInDateRange = (slip: ProformaSlip): boolean => {
+    if (!fromStr && !toStr) return true;
+    const d = parseSlipDate(slip.orderDate);
+    if (!d) return false;
+    const day = isoOf(d);
+    if (fromStr && day < fromStr) return false;
+    if (toStr && day > toStr) return false;
+    return true;
+  };
 
   const getFilteredSlips = () => {
     if (!proformaSlips) return [];
-    
-    // First filter by search query
-    const searchFiltered = proformaSlips.filter(slip => {
-      if (!slipSearchQuery) return true;
-      const searchLower = slipSearchQuery.toLowerCase();
-      return (
-        (slip.orderNumber && slip.orderNumber.toLowerCase().includes(searchLower)) ||
-        (slip.partyName && slip.partyName.toLowerCase().includes(searchLower)) ||
-        (slip.plant && slip.plant.toLowerCase().includes(searchLower)) ||
-        (slip.vehicleNumber && slip.vehicleNumber.toLowerCase().includes(searchLower)) ||
-        (slip.driverName && slip.driverName.toLowerCase().includes(searchLower))
-      );
+    const q = slipSearchQuery.trim().toLowerCase();
+    return (proformaSlips as LockedProformaSlip[]).filter((slip) => {
+      if (q) {
+        const hit = [slip.orderNumber, slip.partyName, slip.plant, slip.vehicleNumber, slip.driverName]
+          .some((v) => v && v.toLowerCase().includes(q));
+        if (!hit) return false;
+      }
+      if (activePlantTab && (slip.plant ?? "").toUpperCase() !== activePlantTab.toUpperCase()) return false;
+      if (!slipInDateRange(slip)) return false;
+      if (!matchAllConditions(slip, columnConditionList, filterableColumns)) return false;
+      return true;
     });
-    
-    // Apply plant filter if any plants are selected
-    const plantFiltered = selectedPlants.length > 0
-      ? searchFiltered.filter(slip => 
-          slip.plant && selectedPlants.includes(slip.plant)
-        )
-      : searchFiltered;
-    
-    // Filter by date if active
-    if (isDateFilterActive && selectedDate) {
-      return plantFiltered.filter(slip => {
-        if (!slip.orderDate) return false;
-        
-        let slipDate: Date;
-        try {
-          if (typeof slip.orderDate === 'string') {
-            if (slip.orderDate.includes('-') && slip.orderDate.split('-')[0].length === 4) {
-              slipDate = new Date(slip.orderDate);
-            } 
-            else if (slip.orderDate.includes('-') && slip.orderDate.split('-').length === 3) {
-              const [day, month, yearShort] = slip.orderDate.split('-').map(Number);
-              const fullYear = yearShort < 50 ? 2000 + yearShort : 1900 + yearShort;
-              slipDate = new Date(fullYear, month - 1, day);
-            } 
-            else if (slip.orderDate.includes('/') && slip.orderDate.split('/').length === 3) {
-              const [day, month, year] = slip.orderDate.split('/').map(Number);
-              const fullYear = year < 100 ? (year < 50 ? 2000 + year : 1900 + year) : year;
-              slipDate = new Date(fullYear, month - 1, day);
-            } 
-            else {
-              slipDate = new Date(slip.orderDate);
-            }
-          } else {
-            slipDate = new Date(slip.orderDate);
-          }
-          
-          return (
-            slipDate.getDate() === selectedDate.getDate() &&
-            slipDate.getMonth() === selectedDate.getMonth() &&
-            slipDate.getFullYear() === selectedDate.getFullYear()
-          );
-        } catch (error) {
-          console.error("Error parsing date:", error, slip.orderDate);
-          return false;
-        }
-      });
-    }
-    
-    return plantFiltered;
   };
   
   // Pagination state variable
@@ -1232,7 +1195,7 @@ export default function ProformaSlips() {
     },
     {
       id: 'orderNumber',
-      header: 'Order No.',
+      header: columnHeader('orderNumber', 'Order No.'),
       sortable: true,
       width: 130,
       render: (slip) => (
@@ -1248,7 +1211,7 @@ export default function ProformaSlips() {
     },
     {
       id: 'partyName',
-      header: 'Party Name',
+      header: columnHeader('partyName', 'Party Name'),
       sortable: true,
       width: 160,
       render: (slip) => slip.partyName,
@@ -1262,7 +1225,7 @@ export default function ProformaSlips() {
     },
     {
       id: 'totalQuantity',
-      header: 'Total Qty',
+      header: columnHeader('totalQuantity', 'Total Qty'),
       sortable: true,
       width: 100,
       align: 'right',
@@ -1270,19 +1233,19 @@ export default function ProformaSlips() {
     },
     {
       id: 'totalVolume',
-      header: 'Total Volume',
+      header: columnHeader('totalVolume', 'Total Volume'),
       width: 110,
       render: (slip) => slip.totalVolume || ' ',
     },
     {
       id: 'vehicleNumber',
-      header: 'Vehicle No.',
+      header: columnHeader('vehicleNumber', 'Vehicle No.'),
       width: 120,
       render: (slip) => slip.vehicleNumber || ' ',
     },
     {
       id: 'driverName',
-      header: 'Driver',
+      header: columnHeader('driverName', 'Driver'),
       width: 120,
       render: (slip) => slip.driverName || ' ',
     },
@@ -1848,7 +1811,40 @@ export default function ProformaSlips() {
         </div>
       </div>
 
-      <Card className="overflow-hidden">
+      {/* Plant tabs — single-select (All + each plant), coloured per Plant Management. Sits
+          between the page header and the table (same placement as Overall Stock). */}
+      {plantOptions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+          <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Plant</span>
+          <button
+            onClick={() => setActivePlantTab("")}
+            className={
+              activePlantTab === ""
+                ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+            }
+          >
+            All
+          </button>
+          {plantOptions.map((p) => {
+            const isSel = activePlantTab.toUpperCase() === p.value.toUpperCase();
+            return (
+              <button
+                key={p.value}
+                onClick={() => setActivePlantTab(p.value)}
+                style={p.bgColor ? { backgroundColor: p.bgColor, color: p.textColor, borderColor: p.borderColor } : undefined}
+                className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                  p.bgColor ? "border" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                } ${isSel ? "ring-2 ring-[#001d6e] ring-offset-1" : ""}`}
+              >
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <Card className="overflow-hidden rounded-xl border-gray-300 shadow-none">
         {/* Header bar — title + search on top, filters directly beneath (matches Notion Inventory) */}
         <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
@@ -1863,44 +1859,166 @@ export default function ProformaSlips() {
                 </div>
               </div>
             </div>
-            <div className="relative w-full sm:w-auto sm:shrink-0">
-              <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
-              <input
-                value={slipSearchQuery}
-                onChange={(e) => setSlipSearchQuery(e.target.value)}
-                placeholder="Search slips by order number or party name…"
-                className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
-              />
-              {slipSearchQuery && (
-                <button onClick={() => setSlipSearchQuery("")} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
-          </div>
 
-          {/* Filters */}
-          <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
-            <SingleDateFilter
-              selectedDate={selectedDate}
-              onDateChange={(date: Date | null) => {
-                setSelectedDate(date);
-                setIsDateFilterActive(!!date);
-                if (date && !isLocked) {
-                  SingleDateFilterStorage.saveDateFilter('proforma-slips', date);
-                }
-              }}
-              isLocked={isLocked}
-              onLockChange={(locked: boolean) => setLocked(locked)}
-              pageKey="proforma-slips"
-              buttonClassName={FILTER_BTN_CLASS}
+            {/* Controls — on the same line as the title, pushed right. Collapsible search first,
+                then Date, + Filter, active filters, and Columns. */}
+            <div className="flex flex-wrap items-center justify-end gap-2">
+            {/* Collapsible search — starts as an icon button, click to reveal the input. */}
+            <CollapsibleSearch
+              value={slipSearchQuery}
+              onChange={setSlipSearchQuery}
+              placeholder="Search slips by order number or party…"
             />
-            <PlantFilter
-              selectedPlants={selectedPlants}
-              onPlantChange={setSelectedPlants}
-              plantOptions={plantOptions}
-              buttonClassName={FILTER_BTN_CLASS}
-            />
+
+            {/* Standalone Date control — single date or from/to range + quick-range presets. */}
+            <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
+              <PopoverTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className={`h-8 gap-1 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                >
+                  <CalendarDays className="h-3.5 w-3.5" />
+                  {dateValue ? describeDate(dateValue) : "Date"}
+                  {dateValue && (
+                    <span
+                      role="button"
+                      aria-label="Clear date"
+                      onClick={(e) => { e.stopPropagation(); setDateValue(""); }}
+                      className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                    >
+                      <X className="h-3 w-3" />
+                    </span>
+                  )}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(["single", "range"] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setDatePickMode(m)}
+                        className={`rounded-md border px-2 py-1 text-xs font-medium ${
+                          datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {m === "single" ? "Single date" : "Date range"}
+                      </button>
+                    ))}
+                  </div>
+                  {datePickMode === "single" ? (
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
+                      <input
+                        type="date"
+                        value={fromStr}
+                        onChange={(e) => { setDateValue(e.target.value ? `d:${e.target.value}` : ""); if (e.target.value) setDateOpen(false); }}
+                        className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                      />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
+                        <input type="date" value={fromStr} max={toStr || undefined} onChange={(e) => setDateValue(`r:${e.target.value}:${toStr}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
+                        <input type="date" value={toStr} min={fromStr || undefined} onChange={(e) => setDateValue(`r:${fromStr}:${e.target.value}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
+                      </div>
+                    </div>
+                  )}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {DATE_PRESETS.map((o) => (
+                        <button
+                          key={o.value}
+                          type="button"
+                          onClick={() => { const v = datePresetValue(o.value); setDateValue(v); setDatePickMode(v.startsWith("r:") ? "range" : "single"); setDateOpen(false); }}
+                          className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {dateValue && (
+                    <div className="flex items-center justify-end pt-1">
+                      <button type="button" onClick={() => { setDateValue(""); setDateOpen(false); }} className="text-[11px] text-red-500 hover:underline">Clear date</button>
+                    </div>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
+
+            {/* + Filter — every column except Plant (tab) and Order Date (Date control). */}
+            <Popover open={filterPickerOpen} onOpenChange={(open) => { setFilterPickerOpen(open); if (!open) { setFilterPickerKey(""); setFilterPickerSearch(""); } }}>
+              <PopoverTrigger asChild>
+                <Button size="sm" variant="outline" className="h-8 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]">
+                  <Plus className="h-3.5 w-3.5" /> Filter
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-64">
+                {filterPickerKey === "" ? (
+                  <div className="space-y-1.5">
+                    <Input className="h-8 text-xs" placeholder="Find a filter…" value={filterPickerSearch} onChange={(e) => setFilterPickerSearch(e.target.value)} autoFocus />
+                    <div className="max-h-56 overflow-y-auto">
+                      {filterPickerOptions.length === 0 ? (
+                        <div className="px-2 py-1.5 text-xs text-gray-400">{filterPickerSearch ? "No matches" : "All filters added"}</div>
+                      ) : (
+                        filterPickerOptions.map((d) => (
+                          <button key={d.key} type="button" onClick={() => setFilterPickerKey(d.key)} className="block w-full rounded px-2 py-1.5 text-left text-xs text-gray-700 hover:bg-[#001d6e]/5 hover:text-[#001d6e]">
+                            {d.label}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : pickedFilterColumn ? (
+                  <div className="space-y-2">
+                    <button type="button" onClick={() => setFilterPickerKey("")} className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600">
+                      <ChevronLeft className="h-3 w-3" /> Back
+                    </button>
+                    <ColumnFilterPopoverContent
+                      column={pickedFilterColumn}
+                      onApply={(c) => { setColumnCondition(pickedFilterColumn.id, c); setFilterPickerOpen(false); setFilterPickerKey(""); }}
+                      onCancel={() => setFilterPickerKey("")}
+                    />
+                  </div>
+                ) : null}
+              </PopoverContent>
+            </Popover>
+
+            {/* Active column filters */}
+            {Object.keys(columnConditions).length > 0 && (
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
+                    <ListFilter className="h-3.5 w-3.5 mr-1" /> Filters ({Object.keys(columnConditions).length})
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-72">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between pb-1">
+                      <span className="text-xs font-semibold text-gray-700">Active filters</span>
+                      <button type="button" onClick={() => setColumnConditions({})} className="text-[11px] text-red-500 hover:underline">Clear all</button>
+                    </div>
+                    {Object.entries(columnConditions).map(([columnId, condition]) => (
+                      <div key={columnId} className="flex items-center justify-between gap-2 rounded border border-gray-200 px-2 py-1">
+                        <span className="text-gray-700 text-xs">{conditionSummary(condition, filterableColumns)}</span>
+                        <button type="button" onClick={() => clearColumnCondition(columnId)} className="text-gray-400 hover:text-red-500" aria-label="Remove filter">
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
+
             <DataTableColumnToggle
               columns={slipColumns}
               visibleColumnIds={visibleColumnIds}
@@ -1917,6 +2035,7 @@ export default function ProformaSlips() {
               }
               buttonClassName={FILTER_BTN_CLASS}
             />
+            </div>
           </div>
         </div>
         <CardContent className="p-0">

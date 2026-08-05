@@ -1363,8 +1363,8 @@ export default function OrderImport() {
                   onClick={() => selectPlantTab("")}
                   className={
                     plantTab === ""
-                      ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
-                      : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                      ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                      : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
                   }
                 >
                   All
@@ -1376,16 +1376,13 @@ export default function OrderImport() {
                     <button
                       key={name}
                       onClick={() => selectPlantTab(name)}
-                      // Selected: solid navy. Unselected: tinted with the plant's configured colors
-                      // from Plant Management (falls back to a plain grey pill when uncolored).
-                      style={!isSel && c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
-                      className={
-                        isSel
-                          ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
-                          : c?.bgColor
-                            ? "rounded-full border px-3 py-1 text-xs font-semibold"
-                            : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
-                      }
+                      // Each pill keeps its Plant Management colour whether selected or not; the
+                      // selected one gets a navy ring (same treatment as Overall Stock / Proforma
+                      // Slips) instead of turning solid navy and losing its colour.
+                      style={c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
+                      className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                        c?.bgColor ? "border" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                      } ${isSel ? "ring-2 ring-[#001d6e] ring-offset-1" : ""}`}
                     >
                       {name}
                     </button>
