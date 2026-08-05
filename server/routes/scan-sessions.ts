@@ -1144,7 +1144,12 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       ose.voided,
       ose.voided_at        AS "voidedAt",
       ose.void_reason      AS "voidReason",
+      -- Inventory Sr. No for this item (products.new_sr, matched by barcode) so the same item
+      -- always carries the same Sr. No here as on the Inventory page. LIMIT 1 avoids row
+      -- duplication if a barcode ever appears on more than one product row.
+      (SELECT p.new_sr FROM products p WHERE LOWER(p.barcode) = LOWER(ose.barcode) LIMIT 1) AS "srNo",
       ois.csv_file_name    AS "orderName",
+      ois.order_date       AS "orderDate",
       ois.plant            AS "plant"
     FROM order_scan_events ose
     JOIN order_import_sessions ois ON ois.id = ose.session_id
@@ -1170,7 +1175,9 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
+      (SELECT p.new_sr FROM products p WHERE LOWER(p.barcode) = LOWER(sm.barcode) LIMIT 1) AS "srNo",
       sm.reason AS "orderName",
+      NULL::text AS "orderDate",
       sm.plant AS "plant"
     FROM stock_movements sm
     WHERE sm.type = 'exchange'
@@ -1280,6 +1287,11 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
 
     const dateParam    = typeof req.query.date    === 'string' && req.query.date.trim()    ? req.query.date.trim()    : null;
+    // Date range (scan date) — from/to, either bound optional. Sent by the Reports page's
+    // Overall-Stock-style Date control (single date → from === to). `date` is still honoured for
+    // any older/other caller.
+    const fromParam    = typeof req.query.from    === 'string' && req.query.from.trim()    ? req.query.from.trim()    : null;
+    const toParam      = typeof req.query.to      === 'string' && req.query.to.trim()      ? req.query.to.trim()      : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
     const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange'].includes(req.query.type) ? req.query.type : null;
     const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
@@ -1303,6 +1315,8 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     }
     if (plantParam)   { params.push(plantParam.toLowerCase()); conditions.push(`LOWER("plant") = $${params.length}`); }
     if (dateParam)    { params.push(dateParam);    conditions.push(`DATE("scannedAt") = $${params.length}`); }
+    if (fromParam)    { params.push(fromParam);    conditions.push(`DATE("scannedAt") >= $${params.length}::date`); }
+    if (toParam)      { params.push(toParam);      conditions.push(`DATE("scannedAt") <= $${params.length}::date`); }
     if (scannerParam) { params.push(scannerParam); conditions.push(`"scannedByName" = $${params.length}`); }
     // Empty boxes and exchanges ARE shown in scan history as their own distinct statuses, but
     // they're never product scans — so 'regular'/'extra' filters must exclude both, and the
@@ -1428,10 +1442,12 @@ router.get('/reports/scan-history/filter-values', async (req: Request, res: Resp
 // ── Upload scan-history rows into an existing Notion database ────────────────
 router.post('/reports/upload-to-notion', requirePageWrite('scan-history'), async (_req: Request, res: Response) => {
   try {
-    const { pageId, columns, date, search, scanner, type, plant } = _req.body as {
+    const { pageId, columns, date, from, to, search, scanner, type, plant } = _req.body as {
       pageId: string;
       columns: string[];
       date?: string;
+      from?: string;
+      to?: string;
       search?: string;
       scanner?: string;
       type?: string;
@@ -1450,7 +1466,7 @@ router.post('/reports/upload-to-notion', requirePageWrite('scan-history'), async
       pageId: resolvedPageId,
       columns,
       allowedPlants: getUserPlants(_req.user),
-      date, search, scanner, type, plant,
+      date, from, to, search, scanner, type, plant,
     });
 
     // Remember this target + column selection so the auto-sync reuses them (best-effort).

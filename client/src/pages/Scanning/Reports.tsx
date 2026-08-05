@@ -6,7 +6,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   History, X, RefreshCw, FileDown, ChevronDown, ChevronLeft,
-  Loader2, Upload, Trash2, Plus, ListFilter, Filter,
+  Loader2, Upload, Trash2, Plus, ListFilter, Filter, CalendarDays,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
@@ -56,6 +56,8 @@ type ScanHistoryItem = {
   scannedByName: string | null;
   scannedAt: string;
   orderName: string;
+  orderDate: string | null;
+  srNo: string | null;
   plant: string;
   voided: boolean | null;
   voidedAt: string | null;
@@ -242,8 +244,46 @@ const Reports = () => {
     { value: "empty", label: "Empty Box only" },
     { value: "exchange", label: "Exchange only" },
   ];
+
+  // Date filter — same control/encoding as Overall Stock: the stored value is either a single
+  // day ("d:YYYY-MM-DD") or a from–to range ("r:YYYY-MM-DD:YYYY-MM-DD"), both resolving to a
+  // from/to window sent to the server. Presets just compute one of those. Filters scan date
+  // (scannedAt).
+  const dateValue = selectedDate;
+  const { from: fromDate, to: toDate } = useMemo(() => {
+    if (dateValue.startsWith("d:")) { const day = dateValue.slice(2); return { from: day, to: day }; }
+    if (dateValue.startsWith("r:")) { const [, f, t] = dateValue.split(":"); return { from: f ?? "", to: t ?? "" }; }
+    return { from: "", to: "" };
+  }, [dateValue]);
+  const dateIsRange = dateValue.startsWith("r:");
+  const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
+  const [dateOpen, setDateOpen] = useState(false);
+  const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
+  const datePresetValue = (key: string): string => {
+    const d = new Date();
+    if (key === "today") return `d:${isoOf(d)}`;
+    if (key === "yday") { const y = new Date(d); y.setDate(y.getDate() - 1); return `d:${isoOf(y)}`; }
+    if (key === "week") { const w = new Date(d); w.setDate(w.getDate() - 6); return `r:${isoOf(w)}:${isoOf(d)}`; }
+    if (key === "month") return `r:${isoOf(new Date(d.getFullYear(), d.getMonth(), 1))}:${isoOf(d)}`;
+    return "";
+  };
+  const DATE_PRESETS = [
+    { value: "today", label: "Today" },
+    { value: "yday", label: "Yesterday" },
+    { value: "week", label: "This week" },
+    { value: "month", label: "This month" },
+  ];
+
   const describeSimpleFilter = (field: string, value: string) => {
-    if (field === "date") return `Date: ${format(new Date(value), "MMM d, yyyy")}`;
+    if (field === "date") {
+      if (value.startsWith("d:")) return `Date: ${format(new Date(value.slice(2)), "MMM d, yyyy")}`;
+      if (value.startsWith("r:")) {
+        const [, f, t] = value.split(":");
+        const fmt = (s: string) => (s ? format(new Date(s), "MMM d") : "…");
+        return `Date: ${fmt(f)} → ${fmt(t)}`;
+      }
+      return `Date: ${value}`;
+    }
     if (field === "scanner") return `Scanned By: ${value}`;
     if (field === "type") return `Type: ${TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value}`;
     return value;
@@ -310,14 +350,15 @@ const Reports = () => {
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
   const filterPickerOptions = useMemo(() => {
+    // Date is its own standalone control (below), not part of this "+ Filter" list — same split
+    // as Overall Stock.
     const dims = [
-      { key: "date", label: "Date" },
       { key: "scanner", label: "Scanned By" },
       { key: "type", label: "Type" },
       ...filterableColumns.map((c) => ({ key: c.id, label: c.label })),
     ];
     const isActive = (key: string) =>
-      ["date", "scanner", "type"].includes(key)
+      ["scanner", "type"].includes(key)
         ? activeFilters.some((f) => f.field === key)
         : !!columnConditions[key];
     const q = filterPickerSearch.trim().toLowerCase();
@@ -369,7 +410,8 @@ const Reports = () => {
     try {
       const r = await apiRequest("POST", "/api/scan-sessions/reports/upload-to-notion", {
         columns: notionColumns,
-        date:    selectedDate   || undefined,
+        from:    fromDate       || undefined,
+        to:      toDate         || undefined,
         search:  historySearch  || undefined,
         scanner: historyScanner || undefined,
         type:    historyType    || undefined,
@@ -386,7 +428,8 @@ const Reports = () => {
 
   const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
-    date:    selectedDate   || undefined,
+    from:    fromDate       || undefined,
+    to:      toDate         || undefined,
     search:  historySearch  || undefined,
     scanner: historyScanner || undefined,
     type:    historyType    || undefined,
@@ -427,7 +470,8 @@ const Reports = () => {
     const all: ScanHistoryItem[] = [];
     while (offset < total) {
       const url = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
-        date:    selectedDate   || undefined,
+        from:    fromDate       || undefined,
+        to:      toDate         || undefined,
         search:  historySearch  || undefined,
         scanner: historyScanner || undefined,
         type:    historyType    || undefined,
@@ -446,14 +490,14 @@ const Reports = () => {
   }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
-    ["#", "Scanned By", "Code", "Item", "Barcode", "Order", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
-    ...src.map((h, i) => [
-      i + 1,
+    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order Date", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
+    ...src.map((h) => [
+      h.srNo ?? "",
       h.scannedByName ?? "",
       h.scannedByCode ?? "",
       h.itemName ?? "",
       h.barcode ?? "",
-      h.orderName,
+      h.orderDate ?? "",
       h.plant,
       h.totalQty,
       h.pallets != null ? parseFloat(String(h.pallets)).toFixed(2) : "",
@@ -472,11 +516,13 @@ const Reports = () => {
   const historyColumns: DataTableColumn<ScanHistoryItem>[] = [
     {
       id: "srNo",
-      header: "#",
+      header: "Sr. No",
       hideable: false,
-      width: 48,
-      cellClassName: "text-gray-400 tabular-nums",
-      render: (_row, rowIndex) => historyOffset + rowIndex + 1,
+      width: 64,
+      cellClassName: "text-gray-500 tabular-nums",
+      // The item's inventory Sr. No (products.new_sr), so the same item always shows the same
+      // number here as on the Inventory page — not a per-page running row count.
+      render: (row) => row.srNo || dash,
     },
     {
       id: "scannedBy",
@@ -523,11 +569,16 @@ const Reports = () => {
     },
     {
       id: "order",
-      header: "Order",
-      width: 140,
-      accessor: (row) => row.orderName,
-      cellClassName: "truncate",
-      render: (row) => row.orderName,
+      header: "Order Date",
+      width: 120,
+      accessor: (row) => row.orderDate ?? "",
+      cellClassName: "whitespace-nowrap text-gray-600",
+      // Show the order's date (from the CSV import) instead of the order/file name.
+      render: (row) => {
+        if (!row.orderDate) return dash;
+        const d = new Date(row.orderDate);
+        return isNaN(d.getTime()) ? row.orderDate : format(d, "MMM d, yyyy");
+      },
     },
     {
       id: "plant",
@@ -665,8 +716,125 @@ const Reports = () => {
                 placeholder="Item, barcode, or scanner…"
               />
 
-              {/* One unified "+ Filter" — Date, Scanned By, Type, Plant, and every generic
-                  column in the same searchable list, same pattern as Overall Stock. */}
+              {/* Standalone Date control — sits BEFORE "+ Filter", same as Overall Stock. Single
+                  date or from/to range (both editable) plus quick-range presets; filters scan
+                  date (scannedAt). */}
+              <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) { setDatePickMode(dateIsRange ? "range" : "single"); } }}>
+                <PopoverTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`h-8 gap-1 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Date: ", "") : "Date"}
+                    {dateValue && (
+                      <span
+                        role="button"
+                        aria-label="Clear date"
+                        onClick={(e) => { e.stopPropagation(); clearSimpleFilter("date"); }}
+                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                      >
+                        <X className="h-3 w-3" />
+                      </span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                {/* align="end" + avoidCollisions={false}: box anchors to the button's right edge
+                    and never re-positions as its height changes while picking — stays put. */}
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(["single", "range"] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setDatePickMode(m)}
+                          className={`rounded-md border px-2 py-1 text-xs font-medium ${
+                            datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
+                          }`}
+                        >
+                          {m === "single" ? "Single date" : "Date range"}
+                        </button>
+                      ))}
+                    </div>
+
+                    {datePickMode === "single" ? (
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
+                        <input
+                          type="date"
+                          value={fromDate}
+                          onChange={(e) => {
+                            upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "");
+                            if (e.target.value) setDateOpen(false);
+                          }}
+                          className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                        />
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
+                          <input
+                            type="date"
+                            value={fromDate}
+                            max={toDate || undefined}
+                            onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
+                            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
+                          <input
+                            type="date"
+                            value={toDate}
+                            min={fromDate || undefined}
+                            onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
+                            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {DATE_PRESETS.map((o) => (
+                          <button
+                            key={o.value}
+                            type="button"
+                            onClick={() => {
+                              const v = datePresetValue(o.value);
+                              upsertSimpleFilter("date", v);
+                              setDatePickMode(v.startsWith("r:") ? "range" : "single");
+                              setDateOpen(false);
+                            }}
+                            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+                          >
+                            {o.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {dateValue && (
+                      <div className="flex items-center justify-end pt-1">
+                        <button
+                          type="button"
+                          onClick={() => { clearSimpleFilter("date"); setDateOpen(false); }}
+                          className="text-[11px] text-red-500 hover:underline"
+                        >
+                          Clear date
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </PopoverContent>
+              </Popover>
+
+              {/* One unified "+ Filter" — Scanned By, Type, Plant, and every generic column in the
+                  same searchable list, same pattern as Overall Stock. (Date is its own control.) */}
               <Popover
                 open={filterPickerOpen}
                 onOpenChange={(open) => {
@@ -712,25 +880,6 @@ const Reports = () => {
                             </button>
                           ))
                         )}
-                      </div>
-                    </div>
-                  ) : filterPickerKey === "date" ? (
-                    <div className="space-y-3">
-                      <button type="button" onClick={() => setFilterPickerKey("")} className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600">
-                        <ChevronLeft className="h-3 w-3" /> Back
-                      </button>
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
-                        <input
-                          type="date"
-                          onChange={(e) => {
-                            if (!e.target.value) return;
-                            upsertSimpleFilter("date", e.target.value);
-                            setFilterPickerOpen(false);
-                            setFilterPickerKey("");
-                          }}
-                          className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                        />
                       </div>
                     </div>
                   ) : filterPickerKey === "scanner" ? (
@@ -838,7 +987,8 @@ const Reports = () => {
                       key={fmt}
                       onSelect={() => {
                         const rows = historyExportRows(historyItems);
-                        const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                        const dateSuffix = dateValue ? `-${fromDate}${dateIsRange ? `_to_${toDate}` : ""}` : "";
+                        const suffix = `${dateSuffix}-${format(new Date(), "yyyy-MM-dd")}`;
                         if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
                         if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
                         if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);

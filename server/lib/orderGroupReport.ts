@@ -8,6 +8,7 @@ import { eq, and, asc, inArray } from 'drizzle-orm';
 
 export type GroupReportEntry = {
   partId: number; sequence: number; csvFileName: string; barcode: string; itemName: string;
+  itemsPerPallet: number;
   expectedQty: number; receivedQty: number; extraQty: number; missingQty: number;
   adjustedTo: { toPartId: number; toCsvFileName: string; qty: number }[];
   adjustedFrom: { fromPartId: number; fromCsvFileName: string; qty: number }[];
@@ -31,7 +32,7 @@ export type GroupReport = {
     totalAdjustments: number; finalStockAdded: number;
     netExtraAfterAdjustment: number; netMissingAfterAdjustment: number;
     allComplete: boolean;
-    productWise: Array<{ barcode: string; itemName: string; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }>;
+    productWise: Array<{ barcode: string; itemName: string; itemsPerPallet: number; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }>;
   };
 };
 
@@ -56,6 +57,17 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
 
   const partIds = parts.map((p) => p.id);
   const importItems = await db.select().from(orderImportItems).where(inArray(orderImportItems.sessionId, partIds));
+
+  // Items-per-pallet per barcode, derived from the CSV rows already loaded above
+  // (quantity ÷ expectedPallets) — so the report can carry a pallet count under each qty
+  // without any product lookup. First non-zero value per barcode wins.
+  const ippByBarcode = new Map<string, number>();
+  for (const item of importItems) {
+    if (!item.barcode || ippByBarcode.has(item.barcode)) continue;
+    const q = item.quantity ?? 0;
+    const ep = item.expectedPallets ?? 0;
+    if (q > 0 && ep > 0) ippByBarcode.set(item.barcode, Math.round(q / ep));
+  }
 
   const { rows: scanItemRows } = await pool.query(
     `SELECT session_id AS "sessionId", barcode, total_scanned_qty AS "totalScannedQty"
@@ -128,6 +140,7 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
       const extra = extraMap.get(key) ?? 0;
       const entry: GroupReportEntry = {
         partId: part.id, sequence: sequenceByPartId.get(part.id) ?? 0, csvFileName: part.csvFileName, barcode, itemName,
+        itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
         expectedQty: expected, receivedQty: received + extra,
         extraQty: extra,
         missingQty: Math.max(0, expected - received),
@@ -197,6 +210,7 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
     .map(([barcode, entries]) => ({
       barcode,
       itemName: entries[0]?.itemName ?? barcode,
+      itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
       totalExpected: entries.reduce((s, e) => s + e.expectedQty, 0),
       totalReceived: entries.reduce((s, e) => s + e.receivedQty, 0),
       totalExtra: entries.reduce((s, e) => s + e.extraQty, 0),
@@ -250,6 +264,14 @@ export async function computePartReport(sessionId: number): Promise<PartReport |
   if (!session) return null;
 
   const importItems = await db.select().from(orderImportItems).where(eq(orderImportItems.sessionId, sessionId));
+  // Items-per-pallet per barcode from the CSV rows (quantity ÷ expectedPallets) — no lookup.
+  const ippByBarcode = new Map<string, number>();
+  for (const item of importItems) {
+    if (!item.barcode || ippByBarcode.has(item.barcode)) continue;
+    const q = item.quantity ?? 0;
+    const ep = item.expectedPallets ?? 0;
+    if (q > 0 && ep > 0) ippByBarcode.set(item.barcode, Math.round(q / ep));
+  }
   const { rows: scanItemRows } = await pool.query(
     `SELECT barcode, total_scanned_qty AS "totalScannedQty" FROM order_scan_items WHERE session_id = $1`,
     [sessionId],
@@ -293,6 +315,7 @@ export async function computePartReport(sessionId: number): Promise<PartReport |
     const missingQty = Math.max(0, expectedQty - received);
     return {
       partId: session.id, sequence: 0, csvFileName: session.csvFileName, barcode, itemName,
+      itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
       expectedQty, receivedQty: received + extraQty, extraQty, missingQty,
       adjustedTo: [], adjustedFrom: [], remainingExtra: extraQty, remainingMissing: missingQty,
     };

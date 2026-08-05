@@ -14,7 +14,9 @@ export type ScanHistoryPushOptions = {
   columns?: string[] | null;
   // null = every plant (system job / admin). [] = none (restricted user with no plants).
   allowedPlants?: string[] | null;
-  date?: string; search?: string; scanner?: string; type?: string; plant?: string;
+  // `date` = a single exact scan date; from/to = an inclusive scan-date range (either bound
+  // optional). The Reports page sends from/to; `date` is kept for older callers.
+  date?: string; from?: string; to?: string; search?: string; scanner?: string; type?: string; plant?: string;
   limit?: number;
 };
 
@@ -108,6 +110,8 @@ export async function pushScanHistoryToNotion(opts: ScanHistoryPushOptions): Pro
   }
   if (opts.plant)   { params.push(opts.plant.toLowerCase()); conditions.push(`LOWER(ois.plant) = $${params.length}`); }
   if (opts.date)    { params.push(opts.date);    conditions.push(`DATE(ose.scanned_at) = $${params.length}`); }
+  if (opts.from)    { params.push(opts.from);    conditions.push(`DATE(ose.scanned_at) >= $${params.length}::date`); }
+  if (opts.to)      { params.push(opts.to);      conditions.push(`DATE(ose.scanned_at) <= $${params.length}::date`); }
   if (opts.scanner) { params.push(opts.scanner); conditions.push(`ose.scanned_by_name = $${params.length}`); }
   if (opts.type === 'regular') conditions.push(`ose.is_extra = false`);
   if (opts.type === 'extra')   conditions.push(`ose.is_extra = true`);
