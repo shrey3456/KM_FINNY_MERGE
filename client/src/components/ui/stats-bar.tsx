@@ -45,7 +45,7 @@ interface StatsBarProps {
 }
 
 /**
- * Stats tiles (+ optional action bar) in one bordered card — the Notion Inventory
+ * Stats tiles (+ optional action bar) in one bordered card — the Product Master
  * header treatment, reusable across modules.
  */
 export function StatsBar({ stats, actions, columns, wrapLabels, className }: StatsBarProps) {

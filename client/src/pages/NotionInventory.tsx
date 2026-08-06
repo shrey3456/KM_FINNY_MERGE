@@ -528,7 +528,7 @@ export default function NotionInventory() {
     <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
       <PageHeader
         icon={Database}
-        title="Notion Inventory"
+        title="Product Master"
         description="Product master synced from Notion into PostgreSQL."
       />
 

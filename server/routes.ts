@@ -224,7 +224,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   apiRouter.get("/products", async (req: Request, res: Response) => {
     try {
       // Shared across many pages/roles (Scan's Edit CSV search, Overall Stock's Exchange
-      // Product tool, Notion Inventory's admin-only table) — a plain login check, not an
+      // Product tool, Product Master's admin-only table) — a plain login check, not an
       // admin/page-specific one, since it's genuinely needed by non-admin users too.
       if (!req.isAuthenticated || !req.isAuthenticated()) {
         return res.status(401).json({ message: "Not authenticated" });
@@ -8631,7 +8631,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     };
     // Both the recurring run and the boot-time run are data-fields-only now — photos are
-    // never checked automatically. An admin syncs photos on demand from the Notion Inventory
+    // never checked automatically. An admin syncs photos on demand from the Product Master
     // page's "Sync Photos" button; Apply only ever touches images that a photo sync actually
     // queued, so staying data-only here never risks silently reverting/losing photo changes.
     setInterval(() => runScheduledSync(false), SYNC_INTERVAL_MS);

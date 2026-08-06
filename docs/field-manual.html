@@ -481,7 +481,7 @@
     <div class="group">
       <p class="group-label">Catalog &amp; Documents</p>
       <ul>
-        <li><a href="#inventory">Inventory (Notion)</a></li>
+        <li><a href="#inventory">Product Master</a></li>
         <li><a href="#proforma">Proforma Slips</a></li>
         <li><a href="#print-ops">Print Operations</a></li>
         <li><a href="#expense">Expense Voucher</a></li>
@@ -501,7 +501,7 @@
     <div class="intro">
       <p class="eyebrow">Read this first</p>
       <h2>How the pieces fit before you touch any one of them</h2>
-      <p>KM Finny runs a physical warehouse: CSV orders come in, staff scan boxes against them on the floor, stock totals move, and paperwork (vouchers, slips, dispatch labels) gets printed along the way. Every module below either <em>produces</em> data the others read, or <em>consumes</em> data another module produced — Order Management feeds Order Scan, Order Scan feeds Overall Stock and Order Reports, Notion Inventory feeds product data to all of them.</p>
+      <p>KM Finny runs a physical warehouse: CSV orders come in, staff scan boxes against them on the floor, stock totals move, and paperwork (vouchers, slips, dispatch labels) gets printed along the way. Every module below either <em>produces</em> data the others read, or <em>consumes</em> data another module produced — Order Management feeds Order Scan, Order Scan feeds Overall Stock and Order Reports, Product Master feeds product data to all of them.</p>
       <p>Three separate mechanisms gate what a person can see and do, layered on top of each other. <strong>Role</strong> (<code>admin</code> / <code>super-admin</code> / <code>read/write</code> / <code>read</code>) is global and coarse — admins bypass every other check. <strong>Allowed Pages</strong> (<code>users.allowedPages</code>, a JSON array of page keys) is per-user and controls which pages even render for someone who isn't an admin. <strong>Write Access</strong> (<code>users.pageWriteAccess</code>, a subset of Allowed Pages) controls whether a non-admin can edit or only view a page they can already see. All three are set from User Management. A handful of pages layer a fourth, older mechanism on top — department-name string matching (e.g. <code>"DISPATCH {VALSAD}"</code>) — which predates the page-key system and still drives a few pages noted below.</p>
       <div class="stack-row">
         <span class="chip">React + TypeScript</span>
@@ -766,7 +766,7 @@
 
       <article class="page" id="inventory">
         <div class="page-head">
-          <h3>Inventory <span style="font-weight:400; color:var(--ink-soft);">(Notion Sync)</span></h3>
+          <h3>Product Master <span style="font-weight:400; color:var(--ink-soft);">(Notion Sync)</span></h3>
           <span class="page-route filepath">/notion-inventory → client/src/pages/NotionInventory.tsx</span>
         </div>
         <p class="page-purpose">The product catalog itself — mastered in Notion, mirrored into Postgres. Every other module's idea of "what a product is" traces back here.</p>

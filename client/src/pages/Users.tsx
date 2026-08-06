@@ -57,7 +57,7 @@ import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 import { hasPageViewAccess, hasPageWriteAccess } from "@/lib/permissions";
 
-// Solid navy fill, matching the Notion Inventory action buttons.
+// Solid navy fill, matching the Product Master action buttons.
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 const PRIMARY_BTN_CLASS = "bg-[#001d6e] text-white hover:bg-[#001552]";
 

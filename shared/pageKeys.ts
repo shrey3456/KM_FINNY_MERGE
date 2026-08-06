@@ -11,7 +11,7 @@ export const CONTROLLABLE_PAGES = [
   { key: "scan-history", label: "Scan History" },
   { key: "order-import", label: "Order Management" },
   { key: "order-import-edit", label: "Edit Order Import CSV" },
-  { key: "notion-inventory", label: "Inventory" },
+  { key: "notion-inventory", label: "Product Master" },
   { key: "purchases", label: "Purchases" },
   { key: "plant-management", label: "Plant Management" }
 ] as const;

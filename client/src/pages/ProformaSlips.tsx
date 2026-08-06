@@ -118,7 +118,7 @@ const proformaSlipFormSchema = z.object({
 
 type ProformaSlipFormValues = z.infer<typeof proformaSlipFormSchema>;
 
-// Solid navy fill, matching the Notion Inventory action buttons (Import CSV / Export / Sync Notion).
+// Solid navy fill, matching the Product Master action buttons (Import CSV / Export / Sync Notion).
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
 // Extend basic ProformaSlip type to include lock and audit fields loaded from API
@@ -1834,7 +1834,7 @@ export default function ProformaSlips() {
       )}
 
       <Card className="overflow-hidden rounded-xl border-gray-300 shadow-none">
-        {/* Header bar — title + search on top, filters directly beneath (matches Notion Inventory) */}
+        {/* Header bar — title + search on top, filters directly beneath (matches Product Master) */}
         <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div className="flex items-center gap-3">

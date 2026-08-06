@@ -81,7 +81,7 @@ type ScanHistoryResponse = {
 
 const HISTORY_PAGE_SIZE = 20;
 
-// Solid navy fill, matching Overall Stock / Notion Inventory's filter buttons. Squared off
+// Solid navy fill, matching Overall Stock / Product Master's filter buttons. Squared off
 // (rounded-xl) for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 

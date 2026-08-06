@@ -205,7 +205,7 @@ function downloadPdf(
 
 const PAGE_SIZE = 20;
 
-// Solid navy fill, matching the Notion Inventory action buttons. Squared off (rounded-xl)
+// Solid navy fill, matching the Product Master action buttons. Squared off (rounded-xl)
 // for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
