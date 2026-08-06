@@ -572,9 +572,9 @@ export async function reconcileCredits(
       await client.query(
         `INSERT INTO order_scan_events
            (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-            items_per_pallet, is_extra, scanned_by_name)
-         VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6)`,
-        [part.id, item.id, ev.barcode, ev.item_name, take, `System (credited from Part ${completedPart.partIndex})`],
+            items_per_pallet, is_extra, scanned_by_name, is_credit, credit_source_event_id)
+         VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6,true,$7)`,
+        [part.id, item.id, ev.barcode, ev.item_name, take, `System (credited from Part ${completedPart.partIndex})`, ev.id],
       );
 
       await client.query(

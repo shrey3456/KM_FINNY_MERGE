@@ -99,7 +99,10 @@ const PrintOperations: React.FC = () => {
   const rawDepartment = String(currentUser?.department || '').trim().toLowerCase();
   const rawDesignation = String(currentUser?.designation || '').trim().toLowerCase();
 
-  const canUnlockSlips = isAdminOrSuper || hasPageWriteAccess("print-operations");
+  // Matches the server's actual rule (proforma-api.ts's unlock route: requirePageWrite both
+  // 'print-operations' AND 'proforma') — a user with only one of the two would otherwise see
+  // a fully clickable Unlock button that 403s on click.
+  const canUnlockSlips = isAdminOrSuper || (hasPageWriteAccess("print-operations") && hasPageWriteAccess("proforma"));
 
   // NEW: Get current user info and time for use in both print function and preview
   // CHANGED: Use Name instead of Role

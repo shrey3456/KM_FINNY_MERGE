@@ -2163,7 +2163,7 @@ export default function ProformaSlips() {
                                 </SelectItem>
                               ))
                             ) : (
-                              <SelectItem value="" disabled>No plants configured</SelectItem>
+                              <SelectItem value="__none__" disabled>No plants configured</SelectItem>
                             )}
                           </SelectContent>
                         </Select>
@@ -2356,7 +2356,7 @@ export default function ProformaSlips() {
                                 </SelectItem>
                               ))
                             ) : (
-                              <SelectItem value="" disabled>No plants configured</SelectItem>
+                              <SelectItem value="__none__" disabled>No plants configured</SelectItem>
                             )}
                           </SelectContent>
                         </Select>

@@ -239,12 +239,12 @@ export default function ScanOrderPage() {
   const { toast } = useToast();
   const { user: currentUser } = useUser();
   const [, navigate] = useLocation();
-  // Anyone can complete a part EXCEPT designations "Loader"/"Helper"/"Driver" (exact match) —
-  // those are physical/operational roles who shouldn't be the ones deciding to close an order
-  // out. Admin/super-admin always allowed regardless of designation.
+  // Anyone can complete a part EXCEPT designations "Loader"/"Helper"/"Driver"/"Scanner" (exact
+  // match) — those are physical/operational roles who shouldn't be the ones deciding to close
+  // an order out. Admin/super-admin always allowed regardless of designation.
   const userDesignation = String((currentUser as any)?.designation || "").toLowerCase().trim();
   const isAdminOrSuperUser = ["admin", "super-admin"].includes(((currentUser as any)?.role ?? "").toLowerCase());
-  const canCompletePart = isAdminOrSuperUser || !["loader", "helper", "driver"].includes(userDesignation);
+  const canCompletePart = isAdminOrSuperUser || !["loader", "helper", "driver", "scanner"].includes(userDesignation);
   // The simplified Dispatch Dashboard replaces the normal scanning UI for designation
   // "Scanner" (exact match) only — no longer department-name-based ("Dispatch Valsad" etc.).
   // Admin/super-admin always get the full scanning interface regardless of designation.
@@ -500,6 +500,14 @@ export default function ScanOrderPage() {
   const [osCameraError, setOsCameraError] = useState<string | null>(null);
   const [osPending, setOsPending] = useState<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osPendingRef = useRef<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
+  // Tracks whether THIS scan's product image failed to load, so the image panel can hide via
+  // React state instead of an onError handler reaching into the DOM directly. The dialog stays
+  // mounted across back-to-back scans (its `open` prop never toggles false in between), so the
+  // <img> node persists too — a prior imperative `parentElement.style.display = "none"` would
+  // never get cleared and would wrongly keep hiding every later scan's image, even ones that
+  // load fine. Resetting this on every new osPending fixes that.
+  const [osImageFailed, setOsImageFailed] = useState(false);
+  useEffect(() => { setOsImageFailed(false); }, [osPending]);
   // Synchronous reentrancy lock for the auto-confirm path. osPendingRef/osMultiMatchRef only
   // guard re-entry while a DIALOG is open — but an auto-confirmed scan never opens one, so
   // without this a second gun trigger-pull (or an auto-repeating manual-entry Enter) landing
@@ -1488,11 +1496,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // every render regardless of orderScanNotifLoading (a hook after a conditional return only
   // fires on some renders, which is exactly what triggered the
   // "Rendered more hooks than during the previous render" crash).
-  // Void rights mirror the server's own rule exactly (order-scan.ts's ADMIN_ROLES) rather than
-  // reusing canCompletePart, which also covers a "supervisor" role — that role has no void
-  // access server-side, so showing the button to them would just 403 on click.
-  const userRole = ((currentUser as any)?.role ?? "").toLowerCase();
-  const canVoidScan = ["admin", "super-admin", "billing"].includes(userRole);
+  // Void rights mirror the server's own rule exactly (order-scan.ts's void route: requires
+  // Write Access to BOTH "scan-order" and "scan-history", chained as two requirePageWrite
+  // middlewares) — a user with only one of the two would otherwise see a clickable Void
+  // button that 403s on click.
+  const canVoidScan = isAdminOrSuperUser || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"));
 
   type MvHistoryEvent = {
     id: number; sessionId: number; barcode: string; itemName: string | null;
@@ -2196,11 +2204,21 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     ).slice().sort((a, b) => {
       // Whatever was scanned most recently THIS session floats straight to the top, regardless
       // of complete/partial/pending status — no more "received rows group at the top first"
-      // bucketing. A row never touched this session (seq 0 for both) keeps its original order.
+      // bucketing. Once that local signal is gone (page reload, which clears osScanSeqRef, or
+      // the scan happened on a different device/kiosk), fall back to the server's own
+      // lastScannedAt instead of dropping back to original CSV order — mirrors mvRecencySort
+      // above, which already did this; this list hadn't caught up, so a just-scanned row could
+      // silently lose its "recent" spot on refresh. A row never scanned at all (no seq, no
+      // lastScannedAt) keeps its original CSV order.
       const seq = osScanSeqRef.current.byId;
       const aSeq = seq.get(a.id) ?? 0;
       const bSeq = seq.get(b.id) ?? 0;
-      if (aSeq !== bSeq) return bSeq - aSeq;
+      const aServer = a.lastScannedAt ? new Date(a.lastScannedAt).getTime() : 0;
+      const bServer = b.lastScannedAt ? new Date(b.lastScannedAt).getTime() : 0;
+      const LOCAL_SCAN_OFFSET = 1e15; // dwarfs any real timestamp, so a local seq always wins
+      const aRank = aSeq > 0 ? LOCAL_SCAN_OFFSET + aSeq : aServer;
+      const bRank = bSeq > 0 ? LOCAL_SCAN_OFFSET + bSeq : bServer;
+      if (aRank !== bRank) return bRank - aRank;
       return a.id - b.id;
     });
     // Counts toward the "received" tally once scanned qty PLUS any cross-part credit is above
@@ -4576,13 +4594,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 Under rotate-90 (clockwise), CSS-left maps to physical-top — so image-left reads as
                 image-on-top with the details below it on the physical portrait screen. */}
             <div className="flex flex-col sm:flex-row">
-              {osResolvedImageName && (
+              {osResolvedImageName && !osImageFailed && (
                 <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
                   <img
+                    key={osResolvedImageName}
                     src={`/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`}
                     alt=""
                     className="max-h-96 w-full object-contain sm:max-h-full"
-                    onError={(e) => { const el = e.currentTarget as HTMLImageElement; if (el.parentElement) el.parentElement.style.display = "none"; }}
+                    onError={() => setOsImageFailed(true)}
                   />
                 </div>
               )}

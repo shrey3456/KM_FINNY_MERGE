@@ -20,6 +20,8 @@ import { Input } from "@/components/ui/input";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
+import { useAuth } from "@/hooks/use-auth";
+import { hasPageWriteAccess } from "@/lib/permissions";
 import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
 import { StatsBar } from "@/components/ui/stats-bar";
 import { TableCard } from "@/components/ui/table-card";
@@ -210,6 +212,10 @@ const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hove
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function OverallStock() {
+  const { user } = useAuth();
+  const isAdminOrSuper = ["admin", "super-admin"].includes(((user as any)?.role ?? "").toLowerCase());
+  // Matches the server's actual rule (POST /reports/exchange-stock: requirePageWrite('overall-stock')).
+  const canExchange = isAdminOrSuper || hasPageWriteAccess("overall-stock");
   const [search,      setSearch]      = useState("");
   const [pageIndex,   setPageIndex]   = useState(0);
   // Dynamic "+ Filter" conditions the operator adds on demand. Each is one field + a chosen value;
@@ -742,7 +748,7 @@ export default function OverallStock() {
       cellClassName: "text-gray-500 whitespace-nowrap",
       render: (row) => (row.lastArrived ? format(new Date(row.lastArrived), "MMM d, yyyy") : dash),
     },
-    ...(isAdmin ? [{
+    ...(canExchange ? [{
       id: "actions",
       header: "",
       hideable: false,

@@ -7,7 +7,7 @@ import {
   orderImportSessions, orderScanItems, orderScanEvents,
   users, plants, plantStvs,
 } from '../../shared/schema';
-import { eq, and, or, desc, asc, gte, sql } from 'drizzle-orm';
+import { eq, and, or, desc, asc, gte, sql, inArray } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
 import { computeGroupReport, resolveGroupId, applyLiveScanStock, reverseLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
@@ -20,9 +20,13 @@ function plantEq(filter: string) {
 }
 
 // Case-insensitive plant match against a user's assigned-plants list (already lowercased by
-// getUserPlants) — the multi-plant equivalent of plantEq above.
+// getUserPlants) — the multi-plant equivalent of plantEq above. Uses drizzle-orm's inArray
+// (LOWER(plant) IN ($1, $2, ...), each value its own bound parameter) rather than
+// `= ANY(${filters}::text[])` — passing a raw JS array through Drizzle's `sql` template tag
+// does NOT bind it as a single Postgres array parameter the way raw pg.query does; it caused
+// a real "malformed array literal" 500 on every route using it (e.g. GET /order-scan/notification).
 function plantIn(filters: string[]) {
-  return sql`LOWER(${orderImportSessions.plant}) = ANY(${filters}::text[])`;
+  return inArray(sql`LOWER(${orderImportSessions.plant})`, filters);
 }
 
 const router = Router();
@@ -198,13 +202,13 @@ function requireScanRole(req: Request, res: Response, next: NextFunction) {
 }
 
 // Mirrors the client's canCompletePart gate (Scan.tsx) — anyone can complete a part EXCEPT
-// designations "Loader"/"Helper"/"Driver" (exact match); admin/super-admin always allowed
-// regardless of designation.
+// designations "Loader"/"Helper"/"Driver"/"Scanner" (exact match); admin/super-admin always
+// allowed regardless of designation.
 function canCompletePart(user: any): boolean {
   const role = (user?.role ?? '').toLowerCase().trim();
   if (['admin', 'super-admin'].includes(role)) return true;
   const designation = (user?.designation ?? '').toLowerCase().trim();
-  return !['loader', 'helper', 'driver'].includes(designation);
+  return !['loader', 'helper', 'driver', 'scanner'].includes(designation);
 }
 
 function requireCompleteAccess(req: Request, res: Response, next: NextFunction) {
@@ -1686,25 +1690,26 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
 });
 
 // ── POST /api/order-scan/events/:id/void ─────────────────────────────────────
-// Admin-only. Marks a single scan event as a mistake: the row stays in history
-// (never deleted) but its quantity is reversed out of the linked order_scan_items
-// row AND out of stock (product_plant_stock / stock_movements / products.in_stock),
-// mirroring exactly what the original /scan increment did, in reverse. Allowed
-// regardless of whether the part has since been completed — an admin needs to be
-// able to correct a mistake discovered after the fact, not just while it's still
-// open. Blocked only if this exact event has already been used as a FIFO credit
-// source for a later part (credited_qty > 0) — voiding it out from under that
-// credit would leave the later part's numbers wrong with nothing pointing at why;
-// that credit would need to be dealt with first (e.g. void the later part's
-// credited entry, which un-does reconcileCredits' write — not handled here).
-router.post('/order-scan/events/:id/void', async (req: Request, res: Response) => {
+// Admin, or anyone granted Write Access to BOTH the "scan-order" and "scan-history" pages
+// (chaining two requirePageWrite calls below — each is its own middleware in the chain, so
+// both must pass; one grant alone is not enough). Marks a single scan event as a mistake:
+// the row stays in history (never deleted) but its quantity is reversed out of the linked
+// order_scan_items row AND out of stock (product_plant_stock / stock_movements /
+// products.in_stock), mirroring exactly what the original /scan increment did, in reverse.
+// Allowed regardless of whether the part has since been completed — a correction needs to
+// be possible after the fact, not just while it's still open. Blocked only if this exact
+// event has already been used as a FIFO credit source for a later part (credited_qty > 0) —
+// voiding it out from under that credit would leave the later part's numbers wrong with
+// nothing pointing at why; that credit would need to be dealt with first — void the later
+// part's own credit-transfer row instead, which IS handled here: see the is_credit branch
+// below, which reimburses this event's credited_qty instead of reversing stock a second time.
+// Voiding a genuine Regular scan also auto-backfills the resulting shortfall from any leftover
+// Extra scanned for the same item on this same part, if one exists (see the block right after
+// the item update below) — so an Extra sitting next to a voided Regular gets put to use instead
+// of just sitting there unused while the item shows short.
+router.post('/order-scan/events/:id/void', requirePageWrite('scan-order'), requirePageWrite('scan-history'), async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
-
-  const role = ((req.user as any)?.role ?? '').toLowerCase().trim();
-  if (!ADMIN_ROLES.includes(role)) {
-    return res.status(403).json({ message: 'Admin access required' });
-  }
 
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : null;
   const userCode = (req.user as any)?.userCode ?? null;
@@ -1761,10 +1766,169 @@ router.post('/order-scan/events/:id/void', async (req: Request, res: Response) =
           [event.pallets, event.loose_qty, newTotal, item.id],
         );
         updatedItem = updateResult.rows[0];
+
+        // Voiding a genuine Regular scan (not an Extra, not a credit-transfer row) can leave
+        // this item short again. If there's leftover, not-yet-used Extra scanned for the same
+        // barcode on this same part, pull it in to cover the gap automatically — oldest first.
+        // Prefer converting the ACTUAL Extra row itself (is_extra: true → false, in place, same
+        // id, same original scanner/timestamp) rather than leaving it alone and writing a new
+        // synthetic row next to it — that's the common case, when a row's whole remaining amount
+        // is used. Only when a row has to be SPLIT (part of it covers this shortfall, part stays
+        // Extra, or part of it was already spoken for by a different part's forward credit) does
+        // a second row get written, for just the split-off portion — the minimum needed to keep
+        // both halves accurate. Either way, voiding this later is already handled by the
+        // is_credit branch below. Total stock on hand doesn't change here — these boxes were
+        // already counted when the Extra was originally scanned — but the "Extra" bucket in
+        // product_plant_stock.extra_qty shrinks by the same amount, since that many boxes are no
+        // longer sitting around uncommitted; they now count toward this order.
+        if (!event.is_extra && !event.is_credit) {
+          let shortfall = Math.max(0, Number(updatedItem.expected_qty ?? 0) - Number(updatedItem.total_scanned_qty ?? 0));
+          if (shortfall > 0) {
+            const { rows: extraEvents } = await client.query(
+              `SELECT id, total_qty, credited_qty
+               FROM order_scan_events
+               WHERE session_id = $1 AND barcode = $2 AND is_extra = true AND voided IS NOT TRUE
+                 AND total_qty > COALESCE(credited_qty, 0)
+               ORDER BY scanned_at ASC, id ASC
+               FOR UPDATE`,
+              [event.session_id, event.barcode],
+            );
+            for (const ex of extraEvents) {
+              if (shortfall <= 0) break;
+              const alreadyCredited = Number(ex.credited_qty ?? 0);
+              const available = Number(ex.total_qty) - alreadyCredited;
+              if (available <= 0) continue;
+              const take = Math.min(available, shortfall);
+              const wholeRowUnclaimed = alreadyCredited === 0 && take === Number(ex.total_qty);
+
+              if (wholeRowUnclaimed) {
+                // This row's entire amount is going toward this shortfall and nothing else has
+                // ever claimed part of it — just flip it, no new row. Scan history then shows
+                // this exact entry as Regular, exactly as it would if it'd been scanned that way
+                // to begin with (same scanner, same timestamp).
+                await client.query(
+                  `UPDATE order_scan_events SET is_extra = false, is_credit = true WHERE id = $1`,
+                  [ex.id],
+                );
+              } else {
+                // Only part of this row is being converted — the rest either stays Extra or was
+                // already claimed elsewhere. Reserve it via credited_qty (never mutate the
+                // original row's total_qty — it stays an accurate record of what was actually
+                // scanned) and write one small linked row for just the converted portion.
+                await client.query(
+                  `UPDATE order_scan_events SET credited_qty = COALESCE(credited_qty, 0) + $1 WHERE id = $2`,
+                  [take, ex.id],
+                );
+                await client.query(
+                  `INSERT INTO order_scan_events
+                     (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+                      items_per_pallet, is_extra, scanned_by_name, is_credit, credit_source_event_id)
+                   VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6,true,$7)`,
+                  [event.session_id, item.id, event.barcode, event.item_name, take, 'System (backfilled from Extra after void)', ex.id],
+                );
+              }
+
+              if (plant) {
+                await client.query(
+                  `UPDATE product_plant_stock
+                   SET extra_qty = GREATEST(0, extra_qty - $1), updated_at = NOW()
+                   WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
+                  [take, event.barcode, plant],
+                );
+                await client.query(
+                  `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
+                   VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW())`,
+                  [event.barcode, plant, -take, 'Extra reclassified to Regular — backfilled a shortfall left by a voided scan', event.session_id],
+                );
+              }
+
+              const backfillResult = await client.query(
+                `UPDATE order_scan_items
+                 SET total_scanned_qty = COALESCE(total_scanned_qty, 0) + $1,
+                     status = CASE
+                       WHEN COALESCE(total_scanned_qty, 0) + $1 >= expected_qty THEN 'complete'
+                       WHEN COALESCE(total_scanned_qty, 0) + $1 > 0             THEN 'partial'
+                       ELSE 'pending'
+                     END,
+                     last_scanned_at = NOW()
+                 WHERE id = $2
+                 RETURNING *`,
+                [take, item.id],
+              );
+              updatedItem = backfillResult.rows[0];
+
+              shortfall -= take;
+            }
+          }
+        }
       }
     }
 
-    if (plant && event.barcode) {
+    // Undoing a same-part backfill takes two different shapes depending on how it was created
+    // (see the block above). A row that was flipped IN PLACE from Extra to Regular (no separate
+    // credit_source_event_id — this event IS the original Extra event) needs to be un-flipped,
+    // not marked voided: marking it voided would exclude it from BOTH Regular AND active-Extra
+    // tracking, and those boxes would just disappear. Un-flipping puts it back exactly as it
+    // was — active, and counted as Extra again — so this returns early instead of falling
+    // through to the generic "mark voided" step below.
+    if (event.is_credit && !event.credit_source_event_id) {
+      const unflipResult = await client.query(
+        `UPDATE order_scan_events SET is_extra = true, is_credit = false WHERE id = $1 RETURNING *`,
+        [eventId],
+      );
+      if (plant && event.barcode) {
+        const qty = Number(event.total_qty ?? 0);
+        await client.query(
+          `UPDATE product_plant_stock
+           SET extra_qty = extra_qty + $1, updated_at = NOW()
+           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
+          [qty, event.barcode, plant],
+        );
+        await client.query(
+          `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
+           VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW())`,
+          [event.barcode, plant, qty, 'Un-did a backfill conversion — restored to Extra', event.session_id],
+        );
+      }
+      await client.query('COMMIT');
+      return res.json({ event: unflipResult.rows[0], updatedItem });
+    }
+
+    // A system-generated credit-transfer row (see reconcileCredits, and the same-part backfill
+    // block above, for the split case) never added new stock — it just reassigned boxes an
+    // earlier Extra scan already added. Reversing stock for it here would remove those boxes a
+    // second time. Instead, give the qty back to the source Extra event so it's available again.
+    if (event.is_credit && event.credit_source_event_id) {
+      const { rows: srcRows } = await client.query(
+        `SELECT session_id, barcode FROM order_scan_events WHERE id = $1 FOR UPDATE`,
+        [event.credit_source_event_id],
+      );
+      const src = srcRows[0];
+
+      await client.query(
+        `UPDATE order_scan_events SET credited_qty = GREATEST(0, COALESCE(credited_qty, 0) - $1) WHERE id = $2`,
+        [Number(event.total_qty ?? 0), event.credit_source_event_id],
+      );
+
+      // Only the same-part backfill (above) pulled this qty out of product_plant_stock's Extra
+      // bucket when it was created — give it back there too, but only in that case. A forward
+      // credit to a LATER part (reconcileCredits) never touched extra_qty in the first place
+      // (same session_id on both sides is what tells these two apart).
+      if (src && plant && Number(src.session_id) === Number(event.session_id)) {
+        const qty = Number(event.total_qty ?? 0);
+        await client.query(
+          `UPDATE product_plant_stock
+           SET extra_qty = extra_qty + $1, updated_at = NOW()
+           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
+          [qty, src.barcode, plant],
+        );
+        await client.query(
+          `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
+           VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW())`,
+          [src.barcode, plant, qty, 'Voided a backfill — qty restored to Extra', event.session_id],
+        );
+      }
+    } else if (plant && event.barcode) {
       const qty = Number(event.total_qty ?? 0);
       await reverseLiveScanStock(
         client, plant, event.barcode,

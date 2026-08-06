@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
+import { hasPageWriteAccess } from "@/lib/permissions";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -200,6 +201,12 @@ const Reports = () => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const isAdmin = ["admin", "super-admin"].includes(((user as any)?.role ?? "").toLowerCase());
+  // Matches the server's actual rule (POST /reports/upload-to-notion: requirePageWrite('scan-history')).
+  const canUploadNotion = isAdmin || hasPageWriteAccess("scan-history");
+  // Matches the server's actual rule (POST /events/:id/void: requirePageWrite chained for BOTH
+  // 'scan-order' and 'scan-history') — a user with only one of the two would otherwise see a
+  // clickable Void button that 403s on click.
+  const canVoidScan = isAdmin || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"));
   const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const voidMutation = useMutation({
@@ -656,7 +663,7 @@ const Reports = () => {
       cellClassName: "whitespace-nowrap text-gray-500",
       render: (row) => (row.scannedAt ? format(new Date(row.scannedAt), "MMM d, h:mm a") : dash),
     },
-    ...(isAdmin
+    ...(canVoidScan
       ? [
           {
             id: "void",
@@ -1001,12 +1008,14 @@ const Reports = () => {
                 </DropdownMenuContent>
               </DropdownMenu>
 
-              <Button
-                size="sm" className={FILTER_BTN_CLASS}
-                onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
-              >
-                <Upload className="h-3.5 w-3.5 mr-1" />Upload to Notion
-              </Button>
+              {canUploadNotion && (
+                <Button
+                  size="sm" className={FILTER_BTN_CLASS}
+                  onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
+                >
+                  <Upload className="h-3.5 w-3.5 mr-1" />Upload to Notion
+                </Button>
+              )}
             </>
           }
         >
@@ -1168,7 +1177,7 @@ const Reports = () => {
       </DialogContent>
     </Dialog>
 
-    {/* Void scan confirmation — admin-only. Keeps the row in history (never deleted), marked
+    {/* Void scan confirmation — admin or scan-history write access. Keeps the row in history (never deleted), marked
         Voided; excluded from totals and reversed out of stock. */}
     <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
       <DialogContent className="max-w-sm">

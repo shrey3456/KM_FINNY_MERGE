@@ -883,6 +883,14 @@ export const orderScanEvents = pgTable("order_scan_events", {
   // set on is_extra=true rows; caps the amount available to credit anything else so the
   // same physical boxes can't be credited twice. 0 for ordinary (non-extra) events.
   creditedQty: integer("credited_qty").default(0),
+  // Marks a row as a SYSTEM-GENERATED credit transfer (written by reconcileCredits in
+  // server/lib/orderGroupReport.ts), not a real physical scan — it never added new stock, it
+  // just reassigns boxes an earlier part's Extra scan already added. Void must skip the stock
+  // reversal for these rows (there's nothing to reverse) and instead give the qty back to the
+  // source event via creditSourceEventId, or it double-removes real stock. Added via a raw
+  // ALTER TABLE migration in server/index.ts, like notionSyncedAt above.
+  isCredit: boolean("is_credit").default(false),
+  creditSourceEventId: integer("credit_source_event_id"),
   // "Empty Box" manual entry (a box with no item/barcode to scan) reuses THIS table's existing
   // columns instead of dedicated flags: it's an event with the sentinel barcode 'EMPTY_BOX'
   // (how every read identifies one — no real numeric SKU collides), its count in total_qty,

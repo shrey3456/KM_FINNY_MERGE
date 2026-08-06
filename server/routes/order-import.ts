@@ -110,7 +110,7 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
 
     const forcedPlants = (req as any).importViewPlants as string[] | null;
     const plantCondition = forcedPlants
-      ? sql`LOWER(${orderImportSessions.plant}) = ANY(${forcedPlants}::text[])`
+      ? inArray(sql`LOWER(${orderImportSessions.plant})`, forcedPlants)
       : req.query.plant
       ? sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`
       : null;
@@ -949,7 +949,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       const ids = sessionIdsParam.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
       if (ids.length === 0) return res.status(400).json({ message: 'sessionIds must be a comma-separated list of numbers' });
       conditions = [eq(orderImportSessions.isDeleted, false), inArray(orderImportSessions.id, ids)];
-      if (forcedPlants !== null) conditions.push(sql`LOWER(${orderImportSessions.plant}) = ANY(${forcedPlants}::text[])`);
+      if (forcedPlants !== null) conditions.push(inArray(sql`LOWER(${orderImportSessions.plant})`, forcedPlants as string[]));
     } else if (dateStr) {
       // Matches the ORDER DATE chosen at upload — the same value FIFO grouping keys on — not
       // the day the file happened to be uploaded. Using created_at here meant a CSV uploaded on
@@ -961,7 +961,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         eq(orderImportSessions.orderDate, dateStr),
       ];
       if (forcedPlants !== null) {
-        conditions.push(sql`LOWER(${orderImportSessions.plant}) = ANY(${forcedPlants}::text[])`);
+        conditions.push(inArray(sql`LOWER(${orderImportSessions.plant})`, forcedPlants as string[]));
       } else if (req.query.plant) {
         conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`);
       }
@@ -1179,7 +1179,7 @@ router.get('/order-import/master-view/item-history', requireImportViewAccess, as
     // so a barcode scanned only on another plant's part of this group can't leak through.
     const forcedPlants = (req as any).importViewPlants as string[] | null;
     const sessionConditions: any[] = [inArray(orderImportSessions.id, sessionIds)];
-    if (forcedPlants !== null) sessionConditions.push(sql`LOWER(${orderImportSessions.plant}) = ANY(${forcedPlants}::text[])`);
+    if (forcedPlants !== null) sessionConditions.push(inArray(sql`LOWER(${orderImportSessions.plant})`, forcedPlants as string[]));
     const allowedSessions = await db.select({ id: orderImportSessions.id })
       .from(orderImportSessions).where(and(...sessionConditions));
     const allowedSessionIds = allowedSessions.map((s) => s.id);

@@ -4493,6 +4493,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   apiRouter.get(
     "/proforma-slips/order/:orderNumber",
     async (req: Request, res: Response) => {
+      // Never let a reverse proxy (IIS ARR) or browser cache this — Print Operations refetches
+      // it right after Lock/Unlock to reflect the new state immediately; without this, a GET to
+      // the exact same URL moments later can be served a stale cached response instead of
+      // hitting the server again, so the button never updates until a hard page reload bypasses
+      // the cache by chance. Same fix already applied to order-import.ts/order-scan.ts.
+      res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.set("Pragma", "no-cache");
       try {
         if (!req.isAuthenticated || !req.isAuthenticated()) {
           return res.status(401).json({ message: "Not authenticated" });
@@ -8257,8 +8264,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  app.get("/api/plants", requirePageAccess("plant-management"), async (req, res) => {
+  // Shared across many pages/roles (Proforma Slips' plant picker, Overall Stock, Scan, Order
+  // Import, the PlantBadge display component) — not exclusive to the Plant Management page,
+  // so this is a plain login check, not a "plant-management" page-access check. Locking it to
+  // that specific page (as an earlier pass did) broke every other page's plant dropdown for
+  // any user without that specific grant.
+  app.get("/api/plants", async (req, res) => {
     try {
+      if (!req.isAuthenticated || !req.isAuthenticated()) {
+        return res.status(401).json({ message: "Not authenticated" });
+      }
       const allPlants = await storage.getAllPlants(); // You need to ensure this method exists in storage.ts
       res.json(allPlants);
     } catch (error) {

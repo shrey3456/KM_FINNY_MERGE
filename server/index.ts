@@ -82,6 +82,15 @@ app.use((req, res, next) => {
       ALTER TABLE order_scan_events
       ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0
     `);
+    // Flags a row as a system-generated credit transfer (see reconcileCredits) rather than a
+    // real scan, and points it back at the source Extra event it was transferred from — so
+    // voiding it can skip the stock reversal and give the qty back to the source instead of
+    // double-removing real stock.
+    await pool.query(`
+      ALTER TABLE order_scan_events
+      ADD COLUMN IF NOT EXISTS is_credit BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS credit_source_event_id INTEGER
+    `);
     // (Empty Box entries reuse order_scan_events' existing columns — sentinel barcode
     // 'EMPTY_BOX', count in total_qty, note in item_name — so no schema change is needed.)
 

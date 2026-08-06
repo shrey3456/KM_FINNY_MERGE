@@ -1773,16 +1773,12 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
 
 // ── POST /api/scan-sessions/reports/exchange-stock ───────────────────────────────────────────
 // Manual stock swap between two products at ONE plant — "this physical stock was actually
-// product B, not product A". Admin-only. No dedicated table: reuses the existing
-// stock_movements ledger with a new type ('exchange') instead of adding schema — two rows are
-// written (− on fromBarcode, + on toBarcode), which is also all the Scan History "Exchange"
-// filter reads from. Never touches order_scan_events, so existing scan history is untouched.
-router.post('/reports/exchange-stock', async (req: Request, res: Response) => {
-  const role = ((req.user as any)?.role ?? '').toLowerCase().trim();
-  if (!['admin', 'super-admin', 'billing'].includes(role)) {
-    return res.status(403).json({ message: 'Admin access required' });
-  }
-
+// product B, not product A". Admin, or anyone granted Write Access to the "overall-stock" page.
+// No dedicated table: reuses the existing stock_movements ledger with a new type ('exchange')
+// instead of adding schema — two rows are written (− on fromBarcode, + on toBarcode), which is
+// also all the Scan History "Exchange" filter reads from. Never touches order_scan_events, so
+// existing scan history is untouched.
+router.post('/reports/exchange-stock', requirePageWrite('overall-stock'), async (req: Request, res: Response) => {
   const fromBarcode = typeof req.body?.fromBarcode === 'string' ? req.body.fromBarcode.trim() : '';
   const toBarcode    = typeof req.body?.toBarcode   === 'string' ? req.body.toBarcode.trim()   : '';
   const plant        = typeof req.body?.plant       === 'string' ? req.body.plant.trim()       : '';
@@ -1800,9 +1796,9 @@ router.post('/reports/exchange-stock', async (req: Request, res: Response) => {
     return res.status(400).json({ message: 'removeQty and addQty must both be greater than 0' });
   }
 
-  // Plant scoping — a non-admin restricted to specific plants can't exchange stock at a plant
-  // they don't have access to (though this route is admin-only above, kept for defense in depth
-  // if the role check above is ever loosened).
+  // Plant scoping — requirePageWrite above only checks the "overall-stock" grant, not which
+  // plant(s) it applies to, so a non-admin restricted to specific plants still can't exchange
+  // stock at a plant they don't have access to.
   const allowedPlants = getUserPlants(req.user);
   if (allowedPlants !== null && !allowedPlants.includes(plant.toLowerCase())) {
     return res.status(403).json({ message: 'Access denied for this plant' });

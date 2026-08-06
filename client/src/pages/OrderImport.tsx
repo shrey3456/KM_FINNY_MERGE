@@ -198,10 +198,10 @@ export default function OrderImport() {
   const canWriteOrderImport = isAdminOrSuper || hasPageWriteAccess("order-import");
   const canDeleteOrderImport = canWriteOrderImport;
   // Complete is its own rule, unrelated to page write access: anyone can complete a part
-  // EXCEPT designations "Loader"/"Helper"/"Driver" (exact match) — those are operational
-  // roles who shouldn't be the ones deciding to close an order out. Mirrors Scan.tsx's
-  // canCompletePart and the server's requireCompleteAccess exactly.
-  const canCompleteOrder = isAdminOrSuper || !["loader", "helper", "driver"].includes(designation);
+  // EXCEPT designations "Loader"/"Helper"/"Driver"/"Scanner" (exact match) — those are
+  // operational roles who shouldn't be the ones deciding to close an order out. Mirrors
+  // Scan.tsx's canCompletePart and the server's requireCompleteAccess exactly.
+  const canCompleteOrder = isAdminOrSuper || !["loader", "helper", "driver", "scanner"].includes(designation);
   // The Edit (pencil) button on Available/Active rows is gated by its OWN page key —
   // "order-import-edit" — independent of Order Import's own access above, exactly as it was
   // when this lived on its own page. hasPageViewAccess just controls whether the button is
@@ -1465,16 +1465,18 @@ export default function OrderImport() {
                               <span className="inline-flex items-center bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">
                                 {s.rowCount}
                               </span>
-                              <Button size="sm"
-                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-full"
-                                disabled={loadForScanMutation.isPending || plantBusy || !canWriteOrderImport}
-                                title={!canWriteOrderImport ? "Write access required for Order Import" : plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
-                                onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
-                                {loadForScanMutation.isPending
-                                  ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                                  : <ScanLine className="h-3 w-3 mr-1" />}
-                                Load
-                              </Button>
+                              {canWriteOrderImport && (
+                                <Button size="sm"
+                                  className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-full"
+                                  disabled={loadForScanMutation.isPending || plantBusy}
+                                  title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
+                                  onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
+                                  {loadForScanMutation.isPending
+                                    ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                                    : <ScanLine className="h-3 w-3 mr-1" />}
+                                  Load
+                                </Button>
+                              )}
                               {canViewCsvEdit && (
                                 <Button size="sm" variant="ghost"
                                   className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e] rounded-full"
@@ -1483,15 +1485,16 @@ export default function OrderImport() {
                                   <Pencil className="h-3.5 w-3.5" />
                                 </Button>
                               )}
-                              <Button size="sm" variant="ghost"
-                                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30 rounded-full"
-                                disabled={!canDeleteOrderImport || deletePreviewMutation.isPending}
-                                title={!canDeleteOrderImport ? "Deleting a CSV is restricted to Admin" : undefined}
-                                onClick={(e) => { e.stopPropagation(); setDeleteTargetInfo({ plant: s.plant, orderDate: s.orderDate || todayStr }); deletePreviewMutation.mutate(s.id); }}>
-                                {deletePreviewMutation.isPending && deletePreviewMutation.variables === s.id
-                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                  : <Trash2 className="h-3.5 w-3.5" />}
-                              </Button>
+                              {canDeleteOrderImport && (
+                                <Button size="sm" variant="ghost"
+                                  className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30 rounded-full"
+                                  disabled={deletePreviewMutation.isPending}
+                                  onClick={(e) => { e.stopPropagation(); setDeleteTargetInfo({ plant: s.plant, orderDate: s.orderDate || todayStr }); deletePreviewMutation.mutate(s.id); }}>
+                                  {deletePreviewMutation.isPending && deletePreviewMutation.variables === s.id
+                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    : <Trash2 className="h-3.5 w-3.5" />}
+                                </Button>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -1610,18 +1613,22 @@ export default function OrderImport() {
                               <DropdownMenuItem onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
                                 <FileBarChart className="mr-2 h-3.5 w-3.5 text-gray-500" /> Reports
                               </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={deactivateMutation.isPending || !canWriteOrderImport}
-                                onClick={() => setDeactivateTarget(s.id)}
-                                className="text-amber-700 focus:text-amber-700">
-                                <StopCircle className="mr-2 h-3.5 w-3.5" /> Deactivate
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={completeMutation.isPending || !canCompleteOrder}
-                                onClick={() => setCompleteTarget(s.id)}
-                                className="text-green-700 focus:text-green-700">
-                                <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Complete
-                              </DropdownMenuItem>
+                              {canWriteOrderImport && (
+                                <DropdownMenuItem
+                                  disabled={deactivateMutation.isPending}
+                                  onClick={() => setDeactivateTarget(s.id)}
+                                  className="text-amber-700 focus:text-amber-700">
+                                  <StopCircle className="mr-2 h-3.5 w-3.5" /> Deactivate
+                                </DropdownMenuItem>
+                              )}
+                              {canCompleteOrder && (
+                                <DropdownMenuItem
+                                  disabled={completeMutation.isPending}
+                                  onClick={() => setCompleteTarget(s.id)}
+                                  className="text-green-700 focus:text-green-700">
+                                  <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Complete
+                                </DropdownMenuItem>
+                              )}
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </div>
@@ -1700,11 +1707,11 @@ export default function OrderImport() {
                           </Button>
                           {/* Only for the single most-recently-completed session per plant — an
                               accidental Complete click, not a general "reopen any history" tool. */}
-                          {lastCompletedIdByPlant.get((s.plant ?? "").toLowerCase())?.id === s.id && (
+                          {canWriteOrderImport && lastCompletedIdByPlant.get((s.plant ?? "").toLowerCase())?.id === s.id && (
                             <Button size="sm" variant="outline"
                               className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50 rounded-full"
-                              disabled={reopenMutation.isPending || !canWriteOrderImport}
-                              title={!canWriteOrderImport ? "Write access required for Order Import" : "Undo an accidental Complete — continue scanning this session"}
+                              disabled={reopenMutation.isPending}
+                              title="Undo an accidental Complete — continue scanning this session"
                               onClick={() => reopenMutation.mutate(s.id)}>
                               {reopenMutation.isPending && reopenMutation.variables === s.id
                                 ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" />
