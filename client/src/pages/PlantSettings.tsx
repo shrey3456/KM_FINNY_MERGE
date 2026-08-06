@@ -960,7 +960,7 @@ export default function PlantSettings() {
                     <Button
                       type="submit"
                       className="h-9 bg-[#001d6e] text-white hover:bg-[#00154b]"
-                      disabled={createMutation.isPending || updateMutation.isPending}
+                      disabled={createMutation.isPending || updateMutation.isPending || !canWrite}
                     >
                       {editingPlant ? "Update Plant" : "Create Plant"}
                     </Button>

@@ -98,12 +98,8 @@ const PrintOperations: React.FC = () => {
 
   const rawDepartment = String(currentUser?.department || '').trim().toLowerCase();
   const rawDesignation = String(currentUser?.designation || '').trim().toLowerCase();
-  
-  const isITDep= ['IT', 'information technology', 'it'].includes(rawDepartment);
-  const ismanagment = ['management', 'manager', 'head', 'director'].includes(rawDepartment);
-  // Department: Billing, Designation: Head
-  console.log(isITDep,ismanagment)
-  const canUnlockSlips = !isread && (isAdminOrSuper || isITDep || ismanagment || (rawDepartment === 'billing' && rawDesignation === 'head'));
+
+  const canUnlockSlips = isAdminOrSuper || hasPageWriteAccess("print-operations");
 
   // NEW: Get current user info and time for use in both print function and preview
   // CHANGED: Use Name instead of Role

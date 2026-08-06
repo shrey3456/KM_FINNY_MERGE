@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer } from 'http';
+import passport from 'passport';
 import { db, pool } from '../db';
 import {
   orderImportSessions, orderScanItems, orderScanEvents,
@@ -11,10 +12,17 @@ import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
 import { computeGroupReport, resolveGroupId, applyLiveScanStock, reverseLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
 import { requirePageWrite } from '../lib/pageAccess';
+import { sessionMiddleware } from '../auth';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
 function plantEq(filter: string) {
   return sql`LOWER(${orderImportSessions.plant}) = LOWER(${filter})`;
+}
+
+// Case-insensitive plant match against a user's assigned-plants list (already lowercased by
+// getUserPlants) — the multi-plant equivalent of plantEq above.
+function plantIn(filters: string[]) {
+  return sql`LOWER(${orderImportSessions.plant}) = ANY(${filters}::text[])`;
 }
 
 const router = Router();
@@ -72,8 +80,29 @@ export function initOrderScanWs(httpServer: HttpServer) {
         if (process.env.NODE_ENV === 'production') socket.destroy();
         return;
       }
-      wss.handleUpgrade(request, socket as any, head, (ws) => {
-        wss.emit('connection', ws, request);
+
+      // Require login for this connection — same baseline as every REST route on this page
+      // (requireScanRole: "any logged-in user"). The raw upgrade `request` never passes
+      // through Express's own app.use(session(...)) chain on its own, so it's replayed here
+      // by hand: session → passport.initialize → passport.session, then req.isAuthenticated().
+      // `fakeRes` only needs to survive express-session's internal res.end/getHeader/setHeader
+      // touches — no cookie is ever actually written back through this fake response, since
+      // login already happened over a normal HTTP request before the browser opens this socket.
+      if (!sessionMiddleware) { socket.destroy(); return; }
+      const fakeRes: any = { getHeader: () => undefined, setHeader: () => {}, end: () => {}, writeHead: () => {}, on: () => {} };
+      sessionMiddleware(request as any, fakeRes, () => {
+        passport.initialize()(request as any, fakeRes, () => {
+          passport.session()(request as any, fakeRes, () => {
+            const authedReq = request as any;
+            if (!authedReq.isAuthenticated || !authedReq.isAuthenticated()) {
+              socket.destroy();
+              return;
+            }
+            wss.handleUpgrade(request, socket as any, head, (ws) => {
+              wss.emit('connection', ws, request);
+            });
+          });
+        });
       });
     } catch {
       socket.destroy();
@@ -168,66 +197,52 @@ function requireScanRole(req: Request, res: Response, next: NextFunction) {
   next(); // any logged-in user may access scan routes; plant filtering handles the rest
 }
 
-// Mirrors the client's canCompletePart gate (Scan.tsx) — Complete Part and Manage Scans
-// (void a scan) are restricted to: admin/super-admin, or a user who BOTH has "scan-order"
-// granted via Allowed Pages AND has the Supervisor designation — either alone is not enough.
-function canCompleteOrVoidScan(user: any): boolean {
+// Mirrors the client's canCompletePart gate (Scan.tsx) — anyone can complete a part EXCEPT
+// designations "Loader"/"Helper"/"Driver" (exact match); admin/super-admin always allowed
+// regardless of designation.
+function canCompletePart(user: any): boolean {
   const role = (user?.role ?? '').toLowerCase().trim();
   if (['admin', 'super-admin'].includes(role)) return true;
   const designation = (user?.designation ?? '').toLowerCase().trim();
-  if (designation !== 'supervisor') return false;
-  let allowedPages: string[] = [];
-  try { allowedPages = JSON.parse(user?.allowedPages || '[]'); } catch { /* default [] */ }
-  return allowedPages.includes('scan-order');
+  return !['loader', 'helper', 'driver'].includes(designation);
 }
 
-function requireCompleteOrVoidAccess(req: Request, res: Response, next: NextFunction) {
+function requireCompleteAccess(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
-  if (!canCompleteOrVoidScan(req.user)) {
-    return res.status(403).json({ message: 'You do not have permission to complete or void scans.' });
+  if (!canCompletePart(req.user)) {
+    return res.status(403).json({ message: 'You do not have permission to complete this part.' });
   }
   next();
 }
 
 
-// Extract plant filter for dispatch users (fully case-insensitive).
-// All inputs are lowercased; DB comparisons use LOWER() via plantEq().
-//   role="Dispatch Valsad"              → "valsad"
-//   role="dispatch", dept="Valsad"      → "valsad"
-//   role="dispatch", dept="Dispatch Valsad" → "valsad"
-//   role="user",     dept="DISPATCH VALSAD" → "valsad"
-//   role="Admin"/"Billing"/"Super-Admin" → null (see all plants)
-// Strip "dispatch" prefix and bracket wrappers: "DISPATCH {VALSAD}" → "valsad"
-function extractPlant(s: string): string {
-  return s.toLowerCase().replace(/^dispatch[\s_-]*/i, '').replace(/[{}\[\]()]/g, '').trim();
-}
-
 const ADMIN_ROLES = ['admin', 'super-admin', 'billing'];
-const NON_PLANT_WORDS = new Set(['admin', 'super-admin', 'billing', 'user', 'dispatch', 'read', 'write', 'it', 'management', '']);
 
-export function getPlantFilter(user: any): string | null {
-  const role = (user?.role ?? '').toLowerCase().trim();
-  const dept = (user?.department ?? '').toLowerCase().trim();
-
-  // Admin roles see all plants — no filter
-  if (ADMIN_ROLES.includes(role)) return null;
-
-  // Any user: try to extract plant from department first, fall back to role
-  const fromDept = extractPlant(dept);
-  if (fromDept && !NON_PLANT_WORDS.has(fromDept)) return fromDept;
-
-  const fromRole = extractPlant(role);
-  if (fromRole && !NON_PLANT_WORDS.has(fromRole)) return fromRole;
-
-  return null;
+// Shared by every read-only /order-scan/sessions/:id/* route below: loads the session's
+// plant and checks it against the caller's own assigned plants (getUserPlants). The list
+// endpoints (/sessions, /active, /notification, /active-sessions) already filter by plant,
+// but these per-ID detail routes previously trusted whatever id was requested — a plant-
+// scoped user who already knows/guesses an id for a DIFFERENT plant could read its detail
+// data. Sends the 404/403 response itself and returns null so the caller just does
+// `if (!plant) return;`; returns the plant string when access is allowed.
+async function checkSessionPlantOrRespond(req: Request, res: Response, sessionId: number): Promise<string | null> {
+  const { rows } = await pool.query('SELECT plant FROM order_import_sessions WHERE id = $1', [sessionId]);
+  if (!rows[0]) { res.status(404).json({ message: 'Session not found' }); return null; }
+  const plant = rows[0].plant as string;
+  const userPlants = getUserPlants(req.user);
+  if (userPlants !== null && !userPlants.includes((plant ?? '').toLowerCase())) {
+    res.status(403).json({ message: 'Access denied for this plant' });
+    return null;
+  }
+  return plant;
 }
 
-// Which plant names a user may view, for plant-scoped pages (Overall Stock, Scan History).
-// Returns null for admin/super-admin/billing → "see ALL plants, no filter". Otherwise returns
-// the user's assigned plants from the Users page (users.plants JSON array), lowercased. Falls
-// back to the department-derived single plant (getPlantFilter) when no plants are assigned yet,
-// so existing dispatch users keep working before anyone edits their plant list. An empty array
-// (non-admin with nothing resolvable) means "see nothing" — safer than accidentally showing all.
+// Which plant names a user may view/act on — the single source of truth for plant access
+// across every page (Scan, Order Management, Overall Stock, Scan History). Returns null for
+// admin/super-admin/billing → "see ALL plants, no filter". Otherwise returns EXACTLY the
+// user's assigned plants from the Users page (users.plants JSON array), lowercased — no
+// fallback to guessing a plant from department/role text (e.g. "Dispatch Valsad") anymore.
+// An empty array (nothing assigned) means "see/do nothing" — fail closed, not fail open.
 export function getUserPlants(user: any): string[] | null {
   const role = (user?.role ?? '').toLowerCase().trim();
   if (ADMIN_ROLES.includes(role)) return null; // all plants
@@ -237,12 +252,9 @@ export function getUserPlants(user: any): string[] | null {
     const raw = user?.plants;
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (Array.isArray(parsed)) assigned = parsed.map((p) => String(p).toLowerCase().trim()).filter(Boolean);
-  } catch { /* fall through to department fallback */ }
+  } catch { /* default [] */ }
 
-  if (assigned.length > 0) return assigned;
-
-  const fallback = getPlantFilter(user); // department/role-derived single plant
-  return fallback ? [fallback.toLowerCase()] : [];
+  return assigned;
 }
 
 // Pick correct pallet size based on plant
@@ -563,14 +575,14 @@ router.get('/order-scan/sessions/:id/ws-status', (req: Request, res: Response) =
 // Scanner users: returns their plant's active session only.
 router.get('/order-scan/notification', async (req: Request, res: Response) => {
   try {
-    const plantFilter = getPlantFilter(req.user);
+    const userPlants = getUserPlants(req.user);
     const importedBy  = alias(users, 'imported_by');
 
     const conditions: any[] = [
       eq(orderImportSessions.scanStatus, 'active'),
       eq(orderImportSessions.isDeleted, false),
     ];
-    if (plantFilter) conditions.push(plantEq(plantFilter));
+    if (userPlants !== null) conditions.push(plantIn(userPlants));
 
     const [session] = await db
       .select({
@@ -605,19 +617,19 @@ router.get('/order-scan/notification', async (req: Request, res: Response) => {
 // user can see, not just the most-recently-activated one. Admin/billing (no plant
 // filter) can have simultaneously active sessions across different plants (e.g.
 // Valsad and Indore scanning at once) — this lets them switch between all of them
-// instead of only ever seeing whichever one is "on top". Dispatch/non-admin users
-// are still plant-scoped, so this returns the same 0-or-1 sessions they already see
-// via /notification — no behavior change for them.
+// instead of only ever seeing whichever one is "on top". A non-admin user assigned to
+// more than one plant on the Users page can now also see more than one active session
+// here — one per plant they're assigned to.
 router.get('/order-scan/active-sessions', async (req: Request, res: Response) => {
   try {
-    const plantFilter = getPlantFilter(req.user);
+    const userPlants = getUserPlants(req.user);
     const importedBy  = alias(users, 'imported_by');
 
     const conditions: any[] = [
       eq(orderImportSessions.scanStatus, 'active'),
       eq(orderImportSessions.isDeleted, false),
     ];
-    if (plantFilter) conditions.push(plantEq(plantFilter));
+    if (userPlants !== null) conditions.push(plantIn(userPlants));
 
     const sessions = await db
       .select({
@@ -646,17 +658,17 @@ router.get('/order-scan/active-sessions', async (req: Request, res: Response) =>
   }
 });
 
-// ── GET /api/order-scan/whoami — returns what plant the server sees for this user ──
+// ── GET /api/order-scan/whoami — returns what plants the server sees for this user ──
 router.get('/order-scan/whoami', (req: Request, res: Response) => {
-  const plant = getPlantFilter(req.user);
-  res.json({ role: (req.user as any)?.role, department: (req.user as any)?.department, plantFilter: plant });
+  const plants = getUserPlants(req.user);
+  res.json({ role: (req.user as any)?.role, department: (req.user as any)?.department, plants });
 });
 
 // ── GET /api/order-scan/active ───────────────────────────────────────────────
-// Returns the currently active session for the user's plant (or null).
+// Returns the currently active session for the user's plant(s) (or null).
 router.get('/order-scan/active', async (req: Request, res: Response) => {
   try {
-    const plantFilter = getPlantFilter(req.user);
+    const userPlants = getUserPlants(req.user);
     const importedBy  = alias(users, 'imported_by');
     const activatedBy = alias(users, 'activated_by');
 
@@ -664,7 +676,7 @@ router.get('/order-scan/active', async (req: Request, res: Response) => {
       eq(orderImportSessions.scanStatus, 'active'),
       eq(orderImportSessions.isDeleted, false),
     ];
-    if (plantFilter) conditions.push(plantEq(plantFilter));
+    if (userPlants !== null) conditions.push(plantIn(userPlants));
 
     const [session] = await db
       .select({
@@ -698,7 +710,21 @@ router.get('/order-scan/active', async (req: Request, res: Response) => {
 // Returns the list of STV codes configured for a given plant.
 router.get('/order-scan/stvs', async (req: Request, res: Response) => {
   try {
-    const plantName = String(req.query.plant ?? '').trim();
+    // A plant-restricted user may only request one of THEIR assigned plants — not trust the
+    // query string outright, which would let them fetch another plant's STV list. Admin (null)
+    // passes through whatever was requested. A restricted user with no ?plant= given defaults
+    // to their one assigned plant when they have exactly one; with 0 or 2+, they must specify.
+    const userPlants = getUserPlants(req.user);
+    const requested = String(req.query.plant ?? '').trim().toLowerCase();
+    let plantName: string;
+    if (userPlants === null) {
+      plantName = requested;
+    } else if (requested) {
+      if (!userPlants.includes(requested)) return res.status(403).json({ message: 'Access denied for this plant' });
+      plantName = requested;
+    } else {
+      plantName = userPlants.length === 1 ? userPlants[0] : '';
+    }
     if (!plantName) return res.json([]);
 
     const [plant] = await db.select().from(plants)
@@ -722,11 +748,20 @@ router.get('/order-scan/stvs', async (req: Request, res: Response) => {
 // ?date=YYYY-MM-DD filters to that day; defaults to today's sessions (last 48 h).
 router.get('/order-scan/sessions', async (req: Request, res: Response) => {
   try {
-    const userPlantFilter = getPlantFilter(req.user);
+    const userPlants = getUserPlants(req.user);
 
-    // Admin/billing can filter by plant via query param; dispatch uses their own plant
-    const queryPlant = req.query.plant ? String(req.query.plant).trim() : null;
-    const plantFilter = userPlantFilter ?? (queryPlant || null);
+    // Admin/billing (userPlants null) can filter by plant via query param, unrestricted
+    // otherwise. A restricted user is always confined to their assigned plants; ?plant= may
+    // narrow that down to just ONE of their plants if it's actually one of theirs, otherwise
+    // it's ignored and every plant they're assigned to is returned.
+    const queryPlant = req.query.plant ? String(req.query.plant).trim().toLowerCase() : null;
+    let plantCondition: any = null;
+    if (userPlants === null) {
+      if (queryPlant) plantCondition = plantEq(queryPlant);
+    } else {
+      const scoped = queryPlant && userPlants.includes(queryPlant) ? [queryPlant] : userPlants;
+      plantCondition = plantIn(scoped);
+    }
 
     // Date filter: compare the stored timestamp's date directly (server local time),
     // consistent with how order-import.ts filters. No timezone conversion needed.
@@ -787,7 +822,7 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
             eq(orderImportSessions.scanStatus, 'active'),
             eq(orderImportSessions.scanStatus, 'available'),
           ),
-          ...(plantFilter ? [plantEq(plantFilter)] : []),
+          ...(plantCondition ? [plantCondition] : []),
           ...(statusFilter ? [eq(orderImportSessions.scanStatus, statusFilter)] : []),
         ),
       )
@@ -801,8 +836,10 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
 
 // ── POST /api/order-scan/sessions/:id/activate ───────────────────────────────
 // Activates a session for scanning. Pre-populates orderScanItems from import items.
-// Only one active session per plant at a time.
-router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+// Only one active session per plant at a time. This is an Order Management page action
+// ("Load for Scan"), so it's gated by Write Access to "order-import" — not "scan-order",
+// which is reserved for the actual barcode-scanning actions on the Scan page itself.
+router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 
@@ -826,14 +863,23 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
       return res.status(409).json({ message: 'Session already completed' });
     }
 
+    // Plant ownership — a user restricted to specific plants (getUserPlants returns a non-
+    // null array) may only activate sessions belonging to one of THOSE plants. Admin/super-
+    // admin/billing (null = unrestricted) act on any plant, same as everywhere else on this page.
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes(session.plant.toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     // Plant-scoped advisory lock — closes a real race the row lock above does NOT: two
     // DIFFERENT sessions for the SAME plant being activated at the same instant lock two
     // different rows, so neither blocks the other, and both could read the conflict-check
     // below as "nothing active yet" before either commits. This serializes all /activate
     // calls for one plant so the second one always sees the first's committed row. Held for
-    // the transaction; released automatically on COMMIT/ROLLBACK.
-    const plantFilter = getPlantFilter(req.user);
-    const lockPlant = (plantFilter ?? session.plant).toLowerCase();
+    // the transaction; released automatically on COMMIT/ROLLBACK. Always the SESSION's own
+    // plant (not "the user's plant" — a user can now be assigned to several).
+    const lockPlant = session.plant.toLowerCase();
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockPlant]);
 
     // Check for a conflicting active session on the same plant (exclude deleted sessions)
@@ -841,7 +887,7 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
       `SELECT id, csv_file_name FROM order_import_sessions
        WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active'
          AND is_deleted = false AND id != $2`,
-      [plantFilter ?? session.plant, id],
+      [session.plant, id],
     );
     if (conflictResult.rows[0]) {
       const c = conflictResult.rows[0];
@@ -931,10 +977,21 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
 
 // ── POST /api/order-scan/sessions/:id/deactivate ─────────────────────────────
 // Releases the active lock without completing — allows another session to go active.
-router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+// Order Management page action — gated by "order-import" write access, same as activate.
+router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('order-import'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    const [session] = await db.select({ plant: orderImportSessions.plant })
+      .from(orderImportSessions)
+      .where(eq(orderImportSessions.id, id));
+    if (!session) return res.status(404).json({ message: 'Session not found' });
+
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((session.plant ?? '').toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     await db.update(orderImportSessions)
       .set({ scanStatus: 'available' })
       .where(eq(orderImportSessions.id, id));
@@ -946,10 +1003,19 @@ router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('scan-order'
 });
 
 // ── POST /api/order-scan/sessions/:id/complete ───────────────────────────────
-router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
+router.post('/order-scan/sessions/:id/complete', requireCompleteAccess, async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    const [ownerCheck] = await db.select({ plant: orderImportSessions.plant })
+      .from(orderImportSessions)
+      .where(eq(orderImportSessions.id, id));
+    if (!ownerCheck) return res.status(404).json({ message: 'Session not found' });
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((ownerCheck.plant ?? '').toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     // Raw pg query (not Drizzle's .update().set()) — Drizzle's timestamp column serializes
     // a JS Date via .toISOString() (UTC) before sending it, while raw pg sends the Date's
     // local (IST) wall-clock value. Every other timestamp write in this file (activate,
@@ -1023,8 +1089,10 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, as
 // this session auto-activated a next one, that session is demoted back to 'available' so this
 // one can retake the 'active' slot — but only if the auto-activated session has no scans of
 // its own yet; if it does, the admin needs to deal with that session directly instead of
-// having it silently pushed aside.
-router.post('/order-scan/sessions/:id/reopen', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
+// having it silently pushed aside. Order Management page action — gated by "order-import"
+// write access (not the Complete designation-blocklist rule; Reopen is the undo of an Order
+// Management click, not a scanning-floor decision).
+router.post('/order-scan/sessions/:id/reopen', requirePageWrite('order-import'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 
@@ -1042,6 +1110,11 @@ router.post('/order-scan/sessions/:id/reopen', requireCompleteOrVoidAccess, asyn
     if (!session) {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Session not found' });
+    }
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((session.plant ?? '').toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
     }
     if (session.scanStatus !== 'completed') {
       await client.query('ROLLBACK');
@@ -1115,6 +1188,7 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const items = await db.select().from(orderScanItems)
       .where(eq(orderScanItems.sessionId, id))
       .orderBy(asc(orderScanItems.id));
@@ -1165,6 +1239,7 @@ router.get('/order-scan/sessions/:id/group-credits', async (req: Request, res: R
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const groupId = await resolveGroupId(id);
     if (!groupId) return res.json({ credits: [], partIndex: null, totalParts: 0 });
 
@@ -1197,6 +1272,7 @@ router.get('/order-scan/sessions/:id/group-session-ids', async (req: Request, re
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const { rows } = await pool.query(
       `SELECT id FROM order_import_sessions
        WHERE is_deleted = false AND (
@@ -1336,6 +1412,13 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
       return res.status(404).json({ message: 'Session not found or has been deleted' });
     }
     const anchorSession = sessResult.rows[0];
+
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((anchorSession.plant ?? '').toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     const groupId = anchorSession.receivingSessionId ?? anchorSession.id;
 
     // Every part of the same FIFO group is scannable at once — this scan is resolved by
@@ -1564,6 +1647,7 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const { rows } = await pool.query(`
       SELECT
         COALESCE(ose.barcode, '')            AS barcode,
@@ -1590,6 +1674,7 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const events = await db.select().from(orderScanEvents)
       .where(eq(orderScanEvents.sessionId, id))
       .orderBy(desc(orderScanEvents.scannedAt))
@@ -1742,6 +1827,7 @@ router.get('/order-scan/sessions/:id/empty-boxes', async (req: Request, res: Res
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const { rows: entries } = await pool.query(
       `SELECT id, session_id AS "sessionId", total_qty AS quantity, ${EMPTY_BOX_NOTE_SQL} AS note,
               scanned_by_code AS "scannedByCode", scanned_by_name AS "scannedByName",
@@ -1775,10 +1861,14 @@ router.post('/order-scan/sessions/:id/empty-box', requirePageWrite('scan-order')
 
   try {
     const { rows: sessRows } = await pool.query(
-      `SELECT scan_status AS "scanStatus" FROM order_import_sessions WHERE id = $1 AND is_deleted = false`,
+      `SELECT scan_status AS "scanStatus", plant FROM order_import_sessions WHERE id = $1 AND is_deleted = false`,
       [id],
     );
     if (!sessRows[0]) return res.status(404).json({ message: 'Session not found or has been deleted' });
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((sessRows[0].plant ?? '').toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
     if (sessRows[0].scanStatus === 'completed') {
       return res.status(400).json({ message: 'This part is already completed — empty boxes can no longer be added.' });
     }
@@ -1815,6 +1905,18 @@ router.post('/order-scan/empty-box/:id/undo', requirePageWrite('scan-order'), as
   const userCode = (req.user as any)?.userCode ?? null;
 
   try {
+    const { rows: ownerRows } = await pool.query(
+      `SELECT ois.plant FROM order_scan_events ose
+       JOIN order_import_sessions ois ON ois.id = ose.session_id
+       WHERE ose.id = $1 AND ose.barcode = $2`,
+      [entryId, EMPTY_BOX_BARCODE],
+    );
+    if (!ownerRows[0]) return res.status(404).json({ message: 'Empty box entry not found or already removed' });
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((ownerRows[0].plant ?? '').toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     const { rows } = await pool.query(
       `UPDATE order_scan_events
        SET voided = true, voided_by_code = $1, voided_at = NOW()

@@ -255,7 +255,7 @@ function Router() {
         <ProtectedRoute path="/settings" component={Settings} requiredPage="settings" />
         <ProtectedRoute path="/plant-settings" component={PlantSettings} requiredPage="plant-management" />
         <ProtectedRoute path="/order-management" component={OrderManagement} requiredPage="order-management" />
-        <ProtectedRoute path="/order-import" component={OrderImport} requireOrderManagement={true} requiredPage="order-import" />
+        <ProtectedRoute path="/order-import" component={OrderImport} requiredPage="order-import" />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />
         <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />

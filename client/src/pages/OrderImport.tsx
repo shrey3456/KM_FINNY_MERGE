@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
-import { getCurrentUserPermissions, hasPageWriteAccess, hasPageViewAccess } from "../lib/permissions";
+import { hasPageWriteAccess, hasPageViewAccess } from "../lib/permissions";
 import {
   AlertCircle,
   CheckCircle,
@@ -188,30 +188,20 @@ export default function OrderImport() {
   const [, navigate] = useLocation();
   const { user } = useAuth();
   const role = ((user as any)?.role ?? "").toLowerCase();
-  const department = ((user as any)?.department ?? "").toLowerCase();
-  const userPermissions = getCurrentUserPermissions();
-  let allowedPagesList: string[] = [];
-  try { allowedPagesList = JSON.parse((user as any)?.allowedPages || "[]"); } catch { allowedPagesList = []; }
-  // Write access (below) implies read access, so it's included here too.
-  const isImportRole = ["admin", "super-admin"].includes(role)
-    || department === "billing"
-    || userPermissions.canAccessOrderManagement
-    || allowedPagesList.includes("order-import")
-    || hasPageWriteAccess("order-import");
-  // Separate from page VISIBILITY (isImportRole above) — this controls whether the
-  // currently-visible page's own write actions (Upload, Map & Import, Delete) are enabled.
-  // Admin/super-admin/billing always have write access (unchanged); anyone else needs
-  // admin to have explicitly granted "Order Import" in their Write Access on the
-  // User Management page.
-  const canWriteOrderImport = ["admin", "super-admin"].includes(role)
-    || department === "billing"
-    || hasPageWriteAccess("order-import");
-  // Deleting a CSV (with stock/scan rollback) is stricter than general Order Import write
-  // access — the server's DELETE/delete-preview routes require this exact admin/super-admin/
-  // billing set (requireAdmin in server/routes/order-import.ts), NOT hasPageWriteAccess, so a
-  // user only granted "Order Import" write access must not see an enabled delete button that
-  // would just 403.
-  const canDeleteOrderImport =canWriteOrderImport;
+  const designation = ((user as any)?.designation ?? "").toLowerCase().trim();
+  const isAdminOrSuper = ["admin", "super-admin"].includes(role);
+  // Page visibility and every write action (Upload, Replace CSV, Delete, Load for Scan,
+  // Deactivate, Reopen) now check ONE thing — the "Order Import" permission granted on the
+  // Users page — admin/super-admin bypass, nothing else. No more Billing-department special
+  // case, no more separate "Scan Order" permission requirement for Activate/Deactivate.
+  const isImportRole = isAdminOrSuper || hasPageViewAccess("order-import");
+  const canWriteOrderImport = isAdminOrSuper || hasPageWriteAccess("order-import");
+  const canDeleteOrderImport = canWriteOrderImport;
+  // Complete is its own rule, unrelated to page write access: anyone can complete a part
+  // EXCEPT designations "Loader"/"Helper"/"Driver" (exact match) — those are operational
+  // roles who shouldn't be the ones deciding to close an order out. Mirrors Scan.tsx's
+  // canCompletePart and the server's requireCompleteAccess exactly.
+  const canCompleteOrder = isAdminOrSuper || !["loader", "helper", "driver"].includes(designation);
   // The Edit (pencil) button on Available/Active rows is gated by its OWN page key —
   // "order-import-edit" — independent of Order Import's own access above, exactly as it was
   // when this lived on its own page. hasPageViewAccess just controls whether the button is
@@ -1477,8 +1467,8 @@ export default function OrderImport() {
                               </span>
                               <Button size="sm"
                                 className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-full"
-                                disabled={loadForScanMutation.isPending || plantBusy}
-                                title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
+                                disabled={loadForScanMutation.isPending || plantBusy || !canWriteOrderImport}
+                                title={!canWriteOrderImport ? "Write access required for Order Import" : plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
                                 onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
                                 {loadForScanMutation.isPending
                                   ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
@@ -1621,13 +1611,13 @@ export default function OrderImport() {
                                 <FileBarChart className="mr-2 h-3.5 w-3.5 text-gray-500" /> Reports
                               </DropdownMenuItem>
                               <DropdownMenuItem
-                                disabled={deactivateMutation.isPending}
+                                disabled={deactivateMutation.isPending || !canWriteOrderImport}
                                 onClick={() => setDeactivateTarget(s.id)}
                                 className="text-amber-700 focus:text-amber-700">
                                 <StopCircle className="mr-2 h-3.5 w-3.5" /> Deactivate
                               </DropdownMenuItem>
                               <DropdownMenuItem
-                                disabled={completeMutation.isPending}
+                                disabled={completeMutation.isPending || !canCompleteOrder}
                                 onClick={() => setCompleteTarget(s.id)}
                                 className="text-green-700 focus:text-green-700">
                                 <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Complete
@@ -1713,8 +1703,8 @@ export default function OrderImport() {
                           {lastCompletedIdByPlant.get((s.plant ?? "").toLowerCase())?.id === s.id && (
                             <Button size="sm" variant="outline"
                               className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50 rounded-full"
-                              disabled={reopenMutation.isPending}
-                              title="Undo an accidental Complete — continue scanning this session"
+                              disabled={reopenMutation.isPending || !canWriteOrderImport}
+                              title={!canWriteOrderImport ? "Write access required for Order Import" : "Undo an accidental Complete — continue scanning this session"}
                               onClick={() => reopenMutation.mutate(s.id)}>
                               {reopenMutation.isPending && reopenMutation.variables === s.id
                                 ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" />
@@ -2101,7 +2091,7 @@ export default function OrderImport() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-amber-600 text-white hover:bg-amber-700"
               onClick={() => deactivateTarget !== null && deactivateMutation.mutate(deactivateTarget)}
-              disabled={deactivateMutation.isPending}>
+              disabled={deactivateMutation.isPending || !canWriteOrderImport}>
               {deactivateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Deactivate"}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -2121,7 +2111,7 @@ export default function OrderImport() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-green-600 text-white hover:bg-green-700"
               onClick={() => completeTarget !== null && completeMutation.mutate(completeTarget)}
-              disabled={completeMutation.isPending}>
+              disabled={completeMutation.isPending || !canCompleteOrder}>
               {completeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Complete"}
             </AlertDialogAction>
           </AlertDialogFooter>

@@ -112,7 +112,7 @@ import orderImportEditRoutes from "./routes/order-import-edit";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
-import { requirePageWrite } from "./lib/pageAccess";
+import { requirePageWrite, requirePageAccess } from "./lib/pageAccess";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -223,6 +223,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Product endpoints
   apiRouter.get("/products", async (req: Request, res: Response) => {
     try {
+      // Shared across many pages/roles (Scan's Edit CSV search, Overall Stock's Exchange
+      // Product tool, Notion Inventory's admin-only table) — a plain login check, not an
+      // admin/page-specific one, since it's genuinely needed by non-admin users too.
+      if (!req.isAuthenticated || !req.isAuthenticated()) {
+        return res.status(401).json({ message: "Not authenticated" });
+      }
       console.log("Received request for products list");
 
       // Check if "all" parameter is present to return all products
@@ -4488,6 +4494,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/proforma-slips/order/:orderNumber",
     async (req: Request, res: Response) => {
       try {
+        if (!req.isAuthenticated || !req.isAuthenticated()) {
+          return res.status(401).json({ message: "Not authenticated" });
+        }
         const orderNumber = req.params.orderNumber;
         if (!orderNumber) {
           return res.status(400).json({ message: "Order number is required" });
@@ -4727,6 +4736,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.delete(
     "/proforma-slips/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -4796,6 +4806,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Proforma Slip Items endpoints
   apiRouter.post(
     "/proforma-slips/:slipId/items",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         const slipId = parseInt(req.params.slipId);
@@ -4896,6 +4907,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.put(
     "/proforma-slip-items/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         console.time("updateProformaSlipItem");
@@ -4961,6 +4973,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.delete(
     "/proforma-slip-items/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         console.time("deleteProformaSlipItem");
@@ -5023,6 +5036,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Optimized batch update endpoint for proforma slip items
   apiRouter.post(
     "/proforma-slip-items/batch-update",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       console.log(
         `Batch update request received for ${req.body.items?.length || 0} items`,
@@ -8243,7 +8257,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  app.get("/api/plants", async (req, res) => {
+  app.get("/api/plants", requirePageAccess("plant-management"), async (req, res) => {
     try {
       const allPlants = await storage.getAllPlants(); // You need to ensure this method exists in storage.ts
       res.json(allPlants);
@@ -8253,18 +8267,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Create a new plant
-  app.post("/api/plants", async (req, res) => {
+  app.post("/api/plants", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const data = insertPlantSchema.parse(req.body);
       const newPlant = await storage.createPlant(data); // Ensure this method exists in storage.ts
       res.status(201).json(newPlant);
@@ -8274,18 +8278,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Update a plant
-  app.put("/api/plants/:id", async (req, res) => {
+  app.put("/api/plants/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       const data = insertPlantSchema.parse(req.body);
       const updatedPlant = await storage.updatePlant(id, data); // Ensure this method exists
@@ -8296,18 +8290,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Delete a plant
-  app.delete("/api/plants/:id", async (req, res) => {
+  app.delete("/api/plants/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       await storage.deletePlant(id); // Ensure this method exists
       res.json({ success: true });
@@ -8316,7 +8300,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/plants/:id/stvs", async (req, res) => {
+  app.get("/api/plants/:id/stvs", requirePageAccess("plant-management"), async (req, res) => {
     try {
       const plantId = parseInt(req.params.id);
       if (Number.isNaN(plantId)) {
@@ -8329,18 +8313,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/plants/:id/stvs", async (req, res) => {
+  app.post("/api/plants/:id/stvs", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const plantId = parseInt(req.params.id);
       if (Number.isNaN(plantId)) {
         return res.status(400).json({ message: "Invalid plant id" });
@@ -8362,18 +8336,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.put("/api/plant-stvs/:id", async (req, res) => {
+  app.put("/api/plant-stvs/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       if (Number.isNaN(id)) {
         return res.status(400).json({ message: "Invalid STV id" });
@@ -8392,18 +8356,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.delete("/api/plant-stvs/:id", async (req, res) => {
+  app.delete("/api/plant-stvs/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       if (Number.isNaN(id)) {
         return res.status(400).json({ message: "Invalid STV id" });

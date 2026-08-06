@@ -3,7 +3,7 @@ import { db, pool } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
 import { eq, desc, and, sql, inArray, asc } from 'drizzle-orm';
 import { addSseClient, removeSseClient, broadcastOrderImportUpdate } from '../lib/importEvents';
-import { seedAndActivateSession, seedSessionItems, sweepStaleCompletions, getPlantFilter, broadcastSessionDeleted, autoActivateNextInScope } from './order-scan';
+import { seedAndActivateSession, seedSessionItems, sweepStaleCompletions, getUserPlants, broadcastSessionDeleted, autoActivateNextInScope } from './order-scan';
 import { computeGroupReport, resolveGroupId, computePartReport, reconcileCredits } from '../lib/orderGroupReport';
 import { remapDeletedSessionScans } from '../lib/orderScanRemap';
 import { storage } from '../storage';
@@ -23,36 +23,36 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// Write access to the Order Import page's own actions (upload, delete) — admin/billing
-// always pass (unchanged from before), OR any user admin has explicitly granted write
-// access to this specific page via pageWriteAccess on the User Management page. This is
-// additive: it never removes access anyone already had, only opens a new path for
-// non-admin users who've been granted write on "order-import" specifically.
+// Write access to the Order Import page's own actions (upload, replace CSV, delete) —
+// admin/super-admin bypass, otherwise it only checks Write Access to "order-import" granted
+// on the Users page. No more department/role special-casing (Billing role no longer bypasses
+// this on its own — grant Write Access to "order-import" instead).
 function requireOrderImportWrite(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
   const role = ((req.user as any)?.role ?? '').toLowerCase();
-  if (IMPORT_ADMIN_ROLES.includes(role)) return next();
+  if (['admin', 'super-admin'].includes(role)) return next();
   let writable: string[] = [];
   try { writable = JSON.parse((req.user as any)?.pageWriteAccess || '[]'); } catch { /* default [] */ }
   if (writable.includes('order-import')) return next();
   return res.status(403).json({ message: 'Write access required for Order Import' });
 }
 
-// Read-only access to Master View / Separate CSVs — admin/billing see everything; a
-// dispatch user (role/department resolves to a plant via getPlantFilter) can view too, but
-// every route using this middleware forces the query to THAT plant only, ignoring/overriding
-// whatever ?plant= was requested, so dispatch can never read another plant's data. Anyone
-// authenticated but with no resolvable admin role or plant is denied.
+// Read-only access to Master View / Separate CSVs — admin/billing see everything; anyone
+// else is scoped to their assigned plants (users.plants on the Users page, via
+// getUserPlants — a real list, not guessed from department/role text). Every route using
+// this middleware forces the query to THOSE plants only, ignoring/overriding whatever
+// ?plant= was requested, so a restricted user can never read another plant's data. Someone
+// with no plants assigned is denied entirely — fail closed, not fail open.
 function requireImportViewAccess(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
   const role = ((req.user as any)?.role ?? '').toLowerCase();
   if (IMPORT_ADMIN_ROLES.includes(role)) {
-    (req as any).importViewPlant = null; // null = no forced scope, sees all plants
+    (req as any).importViewPlants = null; // null = no forced scope, sees all plants
     return next();
   }
-  const plantFilter = getPlantFilter(req.user);
-  if (plantFilter) {
-    (req as any).importViewPlant = plantFilter;
+  const userPlants = getUserPlants(req.user);
+  if (userPlants && userPlants.length > 0) {
+    (req as any).importViewPlants = userPlants;
     return next();
   }
   return res.status(403).json({ message: 'Access required' });
@@ -93,8 +93,8 @@ router.get('/order-import/stream', requireAdmin, (req: Request, res: Response) =
 });
 
 // GET /api/order-import/sessions?page=1&pageSize=10&date=YYYY-MM-DD
-// Admin/billing may filter by any plant via ?plant=; a dispatch user gets that param
-// ignored and forced to their own plant (importViewPlant, set by requireImportViewAccess).
+// Admin/billing may filter by any plant via ?plant=; a restricted user gets that param
+// ignored and forced to their assigned plants (importViewPlants, set by requireImportViewAccess).
 router.get('/order-import/sessions', requireImportViewAccess, async (req, res) => {
   try {
     const page     = Math.max(1, parseInt(String(req.query.page     ?? '1')));
@@ -108,9 +108,9 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
       ? eq(orderImportSessions.orderDate, String(req.query.date))
       : null;
 
-    const forcedPlant = (req as any).importViewPlant as string | null;
-    const plantCondition = forcedPlant
-      ? sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`
+    const forcedPlants = (req as any).importViewPlants as string[] | null;
+    const plantCondition = forcedPlants
+      ? sql`LOWER(${orderImportSessions.plant}) = ANY(${forcedPlants}::text[])`
       : req.query.plant
       ? sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`
       : null;
@@ -174,8 +174,16 @@ router.get('/order-import/sessions/date-check', requireImportViewAccess, async (
     const date = String(req.query.date ?? '').trim();
     if (!date) return res.status(400).json({ message: 'date is required' });
 
-    const forcedPlant = (req as any).importViewPlant as string | null;
-    const plant = forcedPlant || String(req.query.plant ?? '').trim();
+    const forcedPlants = (req as any).importViewPlants as string[] | null;
+    const requestedPlant = String(req.query.plant ?? '').trim();
+    let plant: string;
+    if (forcedPlants === null) {
+      plant = requestedPlant;
+    } else if (requestedPlant && forcedPlants.includes(requestedPlant.toLowerCase())) {
+      plant = requestedPlant;
+    } else {
+      plant = forcedPlants.length === 1 ? forcedPlants[0] : '';
+    }
     if (!plant) return res.status(400).json({ message: 'plant is required' });
 
     const { rows } = await pool.query(
@@ -449,15 +457,15 @@ router.get('/order-import/sessions/:id/items', requireImportViewAccess, async (r
   try {
     const id = parseInt(req.params.id);
 
-    // A dispatch user (importViewPlant set) may only read items for a session that
-    // belongs to their own plant — this route has no ?plant= param to force, so verify
-    // by looking the session up first.
-    const forcedPlant = (req as any).importViewPlant as string | null;
-    if (forcedPlant) {
+    // A restricted user (importViewPlants set) may only read items for a session that
+    // belongs to one of their assigned plants — this route has no ?plant= param to force,
+    // so verify by looking the session up first.
+    const forcedPlants = (req as any).importViewPlants as string[] | null;
+    if (forcedPlants !== null) {
       const [session] = await db.select({ plant: orderImportSessions.plant })
         .from(orderImportSessions)
         .where(eq(orderImportSessions.id, id));
-      if (!session || session.plant.toLowerCase() !== forcedPlant.toLowerCase()) {
+      if (!session || !forcedPlants.includes(session.plant.toLowerCase())) {
         return res.status(403).json({ message: 'Access required' });
       }
     }
@@ -521,12 +529,12 @@ router.get('/order-import/sessions/:id/group-report', requireImportViewAccess, a
 
     // Same plant-ownership check as GET .../items — a dispatch user may only pull the
     // report for a group whose parts belong to their own plant.
-    const forcedPlant = (req as any).importViewPlant as string | null;
-    if (forcedPlant) {
+    const forcedPlants = (req as any).importViewPlants as string[] | null;
+    if (forcedPlants !== null) {
       const [session] = await db.select({ plant: orderImportSessions.plant })
         .from(orderImportSessions)
         .where(eq(orderImportSessions.id, id));
-      if (!session || session.plant.toLowerCase() !== forcedPlant.toLowerCase()) {
+      if (!session || !forcedPlants.includes(session.plant.toLowerCase())) {
         return res.status(403).json({ message: 'Access required' });
       }
     }
@@ -551,12 +559,12 @@ router.get('/order-import/sessions/:id/part-report', requireImportViewAccess, as
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 
-    const forcedPlant = (req as any).importViewPlant as string | null;
-    if (forcedPlant) {
+    const forcedPlants = (req as any).importViewPlants as string[] | null;
+    if (forcedPlants !== null) {
       const [session] = await db.select({ plant: orderImportSessions.plant })
         .from(orderImportSessions)
         .where(eq(orderImportSessions.id, id));
-      if (!session || session.plant.toLowerCase() !== forcedPlant.toLowerCase()) {
+      if (!session || !forcedPlants.includes(session.plant.toLowerCase())) {
         return res.status(403).json({ message: 'Access required' });
       }
     }
@@ -578,12 +586,12 @@ router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, 
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 
-    const forcedPlant = (req as any).importViewPlant as string | null;
-    if (forcedPlant) {
+    const forcedPlants = (req as any).importViewPlants as string[] | null;
+    if (forcedPlants !== null) {
       const [session] = await db.select({ plant: orderImportSessions.plant })
         .from(orderImportSessions)
         .where(eq(orderImportSessions.id, id));
-      if (!session || session.plant.toLowerCase() !== forcedPlant.toLowerCase()) {
+      if (!session || !forcedPlants.includes(session.plant.toLowerCase())) {
         return res.status(403).json({ message: 'Access required' });
       }
     }
@@ -641,7 +649,7 @@ router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, 
 });
 
 // PUT /api/order-import/sessions/:id  — replace all items (re-import with new CSV)
-router.put('/order-import/sessions/:id', requireAdmin, async (req: Request, res: Response) => {
+router.put('/order-import/sessions/:id', requireOrderImportWrite, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
@@ -718,9 +726,10 @@ async function getSessionScanCounts(
   };
 }
 
-// GET /api/order-import/sessions/:id/delete-preview — Admin-only. Powers the delete
-// confirmation dialog's "N items already scanned against this file..." warning.
-router.get('/order-import/sessions/:id/delete-preview', requireAdmin, async (req: Request, res: Response) => {
+// GET /api/order-import/sessions/:id/delete-preview — Powers the delete confirmation
+// dialog's "N items already scanned against this file..." warning. Same gate as the delete
+// itself (requireOrderImportWrite) so previewing and actually deleting agree on who's allowed.
+router.get('/order-import/sessions/:id/delete-preview', requireOrderImportWrite, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const { rows: sessRows } = await pool.query(
@@ -762,7 +771,7 @@ router.get('/order-import/sessions/:id/delete-preview', requireAdmin, async (req
 //     void its scan events, reset its scan items to pending (so it leaves Master View/reports),
 //     and mark it resolved (remapped_to_session_id = self) so the NEXT upload is treated as a
 //     brand-new file rather than inheriting this deleted CSV's slot and scans.
-router.delete('/order-import/sessions/:id', requireAdmin, async (req: Request, res: Response) => {
+router.delete('/order-import/sessions/:id', requireOrderImportWrite, async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   const userCode = (req.user as any)?.userCode ?? null;
   const userName = (req.user as any)?.name ?? null;
@@ -930,17 +939,17 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
   try {
     const dateStr = String(req.query.date ?? '');
     const sessionIdsParam = String(req.query.sessionIds ?? '').trim();
-    // A dispatch user (importViewPlant set) is always forced to their own plant, whichever
-    // mode is used below — in sessionIds mode this just adds an extra AND so any session
-    // outside their plant silently drops out rather than being denied entirely.
-    const forcedPlant = (req as any).importViewPlant as string | null;
+    // A restricted user (importViewPlants set) is always forced to their assigned plants,
+    // whichever mode is used below — in sessionIds mode this just adds an extra AND so any
+    // session outside their plants silently drops out rather than being denied entirely.
+    const forcedPlants = (req as any).importViewPlants as string[] | null;
 
     let conditions: any[];
     if (sessionIdsParam) {
       const ids = sessionIdsParam.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
       if (ids.length === 0) return res.status(400).json({ message: 'sessionIds must be a comma-separated list of numbers' });
       conditions = [eq(orderImportSessions.isDeleted, false), inArray(orderImportSessions.id, ids)];
-      if (forcedPlant) conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`);
+      if (forcedPlants !== null) conditions.push(sql`LOWER(${orderImportSessions.plant}) = ANY(${forcedPlants}::text[])`);
     } else if (dateStr) {
       // Matches the ORDER DATE chosen at upload — the same value FIFO grouping keys on — not
       // the day the file happened to be uploaded. Using created_at here meant a CSV uploaded on
@@ -951,8 +960,8 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         eq(orderImportSessions.isDeleted, false),
         eq(orderImportSessions.orderDate, dateStr),
       ];
-      if (forcedPlant) {
-        conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`);
+      if (forcedPlants !== null) {
+        conditions.push(sql`LOWER(${orderImportSessions.plant}) = ANY(${forcedPlants}::text[])`);
       } else if (req.query.plant) {
         conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`);
       }
@@ -1166,11 +1175,11 @@ router.get('/order-import/master-view/item-history', requireImportViewAccess, as
       return res.status(400).json({ message: 'sessionIds must be a comma-separated list of numbers' });
     }
 
-    // Dispatch users are forced to their own plant — narrow the session set to it so a barcode
-    // scanned only on another plant's part of this group can't leak through.
-    const forcedPlant = (req as any).importViewPlant as string | null;
+    // Restricted users are forced to their assigned plants — narrow the session set to those
+    // so a barcode scanned only on another plant's part of this group can't leak through.
+    const forcedPlants = (req as any).importViewPlants as string[] | null;
     const sessionConditions: any[] = [inArray(orderImportSessions.id, sessionIds)];
-    if (forcedPlant) sessionConditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${forcedPlant})`);
+    if (forcedPlants !== null) sessionConditions.push(sql`LOWER(${orderImportSessions.plant}) = ANY(${forcedPlants}::text[])`);
     const allowedSessions = await db.select({ id: orderImportSessions.id })
       .from(orderImportSessions).where(and(...sessionConditions));
     const allowedSessionIds = allowedSessions.map((s) => s.id);

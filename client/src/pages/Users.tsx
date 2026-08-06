@@ -403,7 +403,7 @@ const Users = () => {
 
   const [designations, setDesignations] = useState<string[]>([
     "DIRECTOR", "MANAGER", "ASST. MANAGER", "HEAD", "ASSISTANT", "STAFF",
-    "HELPER", "SUPERVISOR", "STOREKEEPER", "LOADER", "DRIVER"
+    "HELPER", "SUPERVISOR", "STOREKEEPER", "LOADER", "DRIVER", "SCANNER"
   ]);
   const [customDesignation, setCustomDesignation] = useState("");
   const [isAddingDesignation, setIsAddingDesignation] = useState(false);
