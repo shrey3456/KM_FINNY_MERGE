@@ -1780,24 +1780,25 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     }
     return merged;
   })();
-  // Whatever was scanned most recently floats straight to the top, same as the Scan tab — no
-  // status check: partial, completing, or extra-on-an-already-received row all float the same
-  // way. A scan just made on THIS device always outranks pure server data (osScanSeqRef's
-  // monotonic counter is set the instant the optimistic update lands, before the server
-  // round-trip even returns); once that local signal is gone (session change, or the scan
-  // happened on a different device/kiosk, or the page was reloaded), the server's own
-  // lastScannedAt takes over so the order is still correct. A row never touched at all keeps
-  // its original merge order (Array.prototype.sort is stable).
+  // Recently-scanned items float to the top — and crucially the SAME order is visible to every
+  // user/device, not just this browser. Two tiers:
+  //   1. Items I scanned this session sort first, newest local scan on top (instant feedback via
+  //      the client seq map, before the server round-trip lands).
+  //   2. Everything else falls back to the server's shared lastScannedAt — so a scan on ANY other
+  //      device also floats that item up here once it refetches. Two server timestamps compare
+  //      safely against each other (same IST-as-UTC convention); we never mix the optimistic
+  //      client value in, because any item I scanned is already handled by tier 1.
+  // Same rule + same barcode-keyed maps as the Scan tab, so both tables show the same order. A
+  // stable sort (return 0 for untouched pairs) leaves never-scanned rows exactly where they were.
   const mvRecencySort = (a: MvMergedItem, b: MvMergedItem) => {
     const seq = osScanSeqRef.current.byBarcode;
     const aSeq = seq.get(normalize(a.barcode)) ?? 0;
     const bSeq = seq.get(normalize(b.barcode)) ?? 0;
-    const aServer = a._lastScannedAt ? new Date(a._lastScannedAt).getTime() : 0;
-    const bServer = b._lastScannedAt ? new Date(b._lastScannedAt).getTime() : 0;
-    const LOCAL_SCAN_OFFSET = 1e15; // dwarfs any real timestamp, so a local seq always wins
-    const aRank = aSeq > 0 ? LOCAL_SCAN_OFFSET + aSeq : aServer;
-    const bRank = bSeq > 0 ? LOCAL_SCAN_OFFSET + bSeq : bServer;
-    return bRank - aRank;
+    if (aSeq !== bSeq) return bSeq - aSeq;
+    const aT = a._lastScannedAt ? new Date(a._lastScannedAt).getTime() : 0;
+    const bT = b._lastScannedAt ? new Date(b._lastScannedAt).getTime() : 0;
+    if (aT !== bT) return bT - aT;
+    return 0;
   };
   const filtMvItems = mvSearch
     ? allMvItems
@@ -2200,24 +2201,20 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         )
       : osItems
     ).slice().sort((a, b) => {
-      // Whatever was scanned most recently THIS session floats straight to the top, regardless
-      // of complete/partial/pending status — no more "received rows group at the top first"
-      // bucketing. Once that local signal is gone (page reload, which clears osScanSeqRef, or
-      // the scan happened on a different device/kiosk), fall back to the server's own
-      // lastScannedAt instead of dropping back to original CSV order — mirrors mvRecencySort
-      // above, which already did this; this list hadn't caught up, so a just-scanned row could
-      // silently lose its "recent" spot on refresh. A row never scanned at all (no seq, no
-      // lastScannedAt) keeps its original CSV order.
-      const seq = osScanSeqRef.current.byId;
-      const aSeq = seq.get(a.id) ?? 0;
-      const bSeq = seq.get(b.id) ?? 0;
-      const aServer = a.lastScannedAt ? new Date(a.lastScannedAt).getTime() : 0;
-      const bServer = b.lastScannedAt ? new Date(b.lastScannedAt).getTime() : 0;
-      const LOCAL_SCAN_OFFSET = 1e15; // dwarfs any real timestamp, so a local seq always wins
-      const aRank = aSeq > 0 ? LOCAL_SCAN_OFFSET + aSeq : aServer;
-      const bRank = bSeq > 0 ? LOCAL_SCAN_OFFSET + bSeq : bServer;
-      if (aRank !== bRank) return bRank - aRank;
-      return a.id - b.id;
+      // Same two-tier recency rule as Master View (see mvRecencySort), keyed by BARCODE so both
+      // tables show the same order: (1) items I scanned this session float first (instant, via
+      // the client seq map); (2) everything else falls back to the server's shared lastScannedAt
+      // so a scan on ANY device also floats the item up for everyone. Two server timestamps
+      // compare safely; my own scanned items never reach tier 2, so the optimistic client value
+      // (different tz convention) is never mixed in. Stable for never-scanned rows (return 0).
+      const seq = osScanSeqRef.current.byBarcode;
+      const aSeq = seq.get(normalize(a.barcode ?? "")) ?? 0;
+      const bSeq = seq.get(normalize(b.barcode ?? "")) ?? 0;
+      if (aSeq !== bSeq) return bSeq - aSeq;
+      const aT = a.lastScannedAt ? new Date(a.lastScannedAt).getTime() : 0;
+      const bT = b.lastScannedAt ? new Date(b.lastScannedAt).getTime() : 0;
+      if (aT !== bT) return bT - aT;
+      return 0;
     });
     // Counts toward the "received" tally once scanned qty PLUS any cross-part credit is above
     // zero — a partially-scanned line (short of expected) still counts here even though its
