@@ -291,16 +291,20 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
       }
     }
 
-    // A brand-new order can't be created for a date that has already passed — but adding a
-    // LATE PART to an order that already exists is allowed, otherwise a multi-day delivery
-    // could never receive its remaining CSVs once its order date rolled by. Enforced here (not
-    // just via the date picker) since a min= attribute is trivially bypassed.
+    // A brand-new order can't be created for a date further back than 2 days ago (covers
+    // yesterday and the day before, for a CSV that's a day or two late reaching the desk) — but
+    // adding a LATE PART to an order that already exists is allowed regardless of how old it is,
+    // otherwise a multi-day delivery could never receive its remaining CSVs once its order date
+    // rolled by. Enforced here (not just via the date picker's min=) since that's trivially
+    // bypassed.
     if (!joinedExistingGroup) {
       const now = new Date();
-      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      if (normOrderDate < today) {
+      const twoDaysAgo = new Date(now);
+      twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+      const earliestAllowed = `${twoDaysAgo.getFullYear()}-${String(twoDaysAgo.getMonth() + 1).padStart(2, '0')}-${String(twoDaysAgo.getDate()).padStart(2, '0')}`;
+      if (normOrderDate < earliestAllowed) {
         return res.status(400).json({
-          message: `Order Date cannot be in the past for a new order (got ${normOrderDate}, today is ${today}). Adding a part to an existing order for that date is allowed.`,
+          message: `Order Date cannot be more than 2 days in the past for a new order (got ${normOrderDate}, earliest allowed is ${earliestAllowed}). Adding a part to an existing order for that date is allowed.`,
         });
       }
     }

@@ -269,6 +269,10 @@ export default function OrderImport() {
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
+  // A brand-new order's date can be up to 2 days in the past (yesterday, day-before-yesterday)
+  // — matches the server's own allowance in POST /order-import/sessions. Used as both the date
+  // picker's min= and the threshold below for when the past-date existing-order check kicks in.
+  const earliestOrderDateStr = getLocalISODate(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
   const [pageSize, setPageSize] = useState(10);
   const [currentPage, setCurrentPage] = useState(1);
   const [filterDate, setFilterDate] = useState("");
@@ -333,11 +337,12 @@ export default function OrderImport() {
     placeholderData: (previousData) => previousData,
   });
 
-  // Warns before a brand-new order gets a past Order Date (the server only accepts a past
-  // date when it's a late part joining/reclaiming an existing group for that exact
-  // plant+date — never for a genuinely new one). Only runs once both fields are filled and
-  // the date is actually in the past, so it never fires for the normal today-or-later case.
-  const isPastOrderDate = !!orderDate && orderDate < todayStr;
+  // Warns before a brand-new order gets an Order Date more than 2 days in the past (the server
+  // only accepts one that far back when it's a late part joining/reclaiming an existing group
+  // for that exact plant+date — never for a genuinely new one). Only runs once both fields are
+  // filled and the date is actually past the allowance, so it never fires for today, yesterday,
+  // or the day before.
+  const isPastOrderDate = !!orderDate && orderDate < earliestOrderDateStr;
   const pastDateCheckQuery = useQuery<{ exists: boolean }>({
     queryKey: ["/api/order-import/sessions/date-check", plant, orderDate],
     queryFn: async () =>
@@ -1212,7 +1217,7 @@ export default function OrderImport() {
                     sets orderDate via state and so isn't affected by this min. The
                     pastDateCheckQuery/isPastDateBlocked warning below stays as a second line of
                     defense against a manually typed-in past date slipping past the picker. */}
-                <Input type="date" min={todayStr} className={`h-10 text-sm w-full rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                <Input type="date" min={earliestOrderDateStr} className={`h-10 text-sm w-full rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 {isPastDateBlocked && (
                   <p className="text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
                 )}
@@ -1272,7 +1277,7 @@ export default function OrderImport() {
                 </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs font-medium text-gray-600">Order Date</Label>
-                  <Input type="date" min={todayStr} className={`h-11 w-full text-sm px-2 rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                  <Input type="date" min={earliestOrderDateStr} className={`h-11 w-full text-sm px-2 rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 </div>
                 {isPastDateBlocked && (
                   <p className="col-span-2 text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>

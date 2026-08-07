@@ -360,7 +360,6 @@ export default function ScanOrderPage() {
   // buttons — a button press doesn't carry the same "gesture went one way, screen went another"
   // mismatch that makes continuous swipe/wheel scrolling feel disorienting.
   const osTabBodyScrollRef = useRef<HTMLDivElement>(null);
-  const osCsvListScrollRef = useRef<HTMLDivElement>(null);
 
   function ScrollNudgeButtons({ targetRef, amount = 240, className = "", large = false }: {
     targetRef: React.RefObject<HTMLElement>; amount?: number; className?: string; large?: boolean;
@@ -3079,7 +3078,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       <p className="text-xs text-blue-200">{osDoneCount} received</p>
                     </div>
                     <div className="ml-auto flex items-center gap-2">
-                      {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-white/70" />}
                       <button
                         onClick={() => setOsSearchOpen(true)}
                         title="Search items"
@@ -3185,20 +3183,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </div>
                   )}
                   {/* 480px and up, landscape orientation, and always when rotated: the table.
-                      The bounded max-h + disabled vertical scroll stays rotated-only — a CSS
-                      rotation swaps which axis native scroll moves on (see the
-                      ScrollNudgeButtons comment above), so kiosk mode replaces it with the
-                      nudge buttons; normal mobile (including a hand-rotated phone in landscape)
-                      just scrolls the page vertically as usual, with only the wide table itself
-                      scrolling horizontally. */}
-                  <div
-                    ref={osCsvListScrollRef}
-                    className={
-                      bigView ? "max-h-[420px] overflow-x-auto overflow-y-hidden"
-                        : "hidden overflow-x-auto min-[480px]:block landscape:block"
-                    }
-                  >
-                  <table className="min-w-[640px] w-full border-collapse text-sm">
+                      Matches Master View's table treatment exactly — no bounded max-height or
+                      independent scroll box here; the table just flows in the page and the
+                      single page-level nudge (osTabBodyScrollRef, above) handles vertical
+                      scrolling in kiosk mode, same as every other tab. */}
+                  <div className={bigView ? "overflow-x-auto" : "hidden overflow-x-auto min-[480px]:block landscape:block"}>
+                  <table className="min-w-[640px] w-full border-collapse text-base">
                     <thead>
                       <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
                         <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
