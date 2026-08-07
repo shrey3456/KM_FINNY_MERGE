@@ -345,7 +345,6 @@ export default function ScanOrderPage() {
       title={bigView ? "Rotate back to normal" : "Rotate for a portrait-mounted screen"}
     >
       <RotateCw className="h-5 w-5" />
-      <span className="hidden text-xs font-semibold sm:inline">{osRotated ? "Un-rotate" : "Rotate"}</span>
     </button>
   );
 
