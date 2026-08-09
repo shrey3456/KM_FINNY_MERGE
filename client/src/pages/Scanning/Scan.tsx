@@ -42,7 +42,7 @@ import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTable, DATA_TABLE_TOTALS_ROW, type DataTableColumn } from "@/components/ui/data-table";
 import {
   Dialog,
   DialogContent,
@@ -156,6 +156,60 @@ const pltCell = (qty: number, ipp: number, className: string) =>
   qty > 0 && ipp > 0
     ? <span className={className}>{(qty / ipp).toFixed(2)}</span>
     : <span className="text-gray-300">0.00</span>;
+
+// Totals-row counterpart to pltCell: each row contributes qty ÷ ITS OWN pallet size, then those
+// are added up — never one blended pallet size applied to a combined quantity, which would be
+// wrong for any table mixing items with different pack sizes.
+const pltTotal = <T,>(rows: T[], pick: (row: T) => { qty: number; ipp: number }) =>
+  rows
+    .reduce((sum, row) => {
+      const { qty, ipp } = pick(row);
+      return ipp > 0 ? sum + qty / ipp : sum;
+    }, 0)
+    .toFixed(2);
+
+// The desktop tables get their totals row from the shared DataTable. The mobile card lists and
+// the rotated-kiosk / portrait tables are hand-built, so they total up through here instead —
+// same rule as pltTotal for the pallet figures, and always over the rows actually on screen so
+// the line adds up to the column above it.
+type KioskTotals = {
+  exp: number; done: number; remain: number; extra: number;
+  expPlt: number; donePlt: number; remainPlt: number; extraPlt: number;
+};
+const sumKioskTotals = <T,>(
+  rows: T[],
+  pick: (row: T) => { exp: number; done: number; remain: number; extra: number; ipp: number },
+): KioskTotals =>
+  rows.reduce<KioskTotals>(
+    (acc, row) => {
+      const { exp, done, remain, extra, ipp } = pick(row);
+      acc.exp += exp;
+      acc.done += done;
+      acc.remain += remain;
+      acc.extra += extra;
+      if (ipp > 0) {
+        acc.expPlt += exp / ipp;
+        acc.donePlt += done / ipp;
+        acc.remainPlt += remain / ipp;
+        acc.extraPlt += extra / ipp;
+      }
+      return acc;
+    },
+    { exp: 0, done: 0, remain: 0, extra: 0, expPlt: 0, donePlt: 0, remainPlt: 0, extraPlt: 0 },
+  );
+
+// Hand-built totals lines borrow the DataTable's own totals styling rather than redefining it, so
+// the rotated/mobile views and the desktop tables stay one design.
+const KIOSK_TOTALS_ROW = DATA_TABLE_TOTALS_ROW;
+
+// Pins the hand-built totals row to the bottom of its table's scroll box, the way the DataTable
+// pins its own. The background has to live on the CELLS, not the <tr>: a row background paints at
+// the row's natural position and does not travel with sticky cells, so a bare <tr> tint would be
+// left behind and the rows would scroll through in the clear. The top rule is repeated as an inset
+// shadow for the same reason the DataTable repeats it — a border-collapse table drops a sticky
+// cell's own border while it is stuck.
+const KIOSK_TOTALS_CELL_PINNED =
+  "sticky bottom-0 z-[5] bg-[#f5f6f9] shadow-[inset_0_2px_0_0_rgba(0,29,110,0.2)]";
 
 // Sound played on every barcode detection. Drop an mp3/wav at client/public/sounds/scan-beep.mp3
 // to use a custom sound — it's tried first and used automatically. If that file is missing (or
@@ -338,6 +392,17 @@ export default function ScanOrderPage() {
   // Drives the compact single-column layout + larger sizing (manual rotate OR natural portrait).
   // The actual 90° CSS rotation stays tied to osRotated only.
   const bigView = osRotated || isPortrait;
+
+  // Scroll frame for the hand-built kiosk/portrait tables. These used to just flow down the page,
+  // leaving them with no scrollbar of their own and nothing for a totals row to pin against. In
+  // bigView they now get a bounded, self-scrolling box — the same treatment the desktop DataTable
+  // gives its tables — so the header holds at the top, the totals row holds at the bottom, and
+  // there's a visible bar (kiosk-scroll) to drag.
+  // The unit flips when rotated: .kiosk-rotate-90 turns the subtree 90°, so content-space height
+  // runs along the viewport's WIDTH — vw there, vh when the screen is naturally portrait.
+  const kioskTableBoxClass = bigView
+    ? `overflow-auto kiosk-scroll ${osRotated ? "max-h-[62vw]" : "max-h-[62vh]"}`
+    : "hidden overflow-x-auto min-[480px]:block landscape:block";
   const RotateToggleButton = () => (
     <button
       onClick={() => setOsRotated((r) => !r)}
@@ -1866,6 +1931,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         return extra > 0;
       });
 
+  // Totals for Master View's mobile card list and rotated/portrait table. Empty-box entries carry
+  // no order quantity and render as a full-width note rather than a data row, so they contribute
+  // nothing here.
+  const mvKioskTotals = sumKioskTotals(mvVisible, (item) => {
+    if (item._isEmptyBox) return { exp: 0, done: 0, remain: 0, extra: 0, ipp: 0 };
+    const exp = item.quantity ?? 0;
+    const done = item.scannedQty ?? 0;
+    return {
+      exp,
+      done,
+      remain: Math.max(0, exp - done),
+      extra: item.extraQty ?? 0,
+      ipp: item.itemsPerPallet ?? 0,
+    };
+  });
+
   const mvColumns: DataTableColumn<MvMergedItem>[] = [
     {
       id: "state",
@@ -1906,6 +1987,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       width: 140,
       sortable: true,
       accessor: (i) => i.barcode,
+      // Barcodes are digits but they're identifiers, not quantities — never sum them into the
+      // totals row.
+      totalable: false,
       cellClassName: "font-mono text-gray-500",
       render: (i) => (
         <>
@@ -1987,6 +2071,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       width: 80,
       align: "right",
       cellClassName: "tabular-nums text-gray-500",
+      total: (rows) => pltTotal(rows, (i) => { const { exp, ipp } = mvRowState(i); return { qty: exp, ipp }; }),
       render: (i) => {
         const { exp, ipp } = mvRowState(i);
         return pltCell(exp, ipp, "text-gray-500");
@@ -1998,6 +2083,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       width: 100,
       align: "right",
       cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => { const { remain, ipp } = mvRowState(i); return { qty: remain, ipp }; }),
       render: (i) => {
         const { remain, ipp } = mvRowState(i);
         return pltCell(remain, ipp, "text-purple-600");
@@ -2009,6 +2095,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       width: 90,
       align: "right",
       cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => { const { done, ipp } = mvRowState(i); return { qty: done, ipp }; }),
       render: (i) => {
         const { done, ipp } = mvRowState(i);
         return pltCell(done, ipp, "text-[#001d6e]");
@@ -2020,6 +2107,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       width: 90,
       align: "right",
       cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => { const { extra, ipp } = mvRowState(i); return { qty: extra, ipp }; }),
       render: (i) => {
         const { extra, ipp } = mvRowState(i);
         return pltCell(extra, ipp, "text-amber-600");
@@ -2062,15 +2150,21 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(csvSearch.toLowerCase()))
       )
     : csvItemsSorted;
-  const csvTotals = csvImpItems.reduce((acc, i) => {
+  // Totals for Part Order's mobile card list and its rotated/portrait table. Taken over the rows
+  // actually on screen (filtCsvItems, not every imported row) so a search narrows the total along
+  // with the list — matching what the desktop table's own totals row does. ImpItem carries no
+  // itemsPerPallet, so the pack size is backed out of the CSV's expectedPallets figure, the same
+  // way the card list derives its per-row plt annotation.
+  const csvTotals = sumKioskTotals(filtCsvItems, (i) => {
     const exp = i.quantity ?? 0;
-    const done = Math.min(i.scannedQty ?? 0, exp);
-    acc.exp += exp;
-    acc.done += done;
-    acc.remain += Math.max(0, exp - (i.scannedQty ?? 0));
-    acc.extra += i.extraQty ?? 0;
-    return acc;
-  }, { exp: 0, done: 0, remain: 0, extra: 0 });
+    return {
+      exp,
+      done: Math.min(i.scannedQty ?? 0, exp),
+      remain: Math.max(0, exp - (i.scannedQty ?? 0)),
+      extra: i.extraQty ?? 0,
+      ipp: exp > 0 && i.expectedPallets ? exp / i.expectedPallets : 0,
+    };
+  });
 
   // Part Order (Separate CSVs) columns — mirrors the Scan/Master View column layout
   // (Item, Barcode/SAP, Exp/Remain/Received Qty, Status) so all three tabs read as one system.
@@ -2089,6 +2183,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       width: 140,
       sortable: true,
       accessor: (i) => i.barcode,
+      // Identifier, not a quantity — kept out of the totals row.
+      totalable: false,
       cellClassName: "font-mono text-gray-500",
       render: (item) => (
         <>
@@ -2266,6 +2362,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           return extra > 0;
         });
 
+    // Totals for the mobile card list and the rotated/portrait table below. Deliberately built
+    // from the same expressions those rows print (cross-part credit folded into Received, extra
+    // as real over-scan on this part) rather than from osRowState, so each column's figures and
+    // its total are derived identically.
+    const osKioskTotals = sumKioskTotals(osVisible, (item) => {
+      const exp = item.expectedQty ?? 0;
+      const effScanned = (item.totalScannedQty ?? 0) + (osCreditByBarcode.get(normalize(item.barcode))?.creditedQty ?? 0);
+      return {
+        exp,
+        done: Math.min(effScanned, exp),
+        remain: Math.max(0, exp - effScanned),
+        extra: Math.max(0, (item.totalScannedQty ?? 0) - exp),
+        ipp: item.itemsPerPallet ?? 0,
+      };
+    });
+
     const osColumns: DataTableColumn<OsScanItem>[] = [
       {
         id: "state",
@@ -2323,6 +2435,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         width: 140,
         sortable: true,
         accessor: (i) => i.barcode,
+        // Identifier, not a quantity — kept out of the totals row.
+        totalable: false,
         cellClassName: "font-mono text-gray-500",
         render: (item) => (
           <>
@@ -2395,6 +2509,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         width: 80,
         align: "right",
         cellClassName: "tabular-nums text-gray-500",
+        total: (rows) => pltTotal(rows, (i) => { const { exp, ipp } = osRowState(i); return { qty: exp, ipp }; }),
         render: (i) => {
           const { exp, ipp } = osRowState(i);
           return pltCell(exp, ipp, "text-gray-500");
@@ -2406,6 +2521,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         width: 100,
         align: "right",
         cellClassName: "tabular-nums font-semibold",
+        total: (rows) => pltTotal(rows, (i) => { const { rem, ipp } = osRowState(i); return { qty: rem, ipp }; }),
         render: (i) => {
           const { rem, ipp } = osRowState(i);
           return pltCell(rem, ipp, "text-purple-600");
@@ -2417,6 +2533,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         width: 90,
         align: "right",
         cellClassName: "tabular-nums font-semibold",
+        total: (rows) => pltTotal(rows, (i) => { const { doneQty, ipp } = osRowState(i); return { qty: doneQty, ipp }; }),
         render: (i) => {
           const { doneQty, ipp } = osRowState(i);
           return pltCell(doneQty, ipp, "text-[#001d6e]");
@@ -2428,6 +2545,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         width: 90,
         align: "right",
         cellClassName: "tabular-nums font-semibold",
+        total: (rows) => pltTotal(rows, (i) => { const { extra, ipp } = osRowState(i); return { qty: extra, ipp }; }),
         render: (i) => {
           const { extra, ipp } = osRowState(i);
           return pltCell(extra, ipp, "text-amber-600");
@@ -2983,8 +3101,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             )}
           </div>
 
-          {/* ── Scrollable content below sticky scanner ── */}
-          <div ref={osTabBodyScrollRef} className={`flex-1 px-4 py-3 space-y-3 ${bigView ? "overflow-hidden" : "overflow-y-auto"}`}>
+          {/* ── Scrollable content below sticky scanner ──
+              When rotated, min-h-0 is load-bearing: a flex item defaults to min-height:auto, so
+              this box grew to fit the whole item list rather than clipping it. Having no overflow
+              of its own, it had nothing to scroll — which is why the ▲▼ nudge buttons (they call
+              scrollBy on this element) did nothing and the rows below the fold were unreachable.
+              Bounding it makes those buttons work, and overflow-y-auto + kiosk-scroll adds a wide,
+              always-visible bar beside them.
+              min-h-0 is applied ONLY when rotated: it is safe there because .kiosk-rotate-90 sets
+              a definite height (100vw) for h-full to resolve against. On a naturally-portrait
+              phone the ancestor height can be content-derived, where a 0 min-height would let this
+              flex item collapse to nothing and swallow the list — so that case keeps the plain
+              overflow-y-auto it uses at every other width. */}
+          <div
+            ref={osTabBodyScrollRef}
+            className={`flex-1 px-4 py-3 space-y-3 ${osRotated ? "min-h-0 overflow-y-auto kiosk-scroll" : "overflow-y-auto"}`}
+          >
 
             {/* ── Tab strip — one joined, bordered segmented control (business style) instead of
                 separate floating rounded pills. Scanner above stays put across tabs. ── */}
@@ -3176,14 +3308,27 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           </div>
                         );
                       })}
+                      {/* Card lists get the same closing totals as the tables — the numbers
+                          shouldn't disappear just because the screen is narrow. */}
+                      {osVisible.length > 0 && (
+                        <div className={`flex items-center justify-between gap-3 px-4 py-3 text-sm ${KIOSK_TOTALS_ROW}`}>
+                          <span>Total</span>
+                          <span className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
+                            <span>{osKioskTotals.done}/{osKioskTotals.exp}</span>
+                            <span className="text-gray-500">({osKioskTotals.expPlt.toFixed(2)} plt)</span>
+                            {osKioskTotals.remain > 0 && <span>{osKioskTotals.remain} left</span>}
+                            {osKioskTotals.extra > 0 && <span className="text-amber-600">+{osKioskTotals.extra} extra</span>}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
                   {/* 480px and up, landscape orientation, and always when rotated: the table.
-                      Matches Master View's table treatment exactly — no bounded max-height or
-                      independent scroll box here; the table just flows in the page and the
-                      single page-level nudge (osTabBodyScrollRef, above) handles vertical
-                      scrolling in kiosk mode, same as every other tab. */}
-                  <div className={bigView ? "overflow-x-auto" : "hidden overflow-x-auto min-[480px]:block landscape:block"}>
+                      Matches Master View's table treatment exactly. In kiosk/portrait mode it
+                      scrolls inside its own bounded frame (kioskTableBoxClass) so the header and
+                      totals row stay put; at other widths it just flows in the page and the
+                      page-level nudge/scroll handles it. */}
+                  <div className={kioskTableBoxClass}>
                   <table className="min-w-[640px] w-full border-collapse text-base">
                     <thead>
                       <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
@@ -3277,6 +3422,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         <tr><td colSpan={6} className="py-10 text-center text-gray-400">
                           {osItems.length === 0 ? "Loading items…" : "No items match."}
                         </td></tr>
+                      )}
+                      {/* Closing totals — the kiosk/portrait counterpart to the shared
+                          DataTable's totals row, pinned to the bottom of the scroll frame the
+                          same way (only in bigView, where that frame exists). */}
+                      {osVisible.length > 0 && (
+                        <tr className={KIOSK_TOTALS_ROW}>
+                          <td className={`border-r border-gray-200 px-4 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`}>Total</td>
+                          {([
+                            ["exp", "expPlt"], ["done", "donePlt"], ["remain", "remainPlt"], ["extra", "extraPlt"],
+                          ] as const).map(([qtyKey, pltKey]) => (
+                            <td key={qtyKey} className={`text-right tabular-nums border-r border-gray-200 px-3 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`}>
+                              <span className="block text-lg">{osKioskTotals[qtyKey].toLocaleString()}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{osKioskTotals[pltKey].toFixed(2)} plt</span>
+                            </td>
+                          ))}
+                          <td className={`px-4 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`} />
+                        </tr>
                       )}
                     </tbody>
                   </table>
@@ -3435,12 +3597,25 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             </div>
                           );
                         })}
+                        {mvVisible.length > 0 && (
+                          <div className={`flex items-center justify-between gap-3 px-4 py-3 text-sm ${KIOSK_TOTALS_ROW}`}>
+                            <span>Total</span>
+                            <span className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
+                              <span>{mvKioskTotals.done}/{mvKioskTotals.exp}</span>
+                              <span className="text-gray-500">({mvKioskTotals.expPlt.toFixed(2)} plt)</span>
+                              {mvKioskTotals.remain > 0 && <span>{mvKioskTotals.remain} left</span>}
+                              {mvKioskTotals.extra > 0 && <span className="text-amber-600">+{mvKioskTotals.extra} extra</span>}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
-                    <div className={bigView ? "overflow-x-auto" : "hidden overflow-x-auto min-[480px]:block landscape:block"}>
+                    <div className={kioskTableBoxClass}>
                       <table className="min-w-[640px] w-full border-collapse text-base">
                           <thead>
-                            <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                            {/* sticky top-0 to match the Scan tab's table — it holds inside the
+                                kiosk scroll frame the same way the totals row holds at the bottom. */}
+                            <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
                               <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
                               {mvShowFiles && <th className="font-semibold border-r border-gray-300 px-3 py-2.5">File</th>}
                               <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
@@ -3537,6 +3712,21 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 </Fragment>
                               );
                             })}
+                            {mvVisible.length > 0 && (
+                              <tr className={KIOSK_TOTALS_ROW}>
+                                <td className={`border-r border-gray-200 px-4 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`}>Total</td>
+                                {mvShowFiles && <td className={`border-r border-gray-200 px-3 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`} />}
+                                {([
+                                  ["exp", "expPlt"], ["done", "donePlt"], ["remain", "remainPlt"], ["extra", "extraPlt"],
+                                ] as const).map(([qtyKey, pltKey]) => (
+                                  <td key={qtyKey} className={`text-right tabular-nums border-r border-gray-200 px-3 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`}>
+                                    <span className="block text-lg">{mvKioskTotals[qtyKey].toLocaleString()}</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{mvKioskTotals[pltKey].toFixed(2)} plt</span>
+                                  </td>
+                                ))}
+                                <td className={`px-4 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`} />
+                              </tr>
+                            )}
                           </tbody>
                         </table>
                       </div>
@@ -3600,7 +3790,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               read as one system. */}
                           {!csvItemsQuery2.isFetching && (
                             bigView ? (
-                              <div className="overflow-x-auto overflow-y-hidden">
+                              <div className={kioskTableBoxClass}>
                                 <table className="min-w-[640px] w-full border-collapse text-sm">
                                   <thead>
                                     <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
@@ -3647,13 +3837,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                       );
                                     })}
                                     {filtCsvItems.length > 0 && (
-                                      <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
-                                        <td className="border-r border-gray-200 px-4 py-2.5 text-gray-700">Totals</td>
-                                        <td className="text-right tabular-nums text-gray-700 border-r border-gray-200 px-3 py-2.5">{csvTotals.exp}</td>
-                                        <td className="text-right tabular-nums text-emerald-700 border-r border-gray-200 px-3 py-2.5">{csvTotals.done}</td>
-                                        <td className="text-right tabular-nums text-[#001d6e] border-r border-gray-200 px-3 py-2.5">{csvTotals.remain}</td>
-                                        <td className="text-right tabular-nums text-amber-600 border-r border-gray-200 px-3 py-2.5">{csvTotals.extra}</td>
-                                        <td className="px-4 py-2.5"></td>
+                                      <tr className={KIOSK_TOTALS_ROW}>
+                                        <td className={`border-r border-gray-200 px-4 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}>Total</td>
+                                        {(["exp", "done", "remain", "extra"] as const).map((key) => (
+                                          <td key={key} className={`text-right tabular-nums border-r border-gray-200 px-3 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}>
+                                            {csvTotals[key].toLocaleString()}
+                                          </td>
+                                        ))}
+                                        <td className={`px-4 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}></td>
                                       </tr>
                                     )}
                                   </tbody>
@@ -3728,13 +3919,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   );
                                 })}
                                 {filtCsvItems.length > 0 && (
-                                  <div className="flex items-center justify-between border-t-2 border-gray-300 bg-gray-50 px-4 py-3 text-sm font-bold">
-                                    <span className="text-gray-700">Totals</span>
-                                    <span className="flex items-center gap-3 tabular-nums">
-                                      <span className="text-gray-700">{csvTotals.exp} exp</span>
-                                      <span className="text-emerald-700">{csvTotals.done} recv</span>
-                                      <span className="text-[#001d6e]">{csvTotals.remain} left</span>
-                                      <span className="text-amber-600">{csvTotals.extra} extra</span>
+                                  <div className={`flex items-center justify-between gap-3 px-4 py-3 text-sm ${KIOSK_TOTALS_ROW}`}>
+                                    <span>Total</span>
+                                    <span className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
+                                      <span>{csvTotals.done}/{csvTotals.exp}</span>
+                                      <span className="text-gray-500">({csvTotals.expPlt.toFixed(2)} plt)</span>
+                                      {csvTotals.remain > 0 && <span>{csvTotals.remain} left</span>}
+                                      {csvTotals.extra > 0 && <span className="text-amber-600">+{csvTotals.extra} extra</span>}
                                     </span>
                                   </div>
                                 )}
@@ -4145,6 +4336,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     isRowExpandable={(item) => !!item.barcode}
                     expandedRowId={osHistoryItem ? String(osHistoryItem.id) : null}
                     sortMode="client"
+                    enableTotalsRow
+                    totalsLabelColumnId="itemName"
                     enableColumnResizing
                     isStickyHeader
                     maxHeight="max(420px, calc(100vh - 340px))"
@@ -4235,6 +4428,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               : undefined;
                           }}
                           sortMode="client"
+                          enableTotalsRow
+                          totalsLabelColumnId="itemName"
                           enableColumnVisibility
                           columnVisibility={mvVisibleColumnIds}
                           enableColumnResizing
@@ -4349,24 +4544,15 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 return isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined;
                               }}
                               sortMode="client"
+                              // Was a hand-written tfoot pinned to the bottom; now the shared
+                              // totals row, so this table matches Scan/Master View/Reports/Overall
+                              // Stock — pinned under the header AND repeated at the end.
+                              enableTotalsRow
                               enableColumnResizing
                               isStickyHeader
                               maxHeight="max(420px, calc(100vh - 340px))"
                               showMobileSwipeHint
                               headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
-                              renderFooter={() => (
-                                <tfoot>
-                                  <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
-                                    <td className="px-3 py-2 text-gray-700">Totals</td>
-                                    <td className="px-3 py-2"></td>
-                                    <td className="px-3 py-2 text-right tabular-nums text-gray-700">{csvTotals.exp}</td>
-                                    <td className="px-3 py-2 text-right tabular-nums text-[#001d6e]">{csvTotals.remain}</td>
-                                    <td className="px-3 py-2 text-right tabular-nums text-emerald-700">{csvTotals.done}</td>
-                                    <td className="px-3 py-2 text-right tabular-nums text-amber-600">{csvTotals.extra}</td>
-                                    <td className="px-3 py-2"></td>
-                                  </tr>
-                                </tfoot>
-                              )}
                             />
                           </div>
                         </div>

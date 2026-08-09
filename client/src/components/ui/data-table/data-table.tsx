@@ -13,6 +13,20 @@ import type {
   DataTableSortState,
 } from "./types";
 
+/**
+ * The one totals-row look, exported so hand-built tables elsewhere (the Scan page's rotated-kiosk
+ * and mobile tables, its card lists) match the tables driven by this component instead of drifting
+ * into their own styling. A faint navy wash with a heavier rule on top, bold dark figures.
+ *
+ * The background must stay opaque: in a scrolling table the row pins itself to the bottom edge and
+ * data rows slide underneath it.
+ */
+export const DATA_TABLE_TOTALS_ROW = "border-t-2 border-t-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900";
+
+// Pins the totals row to the bottom of the scroll box. The top rule is repeated as an inset
+// shadow because a border-collapse table drops a sticky cell's own border while it's stuck.
+const TOTALS_STICKY = "sticky bottom-0 z-[9] shadow-[inset_0_2px_0_0_rgba(0,29,110,0.2)]";
+
 function cellText(value: unknown): string {
   if (value === null || value === undefined || value === "") return "-";
   if (value instanceof Date) return value.toLocaleString();
@@ -139,13 +153,22 @@ interface DataTableProps<TData> {
   showMobileSwipeHint?: boolean;
   enableZebraStripes?: boolean;
   /**
-   * Append a totals row under the last data row. Totals cover every filtered row, not just the
-   * current page, so they don't change as you page through. Columns auto-sum when their accessor
-   * yields numbers; override per column with `total`, or opt out with `totalable: false`.
+   * Close the table with a totals row. In a scrolling table (`isStickyHeader`) it pins itself to
+   * the bottom edge of the scroll box — fixed there the way the header is fixed at the top — so
+   * the numbers stay on screen without scrolling to the end. Totals cover every filtered row, not
+   * just the current page, so they don't change as you page through. Columns auto-sum when their
+   * accessor yields numbers; override per column with `total`, or opt out with `totalable: false`
+   * (needed for numeric-looking identifiers such as barcodes, which must never be summed).
    */
   enableTotalsRow?: boolean;
-  /** Label placed in the totals row's first cell. */
+  /** Label placed in the totals row. Defaults to the first visible column's cell. */
   totalsLabel?: string;
+  /**
+   * Column whose totals cell carries `totalsLabel`. Use it to keep the label out of a narrow
+   * leading column (a "#" or status-icon column) where it would overflow. Falls back to the first
+   * visible column when unset or when the named column is hidden.
+   */
+  totalsLabelColumnId?: string;
   /** Per-row classes (e.g. status tints). Wins over enableZebraStripes for rows it styles. */
   rowClassName?: (row: TData, rowIndex: number) => string | undefined;
 
@@ -202,6 +225,7 @@ export function DataTable<TData>({
   enableZebraStripes = false,
   enableTotalsRow = false,
   totalsLabel = "Total",
+  totalsLabelColumnId,
   rowClassName,
   className,
   containerClassName,
@@ -272,6 +296,7 @@ export function DataTable<TData>({
   const allRows = sortedRows;
   // allRows holds { row, id } wrappers; column accessors expect the bare TData, so unwrap for totals.
   const totalsRows = allRows.map((r) => r.row);
+  const showTotalsRow = enableTotalsRow && allRows.length > 0;
 
   const pSize = paginationMode === "client" ? pageSize ?? internalPageSize : Math.max(allRows.length, 1);
   const pageCount = paginationMode === "client" ? Math.max(1, Math.ceil(allRows.length / pSize)) : 1;
@@ -378,6 +403,53 @@ export function DataTable<TData>({
 
   const computedHasActiveFilters = hasActiveFilters ?? (enableSearch && search.trim() !== "");
   const computedShowSwipeHint = showMobileSwipeHint ?? (data.length > 0 && visibleColumns.length > 3);
+
+  // Where "Total" is printed. A caller-named column wins, but only while it's actually visible —
+  // hiding it would otherwise drop the label entirely.
+  const totalsLabelId =
+    totalsLabelColumnId && visibleColumns.some((c) => c.id === totalsLabelColumnId)
+      ? totalsLabelColumnId
+      : visibleColumns[0]?.id;
+
+  /**
+   * The totals row, closing out the data. Only sticky when the table owns a scroll box
+   * (`isStickyHeader`); left un-pinned otherwise it would latch onto whatever page-level scroller
+   * happens to be its nearest scrolling ancestor. Its background must stay opaque — rows slide
+   * underneath it — and the divider is drawn as an inset shadow because a `border-collapse`
+   * table drops a sticky cell's own border while it's stuck.
+   */
+  const renderTotalsRow = () => {
+    const sticky = isStickyHeader;
+    // DATA_TABLE_TOTALS_ROW is the one totals look in the app — the hand-built tables on the Scan
+    // page reuse it, so keep any change here in step with them.
+    const base = `whitespace-nowrap border-r border-b border-r-gray-300 border-b-gray-300 px-2 py-1.5 align-middle text-[11px] tabular-nums sm:px-2.5 sm:py-2 sm:text-xs ${DATA_TABLE_TOTALS_ROW}`;
+
+    return (
+      <tr>
+        {enableRowSelection && <td className={cn(base, sticky && TOTALS_STICKY)} />}
+        {visibleColumns.map((col) => {
+          const isPinned = sticky && stickyColumnId === col.id;
+          return (
+            <td
+              key={col.id}
+              className={cn(
+                base,
+                sticky && TOTALS_STICKY,
+                // Keeps the top divider alongside the pinned column's right-edge shadow — a
+                // second `shadow-*` class would otherwise replace it outright.
+                isPinned &&
+                  "left-0 z-[19] shadow-[inset_0_2px_0_0_rgba(0,29,110,0.2),2px_0_4px_-1px_rgba(0,0,0,0.08)]",
+                col.align === "right" && "text-right",
+                col.align === "center" && "text-center",
+              )}
+            >
+              {col.id === totalsLabelId ? totalsLabel : columnTotal(col, totalsRows)}
+            </td>
+          );
+        })}
+      </tr>
+    );
+  };
 
   const totalColSpan = visibleColumns.length + (enableRowSelection ? 1 : 0);
   const totalTableWidth =
@@ -607,30 +679,10 @@ export function DataTable<TData>({
                     </Fragment>
                   );
                 })}
+                {/* Totals close out the data. Lives in <tbody> rather than a <tfoot> so it can't
+                    collide with a consumer's own renderFooter. */}
+                {showTotalsRow && renderTotalsRow()}
               </tbody>
-              {enableTotalsRow && allRows.length > 0 && (
-                <tfoot>
-                  <tr className="border-t-2 border-[#001d6e]/20 bg-[#001d6e]/[0.04] font-bold text-gray-900">
-                    {enableRowSelection && <td className="border-b border-r border-gray-200 px-2 py-2" />}
-                    {visibleColumns.map((col, colIndex) => {
-                      // The label goes in the first cell; every other cell shows its column total.
-                      const isFirst = colIndex === 0 && !enableRowSelection;
-                      return (
-                        <td
-                          key={col.id}
-                          className={cn(
-                            "border-b border-r border-gray-200 px-2 py-2 align-middle text-xs sm:px-2.5",
-                            col.align === "right" && "text-right",
-                            col.align === "center" && "text-center",
-                          )}
-                        >
-                          {isFirst ? totalsLabel : columnTotal(col, totalsRows)}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                </tfoot>
-              )}
               {renderFooter && renderFooter(footerCtx)}
             </table>
           </div>

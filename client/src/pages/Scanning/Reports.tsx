@@ -534,9 +534,10 @@ const Reports = () => {
   const dash = <span className="text-gray-300">—</span>;
 
   // Same table structure/styling as Overall Stock (DataTable + TableCard): sortable/resizable/
-  // hideable columns, zebra stripes, business-report borders. No totals row here — the server
-  // only ever hands us one page of rows, so a client-side sum would just total the visible page
-  // instead of the real filtered total (the summary tiles above already show the true totals).
+  // hideable columns, zebra stripes, business-report borders, plus a totals row pinned under the
+  // header. The totals are honest here because the query above pages through EVERY matching row
+  // before handing the set to the table — it isn't a per-page sum. Voided scans are left out of
+  // Qty/Pallets, matching the rule the void dialog states ("removes it from totals and stock").
   const historyColumns: DataTableColumn<ScanHistoryItem>[] = [
     {
       id: "srNo",
@@ -569,6 +570,7 @@ const Reports = () => {
       hideable: false,
       width: 220,
       accessor: (row) => row.itemName,
+      totalable: false,
       cellClassName: "whitespace-normal break-words",
       render: (row) => (
         <>
@@ -588,6 +590,9 @@ const Reports = () => {
       header: columnHeader("barcode", "Barcode"),
       width: 120,
       accessor: (row) => row.barcode,
+      // A barcode is an identifier that happens to be digits — adding them up is meaningless, so
+      // it never joins the totals row (same reason SAP Code/STV opt out below).
+      totalable: false,
       cellClassName: "font-mono text-gray-500",
       render: (row) => row.barcode ?? dash,
     },
@@ -596,6 +601,7 @@ const Reports = () => {
       header: "Order Date",
       width: 120,
       accessor: (row) => row.orderDate ?? "",
+      totalable: false,
       cellClassName: "whitespace-nowrap text-gray-600",
       // Show the order's date (from the CSV import) instead of the order/file name.
       render: (row) => {
@@ -609,6 +615,7 @@ const Reports = () => {
       header: columnHeader("plant", "Plant"),
       width: 90,
       accessor: (row) => row.plant,
+      totalable: false,
       render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : <span className="text-gray-300">—</span>),
     },
     {
@@ -617,6 +624,8 @@ const Reports = () => {
       width: 80,
       align: "right",
       accessor: (row) => row.totalQty,
+      total: (rows) =>
+        rows.reduce((sum, r) => (r.voided ? sum : sum + (r.totalQty ?? 0)), 0).toLocaleString(),
       cellClassName: "font-bold",
       render: (row) =>
         row.isExchange ? (
@@ -633,6 +642,8 @@ const Reports = () => {
       width: 90,
       align: "right",
       accessor: (row) => row.pallets,
+      total: (rows) =>
+        rows.reduce((sum, r) => (r.voided ? sum : sum + Number(r.pallets ?? 0)), 0).toFixed(2),
       cellClassName: "font-semibold text-[#001d6e]",
       render: (row) =>
         row.pallets != null && Number(row.pallets) > 0 ? parseFloat(String(row.pallets)).toFixed(2) : dash,
@@ -642,6 +653,7 @@ const Reports = () => {
       header: columnHeader("stv", "STV"),
       width: 90,
       accessor: (row) => row.stv,
+      totalable: false,
       cellClassName: "text-gray-600",
       render: (row) => row.stv ?? dash,
     },
@@ -1058,6 +1070,7 @@ const Reports = () => {
               return undefined;
             }}
             enableZebraStripes
+            enableTotalsRow
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}
