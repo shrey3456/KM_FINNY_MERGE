@@ -440,7 +440,9 @@ export function registerOrderRoutes(apiRouter: Router) {
       const pageParam = typeof req.query.page === 'string' ? parseInt(req.query.page, 10) : NaN;
       const limitParam = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : NaN;
       const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
-      const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 10;
+      // Pagination UI was removed client-side — OrderManagement.tsx now requests everything in
+      // one page. Cap raised well above any realistic count purely as a safety ceiling.
+      const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 5000) : 10;
 
       // Fetch ALL import-tagged orders (no row-level limit) — only 2 tiny columns,
       // safe even with thousands of orders. Deduplicate by noteKey in JS so we

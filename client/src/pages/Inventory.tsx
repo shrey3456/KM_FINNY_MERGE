@@ -60,7 +60,7 @@ import {
 } from "@/components/ui/select";
 import {
   Search, Plus, Package, Pencil, Trash, Upload, Loader2, RefreshCw,
-  ChevronLeft, ChevronRight, ChevronFirst, ChevronLast, CloudDownload, Bell, CheckCircle2
+  CloudDownload, Bell, CheckCircle2
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { useState, useRef, useEffect } from 'react';
@@ -99,10 +99,6 @@ const Inventory = () => {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [currentProduct, setCurrentProduct] = useState<Product | null>(null);
   
-  // Pagination state
-  const [currentPage, setCurrentPage] = useState(1);
-  const [entriesLimit, setEntriesLimit] = useState(15);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -618,22 +614,8 @@ const Inventory = () => {
     return bValue.localeCompare(aValue, undefined, { numeric: true });
   });
 
-  // Pagination logic
-  const totalPages = Math.ceil(sortedProducts.length / entriesLimit);
-  
-  // Ensure current page is valid when entries limit changes or data changes
-  useEffect(() => {
-    if (totalPages > 0 && currentPage > totalPages) {
-      setCurrentPage(totalPages);
-    } else if (currentPage < 1) {
-      setCurrentPage(1);
-    }
-  }, [entriesLimit, sortedProducts.length, totalPages, currentPage]);
-
-  const paginatedProducts = sortedProducts.slice(
-    (currentPage - 1) * entriesLimit,
-    currentPage * entriesLimit
-  );
+  // No pagination — every sorted/filtered row renders at once.
+  const paginatedProducts = sortedProducts;
 
   // Calculate totals for the filtered products
   const totals = calculateTotals(filteredProducts);
@@ -1157,65 +1139,8 @@ const Inventory = () => {
                     <TableFooter className="bg-muted/30">
                       <TableRow>
                         <TableCell colSpan={52} className="p-2">
-                          <div className="flex flex-col sm:flex-row items-center justify-between w-full gap-4">
-                             <div className="flex items-center gap-2">
-                                <span className="text-xs whitespace-nowrap">Show entries:</span>
-                                <select 
-                                  className="h-8 text-xs border rounded px-1 bg-background"
-                                  value={entriesLimit}
-                                  onChange={(e) => {
-                                    setEntriesLimit(Number(e.target.value));
-                                    setCurrentPage(1);
-                                  }}
-                                >
-                                  <option value={15}>15</option>
-                                  <option value={25}>25</option>
-                                  <option value={50}>50</option>
-                                  <option value={100}>100</option>
-                                </select>
-                             </div>
-
-                            <div className="text-sm text-muted-foreground">
-                              Showing {sortedProducts.length > 0 ? (currentPage - 1) * entriesLimit + 1 : 0} to {Math.min(currentPage * entriesLimit, sortedProducts.length)} of {sortedProducts.length} entries
-                            </div>
-                            
-                            <div className="flex items-center space-x-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(1)}
-                                disabled={currentPage === 1}
-                              >
-                                <ChevronFirst className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                                disabled={currentPage === 1}
-                              >
-                                <ChevronLeft className="h-4 w-4" />
-                              </Button>
-                              <span className="text-sm text-muted-foreground px-2">
-                                Page {currentPage} of {totalPages || 1}
-                              </span>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                                disabled={currentPage === totalPages || totalPages === 0}
-                              >
-                                <ChevronRight className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setCurrentPage(totalPages)}
-                                disabled={currentPage === totalPages || totalPages === 0}
-                              >
-                                <ChevronLast className="h-4 w-4" />
-                              </Button>
-                            </div>
+                          <div className="text-sm text-muted-foreground">
+                            {sortedProducts.length} entries
                           </div>
                         </TableCell>
                       </TableRow>

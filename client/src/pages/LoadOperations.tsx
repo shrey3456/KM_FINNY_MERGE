@@ -169,10 +169,6 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  ChevronLeft,
-  ChevronRight,
-  ChevronFirst,
-  ChevronLast,
   CalendarRange,
   CalendarIcon,
   XCircle,
@@ -531,9 +527,6 @@ export default function LoadOperations() {
   // Legacy date filter dropdown state (kept for backward compatibility)
   const [dateFilterOption, setDateFilterOption] = useState<string>("all"); // Options: "all", "today", "tomorrow", "yesterday"
   const [userInteracting, setUserInteracting] = useState(false);
-  
-  // Show more/less functionality for table
-  const [showAll, setShowAll] = useState<boolean>(false);
   
   // Plant filter state
   const [selectedPlants, setSelectedPlants] = useState<string[]>([]);
@@ -7210,8 +7203,7 @@ export default function LoadOperations() {
                   return 0; // Return 0 on error to keep the original order
                 }
               })
-              // Apply pagination
-              .slice((currentPage - 1) * entriesLimit, showAll ? undefined : currentPage * entriesLimit)
+              // No pagination — every matching row renders.
               .map((operation) => (
                 <TableRow key={operation.id}>
                   <TableCell>
@@ -9868,26 +9860,10 @@ export default function LoadOperations() {
                 {/* Status Cell */}
                 <TableCell className="text-center">_</TableCell>
                 {/* Actions Cell */}
-                <TableCell>
-                  {/* Show entries dropdown */}
-                  <div className="flex items-center justify-end gap-1 ml-auto">
-                    <span className="text-xs whitespace-nowrap">Show entries:</span>
-                    <select 
-                      className="h-6 text-xs border rounded px-1 bg-background"
-                      value={entriesLimit}
-                      onChange={(e) => setEntriesLimit(Number(e.target.value))}
-                      aria-label="Number of entries to display"
-                    >
-                      <option value={15}>15</option>
-                      <option value={25}>25</option>
-                      <option value={50}>50</option>
-                      <option value={100}>100</option>
-                    </select>
-                  </div>
-                </TableCell>
+                <TableCell></TableCell>
               </TableRow>
             )}
-            {/* Pagination Controls */}
+            {/* Entry count */}
             <TableRow>
               <TableCell colSpan={8} className="px-4 py-2">
                 {(() => {
@@ -9995,38 +9971,10 @@ export default function LoadOperations() {
                     return true;
                   });
                   
-                  // Calculate pagination values
-                  const totalPages = Math.ceil(filteredItems.length / entriesLimit) || 1;
-                  const startItem = (currentPage - 1) * entriesLimit + 1;
-                  const endItem = Math.min(startItem + entriesLimit - 1, filteredItems.length);
-                  
                   return (
                     <div className="flex items-center justify-between w-full px-2">
                       <div className="text-sm text-muted-foreground">
-                        Showing {startItem} to {endItem} of {filteredItems.length} entries
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
-                          disabled={currentPage === 1}
-                          aria-label="Previous page"
-                        >
-                          Previous
-                        </Button>
-                        <div className="text-sm font-medium">
-                          Page {currentPage} of {totalPages}
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
-                          disabled={currentPage === totalPages}
-                          aria-label="Next page"
-                        >
-                          Next
-                        </Button>
+                        {filteredItems.length} entries
                       </div>
                     </div>
                   );

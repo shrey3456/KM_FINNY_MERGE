@@ -871,11 +871,7 @@ const Users = () => {
               noResultsState="No users found matching your search."
               hasActiveFilters={!!searchTerm}
               sortMode="client"
-              paginationMode="client"
-              pageIndex={pageIndex}
-              onPageIndexChange={setPageIndex}
-              defaultPageSize={15}
-              pageSizeOptions={[15, 25, 50, 100]}
+              paginationMode="none"
               enableColumnResizing
               enableColumnVisibility
               columnVisibility={visibleColumnIds}

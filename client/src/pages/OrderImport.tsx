@@ -276,9 +276,11 @@ export default function OrderImport() {
     });
   };
 
-  // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
+  // Date filter for the History tab (default empty = show all, avoids UTC/IST mismatch). No
+  // pagination — every matching session loads in one request (server still caps the request at
+  // a generous ceiling; see HISTORY_PAGE_SIZE below).
   const todayStr = getLocalISODate();
-  const [pageSize, setPageSize] = useState(10);
+  const HISTORY_PAGE_SIZE = 2000;
   const [currentPage, setCurrentPage] = useState(1);
   const [filterDate, setFilterDate] = useState("");
   const [filterPlant, setFilterPlant] = useState("");
@@ -321,11 +323,11 @@ export default function OrderImport() {
   };
 
   const sessionsQuery = useQuery<SessionsResponse>({
-    queryKey: ["/api/order-import/sessions", currentPage, pageSize, filterDate, filterPlant],
+    queryKey: ["/api/order-import/sessions", "history", filterDate, filterPlant],
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams({
-        page: String(currentPage),
-        pageSize: String(pageSize),
+        page: "1",
+        pageSize: String(HISTORY_PAGE_SIZE),
       });
       if (filterDate)  params.set("date",  filterDate);
       if (filterPlant) params.set("plant", filterPlant);
@@ -532,13 +534,13 @@ export default function OrderImport() {
         };
         patchImportSessions((rows) => [newRow, ...rows]);
 
-        // Seed page-1/no-filter key so the list renders instantly even if the
-        // user was on a filtered page before uploading.
-        const p1Key = ["/api/order-import/sessions", 1, pageSize, "", ""] as const;
+        // Seed the no-filter History key so the list renders instantly even if the user had a
+        // filter applied before uploading.
+        const p1Key = ["/api/order-import/sessions", "history", "", ""] as const;
         const p1 = qc.getQueryData<SessionsResponse>(p1Key);
         qc.setQueryData<SessionsResponse>(p1Key, p1
-          ? { ...p1, sessions: [newRow, ...p1.sessions].slice(0, pageSize), total: p1.total + 1, totalPages: Math.max(1, Math.ceil((p1.total + 1) / pageSize)) }
-          : { sessions: [newRow], total: 1, page: 1, pageSize, totalPages: 1 },
+          ? { ...p1, sessions: [newRow, ...p1.sessions], total: p1.total + 1, totalPages: 1 }
+          : { sessions: [newRow], total: 1, page: 1, pageSize: HISTORY_PAGE_SIZE, totalPages: 1 },
         );
 
         qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
@@ -1024,9 +1026,6 @@ export default function OrderImport() {
   useEffect(() => {
     if (!filterPlant) setHistoryTotalAll(totalSessions);
   }, [filterPlant, totalSessions]);
-  const totalPages      = sessionsQuery.data?.totalPages ?? 1;
-  const safePage        = currentPage;
-
   const allItems = itemsQuery.data ?? [];
   const filteredItems = itemSearch
     ? allItems.filter((i) =>
@@ -1709,16 +1708,6 @@ export default function OrderImport() {
                     <X className="h-3.5 w-3.5" />
                   </Button>
                 )}
-                <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1); }}>
-                  <SelectTrigger className="h-8 w-[65px] text-xs rounded-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="10">10</SelectItem>
-                    <SelectItem value="25">25</SelectItem>
-                    <SelectItem value="50">50</SelectItem>
-                  </SelectContent>
-                </Select>
                 {/* Always mounted (visibility toggled, not presence) so the background poll
                     never shifts the filter row — a mount/unmount here was the flicker source. */}
                 <Loader2 className={`h-3.5 w-3.5 animate-spin text-gray-400 ${sessionsQuery.isFetching ? "visible" : "invisible"}`} />
@@ -1871,40 +1860,9 @@ export default function OrderImport() {
                       );
                     })}
                   </div>
-                  {/* Pagination */}
-                  {totalPages > 1 && (
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-t px-5 py-3">
-                      <span className="text-xs text-gray-500">
-                        Page {safePage} of {totalPages} · {totalSessions} sessions
-                      </span>
-                      <div className="flex items-center gap-1">
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-full"
-                          disabled={safePage <= 1} onClick={() => setCurrentPage(safePage - 1)}>
-                          ← Prev
-                        </Button>
-                        {Array.from({ length: totalPages }, (_, i) => i + 1)
-                          .filter((p) => p === 1 || p === totalPages || Math.abs(p - safePage) <= 1)
-                          .reduce<(number | "…")[]>((acc, p, i, arr) => {
-                            if (i > 0 && (p as number) - (arr[i - 1] as number) > 1) acc.push("…");
-                            acc.push(p); return acc;
-                          }, [])
-                          .map((p, i) =>
-                            p === "…" ? (
-                              <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
-                            ) : (
-                              <Button key={p} size="sm"
-                                variant={p === safePage ? "default" : "outline"}
-                                className={`h-8 w-8 p-0 text-xs rounded-full ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
-                                onClick={() => setCurrentPage(p as number)}>
-                                {p}
-                              </Button>
-                            )
-                          )}
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-full"
-                          disabled={safePage >= totalPages} onClick={() => setCurrentPage(safePage + 1)}>
-                          Next →
-                        </Button>
-                      </div>
+                  {totalSessions > 0 && (
+                    <div className="border-t px-5 py-3">
+                      <span className="text-xs text-gray-500">{totalSessions} session{totalSessions === 1 ? "" : "s"}</span>
                     </div>
                   )}
                 </>

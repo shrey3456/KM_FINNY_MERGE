@@ -1312,7 +1312,8 @@ export default function ScanOrderPage() {
   const csvSessQuery = useQuery<{ sessions: ImpSession[]; total: number }>({
     queryKey: ["/api/order-import/sessions", "scan-page", csvEffDate, csvEffPlant],
     queryFn: () => {
-      const p = new URLSearchParams({ page: "1", pageSize: "100" });
+      // No pagination — every CSV for this date/plant loads in one request.
+      const p = new URLSearchParams({ page: "1", pageSize: "1000" });
       if (csvEffDate)  p.set("date",  csvEffDate);
       if (csvEffPlant) p.set("plant", csvEffPlant);
       return apiRequest("GET", `/api/order-import/sessions?${p}`).then((r) => r.json());

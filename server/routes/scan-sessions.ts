@@ -1276,7 +1276,10 @@ function buildScanHistoryFilterClause(
 router.get('/reports/scan-history', async (_req: Request, res: Response) => {
   try {
     const req = _req;
-    const limit  = Math.max(1, Math.min(100, parseInt(String(req.query.limit  ?? '20'), 10) || 20));
+    // Pagination UI was removed client-side — Reports.tsx now requests everything in one page
+    // (HISTORY_PAGE_SIZE). Cap raised well above any realistic result set purely as a safety
+    // ceiling, not as a real page size.
+    const limit  = Math.max(1, Math.min(5000, parseInt(String(req.query.limit  ?? '20'), 10) || 20));
     const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
 
     const dateParam    = typeof req.query.date    === 'string' && req.query.date.trim()    ? req.query.date.trim()    : null;

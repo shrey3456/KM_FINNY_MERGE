@@ -76,7 +76,10 @@ type ScanHistoryResponse = {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const HISTORY_PAGE_SIZE = 20;
+// No pagination UI — every event matching the current filters loads in one request. Bounded
+// well above any realistic result set purely as a safety ceiling (see the matching cap on
+// GET /reports/scan-history), not as a real page size.
+const HISTORY_PAGE_SIZE = 5000;
 
 // Solid navy fill, matching Overall Stock / Notion Inventory's filter buttons. Squared off
 // (rounded-xl) for the business-report look — no soft/pill-shaped filter controls.
@@ -412,7 +415,6 @@ const Reports = () => {
   const historyItems        = historyData?.items ?? [];
   const historyTotal        = historyData?.total ?? 0;
   const historyScanners     = historyData?.scanners ?? [];
-  const historyHasMore      = historyOffset + historyItems.length < historyTotal;
 
   // Export must cover every row matching the current filters, not just the current page —
   // the server caps `limit` at 100 (see /reports/scan-history), so this pages through with
@@ -892,19 +894,9 @@ const Reports = () => {
               <tfoot>
                 <tr>
                   <td colSpan={ctx.columnCount} className="border-t border-gray-300 bg-white px-4 py-2.5">
-                    <div className="flex items-center justify-between text-xs text-gray-500">
-                      <span>
-                        {historyTotal > 0
-                          ? `Showing ${historyOffset + 1}–${Math.min(historyOffset + historyItems.length, historyTotal)} of ${historyTotal.toLocaleString()} events`
-                          : "No events"}
-                      </span>
-                      <div className="flex gap-2">
-                        <Button variant="outline" size="sm" className="rounded-xl" disabled={historyPage <= 1}
-                          onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                        <Button variant="outline" size="sm" className="rounded-xl" disabled={!historyHasMore}
-                          onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
-                      </div>
-                    </div>
+                    <span className="text-xs text-gray-500">
+                      {historyTotal > 0 ? `${historyTotal.toLocaleString()} events` : "No events"}
+                    </span>
                   </td>
                 </tr>
               </tfoot>

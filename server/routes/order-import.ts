@@ -98,7 +98,10 @@ router.get('/order-import/stream', requireAdmin, (req: Request, res: Response) =
 router.get('/order-import/sessions', requireImportViewAccess, async (req, res) => {
   try {
     const page     = Math.max(1, parseInt(String(req.query.page     ?? '1')));
-    const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? '10'))));
+    // Pagination UI was removed client-side — callers now request everything in one page (see
+    // OrderImport.tsx's HISTORY_PAGE_SIZE). Cap raised well above any realistic session count
+    // purely as a safety ceiling against a pathological request, not as a real page size.
+    const pageSize = Math.min(5000, Math.max(1, parseInt(String(req.query.pageSize ?? '10'))));
 
     // Filters on the ORDER DATE (what the CSV was uploaded FOR) rather than created_at (when
     // it happened to be uploaded). Those differ whenever a late part is added to an earlier

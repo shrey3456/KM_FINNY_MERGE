@@ -1175,11 +1175,7 @@ export default function OverallStock() {
             enableTotalsRow
             enableZebraStripes
             sortMode="client"
-            paginationMode="client"
-            pageIndex={pageIndex}
-            onPageIndexChange={setPageIndex}
-            defaultPageSize={PAGE_SIZE}
-            pageSizeOptions={[20, 50, 100, 200]}
+            paginationMode="none"
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}

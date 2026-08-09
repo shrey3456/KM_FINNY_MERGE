@@ -1,7 +1,7 @@
   import React, { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
-import { AlertCircle, CheckCircle, ChevronLeft, ChevronRight, ClipboardList, Loader2, RefreshCw, Upload, Trash2 } from 'lucide-react';
+import { AlertCircle, CheckCircle, ClipboardList, Loader2, RefreshCw, Upload, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -31,14 +31,14 @@ export default function OrderManagement() {
   const [orderDate, setOrderDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [lastImport, setLastImport] = useState<ImportResult | null>(null);
   const [fileToDelete, setFileToDelete] = useState<string | null>(null);
-  const [csvPage, setCsvPage] = useState(1);
-  const CSV_PAGE_SIZE = 8;
+  // No pagination — every import batch loads in one request.
+  const CSV_PAGE_SIZE = 5000;
   const { toast } = useToast();
 
   const { data: importsData, isLoading, refetch: refetchImports } = useQuery<any>({
-    queryKey: ['/api/orders/imports', csvPage, CSV_PAGE_SIZE],
+    queryKey: ['/api/orders/imports', CSV_PAGE_SIZE],
     queryFn: async () => {
-      const response = await fetch(`/api/orders/imports?page=${csvPage}&limit=${CSV_PAGE_SIZE}`, {
+      const response = await fetch(`/api/orders/imports?page=1&limit=${CSV_PAGE_SIZE}`, {
         credentials: 'include',
         cache: 'no-store',
       });
@@ -49,7 +49,6 @@ export default function OrderManagement() {
   });
   const importSummaries: { filename: string; noteKey: string; orderCount: number; itemCount: number; lastImportedAt: string }[] =
     Array.isArray(importsData?.results) ? importsData.results : (Array.isArray(importsData) ? importsData : []);
-  const importsTotalPages: number = importsData?.totalPages ?? 1;
   const importsTotal: number = importsData?.total ?? importSummaries.length;
 
   const importMutation = useMutation({
@@ -86,7 +85,6 @@ export default function OrderManagement() {
       const input = document.getElementById('arriving-orders-csv') as HTMLInputElement | null;
       if (input) input.value = '';
 
-      setCsvPage(1);
       queryClient.invalidateQueries({ queryKey: ['/api/orders/imports'] });
       refetchImports();
       toast({
@@ -303,31 +301,11 @@ export default function OrderManagement() {
                     ))}
                   </div>
 
-                  {importsTotalPages > 1 && (
-                    <div className="flex items-center justify-between mt-4 pt-3 border-t">
+                  {importsTotal > 0 && (
+                    <div className="mt-4 pt-3 border-t">
                       <span className="text-xs text-gray-500">
-                        Page {csvPage} of {importsTotalPages} · {importsTotal} upload{importsTotal !== 1 ? 's' : ''}
+                        {importsTotal} upload{importsTotal !== 1 ? 's' : ''}
                       </span>
-                      <div className="flex gap-1">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 w-7 p-0"
-                          disabled={csvPage <= 1}
-                          onClick={() => setCsvPage((p) => Math.max(1, p - 1))}
-                        >
-                          <ChevronLeft className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 w-7 p-0"
-                          disabled={csvPage >= importsTotalPages}
-                          onClick={() => setCsvPage((p) => Math.min(importsTotalPages, p + 1))}
-                        >
-                          <ChevronRight className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
                     </div>
                   )}
                 </CardContent>

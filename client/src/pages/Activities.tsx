@@ -27,15 +27,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Pagination,
-  PaginationContent,
-  PaginationEllipsis,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-} from "@/components/ui/pagination";
 import { Calendar, Activity, Filter, RefreshCcw, Search, User, CheckCircle2 } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { format } from "date-fns";
@@ -55,7 +46,6 @@ type ActivityData = {
 
 export default function Activities() {
   const { toast } = useToast();
-  const [currentPage, setCurrentPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
   const [actionFilter, setActionFilter] = useState("all-actions");
   const [pageFilter, setPageFilter] = useState("all-pages");
@@ -63,8 +53,6 @@ export default function Activities() {
   const [activityCount, setActivityCount] = useState(0);
   const [newActivities, setNewActivities] = useState(0);
   const intervalRef = useRef<NodeJS.Timeout>();
-  const limit = 50; // Increased limit to show more activities
-  const offset = (currentPage - 1) * limit;
 
   // Fetch activities data
   const { 
@@ -74,7 +62,7 @@ export default function Activities() {
     isRefetching, 
     dataUpdatedAt
   } = useQuery({
-    queryKey: ["activities", limit, offset],
+    queryKey: ["activities"],
     queryFn: async () => {
       try {
         const res = await apiRequest("GET", `/api/activities`);
@@ -518,18 +506,8 @@ export default function Activities() {
     }
   };
 
-  // Add pagination debug info
-  console.log("Pagination debug - total activities:", sortedData.length);
-  console.log("Pagination debug - current page:", currentPage);
-  console.log("Pagination debug - limit per page:", limit);
-  console.log("Pagination debug - calculated offset:", offset);
-  
-  // Get the correct slice of data for the current page
-  const paginated = sortedData.slice(offset, offset + limit);
-  const totalPages = Math.ceil(sortedData.length / limit);
-  
-  console.log("Pagination debug - total pages:", totalPages);
-  console.log("Pagination debug - items on current page:", paginated.length);
+  // No pagination — every row renders at once.
+  const paginated = sortedData;
 
   return (
     <div className="container-fluid px-4 md:px-6 py-6 space-y-6 max-w-full">
@@ -795,68 +773,6 @@ export default function Activities() {
                 })}
               </div>
 
-              {totalPages > 1 && (
-                <div className="mt-4">
-                  <Pagination>
-                    <PaginationContent>
-                      <PaginationItem>
-                        <PaginationPrevious
-                          onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
-                          className={currentPage === 1 ? "pointer-events-none opacity-50" : ""}
-                        />
-                      </PaginationItem>
-
-                      {Array.from({ length: Math.min(5, totalPages) }).map((_, i) => {
-                        let pageNum = i + 1;
-                        if (totalPages > 5) {
-                          if (currentPage > 3 && currentPage < totalPages - 1) {
-                            pageNum = currentPage - 2 + i;
-                          } else if (currentPage >= totalPages - 1) {
-                            pageNum = totalPages - 4 + i;
-                          }
-                        }
-                        
-                        return (
-                          <PaginationItem key={i}>
-                            <PaginationLink
-                              onClick={() => setCurrentPage(pageNum)}
-                              isActive={currentPage === pageNum}
-                            >
-                              {pageNum}
-                            </PaginationLink>
-                          </PaginationItem>
-                        );
-                      })}
-
-                      {totalPages > 5 && currentPage < totalPages - 2 && (
-                        <PaginationItem>
-                          <PaginationEllipsis />
-                        </PaginationItem>
-                      )}
-
-                      {totalPages > 5 && currentPage < totalPages - 1 && (
-                        <PaginationItem>
-                          <PaginationLink
-                            onClick={() => setCurrentPage(totalPages)}
-                            isActive={currentPage === totalPages}
-                          >
-                            {totalPages}
-                          </PaginationLink>
-                        </PaginationItem>
-                      )}
-
-                      <PaginationItem>
-                        <PaginationNext
-                          onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
-                          className={
-                            currentPage === totalPages ? "pointer-events-none opacity-50" : ""
-                          }
-                        />
-                      </PaginationItem>
-                    </PaginationContent>
-                  </Pagination>
-                </div>
-              )}
             </>
           )}
         </CardContent>
