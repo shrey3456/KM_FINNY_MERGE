@@ -72,9 +72,6 @@ import {
   Trash,
   ChevronDown,
   ChevronLeft,
-  ChevronRight,
-  ChevronFirst,
-  ChevronLast,
   Check,
   X,
   Save,
@@ -298,10 +295,6 @@ export default function ProformaSlips() {
 
   // Plant tab options (name + configured colors), derived from the loaded slips + Plant Management.
   const [plantOptions, setPlantOptions] = useState<Array<{value: string; label: string; bgColor?: string; textColor?: string; borderColor?: string}>>([]);
-  
-  // Entries limit state - Default to 15 entries
-  const [entriesLimit, setEntriesLimit] = useState<number>(15);
-  
   // Auto-refresh interval in milliseconds (10 seconds for real-time collaboration)
   const AUTO_REFRESH_INTERVAL = 10000;
   
@@ -1021,22 +1014,6 @@ export default function ProformaSlips() {
   };
   
   // Pagination state variable
-  const [currentPage, setCurrentPage] = useState(1);
-  
-  // Calculate total number of pages based on entries limit
-  const getTotalPages = () => {
-    const filteredLength = getFilteredSlips().length;
-    return Math.ceil(filteredLength / entriesLimit);
-  };
-  
-  // Ensure current page is valid when entries limit changes
-  useEffect(() => {
-    const totalPages = getTotalPages();
-    if (totalPages > 0 && currentPage > totalPages) {
-      setCurrentPage(totalPages);
-    }
-  }, [entriesLimit, getFilteredSlips]);
-  
   // Helper: parse various orderDate formats into a Date (returns null on failure)
   function parseSlipDate(value: any): Date | null {
     try {
@@ -1585,7 +1562,7 @@ export default function ProformaSlips() {
     );
   };
 
-  const renderSlipFooter = (ctx: DataTableFooterContext) => {
+  const renderSlipFooter = (_ctx: DataTableFooterContext) => {
     const filteredSlips = getFilteredSlips();
     // Which columns are ACTUALLY rendering right now — mirrors data-table.tsx's own
     // visibleColumns logic exactly (visibility-toggle set, plus anything hideable:false which
@@ -1614,77 +1591,13 @@ export default function ProformaSlips() {
                 case 'vehicleNumber':
                   return <TableCell key={col.id} className="text-center">{uniqueVehicles}</TableCell>;
                 case 'actions':
-                  return (
-                    <TableCell key={col.id}>
-                      <div className="flex items-center justify-end gap-1">
-                        <span className="text-xs whitespace-nowrap">Entries:</span>
-                        <select
-                          className="h-6 text-xs border rounded px-1 bg-background"
-                          value={ctx.pageSize}
-                          onChange={(e) => ctx.setPageSize(Number(e.target.value))}
-                          aria-label="Number of entries to display"
-                        >
-                          <option value={15}>15</option>
-                          <option value={25}>25</option>
-                          <option value={50}>50</option>
-                          <option value={100}>100</option>
-                        </select>
-                      </div>
-                    </TableCell>
-                  );
+                  return <TableCell key={col.id}></TableCell>;
                 default:
                   return <TableCell key={col.id}></TableCell>;
               }
             })}
           </TableRow>
         )}
-
-        <TableRow>
-          <TableCell colSpan={ctx.columnCount} className="text-center py-2">
-            <div className="flex items-center justify-between">
-              <div className="text-sm text-muted-foreground">
-                Showing {ctx.totalRows > 0 ? ctx.pageIndex * ctx.pageSize + 1 : 0} to {Math.min((ctx.pageIndex + 1) * ctx.pageSize, ctx.totalRows)} of {ctx.totalRows} entries
-              </div>
-              <div className="flex items-center space-x-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => ctx.setPageIndex(0)}
-                  disabled={ctx.pageIndex === 0}
-                >
-                  <ChevronFirst className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => ctx.setPageIndex(Math.max(0, ctx.pageIndex - 1))}
-                  disabled={ctx.pageIndex === 0}
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </Button>
-                <span className="text-sm text-muted-foreground px-2">
-                  Page {ctx.pageIndex + 1} of {ctx.pageCount}
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => ctx.setPageIndex(Math.min(ctx.pageCount - 1, ctx.pageIndex + 1))}
-                  disabled={ctx.pageIndex >= ctx.pageCount - 1}
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => ctx.setPageIndex(ctx.pageCount - 1)}
-                  disabled={ctx.pageIndex >= ctx.pageCount - 1}
-                >
-                  <ChevronLast className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-          </TableCell>
-        </TableRow>
       </TableFooter>
     );
   };
@@ -2061,12 +1974,8 @@ export default function ProformaSlips() {
             sortMode="external"
             sortState={{ columnId: sortConfig.column, direction: sortConfig.direction }}
             onSortColumnClick={handleSort}
-            paginationMode="client"
-            pageIndex={currentPage - 1}
-            onPageIndexChange={(idx) => setCurrentPage(idx + 1)}
-            pageSize={entriesLimit}
-            onPageSizeChange={setEntriesLimit}
-            pageSizeOptions={[15, 25, 50, 100]}
+            isStickyHeader
+            maxHeight="max(420px, calc(100vh - 360px))"
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}

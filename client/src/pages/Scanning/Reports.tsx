@@ -79,8 +79,6 @@ type ScanHistoryResponse = {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const HISTORY_PAGE_SIZE = 20;
-
 // Solid navy fill, matching Overall Stock / Product Master's filter buttons. Squared off
 // (rounded-xl) for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
@@ -223,7 +221,6 @@ const Reports = () => {
     },
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
-  const [historyPage,    setHistoryPage]    = useState(1);
   const [historySearch,  setHistorySearch]  = useState("");
   const [historyExporting, setHistoryExporting] = useState<string | null>(null);
   // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Overall Stock's
@@ -431,29 +428,52 @@ const Reports = () => {
     }
   };
 
-  useEffect(() => { setHistoryPage(1); }, [historySearch, activeFilters, filtersJson]);
-
-  const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
-  const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
-    from:    fromDate       || undefined,
-    to:      toDate         || undefined,
-    search:  historySearch  || undefined,
-    scanner: historyScanner || undefined,
-    type:    historyType    || undefined,
-    filters: filtersJson,
-    limit:   HISTORY_PAGE_SIZE,
-    offset:  historyOffset,
-  });
-
   const { data: historyData, isLoading: historyLoading, isFetching: historyFetching } =
     useQuery<ScanHistoryResponse>({
       queryKey: [
         "/api/scan-sessions/reports/scan-history",
-        selectedDate, historySearch, historyScanner, historyType, filtersJson, historyPage,
+        selectedDate, historySearch, historyScanner, historyType, filtersJson,
       ],
+      // No pagination in the UI — the table scrolls (like the Scan page's Master View shows its
+      // whole list), so pull EVERY matching row. The server caps `limit` at 100, so page through
+      // with the same filters until we have everything, then hand the full set to the table.
+      // Summary fields (total/scanners/…) are full-match totals, so keep them from the first page.
       queryFn: async () => {
-        const r = await apiRequest("GET", historyUrl, undefined, false, true);
-        return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
+        const PAGE_SIZE = 100; // server-side max for `limit`
+        let offset = 0;
+        let total = Infinity;
+        const all: ScanHistoryItem[] = [];
+        let meta: ScanHistoryResponse | undefined;
+        while (offset < total) {
+          const url = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
+            from:    fromDate       || undefined,
+            to:      toDate         || undefined,
+            search:  historySearch  || undefined,
+            scanner: historyScanner || undefined,
+            type:    historyType    || undefined,
+            filters: filtersJson,
+            limit:   PAGE_SIZE,
+            offset,
+          });
+          const r: ScanHistoryResponse | undefined = await apiRequest("GET", url, undefined, false, true);
+          if (!r) break;
+          if (!meta) meta = r;
+          const items = r.items ?? [];
+          if (items.length === 0) break; // guards against an infinite loop if total is ever wrong
+          all.push(...items);
+          total = r.total ?? all.length;
+          offset += items.length;
+        }
+        return {
+          items: all,
+          total: meta?.total ?? all.length,
+          totalBoxes: meta?.totalBoxes ?? 0,
+          totalPallets: meta?.totalPallets ?? 0,
+          extraCount: meta?.extraCount ?? 0,
+          scanners: meta?.scanners ?? [],
+          limit: PAGE_SIZE,
+          offset: 0,
+        };
       },
       refetchInterval: 5000,
       placeholderData: (previousData) => previousData,
@@ -462,14 +482,11 @@ const Reports = () => {
   const historyItems        = historyData?.items ?? [];
   const historyTotal        = historyData?.total ?? 0;
   const historyScanners     = historyData?.scanners ?? [];
-  const historyHasMore      = historyOffset + historyItems.length < historyTotal;
 
-  // Export must cover every row matching the current filters, not just the current page —
-  // the server caps `limit` at 100 (see /reports/scan-history), so this pages through with
-  // the SAME filters until it has everything, then hands the full set to the exporter.
-  // Previously the button exported `historyItems` directly, which is only the current
-  // HISTORY_PAGE_SIZE (20) page — e.g. exporting "today" silently dropped every row past
-  // page 1.
+  // Export must cover every row matching the current filters — the server caps `limit` at 100
+  // (see /reports/scan-history), so this pages through with the SAME filters until it has
+  // everything, then hands the full set to the exporter. Kept independent of the table's own
+  // fetch so a click always exports a fresh, complete set even mid-poll.
   async function fetchAllHistoryItems(): Promise<ScanHistoryItem[]> {
     const EXPORT_PAGE_SIZE = 100; // server-side max for `limit`
     let offset = 0;
@@ -694,15 +711,15 @@ const Reports = () => {
         />
 
         {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/
-            hideable columns, zebra stripes, mobile swipe hint. Pagination is server-driven
-            (Prev/Next over 20-row pages), so it's rendered via renderFooter instead of the
-            DataTable's own client pageIndex/pageSize controls. */}
+            hideable columns, zebra stripes, mobile swipe hint. No pagination — the whole filtered
+            list loads and the table body scrolls under a sticky header, matching the Scan page's
+            Master View. */}
         <TableCard
           icon={History}
           title="Scan Events"
           subtitle={
             <span className="inline-flex items-center gap-1.5">
-              <span>{historyTotal > 0 ? `${historyItems.length} of ${historyTotal.toLocaleString()} events` : "0 events"}</span>
+              <span>{historyTotal > 0 ? `${historyTotal.toLocaleString()} events` : "0 events"}</span>
               {/* Always mounted (visibility toggled, not presence) so the 5s poll never causes a
                   layout shift — kept here in the subtitle line instead of the button row, where
                   its reserved width used to show up as a permanent gap next to "+ Filter". */}
@@ -1046,28 +1063,9 @@ const Reports = () => {
             columnVisibility={visibleColumnIds}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
+            isStickyHeader
+            maxHeight="max(420px, calc(100vh - 360px))"
             headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
-            renderFooter={(ctx) => (
-              <tfoot>
-                <tr>
-                  <td colSpan={ctx.columnCount} className="border-t border-gray-300 bg-white px-4 py-2.5">
-                    <div className="flex items-center justify-between text-xs text-gray-500">
-                      <span>
-                        {historyTotal > 0
-                          ? `Showing ${historyOffset + 1}–${Math.min(historyOffset + historyItems.length, historyTotal)} of ${historyTotal.toLocaleString()} events`
-                          : "No events"}
-                      </span>
-                      <div className="flex gap-2">
-                        <Button variant="outline" size="sm" className="rounded-xl" disabled={historyPage <= 1}
-                          onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                        <Button variant="outline" size="sm" className="rounded-xl" disabled={!historyHasMore}
-                          onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
-                      </div>
-                    </div>
-                  </td>
-                </tr>
-              </tfoot>
-            )}
           />
         </TableCard>
       </div>

@@ -203,8 +203,6 @@ function downloadPdf(
   doc.save(filename);
 }
 
-const PAGE_SIZE = 20;
-
 // Solid navy fill, matching the Product Master action buttons. Squared off (rounded-xl)
 // for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
@@ -217,7 +215,6 @@ export default function OverallStock() {
   // Matches the server's actual rule (POST /reports/exchange-stock: requirePageWrite('overall-stock')).
   const canExchange = isAdminOrSuper || hasPageWriteAccess("overall-stock");
   const [search,      setSearch]      = useState("");
-  const [pageIndex,   setPageIndex]   = useState(0);
   // Dynamic "+ Filter" conditions the operator adds on demand. Each is one field + a chosen value;
   // an empty value means "added but not yet set" and matches everything until picked. See
   // FILTER_FIELDS below for the available dimensions and how each one matches a row.
@@ -230,7 +227,6 @@ export default function OverallStock() {
   const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>({});
   const setColumnCondition = (columnId: string, condition: FilterCondition) => {
     setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
-    setPageIndex(0);
   };
   const clearColumnCondition = (columnId: string) => {
     setColumnConditions((prev) => {
@@ -238,7 +234,6 @@ export default function OverallStock() {
       delete next[columnId];
       return next;
     });
-    setPageIndex(0);
   };
 
   // The single "+ Filter" entry point — one combined list (Plant, Date, then every generic
@@ -333,7 +328,6 @@ export default function OverallStock() {
       const others = prev.filter((f) => f.field !== "plant");
       return name ? [...others, { id: ++filterIdRef.current, field: "plant", value: name }] : others;
     });
-    setPageIndex(0);
   };
 
   // Plant-wise stock. Server enforces access: admins get every plant, others only theirs.
@@ -465,7 +459,6 @@ export default function OverallStock() {
 
   const removeFilter = (id: number) => {
     setActiveFilters((prev) => prev.filter((f) => f.id !== id));
-    setPageIndex(0);
   };
   // Add-or-set in one call — used by the unified "+ Filter" picker below, which builds a
   // complete Plant/Date value before it ever becomes a chip (same one-step Apply pattern as the
@@ -476,7 +469,6 @@ export default function OverallStock() {
       if (idx >= 0) { const next = [...prev]; next[idx] = { ...next[idx], value }; return next; }
       return [...prev, { id: ++filterIdRef.current, field, value }];
     });
-    setPageIndex(0);
   };
 
   // A row passes when every set filter matches it (empty-value filters are ignored until picked).
@@ -942,7 +934,7 @@ export default function OverallStock() {
             <>
               <CollapsibleSearch
                 value={search}
-                onChange={(v) => { setSearch(v); setPageIndex(0); }}
+                onChange={(v) => setSearch(v)}
                 placeholder="Item, barcode, SAP, category…"
               />
 
@@ -1176,7 +1168,7 @@ export default function OverallStock() {
                   size="sm"
                   variant="ghost"
                   className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900"
-                  onClick={() => { setActiveFilters((prev) => prev.filter((f) => f.field === "plant" || f.field === "date")); setColumnConditions({}); setPageIndex(0); }}
+                  onClick={() => { setActiveFilters((prev) => prev.filter((f) => f.field === "plant" || f.field === "date")); setColumnConditions({}); }}
                 >
                   Clear all
                 </Button>
@@ -1275,11 +1267,8 @@ export default function OverallStock() {
             enableTotalsRow
             enableZebraStripes
             sortMode="client"
-            paginationMode="client"
-            pageIndex={pageIndex}
-            onPageIndexChange={setPageIndex}
-            defaultPageSize={PAGE_SIZE}
-            pageSizeOptions={[20, 50, 100, 200]}
+            isStickyHeader
+            maxHeight="max(420px, calc(100vh - 360px))"
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}

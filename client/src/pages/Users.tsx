@@ -227,7 +227,6 @@ const Users = () => {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<Partial<User> | null>(null);
-  const [pageIndex, setPageIndex] = useState(0);
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(['avatar', 'name', 'username', 'designation', 'role', 'plants', 'actions']),
   );
@@ -817,12 +816,12 @@ const Users = () => {
                 <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
                 <input
                   value={searchTerm}
-                  onChange={(e) => { setSearchTerm(e.target.value); setPageIndex(0); }}
+                  onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder="Search users…"
                   className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
                 />
                 {searchTerm && (
-                  <button onClick={() => { setSearchTerm(''); setPageIndex(0); }} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
+                  <button onClick={() => setSearchTerm('')} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
                     <X className="h-3.5 w-3.5" />
                   </button>
                 )}
@@ -871,11 +870,8 @@ const Users = () => {
               noResultsState="No users found matching your search."
               hasActiveFilters={!!searchTerm}
               sortMode="client"
-              paginationMode="client"
-              pageIndex={pageIndex}
-              onPageIndexChange={setPageIndex}
-              defaultPageSize={15}
-              pageSizeOptions={[15, 25, 50, 100]}
+              isStickyHeader
+              maxHeight="max(420px, calc(100vh - 360px))"
               enableColumnResizing
               enableColumnVisibility
               columnVisibility={visibleColumnIds}

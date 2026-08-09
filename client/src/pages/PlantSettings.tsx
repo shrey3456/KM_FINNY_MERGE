@@ -994,9 +994,8 @@ export default function PlantSettings() {
             noResultsState="No plants match your search."
             hasActiveFilters={!!plantSearch}
             sortMode="client"
-            paginationMode="client"
-            defaultPageSize={10}
-            pageSizeOptions={[10, 25, 50, 100]}
+            isStickyHeader
+            maxHeight="max(420px, calc(100vh - 360px))"
             enableColumnResizing
             enableZebraStripes
             showMobileSwipeHint
