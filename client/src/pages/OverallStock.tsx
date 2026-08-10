@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import * as XLSX from "xlsx";
@@ -203,6 +203,8 @@ function downloadPdf(
   doc.save(filename);
 }
 
+const PAGE_SIZE = 20;
+
 // Solid navy fill, matching the Product Master action buttons. Squared off (rounded-xl)
 // for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
@@ -215,6 +217,7 @@ export default function OverallStock() {
   // Matches the server's actual rule (POST /reports/exchange-stock: requirePageWrite('overall-stock')).
   const canExchange = isAdminOrSuper || hasPageWriteAccess("overall-stock");
   const [search,      setSearch]      = useState("");
+  const [pageIndex,   setPageIndex]   = useState(0);
   // Dynamic "+ Filter" conditions the operator adds on demand. Each is one field + a chosen value;
   // an empty value means "added but not yet set" and matches everything until picked. See
   // FILTER_FIELDS below for the available dimensions and how each one matches a row.
@@ -530,6 +533,12 @@ export default function OverallStock() {
 
   // Real stock rows first, then the distinct empty-box rows.
   const displayRows = useMemo(() => [...filtered, ...emptyBoxRows], [filtered, emptyBoxRows]);
+
+  // Any change to what's being listed restarts at page 1 — staying on page 4 of a plant you just
+  // switched to shows an arbitrary slice, and reads as empty whenever the new set is shorter.
+  useEffect(() => {
+    setPageIndex(0);
+  }, [search, activePlant, activeFilters, columnConditionList]);
 
   // Export rows
   const exportRows = (src: PlantStockRow[]): Array<Array<string | number>> => [
@@ -1267,8 +1276,13 @@ export default function OverallStock() {
             enableTotalsRow
             enableZebraStripes
             sortMode="client"
-            isStickyHeader
-            maxHeight="max(420px, calc(100vh - 360px))"
+            // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box of
+            // its own — matching develop.
+            paginationMode="client"
+            pageIndex={pageIndex}
+            onPageIndexChange={setPageIndex}
+            defaultPageSize={PAGE_SIZE}
+            pageSizeOptions={[20, 50, 100, 200]}
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}

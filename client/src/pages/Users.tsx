@@ -17,7 +17,7 @@ import {
   Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown,
   UserPlus, UserCog, AlertTriangle, KeyRound, IdCard, ShieldCheck,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { User } from '@shared/schema';
 import {
   Dialog,
@@ -223,6 +223,10 @@ function MultiSelectField({
 
 const Users = () => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [pageIndex, setPageIndex] = useState(0);
+  // Searching re-cuts the list, so start it from the top rather than leaving you on a page number
+  // that means something different (or nothing at all) against the new set.
+  useEffect(() => { setPageIndex(0); }, [searchTerm]);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -870,8 +874,13 @@ const Users = () => {
               noResultsState="No users found matching your search."
               hasActiveFilters={!!searchTerm}
               sortMode="client"
-              isStickyHeader
-              maxHeight="max(420px, calc(100vh - 360px))"
+              // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box
+              // of its own — matching develop.
+              paginationMode="client"
+              pageIndex={pageIndex}
+              onPageIndexChange={setPageIndex}
+              defaultPageSize={15}
+              pageSizeOptions={[15, 25, 50, 100]}
               enableColumnResizing
               enableColumnVisibility
               columnVisibility={visibleColumnIds}

@@ -1019,8 +1019,11 @@ export default function PlantSettings() {
             noResultsState="No plants match your search."
             hasActiveFilters={!!plantSearch}
             sortMode="client"
-            isStickyHeader
-            maxHeight="max(420px, calc(100vh - 360px))"
+            // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box of
+            // its own — matching develop.
+            paginationMode="client"
+            defaultPageSize={10}
+            pageSizeOptions={[10, 25, 50, 100]}
             enableColumnResizing
             enableZebraStripes
             showMobileSwipeHint

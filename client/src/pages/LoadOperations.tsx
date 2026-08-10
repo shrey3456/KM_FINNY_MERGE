@@ -7129,12 +7129,9 @@ export default function LoadOperations() {
 
 
       {/* Desktop View - Loading Operations Table */}
-      {/* No pagination — the table body scrolls under a sticky header. The shadcn <Table> wraps the
-          <table> in its own overflow-auto div, so we cap THAT wrapper's height (via the [&>div] child
-          selector) to make it the scroll container the sticky <thead> anchors to. */}
-      <div className="hidden md:block border rounded-md w-full [&>div]:max-h-[max(420px,calc(100vh-360px))] [&>div]:overflow-y-auto">
+      <div className="hidden md:block border rounded-md w-full">
         <Table className="hidden md:table">
-          <TableHeader className="sticky top-0 z-10 bg-background [&_th]:bg-background">
+          <TableHeader>
             <TableRow>
               <TableHead className="w-12">
                 <Checkbox 
@@ -7213,8 +7210,8 @@ export default function LoadOperations() {
                   return 0; // Return 0 on error to keep the original order
                 }
               })
-              // No pagination — the table scrolls (see the sticky-header container below), so
-              // every filtered row renders and the whole list is reachable by scrolling.
+              // Apply pagination
+              .slice((currentPage - 1) * entriesLimit, showAll ? undefined : currentPage * entriesLimit)
               .map((operation) => (
                 <TableRow key={operation.id}>
                   <TableCell>
@@ -9871,13 +9868,26 @@ export default function LoadOperations() {
                 {/* Status Cell */}
                 <TableCell className="text-center">_</TableCell>
                 {/* Actions Cell */}
-                <TableCell></TableCell>
+                <TableCell>
+                  {/* Show entries dropdown */}
+                  <div className="flex items-center justify-end gap-1 ml-auto">
+                    <span className="text-xs whitespace-nowrap">Show entries:</span>
+                    <select
+                      className="h-6 text-xs border rounded px-1 bg-background"
+                      value={entriesLimit}
+                      onChange={(e) => setEntriesLimit(Number(e.target.value))}
+                      aria-label="Number of entries to display"
+                    >
+                      <option value={15}>15</option>
+                      <option value={25}>25</option>
+                      <option value={50}>50</option>
+                      <option value={100}>100</option>
+                    </select>
+                  </div>
+                </TableCell>
               </TableRow>
             )}
-            {/* Pagination removed — the table body scrolls under its sticky header instead of
-                paging, so these controls are disabled ({null && …}) rather than deleted, to avoid
-                disturbing the surrounding legacy footer/filter logic. */}
-            {null && (
+            {/* Pagination Controls */}
             <TableRow>
               <TableCell colSpan={8} className="px-4 py-2">
                 {(() => {
@@ -10023,7 +10033,6 @@ export default function LoadOperations() {
                 })()}
               </TableCell>
             </TableRow>
-            )}
           </TableFooter>
         </Table>
       </div>
