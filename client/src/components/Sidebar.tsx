@@ -33,6 +33,7 @@ import {
   ChevronsLeft,
   ChevronDown,
   LayoutList,
+  Eye,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -193,6 +194,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/scan",
           badge: hasScanBadge ? 1 : 0,
           pageKey: "scan-order",
+        },
+        {
+          label: "Scan Viewer",
+          icon: <Eye className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/scan-viewer",
+          pageKey: "scan-viewer",
         },
         {
           label: "Scan History",

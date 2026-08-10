@@ -219,6 +219,33 @@ function requireCompleteAccess(req: Request, res: Response, next: NextFunction) 
   next();
 }
 
+const WRITE_ADMIN_ROLES = ['admin', 'super-admin', 'superadmin', 'super_admin', 'super admin'];
+function hasWriteAccess(user: any, pageKey: string): boolean {
+  const role = (user?.role ?? '').toString().toLowerCase();
+  if (WRITE_ADMIN_ROLES.includes(role)) return true;
+  let writable: string[] = [];
+  try { writable = JSON.parse(user?.pageWriteAccess || '[]'); } catch { /* default [] */ }
+  return writable.includes(pageKey);
+}
+
+// Void needs Write Access via one of two INDEPENDENT paths, not a single fixed pair:
+//   1. BOTH "scan-order" AND "scan-history" — the original rule, for the Scan/Scan History pages.
+//   2. Just "scan-viewer" alone — the lighter, view-plus-correct-mistakes page that deliberately
+//      does NOT grant any of the heavier Scan Order capabilities (scanning, completing,
+//      activating, etc.), so someone can be trusted to void a mistaken scan without being able
+//      to do anything else there.
+// This is an OR-of-ANDs, which is why it's a dedicated function rather than just chaining
+// requirePageWrite calls (chaining only ever produces AND, never OR).
+function requireVoidAccess(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  const user = req.user as any;
+  const role = (user?.role ?? '').toString().toLowerCase();
+  if (WRITE_ADMIN_ROLES.includes(role)) return next();
+  const viaScanPages = hasWriteAccess(user, 'scan-order') && hasWriteAccess(user, 'scan-history');
+  const viaViewer = hasWriteAccess(user, 'scan-viewer');
+  if (viaScanPages || viaViewer) return next();
+  return res.status(403).json({ message: 'Write access required' });
+}
 
 const ADMIN_ROLES = ['admin', 'super-admin', 'billing'];
 
@@ -1726,9 +1753,10 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
 });
 
 // ── POST /api/order-scan/events/:id/void ─────────────────────────────────────
-// Admin, or anyone granted Write Access to BOTH the "scan-order" and "scan-history" pages
-// (chaining two requirePageWrite calls below — each is its own middleware in the chain, so
-// both must pass; one grant alone is not enough). Marks a single scan event as a mistake:
+// Admin, or anyone granted Write Access to BOTH the "scan-order" and "scan-history" pages,
+// OR (independently) Write Access to just "scan-viewer" alone — see requireVoidAccess above
+// for why this needs to be an OR-of-ANDs rather than a simple chained-middleware AND. Marks a
+// single scan event as a mistake:
 // the row stays in history (never deleted) but its quantity is reversed out of the linked
 // order_scan_items row AND out of stock (product_plant_stock / stock_movements /
 // products.in_stock), mirroring exactly what the original /scan increment did, in reverse.
@@ -1743,7 +1771,7 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
 // Extra scanned for the same item on this same part, if one exists (see the block right after
 // the item update below) — so an Extra sitting next to a voided Regular gets put to use instead
 // of just sitting there unused while the item shows short.
-router.post('/order-scan/events/:id/void', requirePageWrite('scan-order'), requirePageWrite('scan-history'), async (req: Request, res: Response) => {
+router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
 

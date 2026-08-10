@@ -1192,7 +1192,7 @@ router.get('/order-import/master-view/item-history', requireImportViewAccess, as
     const { rows } = await pool.query(`
       SELECT
         ose.id, ose.session_id AS "sessionId", ose.barcode, ose.item_name AS "itemName",
-        ose.pallets, ose.total_qty AS "totalQty", ose.is_extra AS "isExtra",
+        ose.pallets, ose.total_qty AS "totalQty", ose.is_extra AS "isExtra", ose.stv,
         ose.scanned_by_name AS "scannedByName", ose.scanned_at AS "scannedAt",
         ose.voided, ose.voided_by_code AS "voidedByCode", ose.voided_at AS "voidedAt",
         ose.void_reason AS "voidReason",

@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
 import Home from "@/pages/Dashboard";
 import ScanOrder from "@/pages/Scanning/Scan";
+import ScanViewer from "@/pages/ScanViewer";
 import NotionInventory from "@/pages/NotionInventory";
 import Reports from "@/pages/Scanning/Reports.tsx";
 import Users from "@/pages/Users";
@@ -248,6 +249,7 @@ function Router() {
         <ProtectedRoute path="/reports" component={Reports} requiredPage="scan-history" />
         <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
+        <ProtectedRoute path="/scan-viewer" component={ScanViewer} requiredPage="scan-viewer" />
         <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
         <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />
         <ProtectedRoute path="/settings" component={Settings} requiredPage="settings" />

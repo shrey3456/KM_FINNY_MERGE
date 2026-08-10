@@ -1632,37 +1632,15 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // ── Expected Qty — sum of every CSV's ordered quantity for the order date(s) currently
     // relevant per plant ──────────────────────────────────────────────────────────────────
     // Explicit date filter (from/to pin down one day, e.g. the "Today"/"Yesterday" presets or
-    // the user filling in just `from`): that ONE date applies to every plant, same as before.
-    // No filter at all: each plant uses its OWN currently ACTIVE session's order date instead
-    // of one shared date — Valsad might be actively scanning the 19th while Indore is still on
-    // the 10th, and each plant's Expected reflects its own reality. This replaced two earlier,
-    // broken defaults: "literal today" (usually empty — most days nothing's uploaded yet) and
-    // before that "oldest pending order across ALL plants" (which silently applied ONE plant's
-    // backlog date to every plant, pulling in unrelated already-completed orders that happened
-    // to share that date — see the 7180-vs-1940 mismatch this replaced). "All" plants now sums
-    // each plant's own active-date total — never one date force-applied across plants that
-    // aren't even on it.
+    // the user filling in just `from`): that ONE date applies to every plant.
+    // No filter at all: sum EVERY order ever uploaded, across every date — not scoped to
+    // whichever session happens to be "active" right now. Picking a date is what narrows it
+    // down to that one order; leaving it blank means "everything".
     let singleDate: string | null = null;   // set only when exactly one date is in play — what the client shows as "(date)" in the tile label.
-    let activePairs: { plant: string; orderDate: string }[] = [];
+    const allDatesMode = !from && !to;
     if (from && (!to || to === from)) {
       singleDate = from;
-    } else if (!from && !to) {
-      const activeParams: any[] = [];
-      const activeConds: string[] = [`scan_status = 'active'`, 'is_deleted = false'];
-      if (allowed !== null) { activeParams.push(allowed); activeConds.push(`LOWER(plant) = ANY($${activeParams.length}::text[])`); }
-      if (plantParam) { activeParams.push(plantParam.toLowerCase()); activeConds.push(`LOWER(plant) = $${activeParams.length}`); }
-      const { rows: activeRows } = await pool.query(
-        `SELECT LOWER(plant) AS plant, order_date AS "orderDate" FROM order_import_sessions WHERE ${activeConds.join(' AND ')}`,
-        activeParams,
-      );
-      activePairs = activeRows.map((r: any) => ({ plant: r.plant, orderDate: r.orderDate }));
-      const distinctDates = new Set(activePairs.map((p) => p.orderDate));
-      if (distinctDates.size === 1) singleDate = activePairs[0]?.orderDate ?? null;
     }
-    // Surfaced to the client so "All" can label itself sensibly even when the plants
-    // underneath it are on different active dates (no single date to print in that case).
-    const activeDatesByPlant: Record<string, string> = {};
-    for (const p of activePairs) activeDatesByPlant[p.plant] = p.orderDate;
 
     const expectedByKey = new Map<string, number>();
     let expectedTotal = 0;
@@ -1723,7 +1701,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     }
 
     if (singleDate) {
-      // Explicit filter, or every active plant coincidentally on the same date — one shared date.
+      // Explicit date filter — one shared date.
       const expParams: any[] = [singleDate];
       const expConds: string[] = ['ois.order_date = $1', 'ois.is_deleted = false'];
       if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
@@ -1737,26 +1715,25 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         HAVING SUM(oii.quantity) <> 0
       `, expParams);
       await applyExpectedRows(expRows);
-    } else if (activePairs.length > 0) {
-      // Multiple plants on genuinely different active dates — join each item's session against
-      // its OWN plant's active date instead of one date applied everywhere.
+    } else if (allDatesMode) {
+      // No date filter — sum every order ever uploaded, across every date (no order_date
+      // restriction at all), instead of scoping to whichever session is currently "active".
       const expParams: any[] = [];
-      const valuesSql = activePairs
-        .map((p) => { expParams.push(p.plant, p.orderDate); return `($${expParams.length - 1}::text, $${expParams.length}::text)`; })
-        .join(', ');
+      const expConds: string[] = ['ois.is_deleted = false'];
+      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
+      if (plantParam) { expParams.push(plantParam.toLowerCase()); expConds.push(`LOWER(oii.plant) = $${expParams.length}`); }
       const { rows: expRows } = await pool.query(`
         SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
         FROM order_import_items oii
         JOIN order_import_sessions ois ON ois.id = oii.session_id
-        JOIN (VALUES ${valuesSql}) AS active(plant, order_date) ON LOWER(ois.plant) = active.plant AND ois.order_date = active.order_date
-        WHERE ois.is_deleted = false
+        WHERE ${expConds.join(' AND ')}
         GROUP BY oii.barcode, oii.plant
         HAVING SUM(oii.quantity) <> 0
       `, expParams);
       await applyExpectedRows(expRows);
     }
 
-    const hasExpected = singleDate != null || activePairs.length > 0;
+    const hasExpected = singleDate != null || allDatesMode;
     const itemsWithExpected = hasExpected
       ? [...items, ...expectedOnlyRows].map((it: any) => ({
           ...it,
@@ -1786,11 +1763,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     res.json({
       items: itemsWithExpected, total: itemsWithExpected.length, plants: allowed,
       emptyBoxByPlant, emptyBoxTotal, dateMode, from: from || null, to: to || null,
-      // expectedDate: one date when it applies to everything (explicit filter, single plant,
-      // or every active plant coincidentally matches) — null when plants are on different
-      // active dates, in which case activeDatesByPlant carries each plant's own date instead.
+      // expectedDate: set only when an explicit date filter is applied — null in the default
+      // "all dates" mode, where expectedTotal is a sum across every order ever uploaded instead.
       expectedDate: singleDate, expectedTotal: hasExpected ? expectedTotal : null,
-      activeDatesByPlant,
     });
   } catch (error) {
     console.error('Error generating plant stock report:', error);

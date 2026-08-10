@@ -535,6 +535,20 @@ export default function PlantSettings() {
       render: (p) => p.name,
     },
     {
+      id: "state",
+      header: "State",
+      width: 80,
+      sortable: true,
+      accessor: (p) => p.state ?? "",
+      render: (p) => p.state ? (
+        <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700">
+          {p.state}
+        </span>
+      ) : (
+        <span className="text-xs text-gray-400">—</span>
+      ),
+    },
+    {
       id: "locking",
       header: "Print Locking",
       width: 100,
@@ -1048,11 +1062,18 @@ export default function PlantSettings() {
             filteredPlants.map((plant: any) => (
               <div key={plant.id} className="p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <div
-                    className="rounded border px-2.5 py-1 text-sm font-bold truncate"
-                    style={{ backgroundColor: plant.bgColor, color: plant.textColor, borderColor: plant.borderColor, borderWidth: "1px" }}
-                  >
-                    {plant.name}
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div
+                      className="rounded border px-2.5 py-1 text-sm font-bold truncate"
+                      style={{ backgroundColor: plant.bgColor, color: plant.textColor, borderColor: plant.borderColor, borderWidth: "1px" }}
+                    >
+                      {plant.name}
+                    </div>
+                    {plant.state && (
+                      <span className="inline-flex shrink-0 items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700">
+                        {plant.state}
+                      </span>
+                    )}
                   </div>
                   <div className="flex shrink-0 gap-1">
                     <Button

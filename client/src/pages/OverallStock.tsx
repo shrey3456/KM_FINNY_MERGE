@@ -55,9 +55,9 @@ type PlantStockRow = {
   // entries; the stock/extra/pallet cells render as dashes so it's never read as inventory.
   isEmptyBox?: boolean;
   emptyBoxCount?: number;
-  // Sum of every CSV's ordered quantity for this barcode+plant on the picked date (across ALL
-  // parts uploaded for that date) — only populated when exactly one date is selected (see
-  // expectedDate below). null when no single date is active.
+  // Sum of every CSV's ordered quantity ever uploaded for this barcode+plant — scoped down to
+  // one date's orders only when a date filter is picked (see expectedDate below); otherwise an
+  // all-time sum across every order date. null when Expected Qty isn't populated at all.
   expectedQty?: number | null;
 };
 
@@ -75,15 +75,10 @@ type PlantStockResponse = {
   dateMode?: boolean;
   from?: string | null;
   to?: string | null;
-  // Set only when ONE date applies to everything Expected Qty was computed for — an explicit
-  // date filter, a single plant selected, or every active plant coincidentally on the same
-  // date. Null when plants are on different active dates — activeDatesByPlant carries each
-  // plant's own date in that case instead.
+  // Set only when an explicit date filter is applied. Null in the default "all dates" mode,
+  // where expectedTotal is a sum across every order ever uploaded instead of one date's orders.
   expectedDate?: string | null;
   expectedTotal?: number | null;
-  // Each plant's own currently-active session's order date (lowercased plant key) — used to
-  // label the "All plants" tile sensibly when there's no single shared date to show.
-  activeDatesByPlant?: Record<string, string>;
 };
 
 // One dated entry from the stock_movements ledger for a single (barcode, plant) — powers the
@@ -347,15 +342,12 @@ export default function OverallStock() {
   // True when a date range is active: the Stock/Extra numbers then mean "received in this
   // window" rather than "total on hand", so the UI labels them differently.
   const dateMode = stockData?.dateMode ?? false;
-  // Expected Qty (sum of every CSV's ordered quantity across all parts) — server resolves
-  // WHICH date(s) per plant (explicit filter, or each plant's own currently-active session),
-  // so this tile can be present (expectedTotal != null) even when expectedDate is null because
-  // the plants in view are on different active dates. activeDatesByPlant then carries each
-  // plant's own date for a per-plant-aware label.
+  // Expected Qty (sum of every CSV's ordered quantity across all parts) — an explicit date
+  // filter scopes this to that one date's orders; with no filter it's an all-time sum across
+  // every order ever uploaded (expectedDate is then null).
   const expectedDate = stockData?.expectedDate ?? null;
   const expectedTotal = stockData?.expectedTotal ?? 0;
   const hasExpected = stockData?.expectedTotal != null;
-  const activeDatesByPlant = stockData?.activeDatesByPlant ?? {};
 
   const rows = stockData?.items ?? [];
   // null = admin (may pick any plant). Array = restricted user → lock the switcher to these.
@@ -670,7 +662,7 @@ export default function OverallStock() {
       cellClassName: cellBorder,
       render: (row) =>
         row.isEmptyBox || row.expectedQty == null ? dash : (
-          <span className="font-bold text-purple-700 tabular-nums" title="Sum of ordered quantity across every CSV/part uploaded for this date">
+          <span className="font-bold text-purple-700 tabular-nums" title={expectedDate ? `Sum of ordered quantity across every CSV/part uploaded for ${expectedDate}` : "Sum of ordered quantity across every CSV/part ever uploaded (all dates)"}>
             {row.expectedQty.toLocaleString()}
           </span>
         ),
@@ -886,13 +878,11 @@ export default function OverallStock() {
               icon: CalendarDays,
               tone: "navy" as const,
               value: expectedTotal.toLocaleString(),
-              // One shared date (explicit filter, one plant selected, or every active plant
-              // coincidentally matches) shows that date. Otherwise (plants on different active
-              // dates, e.g. Valsad on the 19th while Indore is still on the 10th) there's no
-              // single date to print, so each plant's own active date is listed instead.
+              // An explicit date filter scopes this to that one date's orders; with no filter
+              // it's every order ever uploaded, summed across every date.
               label: expectedDate
-                ? `Today's Total Order Qty (${expectedDate}) · ${expectedPalletsTotal.toFixed(2)} plt`
-                : `Current Active Orders (${Object.entries(activeDatesByPlant).map(([p, d]) => `${p.toUpperCase()} ${d}`).join(", ")}) · ${expectedPalletsTotal.toFixed(2)} plt`,
+                ? `Total Order Qty (${expectedDate}) · ${expectedPalletsTotal.toFixed(2)} plt`
+                : `Total Order Qty (All Dates) · ${expectedPalletsTotal.toFixed(2)} plt`,
             }] : []),
           ]}
         />
