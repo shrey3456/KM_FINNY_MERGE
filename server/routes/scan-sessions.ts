@@ -1588,14 +1588,18 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         p.hsn_code                                         AS "hsnCode",
         p.category,
         p.brand,
+        -- Pallet size is a per-STATE fact (products.gj_plt/mp_plt), resolved via which state
+        -- this row's plant is in (plants.state) — not a plant-name guess like the sapCode
+        -- CASE above still is (that one's untouched, out of scope for this change).
         COALESCE(
-          CASE WHEN UPPER(pps.plant) LIKE '%VAL%' THEN NULLIF(p.val_plt, 0)
-               WHEN UPPER(pps.plant) LIKE '%IND%' THEN NULLIF(p.ind_plt, 0) END,
+          CASE WHEN UPPER(pl.state) = 'GJ' THEN NULLIF(p.gj_plt, 0)
+               WHEN UPPER(pl.state) = 'MP' THEN NULLIF(p.mp_plt, 0) END,
           NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0)
         )                                                  AS "itemsPerPallet",
         pps.updated_at                                     AS "lastArrived"
       FROM ${sourceSql} pps
       LEFT JOIN products p ON LOWER(p.barcode) = LOWER(pps.barcode)
+      LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(pps.plant)
       ${where}
       ORDER BY ${
         sort === 'stock' ? 'pps.in_stock DESC, "itemName" ASC'
@@ -1668,6 +1672,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // expectedByKey/expectedTotal, plus synthetic zero-stock rows for barcodes that were
     // ordered but have nothing scanned/stocked yet at all (so the full ordered qty is still
     // visible before a single box is scanned).
+    // Same per-state pallet-size resolution as the main query above (plants.state, not a
+    // plant-name guess) — fetched once here since applyExpectedRows can run more than once.
+    const { rows: plantStateRows } = await pool.query(`SELECT name, state FROM plants`);
+    const plantStateByName = new Map<string, string>(
+      plantStateRows.map((p: any) => [String(p.name ?? '').toLowerCase(), String(p.state ?? '').toUpperCase()]),
+    );
+
     async function applyExpectedRows(expRows: any[]) {
       const unmatchedBarcodes = new Set<string>();
       for (const r of expRows) {
@@ -1682,7 +1693,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       if (barcodesNeedingLookup.length > 0) {
         const { rows: prodRows } = await pool.query(
           `SELECT barcode, name, item_no, sap_code, gj_sap, mp_sap, hsn_code, category, brand,
-                  items_per_pallet, val_plt, ind_plt, pallets
+                  items_per_pallet, gj_plt, mp_plt, pallets
            FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
           [barcodesNeedingLookup.map((b) => b.toLowerCase())],
         );
@@ -1692,11 +1703,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
         if (items.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key)) continue;
         const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
+        // Untouched, out of scope for this change — sapCode still resolves by plant-name guess.
         const plantUpper = String(r.plant ?? '').toUpperCase();
         const sapCode = p ? (plantUpper.includes('VAL') ? (p.gj_sap ?? p.sap_code) : plantUpper.includes('IND') ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
+        const state = plantStateByName.get((r.plant ?? '').toLowerCase());
         const ipp = p ? Number(
-          (plantUpper.includes('VAL') && p.val_plt) || (plantUpper.includes('IND') && p.ind_plt)
-            ? (plantUpper.includes('VAL') ? p.val_plt : p.ind_plt)
+          (state === 'GJ' && p.gj_plt) || (state === 'MP' && p.mp_plt)
+            ? (state === 'GJ' ? p.gj_plt : p.mp_plt)
             : (p.items_per_pallet || p.pallets || 0)
         ) : 0;
         expectedOnlyRows.push({

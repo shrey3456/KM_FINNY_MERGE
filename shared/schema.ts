@@ -2,12 +2,9 @@ import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique 
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-// db-migration
+
 // ============================================================================
 // USERS
-// Purpose : Employee accounts. Each user has a unique userCode (employee ID)
-//           and authenticates with a numeric PIN.
-// Used by : Login page, all pages that record who performed an action.
 // ============================================================================
 
 export const users = pgTable("users", {
@@ -63,8 +60,12 @@ export const products = pgTable("products", {
   volumeInCuFt: text("volume_in_cu_ft"), // "Vol Master :"
   itemsPerPallet: integer("items_per_pallet").default(0), // "Packets :"
   pallets: integer("pallets").default(0),
-  indPlt: integer("ind_plt"),       // "IND PLT :"
-  valPlt: integer("val_plt"),       // "VAL PLT :"
+  // State-wise pallet size (renamed from the old plant-named indPlt/valPlt — a product's
+  // pallet size is really a per-state fact, not a per-plant one; the plant that scans it just
+  // looks up its own state via plants.state and reads the matching column here). Source Notion
+  // property names are unchanged ("IND PLT :" / "VAL PLT :") — see notionInventorySync.ts.
+  mpPlt: integer("mp_plt"),         // Madhya Pradesh — was "indPlt"/"ind_plt"
+  gjPlt: integer("gj_plt"),         // Gujarat — was "valPlt"/"val_plt"
 
   // ── Stock counters (live totals) ───────────────────────────────────────────
   purchased: integer("purchased").default(0),
@@ -134,7 +135,7 @@ export const insertProductSchema = createInsertSchema(products, {
   notionWiseName: true, brand: true, category: true, saleCategory: true,
   plant: true, type: true, productImage: true, productImageHash: true, notionPageId: true,
   // volume / pallet
-  volumeInCuFt: true, itemsPerPallet: true, pallets: true, indPlt: true, valPlt: true,
+  volumeInCuFt: true, itemsPerPallet: true, pallets: true, mpPlt: true, gjPlt: true,
   // stock
   purchased: true, sold: true, inStock: true,
   // GJ
@@ -626,6 +627,10 @@ export const plants = pgTable("plants", {
   bgColor: text("bg_color").notNull(),
   textColor: text("text_color").notNull(),
   borderColor: text("border_color").notNull(),
+  // Short code for the Indian state this plant is in (e.g. "GJ", "MP") — drives which
+  // per-state column on products (gjPlt/mpPlt) a scan against this plant reads. Nullable so
+  // existing plants aren't broken until an admin fills it in on the Plant Management page.
+  state: text("state"),
   isLockingEnabled: boolean("is_locking_enabled").default(true),      // lock proforma after first print
   isSplitPagesEnabled: boolean("is_split_pages_enabled").default(false), // split print across pages
   // Order Scan: auto-complete a part the instant every item on it is fully scanned, instead
@@ -644,7 +649,7 @@ export const plants = pgTable("plants", {
 });
 
 export const insertPlantSchema = createInsertSchema(plants).pick({
-  name: true, bgColor: true, textColor: true, borderColor: true,
+  name: true, bgColor: true, textColor: true, borderColor: true, state: true,
   isLockingEnabled: true, isSplitPagesEnabled: true, isAutoCompleteEnabled: true,
   isAutoScanEnabled: true,
 });

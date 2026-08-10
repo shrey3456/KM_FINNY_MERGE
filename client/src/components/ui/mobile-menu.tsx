@@ -3,11 +3,10 @@ import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Link } from 'wouter';
 import { 
-  BarChart4, 
-  Home, 
-  Settings, 
-  Users, 
-  Package, 
+  BarChart4,
+  Home,
+  Settings,
+  Users,
   ScanLine,
   Menu,
   FileText,
@@ -23,7 +22,6 @@ const MobileMenu: React.FC<MobileMenuProps> = ({ currentPath }) => {
 
   const menuItems = [
     { label: 'Dashboard', icon: <Home className="h-5 w-5 mr-3 text-[#4e2e1a]" />, path: '/' },
-    { label: 'Inventory', icon: <Package className="h-5 w-5 mr-3" />, path: '/inventory' },
     { label: 'Proforma Slips', icon: <FileText className="h-5 w-5 mr-3" />, path: '/proforma-slips' },
     { label: 'Scan Order', icon: <ScanLine className="h-5 w-5 mr-3" />, path: '/scan' },
     { label: 'Order Management', icon: <ClipboardList className="h-5 w-5 mr-3" />, path: '/order-management' },

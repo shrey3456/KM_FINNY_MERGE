@@ -5,7 +5,6 @@ import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
 import Home from "@/pages/Dashboard";
 import ScanOrder from "@/pages/Scanning/Scan";
-import Inventory from "@/pages/Inventory";
 import NotionInventory from "@/pages/NotionInventory";
 import Reports from "@/pages/Scanning/Reports.tsx";
 import Users from "@/pages/Users";
@@ -237,7 +236,6 @@ function Router() {
     <Layout onLogout={handleLogout}>
       <Switch>
         <Route path="/" component={Home} />
-        <ProtectedRoute path="/inventory" component={Inventory} requireInventoryAccess={true} requiredPage="inventory" />
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} requiredPage="notion-inventory" />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
         <ProtectedRoute path="/load-operations" component={LoadOperations} requiredPage="load-operations" />

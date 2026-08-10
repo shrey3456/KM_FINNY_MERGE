@@ -84,7 +84,7 @@ export const FIELD_LABELS: Record<string, string> = {
   name: 'Product Name', notionWiseName: 'Notion Wise Name', brand: 'Brand',
   category: 'Category', saleCategory: 'Sale Category', plant: 'Plant', type: 'Type',
   productImage: 'Product Image', volumeInCuFt: 'Volume (cu ft)',
-  itemsPerPallet: 'Items Per Pallet', indPlt: 'IND PLT', valPlt: 'VAL PLT',
+  itemsPerPallet: 'Items Per Pallet', mpPlt: 'MP PLT', gjPlt: 'GJ PLT',
   gjSr: 'GJ Sr', gjHsn: 'GJ HSN', gjSap: 'GJ SAP', gjSaleRate: 'GJ Sale Rate',
   gjIgst: 'GJ IGST', gjGaPur: 'GJ-GA PUR', gjMhPur: 'GJ-MH PUR', gjNagarPur: 'GJ-NAGAR PUR',
   forGjOrderForm: 'For GJ Order Form',
@@ -239,8 +239,11 @@ function mapNotionPageToFields(page: any) {
     productImageUrl: extractFileUrl(p['Product Image']), // raw Notion URL — download immediately, never persist as-is
     volumeInCuFt:    firstOf(p, 'Vol Master :', 'Vol Master', 'Volume'),
     itemsPerPallet:  extractInteger(p['Packets :']) ?? extractInteger(p['Packets']) ?? extractInteger(p['Items Per Pallet']),
-    indPlt:          extractInteger(p['IND PLT :']),
-    valPlt:          extractInteger(p['VAL PLT :']),
+    // Notion's own property names are unchanged (still named after the plant, IND/VAL) — only
+    // where we store the value changed, since pallet size is really a per-state fact. See
+    // products.mpPlt/gjPlt and plants.state.
+    mpPlt:           extractInteger(p['IND PLT :']),
+    gjPlt:           extractInteger(p['VAL PLT :']),
     gjSr:            firstOf(p, 'GJ Sr :'),
     gjHsn:           gjHsnVal,
     gjSap:           gjSapVal,
@@ -293,7 +296,7 @@ function buildProductData(fields: ReturnType<typeof mapNotionPageToFields>): Rec
   };
   const optional = [
     'notionWiseName', 'brand', 'category', 'saleCategory', 'plant', 'type',
-    'newSr', 'volumeInCuFt', 'itemsPerPallet', 'indPlt', 'valPlt',
+    'newSr', 'volumeInCuFt', 'itemsPerPallet', 'mpPlt', 'gjPlt',
     'gjSr', 'gjHsn', 'gjSap', 'gjSaleRate', 'gjIgst', 'gjGaPur', 'gjMhPur', 'gjNagarPur', 'forGjOrderForm',
     'mpSr', 'mpHsn', 'mpSap', 'mpJhPur', 'mpMhPur', 'mpMpPurJabalpur', 'mpMpPurKhargone', 'mpWbPur',
     'saleMpJh', 'saleMpMh', 'saleMpMp', 'mpJhIgst', 'mpMhIgst', 'mpMpCgst', 'mpMpSgst', 'mpWbIgst', 'mpWbSale', 'forMpOrderForm',
@@ -403,8 +406,8 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
       // separately by content hash (see syncProductImage) and applied outside this loop.
       check('volumeInCuFt',    fields.volumeInCuFt    || null, product.volumeInCuFt);
       check('itemsPerPallet',  fields.itemsPerPallet  ?? null, product.itemsPerPallet ?? null);
-      check('indPlt',          fields.indPlt          ?? null, product.indPlt ?? null);
-      check('valPlt',          fields.valPlt          ?? null, product.valPlt ?? null);
+      check('mpPlt',           fields.mpPlt           ?? null, product.mpPlt ?? null);
+      check('gjPlt',           fields.gjPlt           ?? null, product.gjPlt ?? null);
       check('gjSr',            fields.gjSr            || null, product.gjSr);
       check('gjHsn',           fields.gjHsn           || null, product.gjHsn);
       check('gjSap',           fields.gjSap           || null, product.gjSap);

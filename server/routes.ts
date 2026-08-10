@@ -21,7 +21,6 @@ import { registerBatchRoutes } from "./batch-routes";
 import { registerOrderRoutes } from "./order-routes";
 import proformaApiRoutes from "./routes/proforma-api";
 import {
-  insertProductSchema,
   insertScanHistorySchema,
   scanEntrySchema,
   insertLoadingOperationSchema,
@@ -290,111 +289,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json(product);
   });
 
-  apiRouter.post("/products", async (req: Request, res: Response) => {
-    try {
-      const productData = insertProductSchema.parse(req.body);
-      const product = await storage.createProduct(productData);
-      res.status(201).json(product);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        return res.status(400).json({ message: validationError.message });
-      }
-      res.status(400).json({ message: "Invalid product data" });
-    }
-  });
-
-  apiRouter.put("/products/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-
-      // Get the raw data from request body
-      const rawData = { ...req.body };
-
-      // Pre-process the data to ensure proper types
-      const processedData: Record<string, any> = {};
-
-      // Handle each field with appropriate type conversion
-      for (const [key, value] of Object.entries(rawData)) {
-        // Skip undefined values
-        if (value === undefined) continue;
-
-        switch (key) {
-          // Convert numeric string fields to numbers
-          case "purchased":
-          case "sold":
-          case "inStock":
-          case "itemsPerPallet":
-          case "pallets":
-            processedData[key] =
-              typeof value === "string" ? parseInt(value, 10) : value;
-            break;
-
-          // Handle price fields (convert from string if needed)
-          case "purchasePrice":
-          case "sellingPrice":
-            processedData[key] =
-              typeof value === "string" ? value : String(value);
-            break;
-
-          // Convert date fields to ISO strings
-          case "lastUpdated":
-            if (value instanceof Date) {
-              processedData[key] = value.toISOString();
-            } else if (typeof value === "string") {
-              try {
-                processedData[key] = new Date(value).toISOString();
-              } catch (e) {
-                processedData[key] = new Date().toISOString();
-              }
-            } else {
-              processedData[key] = new Date().toISOString();
-            }
-            break;
-
-          // For all other fields, pass through as is
-          default:
-            processedData[key] = value;
-        }
-      }
-
-      // Ensure lastUpdated is present with a current timestamp
-      if (!processedData.lastUpdated) {
-        processedData.lastUpdated = new Date().toISOString();
-      }
-
-      console.log("Processed product data for update:", processedData);
-
-      // Parse the processed data with the schema
-      const productData = insertProductSchema.partial().parse(processedData);
-
-      const updatedProduct = await storage.updateProduct(id, productData);
-
-      if (!updatedProduct) {
-        return res.status(404).json({ message: "Product not found" });
-      }
-
-      res.json(updatedProduct);
-    } catch (error) {
-      console.error("Error updating product:", error);
-      if (error instanceof ZodError) {
-        console.error(
-          "ZodError details:",
-          JSON.stringify(error.format(), null, 2),
-        );
-        const validationError = fromZodError(error);
-        return res.status(400).json({ message: validationError.message });
-      }
-      res
-        .status(400)
-        .json({
-          message:
-            "Invalid product data: " +
-            (error instanceof Error ? error.message : "Unknown error"),
-        });
-    }
-  });
-
   // PATCH endpoint to update individual product inStock value
   apiRouter.patch("/products/:id", async (req: Request, res: Response) => {
     try {
@@ -453,31 +347,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         message: "Failed to update product inStock",
         error: error instanceof Error ? error.message : String(error),
       });
-    }
-  });
-
-  // Delete a specific product by ID
-  apiRouter.delete("/products/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-      const product = await storage.getProduct(id);
-
-      if (!product) {
-        return res.status(404).json({ message: "Product not found" });
-      }
-
-      const success = await storage.deleteProduct(id);
-
-      if (success) {
-        res.json({ message: "Product deleted successfully" });
-      } else {
-        res.status(500).json({ message: "Failed to delete product" });
-      }
-    } catch (error) {
-      console.error("Error deleting product:", error);
-      res
-        .status(500)
-        .json({ message: "An error occurred while deleting the product" });
     }
   });
 
@@ -3319,134 +3188,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  // CSV Import for products
   const upload = multer({ storage: multer.memoryStorage() });
-
-  apiRouter.post(
-    "/products/import-csv",
-    upload.single("file"),
-    async (req: Request, res: Response) => {
-      try {
-        if (!req.file) {
-          return res.status(400).json({ message: "No file uploaded" });
-        }
-
-        const fileBuffer = req.file.buffer;
-        const results: any[] = [];
-
-        // Parse CSV
-        const stream = Readable.from(fileBuffer.toString());
-        stream
-          .pipe(csv())
-          .on("data", (data) => results.push(data))
-          .on("end", async () => {
-            try {
-              console.log("CSV data:", results);
-
-              // Track imported products and errors
-              let successCount = 0;
-              let errorCount = 0;
-              const errorRows: any[] = [];
-              const barcodeMap: Record<string, number> = {}; // To track duplicates
-
-              // Process each row
-              for (const row of results) {
-                try {
-                  // Convert numeric fields
-                  const purchased = row.Purchased
-                    ? parseInt(row.Purchased, 10) || 0
-                    : 0;
-                  const sold = row.Sold ? parseInt(row.Sold, 10) || 0 : 0;
-                  const inStock = row.InStock
-                    ? parseInt(row.InStock, 10) || 0
-                    : 0;
-                  // Try multiple header variants for items-per-pallet and coerce to a positive integer
-                  const rawItemsPerPallet = row.ItemsPerPallet ?? row.ItemsPer_Pallet ?? row['Items Per Pallet'] ?? row.itemsperpallet ?? row.items_per_pallet ?? row['items per pallet'];
-                  let itemsPerPallet = 0;
-                  if (rawItemsPerPallet != null && String(rawItemsPerPallet).trim() !== '') {
-                    const cleaned = String(rawItemsPerPallet).replace(/[^0-9.-]/g, '');
-                    const parsed = Number(cleaned);
-                    itemsPerPallet = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
-                  }
-                  const pallets = row.Pallets
-                    ? parseInt(row.Pallets, 10) || 0
-                    : 0;
-
-                  // Handle duplicate barcodes by adding a unique suffix
-                  let barcode = row.SKU || "";
-                  if (barcode) {
-                    if (barcode in barcodeMap) {
-                      barcodeMap[barcode]++;
-                      barcode = `${barcode}_${barcodeMap[barcode]}`;
-                    } else {
-                      barcodeMap[barcode] = 1;
-                    }
-                  } else {
-                    // For empty barcodes, use the Sr.No. as the barcode
-                    barcode = row["Sr.No."] || `unknown_${Date.now()}`;
-                  }
-
-                  // Create product entry
-                  await storage.createProduct({
-                    name: row.ItemName || "Unnamed Product",
-                    barcode: barcode,
-                    srNo: row["Sr.No."] || "",
-                    itemNo:
-                      row.ItemNo || row["Item No"] || row["Item No."] || "",
-                    category: row.Category || "",
-                    volumeInCuFt:
-                      row.VolumeInCuFt ||
-                      row["Volume In Cu.Ft"] ||
-                      row["Cu.Ft"] ||
-                      row["Volume"] ||
-                      row["Volume (cu ft)"] ||
-                      row["Volume (cu. ft.)"] ||
-                      row["Volume (cu ft.)"] ||
-                      "",
-                    hsnCode: row.HSNCode || "",
-                    sapCode: row.SAPCode || "",
-                    purchased: purchased,
-                    sold: sold,
-                    inStock: inStock,
-                    itemsPerPallet: itemsPerPallet,
-                    pallets: pallets,
-                    purchasePrice: row.PurchasePrice || "",
-                    sellingPrice: row.SellingPrice || "",
-                    description: row.Description || "",
-                    status: "in stock",
-                  });
-
-                  successCount++;
-                } catch (rowError: any) {
-                  console.error("Error processing row:", row, rowError);
-                  errorCount++;
-                  errorRows.push({
-                    row: row,
-                    error: rowError.message || "Unknown error during import",
-                  });
-                }
-              }
-
-              res.status(200).json({
-                message: `Products imported: ${successCount} successful, ${errorCount} failed`,
-                totalCount: results.length,
-                successCount,
-                errorCount,
-                errors: errorRows.slice(0, 10), // Limit error details to first 10
-              });
-            } catch (parseError) {
-              console.error("Error processing CSV:", parseError);
-              res.status(500).json({ message: "Error processing CSV file" });
-            }
-          });
-      } catch (error) {
-        console.error("CSV import error:", error);
-        res
-          .status(500)
-          .json({ message: "An error occurred during CSV import" });
-      }
-    },
-  );
 
   // Admin endpoint: attempt to fix itemsPerPallet for existing products by parsing numbers
   // Call with ?confirm=true to perform updates; otherwise it returns a dry-run report.

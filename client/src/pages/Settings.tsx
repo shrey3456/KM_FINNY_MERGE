@@ -488,7 +488,7 @@ const Settings = () => {
                           disabled={isClearing || !canWrite}
                           title={!canWrite ? "You have read-only access to Settings" : undefined}
                         >
-                          {isClearing ? "Clearing..." : "Clear Inventory"}
+                          {isClearing ? "Clearing..." : "Clear Product Master"}
                         </Button>
                         <Button
                           variant="destructive"
@@ -518,7 +518,7 @@ const Settings = () => {
       <AlertDialog open={showClearDialog} onOpenChange={handleClearDialogOpenChange}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Clear Inventory?</AlertDialogTitle>
+            <AlertDialogTitle>Clear Product Master?</AlertDialogTitle>
             <AlertDialogDescription>
               This will permanently delete all products and related data. This action cannot be undone.
             </AlertDialogDescription>
@@ -571,7 +571,7 @@ const Settings = () => {
               className="bg-red-600 hover:bg-red-700"
               disabled={isClearing || confirmText !== 'CLEAR' || !acknowledge}
             >
-              {isClearing ? "Clearing..." : "Clear Inventory"}
+              {isClearing ? "Clearing..." : "Clear Product Master"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

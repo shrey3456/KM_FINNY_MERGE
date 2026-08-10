@@ -261,29 +261,43 @@ export function getUserPlants(user: any): string[] | null {
   return assigned;
 }
 
-// Pick correct pallet size based on plant
-function getPalletSize(product: any, plant: string): number {
-  const p = (plant ?? '').toUpperCase();
-  if (p.includes('VAL')) return Number(product.valPlt) || Number(product.itemsPerPallet) || 0;
-  if (p.includes('IND')) return Number(product.indPlt) || Number(product.itemsPerPallet) || 0;
+// Pick correct pallet size based on the plant's STATE (products.gjPlt/mpPlt), not the plant
+// itself — see getPlantStateCode below for how a plant resolves to one of these codes.
+function getPalletSize(product: any, state: string | null): number {
+  const s = (state ?? '').toUpperCase();
+  if (s === 'GJ') return Number(product.gjPlt) || Number(product.itemsPerPallet) || 0;
+  if (s === 'MP') return Number(product.mpPlt) || Number(product.itemsPerPallet) || 0;
   return Number(product.itemsPerPallet) || 0;
 }
 
 // Full pallet-size fallback chain, shared by session population and the scan handler:
-// plant-specific val_plt/ind_plt → generic items_per_pallet → generic pallets column →
+// state-specific gj_plt/mp_plt → generic items_per_pallet → generic pallets column →
 // parse *NNN from the product name (e.g. "16GM*192 ..." → 192). Same chain the old
 // classic-scan flow used, so pallet math never silently falls back to 1.
 function resolveFullPalletSize(
-  product: { itemsPerPallet?: number | null; valPlt?: number | null; indPlt?: number | null; pallets?: number | null; name?: string | null },
-  plant: string,
+  product: { itemsPerPallet?: number | null; gjPlt?: number | null; mpPlt?: number | null; pallets?: number | null; name?: string | null },
+  state: string | null,
 ): number {
-  let size = getPalletSize(product, plant);
+  let size = getPalletSize(product, state);
   if (size === 0) size = Number(product.pallets ?? 0);
   if (size === 0 && product.name) {
     const m = String(product.name).match(/\*(\d{1,5})/);
     if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) size = n; }
   }
   return size;
+}
+
+// Resolves a plant name to its Indian-state short code (plants.state, e.g. "GJ"/"MP") — pallet
+// size lives per-state on products (gjPlt/mpPlt), not per-plant, so every pallet-size lookup
+// needs this first. One query per call site (the plant doesn't change per-row), not per item.
+async function getPlantStateCode(client: any, plantName: string): Promise<string | null> {
+  if (!plantName) return null;
+  const { rows } = await client.query(
+    `SELECT state FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+    [plantName],
+  );
+  const state = rows[0]?.state;
+  return state ? String(state).trim().toUpperCase() : null;
 }
 
 // Seeds order_scan_items from order_import_items (with product/pallet lookups) for a
@@ -310,11 +324,12 @@ async function seedSessionItemsWithClient(client: any, id: number, plant: string
   const importItems = importItemsResult.rows.filter((i: any) => !alreadySeededItemIds.has(i.id));
   if (importItems.length === 0) return;
 
+  const state = await getPlantStateCode(client, plant);
   const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
   const productMap = new Map<string, any>();
   if (barcodes.length > 0) {
     const prodResult = await client.query(
-      `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
+      `SELECT barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
        FROM products WHERE barcode = ANY($1)`,
       [barcodes],
     );
@@ -327,9 +342,9 @@ async function seedSessionItemsWithClient(client: any, id: number, plant: string
   for (const item of importItems) {
     const prod = item.barcode ? productMap.get(item.barcode) : null;
     const prodObj = prod
-      ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
+      ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
       : null;
-    const palletSize = prodObj ? resolveFullPalletSize(prodObj, plant) : 0;
+    const palletSize = prodObj ? resolveFullPalletSize(prodObj, state) : 0;
     vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
     placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
     pi += 7;
@@ -934,11 +949,12 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'
     const importItems = importItemsResult.rows.filter((i: any) => !alreadySeededItemIds.has(i.id));
 
     if (importItems.length > 0) {
+      const state = await getPlantStateCode(client, session.plant);
       const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
       let productMap = new Map<string, any>();
       if (barcodes.length > 0) {
         const prodResult = await client.query(
-          `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
+          `SELECT barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
            FROM products WHERE barcode = ANY($1)`,
           [barcodes],
         );
@@ -952,9 +968,9 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'
         const prod = item.barcode ? productMap.get(item.barcode) : null;
         // Reuse getPalletSize but with snake_case keys from pg driver
         const prodObj = prod
-          ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
+          ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
           : null;
-        const palletSize = prodObj ? resolveFullPalletSize(prodObj, session.plant) : 0;
+        const palletSize = prodObj ? resolveFullPalletSize(prodObj, state) : 0;
         vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
         placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
         pi += 7;
@@ -1208,8 +1224,9 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
       const [sessionRow] = await db.select({ plant: orderImportSessions.plant })
         .from(orderImportSessions).where(eq(orderImportSessions.id, id));
       const plant = sessionRow?.plant ?? '';
+      const state = await getPlantStateCode(pool, plant);
       const prodRows = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, name, items_per_pallet, pallets, val_plt, ind_plt
+        `SELECT LOWER(barcode) AS barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
          FROM products WHERE LOWER(barcode) = ANY($1)`,
         [barcodes],
       );
@@ -1218,8 +1235,8 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
         const p = item.barcode ? productMap.get(item.barcode.toLowerCase()) : null;
         if (!p) continue;
         const liveIpp = resolveFullPalletSize(
-          { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt, pallets: p.pallets, name: p.name },
-          plant,
+          { itemsPerPallet: p.items_per_pallet, gjPlt: p.gj_plt, mpPlt: p.mp_plt, pallets: p.pallets, name: p.name },
+          state,
         );
         if (liveIpp > 0) item.itemsPerPallet = liveIpp;
       }
@@ -1373,6 +1390,20 @@ async function writeScanEvents(
        stv ?? null, userCode, userName],
     );
     events.push(extraEventResult.rows[0]);
+
+    // A pure-extra scan (orderQty === 0, e.g. this item is already fully received) never runs
+    // the order_scan_items UPDATE above, so its last_scanned_at would otherwise go stale even
+    // though a box against it was just scanned. Other devices' and Master View's "most recently
+    // scanned floats to top" ordering reads that column (this device's own tab also has a local
+    // scan-sequence counter, so it isn't affected either way) — without this, the row only
+    // reorders correctly on the device that made the scan, and only until its next reload.
+    if (orderQty === 0 && scanItem) {
+      const touchResult = await client.query(
+        `UPDATE order_scan_items SET last_scanned_at = NOW() WHERE id = $1 RETURNING *`,
+        [scanItem.id],
+      );
+      updatedItem = touchResult.rows[0];
+    }
   }
 
   return { events, updatedItem, orderQty, extraQty };
@@ -1481,16 +1512,17 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     let resolvedItemName: string | null = (matchedItem ?? itemRowsBySession.get(frontSession.id))?.item_name ?? null;
     let resolvedIpp = Number((matchedItem ?? itemRowsBySession.get(frontSession.id))?.items_per_pallet ?? 0);
     const prodResult = await client.query(
-      `SELECT name, items_per_pallet, pallets, val_plt, ind_plt
+      `SELECT name, items_per_pallet, pallets, gj_plt, mp_plt
        FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
       [barcode],
     );
     if (prodResult.rows[0]) {
       const p = prodResult.rows[0];
       resolvedItemName = resolvedItemName ?? p.name ?? null;
+      const state = await getPlantStateCode(client, anchorSession.plant ?? '');
       const liveIpp = resolveFullPalletSize(
-        { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt, pallets: p.pallets, name: p.name },
-        anchorSession.plant ?? '',
+        { itemsPerPallet: p.items_per_pallet, gjPlt: p.gj_plt, mpPlt: p.mp_plt, pallets: p.pallets, name: p.name },
+        state,
       );
       if (liveIpp > 0) resolvedIpp = liveIpp;
     }
@@ -1611,9 +1643,13 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     }
 
     // Broadcast after commit so subscribers always see the committed state — routed to
-    // whichever session(s) each event actually belongs to.
+    // whichever session(s) each event actually belongs to. Not restricted to non-extra events:
+    // a pure-extra scan against an already-received item still touches that item's
+    // last_scanned_at (see writeScanEvents) and other devices need that update too, or the
+    // item only floats to the top of their CSV Items / Master View list on the device that
+    // actually made the scan.
     for (const event of events) {
-      const isForUpdatedItem = updatedItem && event.scan_item_id === updatedItem.id && !event.is_extra;
+      const isForUpdatedItem = updatedItem && event.scan_item_id === updatedItem.id;
       broadcastScanEvent(event.__sessionId, {
         type: 'scan',
         item: isForUpdatedItem ? {

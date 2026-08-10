@@ -72,8 +72,8 @@ type Product = {
   inStock?: number | null;
   itemsPerPallet?: number | null;
   pallets?: number | null;
-  indPlt?: number | null;   // Indore plant pallet qty
-  valPlt?: number | null;   // Valsad plant pallet qty
+  mpPlt?: number | null;   // Madhya Pradesh pallet qty (was indPlt)
+  gjPlt?: number | null;   // Gujarat pallet qty (was valPlt)
 };
 
 type OsScanItem = {
@@ -527,6 +527,22 @@ export default function ScanOrderPage() {
     queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
     staleTime: 60000,
   });
+  // Pallet size is a per-STATE fact (see products.mpPlt/gjPlt), not per-plant — a plant just
+  // knows which state it's in (plants.state, set on the Plant Management page). Replaces the
+  // old plant-name string-guessing ("valsad"/"indore" substring checks).
+  const getPlantState = (plantName: string): string | null => {
+    const name = (plantName ?? "").trim().toLowerCase();
+    if (!name || !allPlants) return null;
+    const match = allPlants.find((p) => String(p.name ?? "").trim().toLowerCase() === name);
+    const state = match?.state;
+    return state ? String(state).trim().toUpperCase() : null;
+  };
+  const getStatePalletSize = (product: Product | null, stateCode: string | null): number => {
+    if (!product) return 0;
+    if (stateCode === "GJ") return Number(product.gjPlt) || Number(product.itemsPerPallet) || Number(product.pallets) || 0;
+    if (stateCode === "MP") return Number(product.mpPlt) || Number(product.itemsPerPallet) || Number(product.pallets) || 0;
+    return Number(product.itemsPerPallet) || Number(product.pallets) || 0;
+  };
   const autoScanEnabled = (() => {
     const plantName = (activeOrderScanSession?.plant ?? "").toLowerCase();
     if (!plantName) return false;
@@ -789,11 +805,15 @@ export default function ScanOrderPage() {
 
   // Drop a remembered STV that doesn't belong to this plant's list (e.g. it was picked while
   // scanning a different plant, then restored from localStorage here). Only runs once the
-  // list has actually loaded, so a slow fetch never wipes a valid pick.
+  // list has actually loaded, so a slow fetch never wipes a valid pick. Also defaults the
+  // selection to the first STV in the list when nothing is picked yet (fresh session, or just
+  // cleared by the check above) — scanning is blocked until an STV is chosen anyway (see
+  // handleOsBarcode), so pre-selecting the first one saves that manual pick every time.
   useEffect(() => {
     const stvs = osStvsQuery.data;
     if (!stvs || stvs.length === 0) return;
-    if (osSelectedStv && !stvs.includes(osSelectedStv)) setOsSelectedStv("");
+    if (osSelectedStv && !stvs.includes(osSelectedStv)) { setOsSelectedStv(""); return; }
+    if (!osSelectedStv) setOsSelectedStv(stvs[0]);
   }, [osStvsQuery.data, osSelectedStv]);
 
   const osItemsKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] as const;
@@ -936,17 +956,10 @@ export default function ScanOrderPage() {
   // products table (with the same fallback chain) and is what actually gets stored, so a
   // mismatch here only affects what's shown before confirming, never the recorded data.
   const _computePlantPalletSize = (firstMatch: OsScanItem | null, invProduct: Product | null): number => {
-    const plantLower = (activeOrderScanSession?.plant ?? "").toLowerCase();
+    const state = getPlantState(activeOrderScanSession?.plant ?? "");
     let size = firstMatch?.itemsPerPallet ?? 1;
     if (invProduct) {
-      let fromInv = 0;
-      if (plantLower.includes("valsad") || plantLower.includes("val")) {
-        fromInv = Number(invProduct.valPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-      } else if (plantLower.includes("indore") || plantLower.includes("ind")) {
-        fromInv = Number(invProduct.indPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-      } else {
-        fromInv = Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-      }
+      let fromInv = getStatePalletSize(invProduct, state);
       // Last resort: parse *NNN from the product name (e.g. "16GM*192 ..." → 192), same
       // fallback the old classic-scan flow used, for products with no pallet columns set.
       if (fromInv === 0 && invProduct.name) {
@@ -965,15 +978,8 @@ export default function ScanOrderPage() {
   // is already treated elsewhere in this file).
   const _resolveMvPalletSize = (invProduct: Product | null, plant: string): number => {
     if (!invProduct) return 0;
-    const plantLower = (plant ?? "").toLowerCase();
-    let fromInv = 0;
-    if (plantLower.includes("valsad") || plantLower.includes("val")) {
-      fromInv = Number(invProduct.valPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-    } else if (plantLower.includes("indore") || plantLower.includes("ind")) {
-      fromInv = Number(invProduct.indPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-    } else {
-      fromInv = Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-    }
+    const state = getPlantState(plant);
+    let fromInv = getStatePalletSize(invProduct, state);
     if (fromInv === 0 && invProduct.name) {
       const m = String(invProduct.name).match(/\*(\d{1,5})/);
       if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) fromInv = n; }
@@ -2692,7 +2698,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     const displayTotals = osTab === "master-view" ? mvTotals : osTotals;
     const stvs = osStvsQuery.data ?? [];
-    // Use plant-specific pallet size from inventory (valPlt/indPlt) as the multiplier
+    // Use state-specific pallet size from inventory (gjPlt/mpPlt) as the multiplier
     const plt = osPending?.plantPalletSize ?? osPending?.matchedItem?.itemsPerPallet ?? 1;
     const NO_STV = "__none__";
     // True when the CSV item exists but is already fully scanned — extra boxes coming in
@@ -4883,9 +4889,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         {osPending.plantPalletSize !== (osPending.matchedItem.itemsPerPallet ?? 0) && osPending.matchedItem.itemsPerPallet ? (
                           <span className="text-blue-500 ml-1">
                             ({(() => {
-                              const p = (activeOrderScanSession?.plant ?? "").toLowerCase();
-                              if (p.includes("valsad") || p.includes("val")) return "VAL PLT";
-                              if (p.includes("indore") || p.includes("ind")) return "IND PLT";
+                              const state = getPlantState(activeOrderScanSession?.plant ?? "");
+                              if (state === "GJ") return "GJ PLT";
+                              if (state === "MP") return "MP PLT";
                               return "inventory";
                             })()})
                           </span>

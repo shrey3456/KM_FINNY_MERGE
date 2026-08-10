@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KM Finny — Permissions Manual</title>
+<style>
+  :root {
+    --paper: #F3F5F8;
+    --surface: #FFFFFF;
+    --ink: #12141C;
+    --ink-soft: #4A4E5C;
+    --line: rgba(18, 20, 28, 0.13);
+    --line-soft: rgba(18, 20, 28, 0.07);
+    --accent: #001D6E;
+    --accent-soft: rgba(0, 29, 110, 0.08);
+    --accent-ink: #FFFFFF;
+    --amber: #9A5C14;
+    --amber-soft: rgba(154, 92, 20, 0.10);
+    --good: #1E6B45;
+    --good-soft: rgba(30, 107, 69, 0.10);
+    --warn: #9A5C14;
+    --warn-soft: rgba(154, 92, 20, 0.10);
+    --crit: #A33A3A;
+    --crit-soft: rgba(163, 58, 58, 0.10);
+    --get: #1E6B45;
+    --post: #001D6E;
+    --put: #9A5C14;
+    --del: #A33A3A;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif;
+    --radius: 3px;
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #0E1016;
+    --surface: #171A24;
+    --ink: #E7E9F0;
+    --ink-soft: #A7ACC0;
+    --line: rgba(231, 233, 240, 0.14);
+    --line-soft: rgba(231, 233, 240, 0.07);
+    --accent: #6E8FE8;
+    --accent-soft: rgba(110, 143, 232, 0.14);
+    --accent-ink: #0E1016;
+    --amber: #D8A24C;
+    --amber-soft: rgba(216, 162, 76, 0.13);
+    --good: #5BAE85;
+    --good-soft: rgba(91, 174, 133, 0.13);
+    --warn: #D8A24C;
+    --warn-soft: rgba(216, 162, 76, 0.13);
+    --crit: #E08080;
+    --crit-soft: rgba(224, 128, 128, 0.13);
+    --get: #5BAE85;
+    --post: #6E8FE8;
+    --put: #D8A24C;
+    --del: #E08080;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0E1016;
+      --surface: #171A24;
+      --ink: #E7E9F0;
+      --ink-soft: #A7ACC0;
+      --line: rgba(231, 233, 240, 0.14);
+      --line-soft: rgba(231, 233, 240, 0.07);
+      --accent: #6E8FE8;
+      --accent-soft: rgba(110, 143, 232, 0.14);
+      --accent-ink: #0E1016;
+      --amber: #D8A24C;
+      --amber-soft: rgba(216, 162, 76, 0.13);
+      --good: #5BAE85;
+      --good-soft: rgba(91, 174, 133, 0.13);
+      --warn: #D8A24C;
+      --warn-soft: rgba(216, 162, 76, 0.13);
+      --crit: #E08080;
+      --crit-soft: rgba(224, 128, 128, 0.13);
+      --get: #5BAE85;
+      --post: #6E8FE8;
+      --put: #D8A24C;
+      --del: #E08080;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 16.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--mono);
+    font-weight: 700;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  p { margin: 0 0 0.9em; max-width: 62ch; }
+  code, .mono { font-family: var(--mono); }
+
+  .shell {
+    display: grid;
+    grid-template-columns: 272px minmax(0, 1fr);
+    max-width: 1320px;
+    margin: 0 auto;
+  }
+  @media (max-width: 940px) {
+    .shell { grid-template-columns: 1fr; }
+  }
+
+  .masthead {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 22px clamp(18px, 4vw, 40px) 18px;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .masthead .id {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .masthead .mark {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    background: var(--accent);
+    color: var(--accent-ink);
+    padding: 3px 8px;
+    border-radius: var(--radius);
+  }
+  .masthead h1 {
+    font-size: 15px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 0;
+    color: var(--ink-soft);
+  }
+  .masthead .meta {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.03em;
+  }
+
+  nav.toc {
+    padding: 28px 18px 60px clamp(18px, 4vw, 40px);
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+  }
+  @media (max-width: 940px) {
+    nav.toc {
+      position: relative;
+      max-height: none;
+      padding: 18px clamp(18px, 4vw, 40px) 0;
+    }
+  }
+  nav.toc .group { margin-bottom: 22px; }
+  nav.toc .group-label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 8px;
+  }
+  nav.toc ul { list-style: none; margin: 0; padding: 0; }
+  nav.toc li { margin: 0; }
+  nav.toc a {
+    display: block;
+    padding: 5px 0 5px 12px;
+    border-left: 2px solid var(--line);
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-soft);
+    text-decoration: none;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  nav.toc a:hover { color: var(--ink); border-left-color: var(--accent); }
+  nav.toc a.active { color: var(--accent); border-left-color: var(--accent); font-weight: 700; }
+
+  main { min-width: 0; padding: 28px clamp(18px, 4vw, 40px) 100px; }
+
+  .intro {
+    max-width: 74ch;
+    margin-bottom: 40px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--line);
+  }
+  .intro .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 10px;
+  }
+  .intro h2 {
+    font-size: clamp(24px, 3.4vw, 32px);
+    margin: 0 0 14px;
+    line-height: 1.15;
+  }
+  .stack-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 18px;
+  }
+  .stack-row .chip {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 4px 9px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--ink-soft);
+  }
+
+  section.category { margin-bottom: 8px; }
+  .category-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin: 52px 0 22px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .category-head:first-of-type { margin-top: 0; }
+  .category-head h2 {
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0;
+    white-space: nowrap;
+  }
+  .category-head .rule { flex: 1; height: 1px; background: var(--line); }
+  .category-head .count { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); }
+
+  article.page {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: clamp(18px, 3vw, 30px);
+    margin-bottom: 22px;
+    scroll-margin-top: 18px;
+  }
+  .page-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .page-head h3 {
+    font-size: 20px;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .page-route {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    background: var(--paper);
+    border: 1px solid var(--line);
+    padding: 3px 8px;
+    border-radius: var(--radius);
+    white-space: nowrap;
+  }
+  .page-purpose {
+    color: var(--ink-soft);
+    font-style: italic;
+    margin: 6px 0 20px;
+    max-width: 68ch;
+  }
+
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px; }
+  .badge {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.03em;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+  }
+  .badge.access { background: var(--accent-soft); color: var(--accent); border-color: currentColor; }
+  .badge.write { background: var(--amber-soft); color: var(--amber); border-color: currentColor; }
+  .badge.admin { background: var(--crit-soft); color: var(--crit); border-color: currentColor; }
+  .badge.data { background: var(--good-soft); color: var(--good); border-color: currentColor; }
+
+  h4.block-label {
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 22px 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h4.block-label:first-of-type { margin-top: 0; }
+  h4.block-label::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+
+  .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; }
+  .steps li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 30px;
+    margin-bottom: 10px;
+    max-width: 64ch;
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 0.05em;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-soft);
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .endpoints { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+  .ep {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 7px 10px;
+    background: var(--paper);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    flex-wrap: wrap;
+  }
+  .ep .m {
+    font-weight: 700;
+    width: 42px;
+    flex-shrink: 0;
+    letter-spacing: 0.02em;
+  }
+  .ep .m.get { color: var(--get); }
+  .ep .m.post { color: var(--post); }
+  .ep .m.put { color: var(--put); }
+  .ep .m.del { color: var(--del); }
+  .ep .path { color: var(--ink); }
+  .ep .note { color: var(--ink-soft); font-family: var(--serif); font-style: italic; font-size: 12.5px; }
+  .ep .guard {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 1px 7px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .ep .guard.none { color: var(--crit); background: var(--crit-soft); }
+  .ep .guard.admin { color: var(--crit); background: var(--crit-soft); }
+
+  .filewrap { overflow-x: auto; margin-bottom: 4px; }
+  table.fields {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+    min-width: 420px;
+  }
+  table.fields caption {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    margin-bottom: 6px;
+  }
+  table.fields th, table.fields td {
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+  table.fields th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  table.fields td.f { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; color: var(--accent); }
+  table.fields td.cond { font-family: var(--mono); font-size: 12px; }
+  table.fields tr:last-child td { border-bottom: none; }
+
+  .note {
+    display: flex;
+    gap: 10px;
+    padding: 11px 13px;
+    background: var(--amber-soft);
+    border-left: 3px solid var(--amber);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 14px;
+    margin-top: 16px;
+  }
+  .note.crit { background: var(--crit-soft); border-color: var(--crit); }
+  .note .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--amber);
+    flex-shrink: 0;
+    padding-top: 0.15em;
+  }
+  .note.crit .tag { color: var(--crit); }
+  .note p { margin: 0; max-width: none; }
+
+  .filepath { font-family: var(--mono); font-size: 0.92em; color: var(--ink-soft); }
+
+  footer.colophon {
+    grid-column: 1 / -1;
+    padding: 28px clamp(18px, 4vw, 40px) 50px;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <header class="masthead">
+    <div class="id">
+      <span class="mark">KM</span>
+      <h1>Permissions Manual — Who Can Click What, And What Actually Checks It</h1>
+    </div>
+    <div class="meta">9 pages · button + API level</div>
+  </header>
+
+  <nav class="toc" aria-label="Table of contents">
+    <div class="group">
+      <p class="group-label">The Mechanism</p>
+      <ul>
+        <li><a href="#how-it-works">How permissions work</a></li>
+        <li><a href="#users">User Management</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">Admin &amp; Catalog</p>
+      <ul>
+        <li><a href="#plant-management">Plant Management</a></li>
+        <li><a href="#product-master">Product Master</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">Order Pipeline</p>
+      <ul>
+        <li><a href="#order-import">Order Management</a></li>
+        <li><a href="#scan-order">Scan Order</a></li>
+        <li><a href="#scan-history">Scan History</a></li>
+        <li><a href="#overall-stock">Overall Stock</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">Documents</p>
+      <ul>
+        <li><a href="#proforma">Proforma Slips</a></li>
+        <li><a href="#print-ops">Print Operations</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main>
+    <div class="intro">
+      <p class="eyebrow">Reference — updated alongside the permission audit/fix pass across every page</p>
+      <h2>Every button, every API route, and exactly what has to be true to use it.</h2>
+      <p>This is the companion to <span class="filepath">docs/field-manual.html</span> — that one covers what each page <em>does</em>; this one covers who's <em>allowed</em> to do it. For each page below: the buttons/UI elements and their client-side condition, then the API routes underneath them and their server-side guard. Client and server are listed separately on purpose — a button can be hidden without the route actually being locked down, and that gap matters.</p>
+      <div class="stack-row">
+        <span class="chip">client/src/lib/permissions.ts</span>
+        <span class="chip">server/lib/pageAccess.ts</span>
+        <span class="chip">shared/pageKeys.ts</span>
+      </div>
+    </div>
+
+    <section class="category" id="how-it-works">
+      <div class="category-head"><h2>The Mechanism</h2><div class="rule"></div><span class="count">read this first</span></div>
+
+      <article class="page">
+        <div class="page-head">
+          <h3>How permissions work</h3>
+          <span class="page-route filepath">client/src/lib/permissions.ts + server/lib/pageAccess.ts</span>
+        </div>
+        <p class="page-purpose">Two JSON columns on the user record, one helper pair per side, and admin always wins. Everything else in this document is a variation on this.</p>
+
+        <h4 class="block-label">The two grants</h4>
+        <ol class="steps">
+          <li><strong>View Access</strong> (<span class="mono">allowedPages</span>) — can open the page at all. Checked by <span class="mono">hasPageViewAccess(pageKey)</span> on the client, <span class="mono">requirePageAccess(pageKey)</span> on the server.</li>
+          <li><strong>Write Access</strong> (<span class="mono">pageWriteAccess</span>) — a subset of View Access; can actually change something on that page. Checked by <span class="mono">hasPageWriteAccess(pageKey)</span> / <span class="mono">requirePageWrite(pageKey)</span>.</li>
+          <li>Both are set per-<span class="mono">pageKey</span> on the <a href="#users">Users page</a> — the list of grantable keys and their display labels lives in <span class="filepath">shared/pageKeys.ts</span> (<span class="mono">CONTROLLABLE_PAGES</span>), which is also what drives the checkbox labels on that page.</li>
+          <li><strong>Admin / super-admin bypass everything</strong>, on both sides, unconditionally — a grant is never checked for these two roles.</li>
+        </ol>
+
+        <h4 class="block-label">Client vs. server — read separately, on purpose</h4>
+        <p><span class="mono">hasPageWriteAccess</span>/<span class="mono">hasPageViewAccess</span> read <span class="mono">localStorage.currentUser</span>, kept in sync by <span class="filepath">client/src/hooks/use-auth.tsx</span>'s <span class="mono">AuthProvider</span> (refetches <span class="mono">/api/user</span> on window focus and every 60s). This is what decides whether a button is <em>hidden</em>. It is advisory only — a determined client can always call the API directly. <span class="mono">requirePageWrite</span>/<span class="mono">requirePageAccess</span> on the server are the actual enforcement: they read the SAME two JSON columns fresh from the authenticated session on every request. A page is only really protected where a server guard exists — several routes below are annotated <span class="badge admin" style="border-radius:999px;">no server guard</span> for exactly this reason; they rely entirely on the client hiding the button / the route guard on the page itself.</p>
+
+        <h4 class="block-label">The three rule shapes actually in use</h4>
+        <ol class="steps">
+          <li><strong>Plain gate</strong> — admin, or Write/View Access to one specific pageKey. The default; most buttons and routes below are this.</li>
+          <li><strong>Dual-AND gate</strong> — admin, or Write Access to <em>two</em> different pageKeys at once, chained as two separate middleware calls server-side (each is its own check in the route's middleware list, so both must pass — passing an array to one call is OR, not AND). Used for Print Operations Lock/Unlock and Scan Order/Scan History's Void.</li>
+          <li><strong>Designation blocklist</strong> — nothing to do with View/Write Access at all: admin, or the user's <em>designation</em> (Loader/Helper/Driver/Scanner) is NOT in a fixed blocklist, exact match. Used only for Complete (Order Management and Scan Order).</li>
+        </ol>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Plant scoping is a fourth, orthogonal axis layered on top of all three shapes for Order Management and Scan Order specifically: <span class="mono">getUserPlants(user)</span> (in <span class="filepath">server/routes/order-scan.ts</span>) returns <span class="mono">null</span> for admin/super-admin/billing (unrestricted) or the user's real <span class="mono">users.plants</span> array otherwise — an empty array fails CLOSED (no plants assigned = no access), not open. A page-level Write Access grant says nothing about which plant(s) it applies to; both checks run independently.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="category" id="users-cat">
+      <article class="page" id="users">
+        <div class="page-head">
+          <h3>User Management</h3>
+          <span class="page-route filepath">/users → client/src/pages/Users.tsx</span>
+        </div>
+        <p class="page-purpose">Where every grant described in this document actually gets set. Admin-only to open at all.</p>
+        <div class="badges">
+          <span class="badge admin">Admin/super-admin only — hardcoded, not grantable</span>
+        </div>
+
+        <h4 class="block-label">How a grant is made</h4>
+        <ol class="steps">
+          <li>Per user, per page: a View Access checkbox and a (dependent) Write Access checkbox, one row per entry in <span class="mono">CONTROLLABLE_PAGES</span> (<span class="filepath">shared/pageKeys.ts</span>). Write Access implies View Access is expected to be on too, but the two are stored as independent JSON arrays — nothing stops View from being off while Write is on beyond the UI's own convention.</li>
+          <li>Designation is a separate field entirely (Director/Manager/.../Loader/Driver/Scanner/...) — it feeds the designation-blocklist rule above, never the page-grant system. Changing a user's designation can silently change their Complete rights without touching either checkbox.</li>
+          <li>Plants assigned to a user (multi-select) feed <span class="mono">getUserPlants</span> — separate again from both page grants and designation.</li>
+        </ol>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>The "Scanner" designation is the one deliberately overloaded case: it's simultaneously a Complete-blocklist entry AND the sole trigger for the Dispatch-style read-only dashboard view on the Scan page (<span class="mono">isDispatchUser</span>) — see <a href="#scan-order">Scan Order</a> below.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="category" id="plant-management-cat">
+      <div class="category-head"><h2>Admin &amp; Catalog</h2><div class="rule"></div><span class="count">2 pages</span></div>
+
+      <article class="page" id="plant-management">
+        <div class="page-head">
+          <h3>Plant Management</h3>
+          <span class="page-route filepath">/plant-management → client/src/pages/PlantSettings.tsx</span>
+        </div>
+        <p class="page-purpose">Create/edit plants and their STV lists.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: plant-management</span>
+        </div>
+
+        <h4 class="block-label">Buttons &amp; UI</h4>
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Element</th><th>Condition</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Create / Update Plant (dialog submit)</td><td class="cond">isAdminOrSuper || hasPageWriteAccess("plant-management")</td><td>Defense-in-depth — disabled attr, matches server</td></tr>
+          </tbody>
+        </table>
+        </div>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/plants</span><span class="note">login only — shared by Proforma Slips' plant picker, Overall Stock, Scan, Order Import, PlantBadge; NOT page-specific</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/plants/:id/stvs</span><span class="guard">requirePageAccess</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/plants</span><span class="guard">requirePageWrite</span></div>
+          <div class="ep"><span class="m put">PUT</span><span class="path">/api/plants/:id</span><span class="guard">requirePageWrite</span></div>
+          <div class="ep"><span class="m del">DEL</span><span class="path">/api/plants/:id</span><span class="guard">requirePageWrite</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/plants/:id/stvs</span><span class="guard">requirePageWrite</span></div>
+          <div class="ep"><span class="m put">PUT</span><span class="path">/api/plant-stvs/:id</span><span class="guard">requirePageWrite</span></div>
+          <div class="ep"><span class="m del">DEL</span><span class="path">/api/plant-stvs/:id</span><span class="guard">requirePageWrite</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p><span class="mono">GET /api/plants</span> was briefly locked to <span class="mono">requirePageAccess("plant-management")</span> during the audit pass and had to be reverted — it broke every other page's plant dropdown for non-admin users the moment it went out (Proforma Slips especially, which crashed on an empty-string Select value as a knock-on effect). It's genuinely shared infrastructure, not page-specific.</p>
+        </div>
+      </article>
+
+      <article class="page" id="product-master">
+        <div class="page-head">
+          <h3>Product Master <span style="font-weight:400; color:var(--ink-soft);">(Notion Sync)</span></h3>
+          <span class="page-route filepath">/notion-inventory → client/src/pages/NotionInventory.tsx</span>
+        </div>
+        <p class="page-purpose">The product catalog, mastered in Notion, mirrored into Postgres.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: notion-inventory</span>
+          <span class="badge admin">Route itself: requireAdmin (App.tsx)</span>
+        </div>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/products</span><span class="note">login only, not admin — Scan's Edit CSV, Overall Stock's Exchange, and this page's own table all share it</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/notion-inventory-sync/detect</span><span class="guard none">no server guard</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/notion-inventory-sync/apply</span><span class="guard none">no server guard</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/notion-inventory-sync/full-sync</span><span class="guard none">no server guard</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/products/csv-import</span><span class="guard admin">requireAdminRole</span></div>
+        </div>
+
+        <div class="note crit">
+          <span class="tag">Worth knowing</span>
+          <p>Detect/Apply/Full-Sync carry no server-side auth check at all — they rely entirely on the page's own client route guard (<span class="mono">requireAdmin={true}</span> in App.tsx). Anyone who knows the URL and is logged in (any role) can call them directly. Same class of gap as the Activities page noted in the field manual.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="category" id="order-import-cat">
+      <div class="category-head"><h2>Order Pipeline</h2><div class="rule"></div><span class="count">4 pages</span></div>
+
+      <article class="page" id="order-import">
+        <div class="page-head">
+          <h3>Order Management</h3>
+          <span class="page-route filepath">/order-import → client/src/pages/OrderImport.tsx</span>
+        </div>
+        <p class="page-purpose">Import CSV orders, activate/complete/reopen parts, edit an already-imported CSV.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: order-import</span>
+          <span class="badge access">pageKey: order-import-edit (separate — the pencil/Edit CSV action)</span>
+        </div>
+
+        <h4 class="block-label">Buttons &amp; UI</h4>
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Element</th><th>Condition</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Page itself</td><td class="cond">isAdminOrSuper || hasPageViewAccess("order-import")</td><td>Everything below hidden entirely otherwise</td></tr>
+            <tr><td class="f">Upload / Map &amp; Import</td><td class="cond">canWriteOrderImport (see below)</td><td>Disabled + tooltip, not hidden — primary form CTA</td></tr>
+            <tr><td class="f">Row: Load for Scan</td><td class="cond">canWriteOrderImport</td><td>Hidden</td></tr>
+            <tr><td class="f">Row: Delete</td><td class="cond">canWriteOrderImport</td><td>Hidden</td></tr>
+            <tr><td class="f">Row: Edit CSV (pencil)</td><td class="cond">hasPageViewAccess("order-import-edit")</td><td>Own separate pageKey, not order-import</td></tr>
+            <tr><td class="f">Row: Deactivate</td><td class="cond">canWriteOrderImport</td><td>Hidden</td></tr>
+            <tr><td class="f">Row: Complete</td><td class="cond">canCompleteOrder (see below)</td><td>Hidden — designation blocklist, NOT canWriteOrderImport</td></tr>
+            <tr><td class="f">Row: Reopen</td><td class="cond">canWriteOrderImport</td><td>Only shown on the most-recently-completed part per plant</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p style="font-size:13px; color:var(--ink-soft);">
+          <span class="mono">canWriteOrderImport = isAdminOrSuper || hasPageWriteAccess("order-import")</span><br/>
+          <span class="mono">canCompleteOrder = isAdminOrSuper || !["loader","helper","driver","scanner"].includes(designation)</span> — exact match, case-insensitive
+        </p>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-import/sessions</span><span class="guard">requireImportViewAccess</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-import/sessions/date-check</span><span class="guard">requireImportViewAccess</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-import/sessions/:id/items, /group-report, /part-report, /scan-activity</span><span class="guard">requireImportViewAccess</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-import/master-view, /master-view/item-history</span><span class="guard">requireImportViewAccess</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-import/sessions</span><span class="note">the CSV upload itself</span><span class="guard">requireOrderImportWrite</span></div>
+          <div class="ep"><span class="m put">PUT</span><span class="path">/order-import/sessions/:id</span><span class="guard">requireOrderImportWrite</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-import/sessions/:id/delete-preview</span><span class="guard">requireOrderImportWrite</span></div>
+          <div class="ep"><span class="m del">DEL</span><span class="path">/order-import/sessions/:id</span><span class="guard">requireOrderImportWrite</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-import-edit/sessions, /sessions/:id/items</span><span class="guard">requirePageAccess("order-import-edit")</span></div>
+          <div class="ep"><span class="m put">PUT</span><span class="path">/order-import-edit/sessions/:id</span><span class="guard">requirePageWrite("order-import-edit")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/sessions/:id/activate</span><span class="guard">requirePageWrite("order-import")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/sessions/:id/deactivate</span><span class="guard">requirePageWrite("order-import")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/sessions/:id/complete</span><span class="guard">requireCompleteAccess</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/sessions/:id/reopen</span><span class="guard">requirePageWrite("order-import")</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p><span class="mono">requireOrderImportWrite</span> (and every other write route above) also checks <span class="mono">getUserPlants</span> against the session's own plant — a Write Access grant alone does not let someone activate/complete/reopen a session outside their assigned plant(s). Complete deliberately ignores Write Access altogether: a user with zero Order Management grants but a non-blocklisted designation can still Complete a part, and conversely a user with full Write Access but designation "Loader" cannot.</p>
+        </div>
+      </article>
+
+      <article class="page" id="scan-order">
+        <div class="page-head">
+          <h3>Scan Order</h3>
+          <span class="page-route filepath">/scan → client/src/pages/Scanning/Scan.tsx</span>
+        </div>
+        <p class="page-purpose">The actual barcode-scanning floor tool — Scan / Master View / Part Order tabs.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: scan-order</span>
+        </div>
+
+        <h4 class="block-label">Buttons &amp; UI</h4>
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Element</th><th>Condition</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Confirm Scan</td><td class="cond">canScanWrite</td><td>Disabled + tooltip — primary form CTA</td></tr>
+            <tr><td class="f">Empty Box (all entry points)</td><td class="cond">canScanWrite</td><td>Disabled + tooltip</td></tr>
+            <tr><td class="f">Complete (desktop + mobile)</td><td class="cond">canCompletePart</td><td>Hidden — designation blocklist</td></tr>
+            <tr><td class="f">Void (Master View history)</td><td class="cond">canVoidScan</td><td>Hidden — dual-AND, see below</td></tr>
+            <tr><td class="f">Dashboard-only view (no scan controls)</td><td class="cond">isDispatchUser</td><td>designation === "scanner" exactly, admin still gets full interface</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p style="font-size:13px; color:var(--ink-soft);">
+          <span class="mono">canScanWrite = isAdminOrSuper || hasPageWriteAccess("scan-order")</span><br/>
+          <span class="mono">canCompletePart = isAdminOrSuper || !["loader","helper","driver","scanner"].includes(designation)</span><br/>
+          <span class="mono">canVoidScan = isAdminOrSuper || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"))</span><br/>
+          <span class="mono">isDispatchUser = !isAdminOrSuper && designation === "scanner"</span>
+        </p>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-scan/notification, /active-sessions, /whoami, /active, /stvs, /sessions</span><span class="note">plant-scoped via getUserPlants — no explicit page-access check beyond login</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-scan/sessions/:id/items, /group-credits, /group-session-ids, /extras, /events, /empty-boxes</span><span class="note">plant-checked per session via checkSessionPlantOrRespond</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/sessions/:id/scan</span><span class="guard">requirePageWrite("scan-order")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/sessions/:id/empty-box</span><span class="guard">requirePageWrite("scan-order")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/empty-box/:id/undo</span><span class="guard">requirePageWrite("scan-order")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="guard">requirePageWrite ×2</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/order-scan/sessions/:id/ws-status</span><span class="note">no guard — status probe only</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p><span class="mono">POST /order-scan/events/:id/void</span> chains <em>two</em> <span class="mono">requirePageWrite</span> calls — <span class="mono">'scan-order'</span> then <span class="mono">'scan-history'</span> — as separate middlewares, which is what makes it AND rather than OR. Voiding also auto-backfills a resulting shortfall from any leftover Extra on the same item (own bookkeeping, not a permission concern, but changes what a void actually does server-side beyond the obvious).</p>
+        </div>
+      </article>
+
+      <article class="page" id="scan-history">
+        <div class="page-head">
+          <h3>Scan History</h3>
+          <span class="page-route filepath">Scan tab, "Reports" view → client/src/pages/Scanning/Reports.tsx</span>
+        </div>
+        <p class="page-purpose">Every individual scan event — filterable, exportable, voidable.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: scan-history</span>
+        </div>
+
+        <h4 class="block-label">Buttons &amp; UI</h4>
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Element</th><th>Condition</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Void column (whole column)</td><td class="cond">canVoidScan</td><td>Hidden entirely, not just the buttons in it</td></tr>
+            <tr><td class="f">Upload to Notion</td><td class="cond">canUploadNotion</td><td>Hidden</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p style="font-size:13px; color:var(--ink-soft);">
+          <span class="mono">canVoidScan = isAdminOrSuper || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"))</span> — same dual rule as Scan Order's Void, they're the same underlying action/endpoint viewed from two pages.<br/>
+          <span class="mono">canUploadNotion = isAdminOrSuper || hasPageWriteAccess("scan-history")</span>
+        </p>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/scan-sessions/reports/notion-config</span><span class="note">no guard — returns only a masked DB id, not a secret</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/scan-sessions/reports/upload-to-notion</span><span class="guard">requirePageWrite("scan-history")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="note">same endpoint as Scan Order's Void — see above</span></div>
+        </div>
+      </article>
+
+      <article class="page" id="overall-stock">
+        <div class="page-head">
+          <h3>Overall Stock</h3>
+          <span class="page-route filepath">/overall-stock → client/src/pages/OverallStock.tsx</span>
+        </div>
+        <p class="page-purpose">Live per-plant stock totals, plus the manual Exchange tool.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: overall-stock</span>
+        </div>
+
+        <h4 class="block-label">Buttons &amp; UI</h4>
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Element</th><th>Condition</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Exchange (⇄ column)</td><td class="cond">canExchange</td><td>Hidden — whole column, not just the icon</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p style="font-size:13px; color:var(--ink-soft);">
+          <span class="mono">canExchange = isAdminOrSuper || hasPageWriteAccess("overall-stock")</span>
+        </p>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/scan-sessions/reports/exchange-stock</span><span class="guard">requirePageWrite("overall-stock")</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Exchange used to be a hardcoded <span class="mono">['admin','super-admin','billing']</span> role check on both sides — "billing" got it for free, with no way to grant it to anyone else. Converted to the standard page-grant pattern: billing now needs an explicit Write Access grant like everyone else, matching the same de-special-casing already done for Order Management's Complete/Deactivate.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="category" id="proforma-cat">
+      <div class="category-head"><h2>Documents</h2><div class="rule"></div><span class="count">2 pages</span></div>
+
+      <article class="page" id="proforma">
+        <div class="page-head">
+          <h3>Proforma Slips</h3>
+          <span class="page-route filepath">/proforma-slips → client/src/pages/ProformaSlips.tsx</span>
+        </div>
+        <p class="page-purpose">Order slips — searchable, editable, printable and lockable once printed.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: proforma</span>
+        </div>
+
+        <h4 class="block-label">Buttons &amp; UI</h4>
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Element</th><th>Condition</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Add / Edit items, row selection</td><td class="cond">canWriteSlips</td><td>Hidden</td></tr>
+            <tr><td class="f">Unlock (after Print locked it)</td><td class="cond">canUnlockSlips</td><td>Dual-AND — see Print Operations, same rule, mirrored here</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p style="font-size:13px; color:var(--ink-soft);">
+          <span class="mono">canWriteSlips = isAdminOrSuper || hasPageWriteAccess("proforma")</span>
+        </p>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips</span><span class="guard">requirePageWrite("proforma")</span></div>
+          <div class="ep"><span class="m put">PUT</span><span class="path">/proforma-slips/:id</span><span class="guard">requirePageWrite("proforma")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/lock, /unlock</span><span class="guard">requirePageWrite ×2</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/proforma-slips, /proforma-slips/:id, /proforma-slips/order/:orderNumber</span><span class="note">no guard beyond login — read access is intentionally open to any authenticated user</span></div>
+        </div>
+      </article>
+
+      <article class="page" id="print-ops">
+        <div class="page-head">
+          <h3>Print Operations</h3>
+          <span class="page-route filepath">/print-operations → client/src/pages/PrintOperationsFinal12.tsx</span>
+        </div>
+        <p class="page-purpose">Search an order, print it, manage the print-lock.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: print-operations</span>
+        </div>
+
+        <h4 class="block-label">Buttons &amp; UI</h4>
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Element</th><th>Condition</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Print</td><td class="cond">none — disabled={isLoading} only</td><td>No permission gate of any kind, by design or oversight (not yet asked to change)</td></tr>
+            <tr><td class="f">Unlock</td><td class="cond">canUnlockSlips</td><td>Swaps to a "contact admin" message instead of a disabled button when absent — functionally hidden either way</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p style="font-size:13px; color:var(--ink-soft);">
+          <span class="mono">canUnlockSlips = isAdminOrSuper || (hasPageWriteAccess("print-operations") && hasPageWriteAccess("proforma"))</span>
+        </p>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/unlock</span><span class="guard">requirePageWrite("print-operations") + requirePageWrite("proforma")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/lock</span><span class="guard">requirePageWrite ×2</span><span class="note">fires automatically on Print, same dual rule</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Unlock needs BOTH grants because it's really two different permissions being asked at once — "can operate Print Operations" and "can modify a Proforma Slip" — and the feature happens to sit on the print-operations page while mutating a proforma record. A user with only one of the two grants sees a fully clickable Unlock button that would 403 on click if the client check weren't kept in sync with this exact server rule.</p>
+        </div>
+      </article>
+    </section>
+
+  </main>
+
+  <footer class="colophon">
+    <span>KM Finny — internal reference, not user-facing</span>
+    <span>Companion to field-manual.html · pages not listed here (Toll/Expense Voucher, Dispatch, Purchases, Load Operations, Activities, Settings) use the simple plain-gate or admin-only patterns already documented there</span>
+  </footer>
+</div>
+
+</body>
+</html>

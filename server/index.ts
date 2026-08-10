@@ -94,6 +94,30 @@ app.use((req, res, next) => {
     // (Empty Box entries reuse order_scan_events' existing columns — sentinel barcode
     // 'EMPTY_BOX', count in total_qty, note in item_name — so no schema change is needed.)
 
+    // Short state code (e.g. "GJ", "MP") for the Indian state a plant is in — drives which
+    // per-state pallet-size column on products (gj_plt/mp_plt) a scan against that plant reads.
+    await pool.query(`
+      ALTER TABLE plants
+      ADD COLUMN IF NOT EXISTS state TEXT
+    `);
+    // Pallet size moves from being named after the PLANT (ind_plt/val_plt) to the STATE it's
+    // actually a fact about (gj_plt/mp_plt) — see plants.state above. A plain rename keeps all
+    // existing data; wrapped in a conditional since RENAME COLUMN has no IF EXISTS clause and
+    // this needs to be safe to run again on every server start once already applied.
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'ind_plt')
+           AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'mp_plt') THEN
+          ALTER TABLE products RENAME COLUMN ind_plt TO mp_plt;
+        END IF;
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'val_plt')
+           AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'gj_plt') THEN
+          ALTER TABLE products RENAME COLUMN val_plt TO gj_plt;
+        END IF;
+      END $$;
+    `);
+
     // Order Date is now mandatory on upload and is what Master View scopes by (it replaced the
     // old created_at/upload-day filter). Rows imported before that change can have a NULL
     // order_date and would otherwise drop out of Master View entirely — backfill them from the
