@@ -73,6 +73,9 @@ type ScanHistoryResponse = {
   extraCount: number;
   emptyBoxCount?: number;
   scanners: string[];
+  /** Totals-row figures for Qty/Pallets over the whole filtered set, not just the loaded page. */
+  qtyTotal?: number;
+  palletsTotal?: number;
   limit: number;
   offset: number;
 };
@@ -87,6 +90,10 @@ const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hove
 // below. "#", Scanned By, Item and Void always stay visible (hideable: false there), so they
 // don't need to be included/excluded here — DataTable adds them back regardless.
 const HISTORY_OPTIONAL_COLUMNS = ["barcode", "order", "plant", "qty", "pallets", "stv", "type", "time"] as const;
+
+// Rows per request. One page per view keeps the load to a single query — see the note on the
+// query below for why this page is paginated rather than loading the whole history.
+const HISTORY_PAGE_SIZE = 20;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -222,6 +229,7 @@ const Reports = () => {
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
   const [historySearch,  setHistorySearch]  = useState("");
+  const [historyPage,    setHistoryPage]    = useState(1);
   const [historyExporting, setHistoryExporting] = useState<string | null>(null);
   // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Overall Stock's
   // Date (kept separate from the generic column engine below since each is a simple exact-match
@@ -428,52 +436,34 @@ const Reports = () => {
     }
   };
 
+
+  // Server-driven pagination, same as develop: ONE request for one 20-row page. This page briefly
+  // loaded the entire filtered history instead (walking it 100 rows at a time, in sequence, while
+  // a 5s poll restarted the walk) and took ~20s to show anything — pagination is what made it
+  // about a second, so it's back.
+  useEffect(() => { setHistoryPage(1); }, [selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+
+  const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
+  const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
+    from:    fromDate       || undefined,
+    to:      toDate         || undefined,
+    search:  historySearch  || undefined,
+    scanner: historyScanner || undefined,
+    type:    historyType    || undefined,
+    filters: filtersJson,
+    limit:   HISTORY_PAGE_SIZE,
+    offset:  historyOffset,
+  });
+
   const { data: historyData, isLoading: historyLoading, isFetching: historyFetching } =
     useQuery<ScanHistoryResponse>({
       queryKey: [
         "/api/scan-sessions/reports/scan-history",
-        selectedDate, historySearch, historyScanner, historyType, filtersJson,
+        selectedDate, historySearch, historyScanner, historyType, filtersJson, historyPage,
       ],
-      // No pagination in the UI — the table scrolls (like the Scan page's Master View shows its
-      // whole list), so pull EVERY matching row. The server caps `limit` at 100, so page through
-      // with the same filters until we have everything, then hand the full set to the table.
-      // Summary fields (total/scanners/…) are full-match totals, so keep them from the first page.
       queryFn: async () => {
-        const PAGE_SIZE = 100; // server-side max for `limit`
-        let offset = 0;
-        let total = Infinity;
-        const all: ScanHistoryItem[] = [];
-        let meta: ScanHistoryResponse | undefined;
-        while (offset < total) {
-          const url = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
-            from:    fromDate       || undefined,
-            to:      toDate         || undefined,
-            search:  historySearch  || undefined,
-            scanner: historyScanner || undefined,
-            type:    historyType    || undefined,
-            filters: filtersJson,
-            limit:   PAGE_SIZE,
-            offset,
-          });
-          const r: ScanHistoryResponse | undefined = await apiRequest("GET", url, undefined, false, true);
-          if (!r) break;
-          if (!meta) meta = r;
-          const items = r.items ?? [];
-          if (items.length === 0) break; // guards against an infinite loop if total is ever wrong
-          all.push(...items);
-          total = r.total ?? all.length;
-          offset += items.length;
-        }
-        return {
-          items: all,
-          total: meta?.total ?? all.length,
-          totalBoxes: meta?.totalBoxes ?? 0,
-          totalPallets: meta?.totalPallets ?? 0,
-          extraCount: meta?.extraCount ?? 0,
-          scanners: meta?.scanners ?? [],
-          limit: PAGE_SIZE,
-          offset: 0,
-        };
+        const r = await apiRequest("GET", historyUrl, undefined, false, true);
+        return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
       },
       refetchInterval: 5000,
       placeholderData: (previousData) => previousData,
@@ -482,6 +472,7 @@ const Reports = () => {
   const historyItems        = historyData?.items ?? [];
   const historyTotal        = historyData?.total ?? 0;
   const historyScanners     = historyData?.scanners ?? [];
+  const historyHasMore      = historyOffset + historyItems.length < historyTotal;
 
   // Export must cover every row matching the current filters — the server caps `limit` at 100
   // (see /reports/scan-history), so this pages through with the SAME filters until it has
@@ -534,10 +525,14 @@ const Reports = () => {
   const dash = <span className="text-gray-300">—</span>;
 
   // Same table structure/styling as Overall Stock (DataTable + TableCard): sortable/resizable/
-  // hideable columns, zebra stripes, business-report borders, plus a totals row pinned under the
-  // header. The totals are honest here because the query above pages through EVERY matching row
-  // before handing the set to the table — it isn't a per-page sum. Voided scans are left out of
-  // Qty/Pallets, matching the rule the void dialog states ("removes it from totals and stock").
+  // hideable columns, zebra stripes, business-report borders, plus a totals row.
+  //
+  // The table only ever holds one 20-row page, so DataTable's own row-summing would report the
+  // total of whatever page you happen to be on. Qty and Pallets therefore take their figure from
+  // the server, computed over the whole filtered set (see qtyTotal/palletsTotal on
+  // /reports/scan-history) — the number stays the same as you page through, which is the only
+  // reading of "Total" that means anything here. Voided scans are excluded, matching the rule the
+  // void dialog states ("removes it from totals and stock").
   const historyColumns: DataTableColumn<ScanHistoryItem>[] = [
     {
       id: "srNo",
@@ -624,8 +619,12 @@ const Reports = () => {
       width: 80,
       align: "right",
       accessor: (row) => row.totalQty,
+      // Whole-set figure from the server; the row-sum fallback only covers the loaded page and is
+      // there for an older server that doesn't send the field.
       total: (rows) =>
-        rows.reduce((sum, r) => (r.voided ? sum : sum + (r.totalQty ?? 0)), 0).toLocaleString(),
+        (historyData?.qtyTotal ??
+          rows.reduce((sum, r) => (r.voided ? sum : sum + (r.totalQty ?? 0)), 0)
+        ).toLocaleString(),
       cellClassName: "font-bold",
       render: (row) =>
         row.isExchange ? (
@@ -643,7 +642,9 @@ const Reports = () => {
       align: "right",
       accessor: (row) => row.pallets,
       total: (rows) =>
-        rows.reduce((sum, r) => (r.voided ? sum : sum + Number(r.pallets ?? 0)), 0).toFixed(2),
+        (historyData?.palletsTotal ??
+          rows.reduce((sum, r) => (r.voided ? sum : sum + Number(r.pallets ?? 0)), 0)
+        ).toFixed(2),
       cellClassName: "font-semibold text-[#001d6e]",
       render: (row) =>
         row.pallets != null && Number(row.pallets) > 0 ? parseFloat(String(row.pallets)).toFixed(2) : dash,
@@ -1021,16 +1022,30 @@ const Reports = () => {
                   {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
                     <DropdownMenuItem
                       key={fmt}
-                      onSelect={() => {
-                        const rows = historyExportRows(historyItems);
-                        const dateSuffix = dateValue ? `-${fromDate}${dateIsRange ? `_to_${toDate}` : ""}` : "";
-                        const suffix = `${dateSuffix}-${format(new Date(), "yyyy-MM-dd")}`;
-                        if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
-                        if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
-                        if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
+                      disabled={historyExporting !== null}
+                      // The table now holds only the current 20-row page, so the export fetches
+                      // the full filtered set itself — otherwise a click would quietly produce a
+                      // file containing just the rows that happened to be on screen.
+                      onSelect={async (e) => {
+                        e.preventDefault();
+                        setHistoryExporting(fmt);
+                        try {
+                          const rows = historyExportRows(await fetchAllHistoryItems());
+                          const dateSuffix = dateValue ? `-${fromDate}${dateIsRange ? `_to_${toDate}` : ""}` : "";
+                          const suffix = `${dateSuffix}-${format(new Date(), "yyyy-MM-dd")}`;
+                          if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
+                          if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
+                          if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
+                        } catch (err: any) {
+                          toast({ title: `${fmt} export failed`, description: err?.message, variant: "destructive" });
+                        } finally {
+                          setHistoryExporting(null);
+                        }
                       }}
                     >
-                      <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />
+                      {historyExporting === fmt
+                        ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                        : <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />}
                       {fmt}
                     </DropdownMenuItem>
                   ))}
@@ -1079,6 +1094,30 @@ const Reports = () => {
             isStickyHeader
             maxHeight="max(420px, calc(100vh - 360px))"
             headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+            // Pagination is server-driven (Prev/Next over 20-row pages), so it's rendered here
+            // rather than through DataTable's own client-side pageIndex/pageSize controls, which
+            // would only page the rows already in the browser.
+            renderFooter={(ctx) => (
+              <tfoot>
+                <tr>
+                  <td colSpan={ctx.columnCount} className="border-t border-gray-300 bg-white px-4 py-2.5">
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <span>
+                        {historyTotal > 0
+                          ? `Showing ${historyOffset + 1}–${Math.min(historyOffset + historyItems.length, historyTotal)} of ${historyTotal.toLocaleString()} events`
+                          : "No events"}
+                      </span>
+                      <div className="flex gap-2">
+                        <Button variant="outline" size="sm" className="rounded-xl" disabled={historyPage <= 1}
+                          onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
+                        <Button variant="outline" size="sm" className="rounded-xl" disabled={!historyHasMore}
+                          onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              </tfoot>
+            )}
           />
         </TableCard>
       </div>

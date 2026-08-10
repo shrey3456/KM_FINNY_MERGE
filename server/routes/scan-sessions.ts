@@ -1343,7 +1343,8 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       : `WHERE NOT "isExchange"`;
     const summaryFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${summaryWhere}`;
 
-    const [dataRes, countRes, summaryRes, scannersRes] = await Promise.all([
+    // Destructuring order must track the array below: data, count, summary, column totals, scanners.
+    const [dataRes, countRes, summaryRes, columnTotalsRes, scannersRes] = await Promise.all([
       pool.query(
         `SELECT *
          ${baseFrom}
@@ -1359,6 +1360,17 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
            COUNT(*) FILTER (WHERE "isExtra" = true AND barcode <> 'EMPTY_BOX') AS "extraCount",
            COALESCE(SUM("totalQty") FILTER (WHERE barcode = 'EMPTY_BOX'), 0)   AS "emptyBoxCount"
          ${summaryFrom}`,
+        params,
+      ),
+      // Column totals for the Reports table's totals row. Distinct from the tiles above: these
+      // cover exactly the rows the table lists (same WHERE — exchanges and empty boxes included)
+      // minus voided ones, which the void action promises to exclude from totals. Computed here
+      // because the browser only holds one page of rows and cannot sum the set itself.
+      pool.query(
+        `SELECT
+           COALESCE(SUM("totalQty") FILTER (WHERE NOT COALESCE(voided, false)), 0) AS "qtyTotal",
+           COALESCE(SUM(pallets)    FILTER (WHERE NOT COALESCE(voided, false)), 0) AS "palletsTotal"
+         ${baseFrom}`,
         params,
       ),
       pool.query(
@@ -1381,6 +1393,8 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       extraCount:   parseInt(summaryRes.rows[0].extraCount, 10),
       emptyBoxCount: parseInt(summaryRes.rows[0].emptyBoxCount, 10),
       scanners:     scannersRes.rows.map((r: any) => r.name as string),
+      qtyTotal:     parseInt(columnTotalsRes.rows[0].qtyTotal, 10),
+      palletsTotal: parseFloat(columnTotalsRes.rows[0].palletsTotal),
       limit,
       offset,
     });
