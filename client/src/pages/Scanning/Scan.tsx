@@ -152,6 +152,14 @@ const stripCsvExt = (name?: string | null) => (name ?? "").replace(/\.csv$/i, ""
 
 // Pallet-count cell: qty ÷ items-per-pallet, or a muted 0.00 when not applicable. Shared by the
 // Scan tab's CSV Items table and Master View so both render pallet figures identically.
+// A CSV row (ImpItem) carries no itemsPerPallet — the import gives an expectedPallets figure
+// instead — so Part Order's pack size is backed out of that. Everything it shows in pallets goes
+// through here, so the table, its totals and the card list can't drift apart.
+const impItemsPerPallet = (i: { quantity: number | null; expectedPallets: number | null }) => {
+  const qty = i.quantity ?? 0;
+  return qty > 0 && i.expectedPallets ? qty / i.expectedPallets : 0;
+};
+
 const pltCell = (qty: number, ipp: number, className: string) =>
   qty > 0 && ipp > 0
     ? <span className={className}>{(qty / ipp).toFixed(2)}</span>
@@ -2152,9 +2160,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     : csvItemsSorted;
   // Totals for Part Order's mobile card list and its rotated/portrait table. Taken over the rows
   // actually on screen (filtCsvItems, not every imported row) so a search narrows the total along
-  // with the list — matching what the desktop table's own totals row does. ImpItem carries no
-  // itemsPerPallet, so the pack size is backed out of the CSV's expectedPallets figure, the same
-  // way the card list derives its per-row plt annotation.
+  // with the list — matching what the desktop table's own totals row does.
   const csvTotals = sumKioskTotals(filtCsvItems, (i) => {
     const exp = i.quantity ?? 0;
     return {
@@ -2162,7 +2168,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       done: Math.min(i.scannedQty ?? 0, exp),
       remain: Math.max(0, exp - (i.scannedQty ?? 0)),
       extra: i.extraQty ?? 0,
-      ipp: exp > 0 && i.expectedPallets ? exp / i.expectedPallets : 0,
+      ipp: impItemsPerPallet(i),
     };
   });
 
@@ -2244,6 +2250,49 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         const extra = item.extraQty ?? 0;
         return extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>;
       },
+    },
+    // Pallet columns, in the same Exp → Remain → Received → Extra order as the Qty block above —
+    // matching the Scan and Master View tables, which read as one system with this one.
+    {
+      id: "expPlt",
+      header: "Exp Plt",
+      width: 80,
+      align: "right",
+      cellClassName: "tabular-nums text-gray-500",
+      total: (rows) => pltTotal(rows, (i) => ({ qty: i.quantity ?? 0, ipp: impItemsPerPallet(i) })),
+      render: (i) => pltCell(i.quantity ?? 0, impItemsPerPallet(i), "text-gray-500"),
+    },
+    {
+      id: "remainPlt",
+      header: "Remain Plt",
+      width: 100,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) =>
+        pltTotal(rows, (i) => ({
+          qty: Math.max(0, (i.quantity ?? 0) - (i.scannedQty ?? 0)),
+          ipp: impItemsPerPallet(i),
+        })),
+      render: (i) =>
+        pltCell(Math.max(0, (i.quantity ?? 0) - (i.scannedQty ?? 0)), impItemsPerPallet(i), "text-purple-600"),
+    },
+    {
+      id: "donePlt",
+      header: "Received Plt",
+      width: 90,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => ({ qty: i.scannedQty ?? 0, ipp: impItemsPerPallet(i) })),
+      render: (i) => pltCell(i.scannedQty ?? 0, impItemsPerPallet(i), "text-[#001d6e]"),
+    },
+    {
+      id: "extraPlt",
+      header: "Extra Plt",
+      width: 90,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => ({ qty: i.extraQty ?? 0, ipp: impItemsPerPallet(i) })),
+      render: (i) => pltCell(i.extraQty ?? 0, impItemsPerPallet(i), "text-amber-600"),
     },
     {
       id: "status",
@@ -3812,6 +3861,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                       const extra = item.extraQty ?? 0;
                                       const isDone = done >= exp && exp > 0;
                                       const isPartial = done > 0 && !isDone;
+                                      // Pallet figure under each qty, same as the Scan and Master
+                                      // View tables.
+                                      const ipp = impItemsPerPallet(item);
+                                      const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
                                       return (
                                         <tr key={item.id} className={`border-b border-gray-200 ${
                                           isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
@@ -3822,10 +3875,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                               {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                                             </p>
                                           </td>
-                                          <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">{exp || "—"}</td>
-                                          <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">{done}</td>
-                                          <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{remain || "—"}</td>
-                                          <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</td>
+                                          <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
+                                            <span className="block">{exp || "—"}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{plt(exp)} plt</span>
+                                          </td>
+                                          <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
+                                            <span className="block">{done}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{plt(done)} plt</span>
+                                          </td>
+                                          <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
+                                            <span className="block">{remain || "—"}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{plt(remain)} plt</span>
+                                          </td>
+                                          <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
+                                            <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{plt(extra)} plt</span>
+                                          </td>
                                           <td className="text-center px-4 py-2.5">
                                             <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
                                               isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
@@ -3839,9 +3904,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                     {filtCsvItems.length > 0 && (
                                       <tr className={KIOSK_TOTALS_ROW}>
                                         <td className={`border-r border-gray-200 px-4 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}>Total</td>
-                                        {(["exp", "done", "remain", "extra"] as const).map((key) => (
-                                          <td key={key} className={`text-right tabular-nums border-r border-gray-200 px-3 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}>
-                                            {csvTotals[key].toLocaleString()}
+                                        {([
+                                          ["exp", "expPlt"], ["done", "donePlt"], ["remain", "remainPlt"], ["extra", "extraPlt"],
+                                        ] as const).map(([qtyKey, pltKey]) => (
+                                          <td key={qtyKey} className={`text-right tabular-nums border-r border-gray-200 px-3 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}>
+                                            <span className="block">{csvTotals[qtyKey].toLocaleString()}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{csvTotals[pltKey].toFixed(2)} plt</span>
                                           </td>
                                         ))}
                                         <td className={`px-4 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}></td>
@@ -3862,9 +3930,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   const extra = item.extraQty ?? 0;
                                   const isDone = done >= exp && exp > 0;
                                   const isPartial = done > 0 && !isDone;
-                                  // ImpItem has no itemsPerPallet — back into it from the CSV's own
-                                  // expectedPallets figure so the plt annotation still lines up.
-                                  const ipp = exp > 0 && item.expectedPallets ? exp / item.expectedPallets : 0;
+                                  const ipp = impItemsPerPallet(item);
                                   const expPlt = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
                                   const remainPlt = ipp > 0 ? (remain / ipp).toFixed(2) : "0.00";
                                   return (
