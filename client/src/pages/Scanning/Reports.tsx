@@ -1091,8 +1091,9 @@ const Reports = () => {
             columnVisibility={visibleColumnIds}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
-            isStickyHeader
-            maxHeight="max(420px, calc(100vh - 360px))"
+            // No isStickyHeader/maxHeight here, matching develop: a 20-row page is short enough to
+            // read whole, so a bounded scroll box would only add an inner scrollbar next to the
+            // page's own. The table flows and the card grows with it.
             headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
             // Pagination is server-driven (Prev/Next over 20-row pages), so it's rendered here
             // rather than through DataTable's own client-side pageIndex/pageSize controls, which
