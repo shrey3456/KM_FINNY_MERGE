@@ -303,15 +303,11 @@ export default function ScanViewer() {
 
   // STV filter for the history drill-down — an item can have been scanned across more than
   // one truck/STV, so this narrows the list to just one. Resets whenever a different item's
-  // history is opened.
+  // history is opened. (historyStvOptions/historyEvents are computed further down, once the
+  // main table's own STV column filter — columnConditions below — is in scope, since that
+  // filter is applied as a floor on top of this one.)
   const [historyStvFilter, setHistoryStvFilter] = useState("");
   useEffect(() => { setHistoryStvFilter(""); }, [historyItem?.id]);
-  const historyStvOptions = Array.from(
-    new Set((historyQuery.data?.items ?? []).map((ev) => ev.stv).filter((s): s is string => !!s)),
-  );
-  const historyEvents = historyStvFilter
-    ? (historyQuery.data?.items ?? []).filter((ev) => ev.stv === historyStvFilter)
-    : (historyQuery.data?.items ?? []);
 
   const [voidTarget, setVoidTarget] = useState<HistoryEvent | null>(null);
   const [voidReason, setVoidReason] = useState("");
@@ -494,14 +490,41 @@ export default function ScanViewer() {
 
   const selectedSession = sessionOptions.find((s) => s.id === sessionId) ?? null;
 
+  // The STV(s) currently selected in the main table's own STV column filter, if any (a
+  // checklist — "in" — so possibly more than one). Reused as a floor on the history drill-down
+  // below: if you've filtered the items table down to one STV, opening any of those items'
+  // history should only ever show that STV's scans, not every truck that item ever went out on.
+  const activeStvFilterValues: string[] = useMemo(() => {
+    const cond = columnConditions["stv"];
+    if (!cond || cond.operator !== "in") return [];
+    return (cond.value as string[]) ?? [];
+  }, [columnConditions]);
+
+  // Same STV floor applied first, then the in-panel dropdown (below) narrows further within
+  // whatever that leaves — so with a single STV filtered on the main table, history for any
+  // item under it is already scoped correctly with no extra step needed.
+  const historyEventsInStvScope = activeStvFilterValues.length > 0
+    ? (historyQuery.data?.items ?? []).filter((ev) => !!ev.stv && activeStvFilterValues.includes(ev.stv))
+    : (historyQuery.data?.items ?? []);
+  const historyStvOptions = Array.from(
+    new Set(historyEventsInStvScope.map((ev) => ev.stv).filter((s): s is string => !!s)),
+  );
+  const historyEvents = historyStvFilter
+    ? historyEventsInStvScope.filter((ev) => ev.stv === historyStvFilter)
+    : historyEventsInStvScope;
+
   // The item-history drill-down panel — same content for whichever row is currently expanded
   // (driven by historyItem, set from the Item column's click handler below).
   const historyPanel = (
     <div className="bg-gray-50 p-3">
       {historyQuery.isLoading ? (
         <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
-      ) : (historyQuery.data?.items?.length ?? 0) === 0 ? (
-        <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
+      ) : historyEventsInStvScope.length === 0 ? (
+        <p className="py-4 text-center text-xs text-gray-400">
+          {activeStvFilterValues.length > 0
+            ? `No scans for this item under ${activeStvFilterValues.length > 1 ? "the selected STVs" : `STV ${activeStvFilterValues[0]}`}.`
+            : "No scans yet for this item in this order."}
+        </p>
       ) : (
         <>
         {historyStvOptions.length > 1 && (

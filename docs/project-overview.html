@@ -449,6 +449,7 @@
       <ul>
         <li><a href="#pipeline">The core pipeline</a></li>
         <li><a href="#model">Plants, states &amp; products</a></li>
+        <li><a href="#stock-reporting">Stock reporting</a></li>
         <li><a href="#permissions">Users &amp; permissions</a></li>
       </ul>
     </div>
@@ -483,7 +484,8 @@
         <ol class="steps">
           <li>A CSV order (one file per part of a delivery) gets uploaded on the <strong>Order Management</strong> page.</li>
           <li>Warehouse staff scan barcodes against it on the <strong>Scan Order</strong> page as boxes physically arrive — the system tracks Expected vs. Received vs. Extra per item, in real time, across every device scanning against the same order.</li>
-          <li><strong>Overall Stock</strong> shows the live, per-plant running stock total that every scan feeds into.</li>
+          <li><strong>Scan Viewer</strong> is a read-only sibling of Scan Order — pick any plant and any order date, including already-completed ones, to see that order's scan progress without touching live scanning. Void is available there too, but only under its own, separately-granted permission.</li>
+          <li><strong>Overall Stock</strong> shows the live, per-plant running stock total that every scan feeds into, alongside what was ordered (Expected) and what's actually been sold (Sale, from Proforma Slips) for the same barcode.</li>
           <li><strong>Proforma Slips</strong> and <strong>Print Operations</strong> generate and lock the dispatch paperwork for a completed order.</li>
           <li><strong>Scan History</strong> is the full audit trail of every individual scan — searchable, exportable, and correctable (void) if a mistake was made.</li>
           <li><strong>Product Master</strong> is the catalog everything else reads from — mirrored from Notion, the actual source of truth for product data.</li>
@@ -563,12 +565,29 @@
         </div>
       </article>
 
+      <article class="page" id="stock-reporting">
+        <div class="page-head"><h3>Stock reporting: Total, Expected, Received &amp; Sale</h3></div>
+        <p class="page-purpose">Overall Stock now reads from three different sources of truth at once, not just the live running stock table.</p>
+        <ol class="steps">
+          <li>The page's top-level tabs switch on <strong>state</strong>, not plant — a state with more than one plant under it (e.g. GJ: Rajkot, Valsad, Baroda) shows their stock combined by default, with a second, nested pill row to narrow down to one specific plant. A single-plant state (MP: Indore) has no nested row, since the state view already <em>is</em> that one plant's view.</li>
+          <li><strong>Expected Qty</strong> sums ordered quantity from <span class="filepath">order_import_items</span>/<span class="filepath">order_import_sessions</span> (the CSV import pipeline) — an all-time sum by default, or scoped to one order date when a date filter is picked.</li>
+          <li><strong>Received Qty</strong>/<strong>Extra</strong> come from the live per-plant running totals (<span class="filepath">product_plant_stock</span>) that every scan feeds into — Received is every physical box counted (extras included), Extra is just the over-order portion of that, shown separately.</li>
+          <li><strong>Sale Qty</strong> is new: a sum of Proforma Slip quantities for the same barcode+plant, matched by the slip's own order date the same way Expected Qty is. Unlike Expected Qty's true all-time default, "all dates" here floors at a fixed start date (sales tracking isn't considered reliable before then) — see <span class="mono">SALES_TRACKING_START</span> in <span class="filepath">server/routes/scan-sessions.ts</span>.</li>
+          <li><strong>Total Stock</strong> (the first data column, right after Plant) is a derived reconciliation figure: Extra + Received − Sale, with its own pallet-equivalent shown inline in the same cell rather than as a separate column.</li>
+        </ol>
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Every pallet figure on this page (Expected/Received/Sale/Extra/Total Pallets) is computed per-row, using that row's own item-per-pallet size — never one blended pallet size applied across every row, same rule used everywhere else in the app.</p>
+        </div>
+      </article>
+
       <article class="page" id="permissions">
         <div class="page-head"><h3>Users &amp; permissions</h3></div>
         <p class="page-purpose">Two-tier per-page grants, plus a couple of narrower rules layered on top for specific actions.</p>
         <ol class="steps">
           <li>Every user has a <strong>View Access</strong> and <strong>Write Access</strong> list (page keys), set on the Users page. Admin/super-admin bypass both, everywhere, unconditionally.</li>
           <li>A handful of actions use different rules entirely — a designation blocklist for who can mark an order Complete, and a dual-page-AND rule (write access to two different pages at once) for a couple of sensitive actions like Print Operations' Unlock and Void.</li>
+          <li>Scan Viewer's own Void action takes this further with an OR-of-ANDs rule: admin, <em>or</em> Write Access to both Scan Order and Scan History (the existing combination), <em>or</em> Write Access to Scan Viewer alone — so someone can be trusted to look up and correct a mistake there without getting full access to the real Scan Order page. See <span class="mono">requireVoidAccess</span> in <span class="filepath">server/routes/order-scan.ts</span>.</li>
           <li>Plant scoping is a separate, independent check layered on top for Order Management and Scan Order — a page-level grant says nothing about which plant(s) it applies to.</li>
         </ol>
         <p style="margin-top:14px;">Full button-by-button and route-by-route detail: <a href="permissions-manual.html">permissions-manual.html</a>.</p>
