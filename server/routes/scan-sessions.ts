@@ -1193,6 +1193,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
 const SCAN_HISTORY_FILTER_COLUMNS: Record<string, { sql: string; type: 'text' | 'number' | 'date' }> = {
   stv:       { sql: 'stv',         type: 'text' },
   time:      { sql: '"scannedAt"', type: 'date' },
+  orderDate: { sql: '"orderDate"', type: 'date' },
   plant:     { sql: '"plant"',     type: 'text' },
 };
 

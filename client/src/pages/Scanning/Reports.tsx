@@ -287,7 +287,8 @@ const Reports = () => {
   // Date filter — same control/encoding as Overall Stock: the stored value is either a single
   // day ("d:YYYY-MM-DD") or a from–to range ("r:YYYY-MM-DD:YYYY-MM-DD"), both resolving to a
   // from/to window sent to the server. Presets just compute one of those. Filters scan date
-  // (scannedAt).
+  // (scannedAt) — "Scan Date" below, to read distinctly from "Order Date" (its own generic
+  // column filter, set only via "+ Filter", not a second standalone control here).
   const dateValue = selectedDate;
   const { from: fromDate, to: toDate } = useMemo(() => {
     if (dateValue.startsWith("d:")) { const day = dateValue.slice(2); return { from: day, to: day }; }
@@ -315,13 +316,13 @@ const Reports = () => {
 
   const describeSimpleFilter = (field: string, value: string) => {
     if (field === "date") {
-      if (value.startsWith("d:")) return `Date: ${format(new Date(value.slice(2)), "MMM d, yyyy")}`;
+      if (value.startsWith("d:")) return `Scan Date: ${format(new Date(value.slice(2)), "MMM d, yyyy")}`;
       if (value.startsWith("r:")) {
         const [, f, t] = value.split(":");
         const fmt = (s: string) => (s ? format(new Date(s), "MMM d") : "…");
-        return `Date: ${fmt(f)} → ${fmt(t)}`;
+        return `Scan Date: ${fmt(f)} → ${fmt(t)}`;
       }
-      return `Date: ${value}`;
+      return `Scan Date: ${value}`;
     }
     if (field === "scanner") return `Scanned By: ${value}`;
     if (field === "type") return `Type: ${TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value}`;
@@ -352,6 +353,7 @@ const Reports = () => {
     { id: "pallets", label: "Pallets", filterType: "number", options: [], disableValues: true, accessor: (r) => r.pallets },
     { id: "stv", label: "STV", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
     { id: "time", label: "Time", filterType: "date", options: filterValues.time ?? [], accessor: (r) => r.scannedAt },
+    { id: "orderDate", label: "Order Date", filterType: "date", options: filterValues.orderDate ?? [], accessor: (r) => r.orderDate },
     { id: "plant", label: "Plant", filterType: "enum", options: filterValues.plant ?? [], accessor: (r) => r.plant },
   ], [filterValues]);
   const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
@@ -365,7 +367,7 @@ const Reports = () => {
       delete next[columnId];
       return next;
     });
-  const columnHeader = (id: string, label: string) => {
+  const columnHeader = (id: string, label: string, initialTab?: "values" | "condition") => {
     const col = filterableColumns.find((c) => c.id === id);
     if (!col) return label;
     return (
@@ -376,6 +378,7 @@ const Reports = () => {
           condition={columnConditions[id]}
           onChange={(c) => setColumnCondition(id, c)}
           onRemove={() => clearColumnCondition(id)}
+          initialTab={initialTab}
         />
       </span>
     );
@@ -650,7 +653,10 @@ const Reports = () => {
     },
     {
       id: "order",
-      header: "Order Date",
+      // Opens straight to the Condition tab (a real calendar input for on/before/after/between)
+      // instead of the Values tab — the Values checklist only ever lists dates that already have
+      // a scan on them (capped at 500), not every date you might actually want to pick.
+      header: columnHeader("orderDate", "Order Date", "condition"),
       width: 120,
       accessor: (row) => row.orderDate ?? "",
       totalable: false,
@@ -810,9 +816,10 @@ const Reports = () => {
                 placeholder="Item, barcode, or scanner…"
               />
 
-              {/* Standalone Date control — sits BEFORE "+ Filter", same as Overall Stock. Single
-                  date or from/to range (both editable) plus quick-range presets; filters scan
-                  date (scannedAt). */}
+              {/* Standalone Scan Date control — sits BEFORE "+ Filter", same as Overall Stock.
+                  Single date or from/to range (both editable) plus quick-range presets; filters
+                  scan date (scannedAt) — when a box was physically scanned, not the order's own
+                  date (see the separate Order Date control right after this one). */}
               <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) { setDatePickMode(dateIsRange ? "range" : "single"); } }}>
                 <PopoverTrigger asChild>
                   <Button
@@ -821,7 +828,7 @@ const Reports = () => {
                     className={`h-8 gap-1 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
                   >
                     <CalendarDays className="h-3.5 w-3.5" />
-                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Date: ", "") : "Date"}
+                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Scan Date: ", "") : "Scan Date"}
                     {dateValue && (
                       <span
                         role="button"
@@ -926,6 +933,7 @@ const Reports = () => {
                   </div>
                 </PopoverContent>
               </Popover>
+
 
               {/* One unified "+ Filter" — Scanned By, Type, Plant, and every generic column in the
                   same searchable list, same pattern as Overall Stock. (Date is its own control.) */}
@@ -1100,7 +1108,7 @@ const Reports = () => {
                               />
                             )}
                             <p className="text-[10px] text-gray-400">
-                              Switch between a single date and a range from the Date button above.
+                              Switch between a single date and a range from the Scan Date button above.
                             </p>
                           </div>
                         )}
