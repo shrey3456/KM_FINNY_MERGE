@@ -5,9 +5,15 @@
   database in one go.
 
 .DESCRIPTION
-  "products" is excluded by default, same as scripts/backup-database.ps1 - it's the product
-  catalog mirrored from Notion (server/services/notionInventorySync.ts), re-creatable by
-  re-running that sync. Pass -IncludeProducts to export it too.
+  Three Notion-related tables are excluded by default:
+    - products                       - the product catalog mirrored from Notion
+                                        (server/services/notionInventorySync.ts)
+    - notion_inventory_sync_config   - which Notion database that sync points at
+    - scan_history_notion_config     - which Notion database Scan History's own upload points at
+  All three are re-creatable (re-run the sync / re-enter the config) rather than needing a
+  restore, and none of them are Drizzle-managed tables (see the note on
+  scripts/restore-database-csv.ps1 about why that matters for restoring). Pass -IncludeAll to
+  export every table with no exclusions.
 
   Reads connection details from DATABASE_URL in the repo's .env file, same as the app itself.
   Uses psql's \copy (client-side COPY) rather than server-side COPY, which is what pgAdmin's
@@ -23,13 +29,15 @@
   .\scripts\backup-database-csv.ps1
 
 .EXAMPLE
-  # Include products too:
-  .\scripts\backup-database-csv.ps1 -IncludeProducts
+  # Include the Notion-related tables too:
+  .\scripts\backup-database-csv.ps1 -IncludeAll
 #>
 
 param(
-    [switch]$IncludeProducts
+    [switch]$IncludeAll
 )
+
+$NotionRelatedTables = @("products", "notion_inventory_sync_config", "scan_history_notion_config")
 
 $ErrorActionPreference = "Stop"
 
@@ -77,7 +85,7 @@ $dbPort = $hostPort.Substring($colonIndex + 1)
 Write-Host "Database : $dbName"
 Write-Host "Host     : $dbHost`:$dbPort"
 Write-Host "User     : $dbUser"
-if (-not $IncludeProducts) { Write-Host "Excluding: public.products (pass -IncludeProducts to include it)" }
+if (-not $IncludeAll) { Write-Host "Excluding: $($NotionRelatedTables -join ', ') (pass -IncludeAll to include them)" }
 
 # -- Locate psql - PATH first, then the usual Windows install location --
 $psql = (Get-Command "psql.exe" -ErrorAction SilentlyContinue).Source
@@ -111,8 +119,8 @@ ORDER BY table_name;
     if ($LASTEXITCODE -ne 0) { throw "Failed to list tables (psql exited with code $LASTEXITCODE)." }
     $tables = $tables | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
 
-    if (-not $IncludeProducts) {
-        $tables = $tables | Where-Object { $_ -ne "products" }
+    if (-not $IncludeAll) {
+        $tables = $tables | Where-Object { $NotionRelatedTables -notcontains $_ }
     }
 
     Write-Host "Exporting $($tables.Count) tables..."

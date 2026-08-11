@@ -1,12 +1,15 @@
 <#
 .SYNOPSIS
-  Backs up the whole PostgreSQL database (schema + data), except the "products" table.
+  Backs up the whole PostgreSQL database (schema + data), except the Notion-related tables.
 
 .DESCRIPTION
-  "products" is excluded on purpose: it's the product catalog mirrored from Notion
-  (server/services/notionInventorySync.ts) - re-creatable by re-running that sync, so it's
-  left out to keep the backup smaller/faster. Every other table (orders, scan history, stock,
-  users, plants, proforma slips, etc.) is included in full.
+  Three tables are excluded on purpose, all re-creatable rather than needing a restore:
+    - products                       - the product catalog mirrored from Notion
+                                        (server/services/notionInventorySync.ts)
+    - notion_inventory_sync_config   - which Notion database that sync points at
+    - scan_history_notion_config     - which Notion database Scan History's own upload points at
+  Every other table (orders, scan history, stock, users, plants, proforma slips, etc.) is
+  included in full.
 
   Reads connection details from DATABASE_URL in the repo's .env file (same one the app itself
   uses), so there's nothing to configure separately. The password is passed via the PGPASSWORD
@@ -73,7 +76,7 @@ $dbPort = $hostPort.Substring($colonIndex + 1)
 Write-Host "Database : $dbName"
 Write-Host "Host     : $dbHost`:$dbPort"
 Write-Host "User     : $dbUser"
-Write-Host "Excluding: public.products"
+Write-Host "Excluding: public.products, public.notion_inventory_sync_config, public.scan_history_notion_config"
 
 # -- Locate pg_dump - PATH first, then the usual Windows install location --
 $pgDump = (Get-Command "pg_dump.exe" -ErrorAction SilentlyContinue).Source
@@ -107,6 +110,8 @@ try {
         --no-owner `
         --no-privileges `
         --exclude-table=public.products `
+        --exclude-table=public.notion_inventory_sync_config `
+        --exclude-table=public.scan_history_notion_config `
         --file=$outFile
     if ($LASTEXITCODE -ne 0) {
         throw "pg_dump exited with code $LASTEXITCODE"
