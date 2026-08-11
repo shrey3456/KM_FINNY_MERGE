@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Boxes, TrendingUp, ChevronDown, ChevronLeft, PackageX, CalendarDays, Loader2, History, X, Plus, ArrowLeftRight, Search, ListFilter } from "lucide-react";
+import { FileDown, LayoutList, Boxes, TrendingUp, ChevronDown, ChevronLeft, PackageX, CalendarDays, Loader2, History, X, Plus, ArrowLeftRight, Search, ListFilter, ShoppingCart, Scale } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -59,6 +59,12 @@ type PlantStockRow = {
   // one date's orders only when a date filter is picked (see expectedDate below); otherwise an
   // all-time sum across every order date. null when Expected Qty isn't populated at all.
   expectedQty?: number | null;
+  expectedPallets?: number | null;
+  // Sum of Proforma Slip quantities for this barcode+plant — same date scoping as expectedQty,
+  // except the "all dates" default floors at Aug 1, 2026 (see saleDate below) instead of truly
+  // summing every slip ever raised. null when Sale Qty isn't populated at all.
+  saleQty?: number | null;
+  salePallets?: number | null;
 };
 
 type PlantStockResponse = {
@@ -79,6 +85,9 @@ type PlantStockResponse = {
   // where expectedTotal is a sum across every order ever uploaded instead of one date's orders.
   expectedDate?: string | null;
   expectedTotal?: number | null;
+  // Same shape as expectedDate/expectedTotal, for Sale Qty (sourced from Proforma Slips).
+  saleDate?: string | null;
+  saleTotal?: number | null;
 };
 
 // One dated entry from the stock_movements ledger for a single (barcode, plant) — powers the
@@ -104,15 +113,27 @@ const ALL_COLUMNS = [
   { key: "sapCode",     label: "SAP Code" },
   { key: "category",    label: "Category" },
   { key: "brand",       label: "Brand" },
+  { key: "totalStock",  label: "Total Stock (Extra + Received − Sale)" },
   { key: "expected",    label: "Expected Qty" },
-  { key: "stock",       label: "Stock (Boxes)" },
+  { key: "expectedPallets", label: "Expected Pallets" },
+  { key: "stock",       label: "Received Qty" },
+  { key: "pallets",     label: "Received Pallet" },
+  { key: "sale",        label: "Sale Qty" },
+  { key: "salePallets", label: "Sale Pallets" },
   { key: "extra",       label: "Extra" },
-  { key: "pallets",     label: "Pallets" },
   { key: "extraPallets", label: "Extra Pallets" },
   { key: "lastUpdated", label: "Last Updated" },
 ] as const;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// Total Stock — Extra + Received (Stock), minus what's already gone out via Sales. null (not a
+// number, not even 0) when Sale Qty itself isn't loaded, so "no sales data" is never confused
+// with "confirmed zero total".
+function totalStockOf(r: PlantStockRow): number | null {
+  if (r.isEmptyBox || r.saleQty == null) return null;
+  return r.extraQty + r.inStock - r.saleQty;
+}
 
 function buildUrl(base: string, params: Record<string, string | number | undefined>) {
   const sp = new URLSearchParams();
@@ -167,9 +188,10 @@ function downloadPdf(
 
   const [header, ...body] = rows;
   // Right-align every numeric/quantity column — matches the header order built by exportRows:
-  // #, Item, Barcode, SAP Code, HSN Code, Category, Brand, Plant, Expected Qty, Stock (Boxes),
-  // Extra, Pallets, Extra Pallets, Last Updated.
-  const rightAlignCols = [0, 8, 9, 10, 11, 12];
+  // #, Item, Barcode, SAP Code, HSN Code, Category, Brand, Plant, Total Stock, Expected Qty,
+  // Expected Pallets, Received Qty, Received Pallet, Sale Qty, Sale Pallets, Extra, Extra
+  // Pallets, Last Updated.
+  const rightAlignCols = [0, 8, 9, 10, 11, 12, 13, 14, 15, 16];
   const columnStyles: Record<number, { halign: "right" }> = {};
   rightAlignCols.forEach((i) => { columnStyles[i] = { halign: "right" }; });
 
@@ -276,8 +298,8 @@ export default function OverallStock() {
       return next;
     });
 
-  // All configured plants — used to populate the plant switcher/tabs for admins.
-  const { data: allPlants = [] } = useQuery<{ id: number; name: string; bgColor?: string; textColor?: string; borderColor?: string }[]>({
+  // All configured plants — used to populate the state/plant switcher tabs for admins.
+  const { data: allPlants = [] } = useQuery<{ id: number; name: string; state?: string | null; bgColor?: string; textColor?: string; borderColor?: string }[]>({
     queryKey: ["/api/plants"],
     queryFn: () => apiRequest("GET", "/api/plants", undefined, false, true),
   });
@@ -319,23 +341,59 @@ export default function OverallStock() {
   // The plant chosen via a chip, if any — sent to the server to scope the query, same as the
   // date preset below. Extras is a purely client-side "+ Filter" dimension (see filterFields).
   const activePlant = activeFilters.find((f) => f.field === "plant")?.value || "";
-  // Plant tabs drive the same plant filter as the "+ Filter" chip — clicking one sets/replaces
-  // the plant condition (empty = "All"), so the server query, labels and exports all follow.
+  // The state tab chosen, if any — a separate chip from "plant" so a state can be viewed
+  // combined (every plant in it at once) without narrowing to one specific plant.
+  const activeStateChip = activeFilters.find((f) => f.field === "state")?.value || "";
+
+  // Every configured plant grouped by its state (plants.state) — the source for both the
+  // top-level State tabs and each state's nested plant switch. Built from the FULL plant list
+  // (not narrowed to this user's allowed set yet — that narrowing happens below, once
+  // plantOptions is known, via visibleStateGroups) so it can resolve a plant's state before the
+  // stock query itself has even run.
+  const stateGroups = useMemo(() => {
+    const byState = new Map<string, { name: string; bgColor?: string; textColor?: string; borderColor?: string }[]>();
+    allPlants.forEach((p) => {
+      const key = (p.state || "").trim().toUpperCase() || "OTHER"; // plants with no state configured still show, grouped together rather than silently dropped
+      if (!byState.has(key)) byState.set(key, []);
+      byState.get(key)!.push(p);
+    });
+    return Array.from(byState.entries())
+      .map(([state, plants]) => ({ state, plants: [...plants].sort((a, b) => a.name.localeCompare(b.name)) }))
+      .sort((a, b) => a.state.localeCompare(b.state));
+  }, [allPlants]);
+  // The state currently in view — either the explicit state chip (combined-state view), or
+  // derived from whichever specific plant is selected, so the nested plant row stays correctly
+  // highlighted even when a plant filter was set some other way (e.g. from the Filters list).
+  const activeState = activeStateChip || (activePlant
+    ? stateGroups.find((g) => g.plants.some((p) => p.name.toUpperCase() === activePlant.toUpperCase()))?.state ?? ""
+    : "");
+
+  // State tabs and the nested plant switch both write into the same "plant"/"state" chip pair —
+  // picking one always clears the other, so the two levels never disagree about what's shown.
+  const setStateTab = (state: string) => {
+    setActiveFilters((prev) => {
+      const others = prev.filter((f) => f.field !== "plant" && f.field !== "state");
+      return state ? [...others, { id: ++filterIdRef.current, field: "state", value: state }] : others;
+    });
+  };
   const setPlantTab = (name: string) => {
     setActiveFilters((prev) => {
-      const others = prev.filter((f) => f.field !== "plant");
+      const others = prev.filter((f) => f.field !== "plant" && f.field !== "state");
       return name ? [...others, { id: ++filterIdRef.current, field: "plant", value: name }] : others;
     });
   };
 
-  // Plant-wise stock. Server enforces access: admins get every plant, others only theirs.
+  // Plant-wise stock. Server enforces access: admins get every plant, others only theirs. A
+  // specific plant always wins over a state — never send both (state is redundant once a plant
+  // is picked, and the server would ignore it anyway).
   const stockUrl = buildUrl("/api/scan-sessions/reports/plant-stock", {
     plant: activePlant || undefined,
+    state: (!activePlant && activeState) || undefined,
     from: fromDate || undefined,
     to: toDate || undefined,
   });
   const { data: stockData } = useQuery<PlantStockResponse>({
-    queryKey: ["/api/scan-sessions/reports/plant-stock", activePlant, fromDate, toDate],
+    queryKey: ["/api/scan-sessions/reports/plant-stock", activePlant, activeState, fromDate, toDate],
     queryFn: () => apiRequest("GET", stockUrl, undefined, false, true),
     refetchInterval: 30000,
   });
@@ -348,6 +406,12 @@ export default function OverallStock() {
   const expectedDate = stockData?.expectedDate ?? null;
   const expectedTotal = stockData?.expectedTotal ?? 0;
   const hasExpected = stockData?.expectedTotal != null;
+  // Sale Qty (sum of Proforma Slip quantities) — same date scoping as Expected Qty, except the
+  // "all dates" default only counts sales from Aug 1, 2026 onward (reliable sales tracking's
+  // actual start), not truly every slip ever raised.
+  const saleDate = stockData?.saleDate ?? null;
+  const saleTotal = stockData?.saleTotal ?? 0;
+  const hasSale = stockData?.saleTotal != null;
 
   const rows = stockData?.items ?? [];
   // null = admin (may pick any plant). Array = restricted user → lock the switcher to these.
@@ -359,6 +423,17 @@ export default function OverallStock() {
   const plantOptions = isAdmin
     ? allPlants.map((p) => p.name)
     : (allowedPlants ?? []).map((p) => p.toUpperCase());
+
+  // stateGroups narrowed to plants this user is actually allowed to see — what the tabs
+  // themselves render. A state with zero visible plants (all outside this user's allowed set)
+  // doesn't get a tab at all.
+  const visibleStateGroups = useMemo(
+    () => stateGroups
+      .map((g) => ({ ...g, plants: g.plants.filter((p) => plantOptions.some((n) => n.toUpperCase() === p.name.toUpperCase())) }))
+      .filter((g) => g.plants.length > 0),
+    [stateGroups, plantOptions],
+  );
+  const activeStateGroup = visibleStateGroups.find((g) => g.state === activeState) ?? null;
 
   // Client-side search filter (server already scoped by plant).
   // Available "+ Filter" dimensions. options: the values to choose from (derived from the data
@@ -414,10 +489,14 @@ export default function OverallStock() {
       { id: "sapCode", label: "SAP Code", filterType: "text", options: textOptions((r) => r.sapCode), accessor: (r) => r.sapCode },
       { id: "category", label: "Category", filterType: "enum", options: textOptions((r) => r.category), accessor: (r) => r.category },
       { id: "brand", label: "Brand", filterType: "enum", options: textOptions((r) => r.brand), accessor: (r) => r.brand },
+      { id: "totalStock", label: "Total Stock", filterType: "number", options: numberOptions((r) => totalStockOf(r)), accessor: (r) => totalStockOf(r) },
       { id: "expected", label: "Expected Qty", filterType: "number", options: numberOptions((r) => r.expectedQty), accessor: (r) => r.expectedQty ?? null },
-      { id: "stock", label: "Stock (Boxes)", filterType: "number", options: numberOptions((r) => r.inStock), accessor: (r) => r.inStock },
+      { id: "expectedPallets", label: "Expected Pallets", filterType: "number", options: numberOptions((r) => r.expectedPallets, 2), accessor: (r) => r.expectedPallets ?? null },
+      { id: "stock", label: "Received Qty", filterType: "number", options: numberOptions((r) => r.inStock), accessor: (r) => r.inStock },
+      { id: "pallets", label: "Received Pallet", filterType: "number", options: numberOptions((r) => r.pallets, 2), accessor: (r) => r.pallets },
+      { id: "sale", label: "Sale Qty", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
+      { id: "salePallets", label: "Sale Pallets", filterType: "number", options: numberOptions((r) => r.salePallets, 2), accessor: (r) => r.salePallets ?? null },
       { id: "extra", label: "Extra", filterType: "number", options: numberOptions((r) => r.extraQty), accessor: (r) => r.extraQty },
-      { id: "pallets", label: "Pallets", filterType: "number", options: numberOptions((r) => r.pallets, 2), accessor: (r) => r.pallets },
       { id: "extraPallets", label: "Extra Pallets", filterType: "number", options: numberOptions((r) => r.extraPallets, 2), accessor: (r) => r.extraPallets },
       { id: "lastUpdated", label: "Last Updated", filterType: "date", options: dateOptions((r) => r.lastArrived), accessor: (r) => r.lastArrived },
     ];
@@ -494,13 +573,13 @@ export default function OverallStock() {
   const totalPallets = filtered.reduce((s, r) => s + (r.pallets ?? 0), 0);
   const totalExtra = filtered.reduce((s, r) => s + r.extraQty, 0);
   const totalExtraPallets = filtered.reduce((s, r) => s + (r.extraPallets ?? 0), 0);
-  // Pallet equivalent of the Expected Qty total below — summed over ALL rows (not `filtered`),
-  // same scope as expectedTotal itself (Plant/Date-scoped only, unaffected by search/column
-  // filters), so the two numbers on that tile always agree with each other.
-  const expectedPalletsTotal = rows.reduce(
-    (s, r) => s + (r.expectedQty && r.itemsPerPallet ? r.expectedQty / r.itemsPerPallet : 0),
-    0,
-  );
+  // Pallet equivalents of the Expected/Sale Qty totals below — summed over ALL rows (not
+  // `filtered`), same scope as expectedTotal/saleTotal themselves (Plant/Date-scoped only,
+  // unaffected by search/column filters), so those tiles' two numbers always agree with each
+  // other. Each row's own expectedPallets/salePallets is already server-computed (qty ÷ that
+  // row's own pallet size), so this is just a sum, not a recompute.
+  const expectedPalletsTotal = rows.reduce((s, r) => s + (r.expectedPallets ?? 0), 0);
+  const salePalletsTotal = rows.reduce((s, r) => s + (r.salePallets ?? 0), 0);
 
   // Empty boxes as their OWN distinct rows (one per plant), appended below the stock rows.
   // Never mixed into stock/extra totals — the quantity shows only inside the "Empty Box" badge.
@@ -532,13 +611,20 @@ export default function OverallStock() {
     setPageIndex(0);
   }, [search, activePlant, activeFilters, columnConditionList]);
 
-  // Export rows
+  // Export rows — same order as the table's own columns.
   const exportRows = (src: PlantStockRow[]): Array<Array<string | number>> => [
-    ["#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant", "Expected Qty", "Stock (Boxes)", "Extra", "Pallets", "Extra Pallets", "Last Updated"],
+    ["#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant", "Total Stock", "Expected Qty", "Expected Pallets", "Received Qty", "Received Pallet", "Sale Qty", "Sale Pallets", "Extra", "Extra Pallets", "Last Updated"],
     ...src.map((r, i) => [
       i + 1, r.itemName, r.barcode ?? "", r.sapCode ?? "", r.hsnCode ?? "",
-      r.category ?? "", r.brand ?? "", r.plant, r.expectedQty ?? "", r.inStock, r.extraQty,
+      r.category ?? "", r.brand ?? "", r.plant,
+      totalStockOf(r) ?? "",
+      r.expectedQty ?? "",
+      r.expectedPallets != null ? r.expectedPallets.toFixed(2) : "",
+      r.inStock,
       r.pallets != null ? r.pallets.toFixed(2) : "",
+      r.saleQty ?? "",
+      r.salePallets != null ? r.salePallets.toFixed(2) : "",
+      r.extraQty,
       r.extraPallets != null ? r.extraPallets.toFixed(2) : "",
       r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "",
     ]),
@@ -652,6 +738,34 @@ export default function OverallStock() {
       render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : dash),
     },
     {
+      id: "totalStock",
+      header: columnHeader("totalStock", "Total Stock"),
+      width: 120,
+      align: "right",
+      sortable: true,
+      accessor: (row) => totalStockOf(row),
+      total: (rows) => {
+        const withTotal = rows.filter((r) => totalStockOf(r) != null);
+        return withTotal.length > 0 ? withTotal.reduce((sum, r) => sum + (totalStockOf(r) ?? 0), 0).toLocaleString() : null;
+      },
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) => {
+        const total = totalStockOf(row);
+        if (total == null) return dash;
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        const totalPlt = ipp > 0 ? total / ipp : null;
+        return (
+          <span title="Extra + Received (Stock) − Sale. Negative means more was sold than what's been received and marked Extra combined.">
+            <span className={`block font-bold tabular-nums ${total < 0 ? "text-red-600" : "text-gray-900"}`}>{total.toLocaleString()}</span>
+            {totalPlt != null && (
+              <span className="block text-[11px] font-semibold text-gray-500">{totalPlt.toFixed(2)} plt</span>
+            )}
+          </span>
+        );
+      },
+    },
+    {
       id: "expected",
       header: columnHeader("expected", "Expected Qty"),
       width: 110,
@@ -668,8 +782,25 @@ export default function OverallStock() {
         ),
     },
     {
+      id: "expectedPallets",
+      header: columnHeader("expectedPallets", "Expected Pallets"),
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.expectedPallets,
+      total: (rows) => rows.reduce((sum, r) => sum + (r.expectedPallets ?? 0), 0).toFixed(2),
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.expectedPallets != null && row.expectedPallets > 0 ? (
+          <span className="font-semibold text-purple-700 tabular-nums">{row.expectedPallets.toFixed(2)}</span>
+        ) : (
+          dash
+        ),
+    },
+    {
       id: "stock",
-      header: columnHeader("stock", "Stock (Boxes)"),
+      header: columnHeader("stock", "Received Qty"),
       width: 110,
       align: "right",
       sortable: true,
@@ -680,6 +811,57 @@ export default function OverallStock() {
         row.isEmptyBox
           ? <span className="font-bold text-orange-600 tabular-nums" title="Empty boxes — not counted in stock totals">{row.inStock.toLocaleString()}</span>
           : row.inStock.toLocaleString(),
+    },
+    {
+      id: "pallets",
+      header: columnHeader("pallets", "Received Pallet"),
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.pallets,
+      total: (rows) => rows.reduce((sum, r) => sum + (r.pallets ?? 0), 0).toFixed(2),
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.pallets != null && row.pallets > 0 ? (
+          <span className="font-semibold text-[#001d6e] tabular-nums">{row.pallets.toFixed(2)}</span>
+        ) : (
+          dash
+        ),
+    },
+    {
+      id: "sale",
+      header: columnHeader("sale", "Sale Qty"),
+      width: 100,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.saleQty,
+      total: (rows) => rows.reduce((sum, r) => sum + (r.saleQty ?? 0), 0).toLocaleString(),
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.isEmptyBox || row.saleQty == null ? dash : (
+          <span className="font-bold text-emerald-600 tabular-nums" title={saleDate ? `Sum of Proforma Slip quantity for ${saleDate}` : "Sum of Proforma Slip quantity since Aug 1, 2026"}>
+            {row.saleQty.toLocaleString()}
+          </span>
+        ),
+    },
+    {
+      id: "salePallets",
+      header: columnHeader("salePallets", "Sale Pallets"),
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.salePallets,
+      total: (rows) => rows.reduce((sum, r) => sum + (r.salePallets ?? 0), 0).toFixed(2),
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) =>
+        row.salePallets != null && row.salePallets > 0 ? (
+          <span className="font-semibold text-emerald-600 tabular-nums">{row.salePallets.toFixed(2)}</span>
+        ) : (
+          dash
+        ),
     },
     {
       id: "extra",
@@ -693,23 +875,6 @@ export default function OverallStock() {
       render: (row) =>
         row.extraQty > 0 ? (
           <span className="font-semibold text-amber-600 tabular-nums">{row.extraQty.toLocaleString()}</span>
-        ) : (
-          dash
-        ),
-    },
-    {
-      id: "pallets",
-      header: columnHeader("pallets", "Pallets"),
-      width: 90,
-      align: "right",
-      sortable: true,
-      accessor: (row) => row.pallets,
-      total: (rows) => rows.reduce((sum, r) => sum + (r.pallets ?? 0), 0).toFixed(2),
-      headerClassName: headerBorder,
-      cellClassName: cellBorder,
-      render: (row) =>
-        row.pallets != null && row.pallets > 0 ? (
-          <span className="font-semibold text-[#001d6e] tabular-nums">{row.pallets.toFixed(2)}</span>
         ) : (
           dash
         ),
@@ -866,7 +1031,11 @@ export default function OverallStock() {
               value: totalStock.toLocaleString(),
               // In date mode this is what ARRIVED in the window, not what's on hand — say so
               // explicitly, otherwise the number reads as a (much smaller) total stock figure.
-              label: `${dateMode ? "Total Stock Received" : "Total Stock (Boxes)"} · ${totalPallets.toFixed(2)} plt${activePlant ? ` · ${activePlant}` : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · All Plants"}`,
+              label: `${dateMode ? "Total Stock Received" : "Total Stock (Boxes)"} · ${totalPallets.toFixed(2)} plt${
+                activePlant ? ` · ${activePlant}`
+                : activeState ? ` · ${activeState} (${activeStateGroup?.plants.map((p) => p.name).join(", ") ?? activeState})`
+                : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · All Plants"
+              }`,
             },
             {
               icon: TrendingUp,
@@ -884,38 +1053,79 @@ export default function OverallStock() {
                 ? `Total Order Qty (${expectedDate}) · ${expectedPalletsTotal.toFixed(2)} plt`
                 : `Total Order Qty (All Dates) · ${expectedPalletsTotal.toFixed(2)} plt`,
             }] : []),
+            ...(hasSale ? [{
+              icon: ShoppingCart,
+              tone: "emerald" as const,
+              value: saleTotal.toLocaleString(),
+              // Same explicit-date-vs-all-dates split as Expected Qty above, except "all dates"
+              // here means "since Aug 1, 2026" — sales tracking isn't reliable before that.
+              label: saleDate
+                ? `Total Sale Qty (${saleDate}) · ${salePalletsTotal.toFixed(2)} plt`
+                : `Total Sale Qty (Since Aug 1, 2026) · ${salePalletsTotal.toFixed(2)} plt`,
+            }] : []),
           ]}
         />
 
-        {/* Plant tabs — quick switch to view a single plant's stock (or All). Each plant tab is
-            filled with that plant's configured Plant Management colors; the active tab gets a navy
-            ring so it's clear which is selected. "All" is solid navy. */}
-        {plantOptions.length > 0 && (
+        {/* State tabs — quick switch to view a whole state's combined stock (or All). Picking a
+            state with more than one plant under it reveals a second, nested pill row below to
+            narrow down to one specific plant within that state; a single-plant state (e.g. MP)
+            needs no nested row since the state view already IS that one plant's view. */}
+        {visibleStateGroups.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Plant</span>
+            <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">State</span>
             <button
-              onClick={() => setPlantTab("")}
+              onClick={() => setStateTab("")}
               className={
-                activePlant === ""
+                activeState === ""
                   ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
                   : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
               }
             >
               All
             </button>
-            {plantOptions.map((name) => {
-              const isSel = activePlant.toUpperCase() === name.toUpperCase();
-              const c = allPlants.find((p) => p.name.toUpperCase() === name.toUpperCase());
+            {visibleStateGroups.map((g) => (
+              <button
+                key={g.state}
+                onClick={() => setStateTab(g.state)}
+                className={
+                  activeState === g.state
+                    ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                    : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                }
+              >
+                {g.state}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Nested plant switch — only for a state with multiple plants, so a single-plant state
+            never shows a redundant one-pill row. */}
+        {activeStateGroup && activeStateGroup.plants.length > 1 && (
+          <div className="flex flex-wrap items-center gap-1.5 pl-1">
+            <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Plant</span>
+            <button
+              onClick={() => setPlantTab("")}
+              className={
+                activePlant === ""
+                  ? "rounded-full bg-[#001d6e]/80 px-3 py-1 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                  : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+              }
+            >
+              All {activeStateGroup.state}
+            </button>
+            {activeStateGroup.plants.map((p) => {
+              const isSel = activePlant.toUpperCase() === p.name.toUpperCase();
               return (
                 <button
-                  key={name}
-                  onClick={() => setPlantTab(name)}
-                  style={c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
-                  className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
-                    c?.bgColor ? "border" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                  key={p.name}
+                  onClick={() => setPlantTab(p.name)}
+                  style={p.bgColor ? { backgroundColor: p.bgColor, color: p.textColor, borderColor: p.borderColor } : undefined}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    p.bgColor ? "border" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
                   } ${isSel ? "ring-2 ring-[#001d6e] ring-offset-1" : ""}`}
                 >
-                  {name}
+                  {p.name}
                 </button>
               );
             })}
@@ -1160,14 +1370,14 @@ export default function OverallStock() {
                 </PopoverContent>
               </Popover>
 
-              {/* Plant is excluded — it's owned by the plant tabs, so Clear all neither counts it
-                  nor clears it (that would silently switch the tab back to All). */}
-              {(activeFilters.some((f) => f.field !== "plant" && f.field !== "date") || Object.keys(columnConditions).length > 0) && (
+              {/* Plant/State are excluded — they're owned by the state/plant tabs, so Clear all
+                  neither counts nor clears them (that would silently switch the tabs back to All). */}
+              {(activeFilters.some((f) => f.field !== "plant" && f.field !== "date" && f.field !== "state") || Object.keys(columnConditions).length > 0) && (
                 <Button
                   size="sm"
                   variant="ghost"
                   className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900"
-                  onClick={() => { setActiveFilters((prev) => prev.filter((f) => f.field === "plant" || f.field === "date")); setColumnConditions({}); }}
+                  onClick={() => { setActiveFilters((prev) => prev.filter((f) => f.field === "plant" || f.field === "date" || f.field === "state")); setColumnConditions({}); }}
                 >
                   Clear all
                 </Button>
@@ -1175,18 +1385,18 @@ export default function OverallStock() {
 
               {/* Every active filter (Plant/Date + column filters) in one list, in case the
                   individual chips scroll out of view or there are too many to scan at a glance. */}
-              {(activeFilters.filter((f) => f.value && f.field !== "plant" && f.field !== "date").length + Object.keys(columnConditions).length) > 0 && (
+              {(activeFilters.filter((f) => f.value && f.field !== "plant" && f.field !== "date" && f.field !== "state").length + Object.keys(columnConditions).length) > 0 && (
                 <Popover>
                   <PopoverTrigger asChild>
                     <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
                       <ListFilter className="h-3.5 w-3.5 mr-1" />
-                      Filters ({activeFilters.filter((f) => f.value && f.field !== "plant" && f.field !== "date").length + Object.keys(columnConditions).length})
+                      Filters ({activeFilters.filter((f) => f.value && f.field !== "plant" && f.field !== "date" && f.field !== "state").length + Object.keys(columnConditions).length})
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent align="start" className="w-72">
                     <div className="space-y-0.5">
                       <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Active filters</p>
-                      {activeFilters.filter((f) => f.value && f.field !== "plant" && f.field !== "date").map((f) => (
+                      {activeFilters.filter((f) => f.value && f.field !== "plant" && f.field !== "date" && f.field !== "state").map((f) => (
                         <div key={f.id} className="flex items-center justify-between gap-2 rounded px-1.5 py-1 text-xs hover:bg-gray-50">
                           <span className="text-gray-700">{describeSimpleFilter(f.field, f.value)}</span>
                           <button type="button" onClick={() => removeFilter(f.id)} className="text-gray-400 hover:text-red-500" aria-label="Remove filter">
@@ -1231,11 +1441,13 @@ export default function OverallStock() {
                         key={fmt}
                         onSelect={() => {
                           const exp = exportRows(filtered);
-                          const suffix = `${activePlant ? "-" + activePlant : ""}-${format(new Date(), "yyyy-MM-dd")}`;
+                          const suffix = `${activePlant ? "-" + activePlant : activeState ? "-" + activeState : ""}-${format(new Date(), "yyyy-MM-dd")}`;
                           if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
                           if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
                           if (fmt === "PDF") {
-                            const plantScope = activePlant || (allowedPlants && allowedPlants.length ? plantOptions.join(", ") : "All Plants");
+                            const plantScope = activePlant
+                              || (activeState ? `${activeState} (${activeStateGroup?.plants.map((p) => p.name).join(", ") ?? activeState})` : "")
+                              || (allowedPlants && allowedPlants.length ? plantOptions.join(", ") : "All Plants");
                             downloadPdf(`overall-stock${suffix}.pdf`, exp, { title: "Stock Overview Report", scope: plantScope });
                           }
                         }}
@@ -1260,7 +1472,7 @@ export default function OverallStock() {
             renderExpandedRow={() => movementsPanel}
             isRowExpandable={(row) => !row.isEmptyBox && !!row.barcode}
             expandedRowId={detailRow ? `${detailRow.isEmptyBox ? "EB" : detailRow.barcode}-${detailRow.plant}` : null}
-            emptyState={`No stock yet${activePlant ? ` for ${activePlant}` : ""}. Stock appears here once an order is completed.`}
+            emptyState={`No stock yet${activePlant ? ` for ${activePlant}` : activeState ? ` for ${activeState}` : ""}. Stock appears here once an order is completed.`}
             noResultsState="No stock rows match your search."
             hasActiveFilters={!!search || activeFilters.length > 0 || Object.keys(columnConditions).length > 0}
             enableTotalsRow

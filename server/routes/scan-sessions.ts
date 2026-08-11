@@ -1505,10 +1505,31 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     const allowed = getUserPlants(req.user); // null = admin (all plants)
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
     const plantParam = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    const stateParam = typeof req.query.state === 'string' ? req.query.state.trim() : '';
 
     // Non-admin with no resolvable plant → show nothing (never fall through to "all").
     if (allowed !== null && allowed.length === 0) {
       return res.json({ items: [], total: 0, plants: [] });
+    }
+
+    // plants table drives both state→plant resolution (below) and the per-state pallet-size
+    // lookup further down (plantStateByName) — fetched once, up front, for both.
+    const { rows: plantRows } = await pool.query(`SELECT name, state FROM plants`);
+    const plantStateByName = new Map<string, string>(
+      plantRows.map((p: any) => [String(p.name ?? '').toLowerCase(), String(p.state ?? '').toUpperCase()]),
+    );
+
+    // Which plants to restrict to, beyond the user's own `allowed` set. A specific plant (the
+    // plant tab, or the nested plant switch within a multi-plant state) takes precedence; a
+    // state on its own expands to every plant in that state (the Overall Stock "state tab"
+    // view); neither means no extra restriction — every plant the user is allowed to see.
+    let plantFilterList: string[] | null = null;
+    if (plantParam) {
+      plantFilterList = [plantParam.toLowerCase()];
+    } else if (stateParam) {
+      plantFilterList = plantRows
+        .filter((p: any) => String(p.state ?? '').toUpperCase() === stateParam.toUpperCase())
+        .map((p: any) => String(p.name).toLowerCase());
     }
 
     // ── Date range → switch data source ──────────────────────────────────────
@@ -1561,9 +1582,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     if (extrasOnly) {
       conds.push(`pps.extra_qty > 0`);
     }
-    if (plantParam) {
-      params.push(plantParam.toLowerCase());
-      conds.push(`LOWER(pps.plant) = $${params.length}`); // bounded by allowed set above for non-admins
+    if (plantFilterList) {
+      params.push(plantFilterList);
+      conds.push(`LOWER(pps.plant) = ANY($${params.length}::text[])`); // bounded by allowed set above for non-admins
     }
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
@@ -1651,12 +1672,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // ordered but have nothing scanned/stocked yet at all (so the full ordered qty is still
     // visible before a single box is scanned).
     // Same per-state pallet-size resolution as the main query above (plants.state, not a
-    // plant-name guess) — fetched once here since applyExpectedRows can run more than once.
-    const { rows: plantStateRows } = await pool.query(`SELECT name, state FROM plants`);
-    const plantStateByName = new Map<string, string>(
-      plantStateRows.map((p: any) => [String(p.name ?? '').toLowerCase(), String(p.state ?? '').toUpperCase()]),
-    );
-
+    // plant-name guess) — plantStateByName was already fetched up front.
     async function applyExpectedRows(expRows: any[]) {
       const unmatchedBarcodes = new Set<string>();
       for (const r of expRows) {
@@ -1705,7 +1721,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       const expParams: any[] = [singleDate];
       const expConds: string[] = ['ois.order_date = $1', 'ois.is_deleted = false'];
       if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
-      if (plantParam) { expParams.push(plantParam.toLowerCase()); expConds.push(`LOWER(oii.plant) = $${expParams.length}`); }
+      if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
       const { rows: expRows } = await pool.query(`
         SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
         FROM order_import_items oii
@@ -1721,7 +1737,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       const expParams: any[] = [];
       const expConds: string[] = ['ois.is_deleted = false'];
       if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
-      if (plantParam) { expParams.push(plantParam.toLowerCase()); expConds.push(`LOWER(oii.plant) = $${expParams.length}`); }
+      if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
       const { rows: expRows } = await pool.query(`
         SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
         FROM order_import_items oii
@@ -1733,12 +1749,114 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       await applyExpectedRows(expRows);
     }
 
+    // ── Sale Qty — sum of Proforma Slip quantities for the order date(s) currently relevant,
+    // same shape as Expected Qty above but sourced from proforma_slip_items/proforma_slips
+    // instead of order_import_items/order_import_sessions. Plant/date live on the SLIP (the
+    // parent row), not the item, so every item in a slip is grouped under that one slip's plant.
+    // Reliable sales tracking only starts SALES_TRACKING_START — earlier proforma data is not
+    // dependable, so unlike Expected Qty's true all-time sum, the "all dates" default floors
+    // there instead of summing everything that ever existed.
+    const SALES_TRACKING_START = '2026-08-01';
+    const saleByKey = new Map<string, number>();
+    let saleTotal = 0;
+    const saleOnlyRows: typeof items = [];
+
+    async function applySaleRows(saleRows: any[]) {
+      const unmatchedBarcodes = new Set<string>();
+      for (const r of saleRows) {
+        const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
+        const qty = Number(r.saleQty) || 0;
+        saleByKey.set(key, qty);
+        saleTotal += qty;
+        if (r.barcode) unmatchedBarcodes.add(r.barcode);
+      }
+      const barcodesNeedingLookup = [...unmatchedBarcodes];
+      const productByBarcode = new Map<string, any>();
+      if (barcodesNeedingLookup.length > 0) {
+        const { rows: prodRows } = await pool.query(
+          `SELECT barcode, name, item_no, sap_code, gj_sap, mp_sap, hsn_code, category, brand,
+                  items_per_pallet, gj_plt, mp_plt, pallets
+           FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
+          [barcodesNeedingLookup.map((b) => b.toLowerCase())],
+        );
+        for (const p of prodRows as any[]) productByBarcode.set(String(p.barcode).toLowerCase(), p);
+      }
+      for (const r of saleRows) {
+        const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
+        // Skip if a row for this barcode+plant already exists — either real stock, or one
+        // Expected Qty already synthesized above — so the same key never gets two rows.
+        const alreadyHasRow =
+          items.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key) ||
+          expectedOnlyRows.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key) ||
+          saleOnlyRows.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key);
+        if (alreadyHasRow) continue;
+        const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
+        const plantUpper = String(r.plant ?? '').toUpperCase();
+        const sapCode = p ? (plantUpper.includes('VAL') ? (p.gj_sap ?? p.sap_code) : plantUpper.includes('IND') ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
+        const state = plantStateByName.get((r.plant ?? '').toLowerCase());
+        const ipp = p ? Number(
+          (state === 'GJ' && p.gj_plt) || (state === 'MP' && p.mp_plt)
+            ? (state === 'GJ' ? p.gj_plt : p.mp_plt)
+            : (p.items_per_pallet || p.pallets || 0)
+        ) : 0;
+        saleOnlyRows.push({
+          srNo: 0, barcode: r.barcode, plant: r.plant,
+          itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
+          hsnCode: p?.hsn_code ?? null, category: p?.category ?? null, brand: p?.brand ?? null,
+          itemsPerPallet: ipp || null, inStock: 0, extraQty: 0,
+          pallets: null, extraPallets: null, lastArrived: null,
+        } as any);
+      }
+    }
+
+    if (singleDate) {
+      const saleParams: any[] = [singleDate];
+      const saleConds: string[] = ['ps.order_date = $1', 'psi.barcode IS NOT NULL', 'ps.plant IS NOT NULL'];
+      if (allowed !== null) { saleParams.push(allowed); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
+      if (plantFilterList) { saleParams.push(plantFilterList); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
+      const { rows: saleRows } = await pool.query(`
+        SELECT psi.barcode, ps.plant, SUM(psi.quantity)::int AS "saleQty"
+        FROM proforma_slip_items psi
+        JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
+        WHERE ${saleConds.join(' AND ')}
+        GROUP BY psi.barcode, ps.plant
+        HAVING SUM(psi.quantity) <> 0
+      `, saleParams);
+      await applySaleRows(saleRows);
+    } else if (allDatesMode) {
+      const saleParams: any[] = [SALES_TRACKING_START];
+      const saleConds: string[] = ['ps.order_date >= $1', 'psi.barcode IS NOT NULL', 'ps.plant IS NOT NULL'];
+      if (allowed !== null) { saleParams.push(allowed); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
+      if (plantFilterList) { saleParams.push(plantFilterList); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
+      const { rows: saleRows } = await pool.query(`
+        SELECT psi.barcode, ps.plant, SUM(psi.quantity)::int AS "saleQty"
+        FROM proforma_slip_items psi
+        JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
+        WHERE ${saleConds.join(' AND ')}
+        GROUP BY psi.barcode, ps.plant
+        HAVING SUM(psi.quantity) <> 0
+      `, saleParams);
+      await applySaleRows(saleRows);
+    }
+
     const hasExpected = singleDate != null || allDatesMode;
-    const itemsWithExpected = hasExpected
-      ? [...items, ...expectedOnlyRows].map((it: any) => ({
-          ...it,
-          expectedQty: expectedByKey.get(`${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}`) ?? null,
-        }))
+    const hasSale = singleDate != null || allDatesMode;
+    const itemsWithExpected = (hasExpected || hasSale)
+      ? [...items, ...expectedOnlyRows, ...saleOnlyRows].map((it: any) => {
+          const key = `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}`;
+          const expectedQty = hasExpected ? (expectedByKey.get(key) ?? null) : null;
+          const saleQty = hasSale ? (saleByKey.get(key) ?? null) : null;
+          // Same qty÷itemsPerPallet rule as the Pallets/Extra Pallets columns above — each row's
+          // own pallet size, never one blended figure.
+          const ipp = it.itemsPerPallet ? Number(it.itemsPerPallet) : 0;
+          return {
+            ...it,
+            expectedQty,
+            saleQty,
+            expectedPallets: ipp > 0 && expectedQty != null ? parseFloat((expectedQty / ipp).toFixed(2)) : null,
+            salePallets: ipp > 0 && saleQty != null ? parseFloat((saleQty / ipp).toFixed(2)) : null,
+          };
+        })
       : items;
 
     // dateMode tells the client that inStock/extraQty mean "received in the selected window",
@@ -1749,7 +1867,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     const ebParams: any[] = [];
     const ebConds: string[] = [`ose.barcode = 'EMPTY_BOX'`, 'ose.voided IS NOT TRUE'];
     if (allowed !== null) { ebParams.push(allowed); ebConds.push(`LOWER(ois.plant) = ANY($${ebParams.length}::text[])`); }
-    if (plantParam)       { ebParams.push(plantParam.toLowerCase()); ebConds.push(`LOWER(ois.plant) = $${ebParams.length}`); }
+    if (plantFilterList)  { ebParams.push(plantFilterList); ebConds.push(`LOWER(ois.plant) = ANY($${ebParams.length}::text[])`); }
     const { rows: ebRows } = await pool.query(`
       SELECT ois.plant, COALESCE(SUM(ose.total_qty), 0)::int AS "qty", COUNT(*)::int AS "count"
       FROM order_scan_events ose
@@ -1766,6 +1884,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       // expectedDate: set only when an explicit date filter is applied — null in the default
       // "all dates" mode, where expectedTotal is a sum across every order ever uploaded instead.
       expectedDate: singleDate, expectedTotal: hasExpected ? expectedTotal : null,
+      // saleDate mirrors expectedDate — null in "all dates" mode, where saleTotal is a sum from
+      // SALES_TRACKING_START onward rather than one explicit date's sales.
+      saleDate: singleDate, saleTotal: hasSale ? saleTotal : null,
     });
   } catch (error) {
     console.error('Error generating plant stock report:', error);
