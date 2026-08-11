@@ -165,6 +165,17 @@ const pltCell = (qty: number, ipp: number, className: string) =>
     ? <span className={className}>{(qty / ipp).toFixed(2)}</span>
     : <span className="text-gray-300">0.00</span>;
 
+// Kiosk rotation steps — a full turn, so a screen mounted at any angle can be matched. The button
+// walks these in order and wraps back to 0.
+const ROTATIONS = [0, 90, 180, 270] as const;
+type Rotation = (typeof ROTATIONS)[number];
+
+// Radix renders dialogs/dropdowns into document.body, outside the rotated container, so each needs
+// the matching turn applied by hand or it opens upright while everything behind it is rotated.
+function portalRotateClass(rotation: Rotation): string {
+  return rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : rotation === 270 ? "-rotate-90" : "";
+}
+
 // Totals-row counterpart to pltCell: each row contributes qty ÷ ITS OWN pallet size, then those
 // are added up — never one blended pallet size applied to a combined quantity, which would be
 // wrong for any table mixing items with different pack sizes.
@@ -378,13 +389,29 @@ export default function ScanOrderPage() {
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
 
-  // ── Kiosk rotation — for a screen mounted in portrait. Remembered across reloads
-  // (localStorage) since a mounted kiosk screen stays in the same physical orientation
-  // indefinitely. See .kiosk-rotate-90 in index.css for the actual rotate mechanics.
-  const [osRotated, setOsRotated] = useState(() => localStorage.getItem("scanOrderRotated") === "true");
+  // ── Kiosk rotation — for a screen mounted at any angle, not just portrait. The button steps
+  // 0° → 90° → 180° → 270° → 0°, a full turn, so a screen mounted upside-down or turned the other
+  // way is reachable instead of only the one quarter turn the old on/off toggle offered.
+  // Remembered across reloads (localStorage) since a mounted kiosk stays in the same physical
+  // orientation indefinitely. See .kiosk-rotate-* in index.css for the actual rotate mechanics.
+  const [osRotation, setOsRotation] = useState<Rotation>(() => {
+    const saved = Number(localStorage.getItem("scanOrderRotation"));
+    if ((ROTATIONS as readonly number[]).includes(saved)) return saved as Rotation;
+    // Carry over the older true/false flag so an already-mounted kiosk keeps its orientation.
+    return localStorage.getItem("scanOrderRotated") === "true" ? 90 : 0;
+  });
   useEffect(() => {
-    localStorage.setItem("scanOrderRotated", String(osRotated));
-  }, [osRotated]);
+    localStorage.setItem("scanOrderRotation", String(osRotation));
+  }, [osRotation]);
+  const osRotateNext = () =>
+    setOsRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
+  const osRotated = osRotation !== 0;
+  // A quarter turn swaps the screen's axes — what the CSS calls height then runs along the
+  // viewport's width. Anything sized in vh/vw has to know which case it's in; a half turn leaves
+  // the axes alone and only flips the content.
+  const osQuarterTurn = osRotation === 90 || osRotation === 270;
+  const kioskRotateClass = osRotated ? `kiosk-rotate-${osRotation}` : "";
+  const osPortalRotate = portalRotateClass(osRotation);
   // Natural portrait orientation (window taller than wide) — a laptop/tablet held or resized to
   // portrait should get the same single-column, larger-text layout as the manual Rotate mode,
   // just WITHOUT the 90° kiosk rotation (the screen is already upright).
@@ -406,16 +433,16 @@ export default function ScanOrderPage() {
   // bigView they now get a bounded, self-scrolling box — the same treatment the desktop DataTable
   // gives its tables — so the header holds at the top, the totals row holds at the bottom, and
   // there's a visible bar (kiosk-scroll) to drag.
-  // The unit flips when rotated: .kiosk-rotate-90 turns the subtree 90°, so content-space height
-  // runs along the viewport's WIDTH — vw there, vh when the screen is naturally portrait.
+  // The unit flips on a QUARTER turn: that turns the subtree 90°, so content-space height runs
+  // along the viewport's WIDTH — vw there, vh when upright, half-turned, or naturally portrait.
   const kioskTableBoxClass = bigView
-    ? `overflow-auto kiosk-scroll ${osRotated ? "max-h-[62vw]" : "max-h-[62vh]"}`
+    ? `overflow-auto kiosk-scroll ${osQuarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
     : "hidden overflow-x-auto min-[480px]:block landscape:block";
   const RotateToggleButton = () => (
     <button
-      onClick={() => setOsRotated((r) => !r)}
+      onClick={() => osRotateNext()}
       className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-      title={bigView ? "Rotate back to normal" : "Rotate for a portrait-mounted screen"}
+      title={`Rotate the screen (now ${osRotation}°) — steps a quarter turn each press, back to 0° after 270°`}
     >
       <RotateCw className="h-5 w-5" />
     </button>
@@ -2709,7 +2736,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
 
     return (
-      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:px-4 sm:pb-4 sm:pt-2 lg:px-6 lg:pb-6 lg:pt-3 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:px-4 sm:pb-4 sm:pt-2 lg:px-6 lg:pb-6 lg:pt-3 ${kioskRotateClass}`}>
         <RotateToggleButton />
         {osRotated && (
           <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
@@ -2944,7 +2971,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         one), so adding our rotation directly here composes cleanly with no
                         conflict. origin-top-left matches Radix's actual side="bottom" align="start"
                         anchor for this trigger, keeping the dropdown attached to the same corner. */}
-                    <SelectContent className={osRotated ? "origin-top-left rotate-90" : undefined}>
+                    <SelectContent className={osRotated ? `origin-top-left ${osPortalRotate}` : undefined}>
                       <SelectItem value={NO_STV}>— Select STV —</SelectItem>
                       {stvs.map((s) => (
                         <SelectItem key={s} value={s}>{s}</SelectItem>
@@ -4646,7 +4673,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             around its own (default, center) transform-origin lines it back up with the rotated
             page — no origin utility needed here. */}
         <Dialog open={showEmptyBox} onOpenChange={(o) => { if (!o) setShowEmptyBox(false); }}>
-          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osRotated ? "rotate-90" : ""}`}>
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osPortalRotate}`}>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-amber-700">
                 <Package className="h-5 w-5" /> Log Empty Box
@@ -4762,7 +4789,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             .kiosk-rotate-90 subtree, so (like the Empty Box dialog) it needs the rotate class
             applied manually or it opens upright while the rest of the kiosk screen is rotated. */}
         <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) { setOsMultiMatch(null); resetOsConfirmation(); } }}>
-          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osRotated ? "rotate-90" : ""}`}>
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osPortalRotate}`}>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
                 <AlertTriangle className="h-5 w-5 text-amber-500" />
@@ -4821,18 +4848,20 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           <div className="fixed inset-0 z-40 pointer-events-none bg-green-400/25" />
         )}
 
-        {/* Scan confirmation dialog. Radix portals it to <body>, outside the .kiosk-rotate-90
-            container, so on a portrait-mounted (rotated) screen it would otherwise appear upright
-            while everything else is turned. rotate-90 composes with Radix's centering transform
+        {/* Scan confirmation dialog. Radix portals it to <body>, outside the .kiosk-rotate-*
+            container, so on a rotated screen it would otherwise appear upright while everything
+            else is turned. The rotate class composes with Radix's centering transform
             (translate(-50%,-50%)) to turn the whole dialog to match — so it reads correctly on the
-            physical portrait screen (and only looks sideways in a normal landscape screenshot).
-            When rotated, its on-screen width/height are swapped: size it against the SWAPPED
-            viewport axes (w/max-w in vh, max-h in vw) with scroll so it always fits. */}
+            physical screen (and only looks turned in a normal landscape screenshot).
+            Only a QUARTER turn swaps its on-screen width/height, so only then is it sized against
+            the swapped viewport axes (w/max-w in vh, max-h in vw); a half turn keeps the normal
+            sizing and just flips it. Either way it scrolls so it always fits. */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>
           <DialogContent
-            className={osRotated
-              ? "w-[92vh] max-w-[92vh] max-h-[92vw] overflow-y-auto rounded-2xl p-0 rotate-90"
-              : "w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl p-0"}
+            className={`overflow-y-auto rounded-2xl p-0 ${osPortalRotate} ${
+              osQuarterTurn
+                ? "w-[92vh] max-w-[92vh] max-h-[92vw]"
+                : "w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl max-h-[90vh]"}`}
           >
             {/* Two columns: full-height product image on the left, all controls on the right.
                 Under rotate-90 (clockwise), CSS-left maps to physical-top — so image-left reads as
@@ -4940,7 +4969,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* Off-rotation: Qty + Pallets side by side (sm:grid-cols-2). Rotated: keep a single
                   CSS column — the rotate-90 turns that vertical stack into the side-by-side pair
                   the kiosk layout expects (a CSS two-column grid would rotate into a stacked pair). */}
-              <div className={`grid gap-3 ${plt > 1 && !osRotated ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+              <div className={`grid gap-3 ${plt > 1 && !osQuarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
                 {/* Qty — −/+ step one box at a time. */}
                 <div className="space-y-1">
                   <Label className="text-sm">Qty (boxes)</Label>
@@ -5113,7 +5142,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   }
 
   return (
-    <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+    <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${kioskRotateClass}`}>
       <RotateToggleButton />
       <div className="mx-auto max-w-7xl space-y-4">
         <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />

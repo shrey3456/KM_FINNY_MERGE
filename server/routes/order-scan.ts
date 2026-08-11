@@ -1742,10 +1742,16 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
     if (!(await checkSessionPlantOrRespond(req, res, id))) return;
+    // Defaults to the 20 most recent, as before. ?limit= raises that for callers that need the
+    // whole part rather than a recent-activity peek — the Scan Viewer's STV filter reads every
+    // event to work out which items went out on which truck, since STV is recorded per event and
+    // appears nowhere on the per-item rows its table is built from. Capped so a bad value can't
+    // ask for an unbounded result set.
+    const limit = Math.max(1, Math.min(5000, parseInt(String(req.query.limit ?? '20'), 10) || 20));
     const events = await db.select().from(orderScanEvents)
       .where(eq(orderScanEvents.sessionId, id))
       .orderBy(desc(orderScanEvents.scannedAt))
-      .limit(20);
+      .limit(limit);
     res.json(events);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch events' });

@@ -58,7 +58,7 @@ import {
 } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { DataTable, DataTableColumnToggle, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -1599,44 +1599,46 @@ export default function ProformaSlips() {
     const totalQty = filteredSlips.reduce((sum, slip) => sum + (slip.totalQuantity || 0), 0);
     const uniqueParties = Array.from(new Set(filteredSlips.map((slip) => slip.partyName))).length;
     const uniqueVehicles = Array.from(new Set(filteredSlips.filter((slip) => slip.vehicleNumber).map((slip) => slip.vehicleNumber))).length;
+    // A figure with its unit underneath, rather than "6623 slips" run together on one line — the
+    // number is what's being read, so it carries the weight and the unit stays a quiet caption.
+    const stat = (value: number, unit: string) => (
+      <>
+        <span className="block text-base font-bold leading-tight tabular-nums text-[#001d6e]">
+          {value.toLocaleString()}
+        </span>
+        <span className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500">{unit}</span>
+      </>
+    );
+
     return (
-      <TableFooter className="bg-muted/30">
+      <TableFooter className="bg-transparent">
         {filteredSlips.length > 0 && (
-          <TableRow className="font-medium border-t-2">
-            {canWriteSlips && <TableCell></TableCell>}
+          // DATA_TABLE_TOTALS_ROW is the app-wide totals look (faint navy wash, heavier rule on
+          // top, bold dark figures) — shared so this row matches every other table's.
+          <TableRow className={`${DATA_TABLE_TOTALS_ROW} hover:bg-[#f5f6f9]`}>
+            {canWriteSlips && <TableCell className="py-2.5"></TableCell>}
             {visibleCols.map((col) => {
               switch (col.id) {
                 case 'orderDate':
-                  return <TableCell key={col.id} className="font-bold whitespace-nowrap">Total</TableCell>;
-                case 'orderNumber':
-                  return <TableCell key={col.id} className="text-center whitespace-nowrap">{filteredSlips.length} slips</TableCell>;
-                case 'partyName':
-                  return <TableCell key={col.id} className="text-center whitespace-nowrap">{uniqueParties} parties</TableCell>;
-                case 'totalQuantity':
-                  return <TableCell key={col.id} className="text-right font-bold">{totalQty}</TableCell>;
-                case 'vehicleNumber':
-                  return <TableCell key={col.id} className="text-center">{uniqueVehicles}</TableCell>;
-                case 'actions':
                   return (
-                    <TableCell key={col.id}>
-                      <div className="flex items-center justify-end gap-1">
-                        <span className="text-xs whitespace-nowrap">Entries:</span>
-                        <select
-                          className="h-6 text-xs border rounded px-1 bg-background"
-                          value={ctx.pageSize}
-                          onChange={(e) => ctx.setPageSize(Number(e.target.value))}
-                          aria-label="Number of entries to display"
-                        >
-                          <option value={15}>15</option>
-                          <option value={25}>25</option>
-                          <option value={50}>50</option>
-                          <option value={100}>100</option>
-                        </select>
-                      </div>
+                    <TableCell key={col.id} className="whitespace-nowrap py-2.5 text-sm font-bold uppercase tracking-wide text-gray-900">
+                      Total
                     </TableCell>
                   );
+                case 'orderNumber':
+                  return <TableCell key={col.id} className="whitespace-nowrap py-2.5">{stat(filteredSlips.length, "slips")}</TableCell>;
+                case 'partyName':
+                  return <TableCell key={col.id} className="whitespace-nowrap py-2.5">{stat(uniqueParties, "parties")}</TableCell>;
+                case 'totalQuantity':
+                  // Right-aligned to sit under its column's own right-aligned figures.
+                  return <TableCell key={col.id} className="py-2.5 text-right">{stat(totalQty, "qty")}</TableCell>;
+                case 'vehicleNumber':
+                  return <TableCell key={col.id} className="whitespace-nowrap py-2.5">{stat(uniqueVehicles, "vehicles")}</TableCell>;
                 default:
-                  return <TableCell key={col.id}></TableCell>;
+                  // Includes 'actions': the entries-per-page control moved down to the pagination
+                  // row, where it sits with the other paging controls instead of competing with
+                  // the figures for attention.
+                  return <TableCell key={col.id} className="py-2.5"></TableCell>;
               }
             })}
           </TableRow>
@@ -1644,9 +1646,27 @@ export default function ProformaSlips() {
 
         <TableRow>
           <TableCell colSpan={ctx.columnCount} className="text-center py-2">
-            <div className="flex items-center justify-between">
-              <div className="text-sm text-muted-foreground">
-                Showing {ctx.totalRows > 0 ? ctx.pageIndex * ctx.pageSize + 1 : 0} to {Math.min((ctx.pageIndex + 1) * ctx.pageSize, ctx.totalRows)} of {ctx.totalRows} entries
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-3">
+                <div className="text-sm text-muted-foreground">
+                  Showing {ctx.totalRows > 0 ? (ctx.pageIndex * ctx.pageSize + 1).toLocaleString() : 0} to {Math.min((ctx.pageIndex + 1) * ctx.pageSize, ctx.totalRows).toLocaleString()} of {ctx.totalRows.toLocaleString()} entries
+                </div>
+                {/* Rows-per-page — moved out of the totals row so the figures there aren't sharing
+                    space with a control, and so it sits with the paging it actually affects. */}
+                <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                  <span className="whitespace-nowrap">Rows</span>
+                  <select
+                    className="h-7 rounded-md border bg-background px-1.5 text-sm"
+                    value={ctx.pageSize}
+                    onChange={(e) => ctx.setPageSize(Number(e.target.value))}
+                    aria-label="Number of entries to display"
+                  >
+                    <option value={15}>15</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </label>
               </div>
               <div className="flex items-center space-x-2">
                 <Button

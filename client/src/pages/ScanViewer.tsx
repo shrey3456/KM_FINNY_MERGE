@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { ChevronLeft, Eye, ListFilter, Loader2, Plus, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronUp, Eye, ListFilter, Loader2, Plus, RotateCw, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -60,6 +60,11 @@ type HistoryEvent = {
 
 const normalize = (v?: string | null) => String(v ?? "").trim().toLowerCase();
 
+// Kiosk rotation steps — a full turn, so a screen mounted at any angle can be matched. Mirrors the
+// Scan Order page's own control (see .kiosk-rotate-* in index.css for the mechanics).
+const ROTATIONS = [0, 90, 180, 270] as const;
+type Rotation = (typeof ROTATIONS)[number];
+
 function getLocalISODate(date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -102,6 +107,61 @@ export default function ScanViewer() {
   const [date, setDate] = useState(() => getLocalISODate());
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
+
+  // ── Kiosk rotation — the same control the Scan Order page has, for a screen mounted at an
+  // angle. Its own storage key, so the two pages can sit on differently-mounted screens.
+  // Its own storage key, so this page and Scan Order can sit on differently-mounted screens.
+  const [rotation, setRotation] = useState<Rotation>(() => {
+    const saved = Number(localStorage.getItem("scanViewerRotation"));
+    return (ROTATIONS as readonly number[]).includes(saved) ? (saved as Rotation) : 0;
+  });
+  useEffect(() => { localStorage.setItem("scanViewerRotation", String(rotation)); }, [rotation]);
+  const rotateNext = () => setRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
+  const isRotated = rotation !== 0;
+  const isQuarterTurn = rotation === 90 || rotation === 270;
+  const rotateClass = isRotated ? `kiosk-rotate-${rotation}` : "";
+  // Radix portals dialogs to <body>, outside the rotated container, so they need the matching turn
+  // applied by hand or they open upright while everything behind them is rotated.
+  const portalRotate = rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : rotation === 270 ? "-rotate-90" : "";
+  // Rotated, the page's own scroll moves content sideways on the physical screen, so it gets the
+  // same Up/Down nudge buttons the Scan Order page uses rather than relying on wheel/swipe.
+  const pageScrollRef = useRef<HTMLDivElement>(null);
+  // A quarter turn swaps the axes: the table's height then runs along the viewport's WIDTH, so it
+  // has to be capped in vw there or the box is sized against the wrong dimension entirely.
+  const tableMaxHeight = isQuarterTurn
+    ? "max(420px, calc(100vw - 340px))"
+    : "max(420px, calc(100vh - 340px))";
+  // Rotated, the page's own scroll moves content sideways on the physical screen (a rigid turn
+  // swaps which axis is "vertical"), so it gets discrete Up/Down buttons rather than relying on a
+  // wheel/swipe whose direction no longer matches what the viewer sees. scrollBy drives the same
+  // container either way. Same treatment as the Scan Order page.
+  const ScrollNudgeButtons = ({ targetRef, amount = 360 }: {
+    targetRef: React.RefObject<HTMLElement>; amount?: number;
+  }) => {
+    const nudge = (dir: 1 | -1) => targetRef.current?.scrollBy({ top: dir * amount, behavior: "smooth" });
+    const btn = "rounded-2xl bg-black/10 p-3.5 text-current hover:bg-black/20 active:scale-95 transition";
+    return (
+      <div className="flex flex-col items-center gap-2">
+        <button type="button" onClick={() => nudge(-1)} aria-label="Scroll up" title="Scroll up" className={btn}>
+          <ChevronUp className="h-7 w-7" />
+        </button>
+        <button type="button" onClick={() => nudge(1)} aria-label="Scroll down" title="Scroll down" className={btn}>
+          <ChevronDown className="h-7 w-7" />
+        </button>
+      </div>
+    );
+  };
+
+  const RotateButton = () => (
+    <button
+      type="button"
+      onClick={rotateNext}
+      className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+      title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
+    >
+      <RotateCw className="h-5 w-5" />
+    </button>
+  );
 
   const filtersReady = !!plant && !!date;
 
@@ -190,6 +250,45 @@ export default function ScanViewer() {
   // Every part sharing this plant + order date — history spans the whole order, not just the
   // one part currently selected above, same as the Scan tab's own drill-down.
   const groupSessionIds = sessionOptions.map((s) => s.id);
+
+  // ── STV filter (page level) ──────────────────────────────────────────────
+  // Every other filter on this page reads a field that's already on the loaded item rows. STV
+  // isn't one — it's recorded per scan EVENT — so it comes from the existing per-session events
+  // endpoint (one call per part of the order), and the item↔STV mapping is derived here on the
+  // client, same as the other filters' option lists are.
+  const eventsQuery = useQuery<{ barcode: string | null; stv: string | null; voided: boolean | null }[]>({
+    queryKey: ["/api/order-scan/sessions", "events", "scan-viewer", groupSessionIds.join(",")],
+    queryFn: async () => {
+      const pages = await Promise.all(
+        groupSessionIds.map((id) =>
+          apiRequest("GET", `/api/order-scan/sessions/${id}/events?limit=5000`).then((r) => r.json()),
+        ),
+      );
+      return pages.flat();
+    },
+    enabled: groupSessionIds.length > 0,
+  });
+
+  // barcode → every STV that barcode was scanned under. One item can go out on more than one
+  // truck, which is why the column's accessor hands the filter engine an array rather than a
+  // single value. Voided scans are skipped: a cancelled entry shouldn't make an item show up
+  // under an STV it was never actually loaded onto.
+  const stvsByBarcode = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const ev of eventsQuery.data ?? []) {
+      if (!ev.stv || ev.voided) continue;
+      const key = normalize(ev.barcode);
+      const set = map.get(key);
+      if (set) set.add(ev.stv);
+      else map.set(key, new Set([ev.stv]));
+    }
+    return new Map(Array.from(map, ([k, v]) => [k, Array.from(v)]));
+  }, [eventsQuery.data]);
+
+  const stvOptions = useMemo(
+    () => Array.from(new Set(Array.from(stvsByBarcode.values()).flat())).sort((a, b) => a.localeCompare(b)),
+    [stvsByBarcode],
+  );
 
   const [historyItem, setHistoryItem] = useState<OsScanItem | null>(null);
   const historyQuery = useQuery<{ items: HistoryEvent[] }>({
@@ -309,13 +408,29 @@ export default function ScanViewer() {
     return [
       { id: "item", label: "Item", filterType: "text", options: textOptions((i) => i.itemName), accessor: (i) => i.itemName },
       { id: "barcode", label: "Barcode / SAP", filterType: "text", options: textOptions((i) => i.barcode), accessor: (i) => i.barcode },
-      { id: "exp", label: "Exp", filterType: "number", options: numberOptions((i) => i.expectedQty ?? 0), accessor: (i) => i.expectedQty ?? 0 },
-      { id: "received", label: "Received", filterType: "number", options: numberOptions((i) => i.totalScannedQty ?? 0), accessor: (i) => i.totalScannedQty ?? 0 },
-      { id: "left", label: "Left", filterType: "number", options: numberOptions((i) => rowState(i).left), accessor: (i) => rowState(i).left },
-      { id: "extra", label: "Extra", filterType: "number", options: numberOptions((i) => rowState(i).extra), accessor: (i) => rowState(i).extra },
+      // STV isn't a field on an item — it's recorded per scan event, and one item can go out on
+      // more than one truck. The accessor therefore returns ALL the STVs that item was scanned
+      // under and the filter engine matches if any of them qualifies (see matchValue's array
+      // branch in lib/columnFilters.ts). Options come from the whole order, so the checklist
+      // still offers every STV even after other filters have narrowed the visible rows.
+      {
+        id: "stv", label: "STV", filterType: "enum",
+        options: stvOptions.map((s) => ({ value: s, label: s })),
+        // Checklist only — an STV is a label you either pick or don't, so contains/equals
+        // operators would just be a slower way to do the same thing.
+        disableConditions: true,
+        accessor: (i) => stvsByBarcode.get(normalize(i.barcode ?? "")) ?? [],
+      },
+      // Labels and order deliberately mirror the Scan Order page's own items table (osColumns in
+      // Scan.tsx): all Qty columns first as Exp → Remain → Received → Extra, then the matching Plt
+      // columns in the same order, so the two pages read as one system.
+      { id: "exp", label: "Exp Qty", filterType: "number", options: numberOptions((i) => i.expectedQty ?? 0), accessor: (i) => i.expectedQty ?? 0 },
+      { id: "left", label: "Remain Qty", filterType: "number", options: numberOptions((i) => rowState(i).left), accessor: (i) => rowState(i).left },
+      { id: "received", label: "Received Qty", filterType: "number", options: numberOptions((i) => i.totalScannedQty ?? 0), accessor: (i) => i.totalScannedQty ?? 0 },
+      { id: "extra", label: "Extra Qty", filterType: "number", options: numberOptions((i) => rowState(i).extra), accessor: (i) => rowState(i).extra },
       { id: "expPlt", label: "Exp Plt", filterType: "number", options: palletOptions((i) => pltQty(rowState(i).exp, i.itemsPerPallet ?? 0)), accessor: (i) => pltQty(rowState(i).exp, i.itemsPerPallet ?? 0) },
+      { id: "leftPlt", label: "Remain Plt", filterType: "number", options: palletOptions((i) => pltQty(rowState(i).left, i.itemsPerPallet ?? 0)), accessor: (i) => pltQty(rowState(i).left, i.itemsPerPallet ?? 0) },
       { id: "receivedPlt", label: "Received Plt", filterType: "number", options: palletOptions((i) => pltQty(rowState(i).received, i.itemsPerPallet ?? 0)), accessor: (i) => pltQty(rowState(i).received, i.itemsPerPallet ?? 0) },
-      { id: "leftPlt", label: "Left Plt", filterType: "number", options: palletOptions((i) => pltQty(rowState(i).left, i.itemsPerPallet ?? 0)), accessor: (i) => pltQty(rowState(i).left, i.itemsPerPallet ?? 0) },
       { id: "extraPlt", label: "Extra Plt", filterType: "number", options: palletOptions((i) => pltQty(rowState(i).extra, i.itemsPerPallet ?? 0)), accessor: (i) => pltQty(rowState(i).extra, i.itemsPerPallet ?? 0) },
       {
         id: "status", label: "Status", filterType: "enum",
@@ -329,7 +444,7 @@ export default function ScanViewer() {
       { id: "lastScanned", label: "Last Scanned", filterType: "date", options: dateOptions((i) => i.lastScannedAt), accessor: (i) => i.lastScannedAt },
     ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, extrasQuery.data]);
+  }, [items, extrasQuery.data, stvOptions, stvsByBarcode]);
   const columnConditionList = useMemo(() => Object.values(columnConditions), [columnConditions]);
 
   // The single "+ Filter" entry point — every generic column in one searchable list, same
@@ -497,9 +612,10 @@ export default function ScanViewer() {
         );
       },
     },
+    // Qty block, in the Scan Order page's order: Exp → Remain → Received → Extra.
     {
       id: "exp",
-      header: columnHeader("exp", "Exp"),
+      header: columnHeader("exp", "Exp Qty"),
       width: 80,
       align: "right",
       sortable: true,
@@ -509,20 +625,9 @@ export default function ScanViewer() {
       render: (row) => rowState(row).exp || "—",
     },
     {
-      id: "received",
-      header: columnHeader("received", "Received"),
-      width: 90,
-      align: "right",
-      sortable: true,
-      accessor: (row) => row.totalScannedQty ?? 0,
-      headerClassName: headerBorder,
-      cellClassName: `tabular-nums font-semibold text-gray-900 ${cellBorder}`,
-      render: (row) => rowState(row).received,
-    },
-    {
       id: "left",
-      header: columnHeader("left", "Left"),
-      width: 80,
+      header: columnHeader("left", "Remain Qty"),
+      width: 90,
       align: "right",
       sortable: true,
       accessor: (row) => rowState(row).left,
@@ -534,8 +639,19 @@ export default function ScanViewer() {
       },
     },
     {
+      id: "received",
+      header: columnHeader("received", "Received Qty"),
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.totalScannedQty ?? 0,
+      headerClassName: headerBorder,
+      cellClassName: `tabular-nums font-semibold text-gray-900 ${cellBorder}`,
+      render: (row) => rowState(row).received,
+    },
+    {
       id: "extra",
-      header: columnHeader("extra", "Extra"),
+      header: columnHeader("extra", "Extra Qty"),
       width: 80,
       align: "right",
       sortable: true,
@@ -548,8 +664,8 @@ export default function ScanViewer() {
       },
     },
     // Pallet columns, their own columns rather than a subline under each qty cell — same
-    // Exp → Received → Left → Extra order as the qty block above, matching the Master View
-    // table's own Exp Plt/Received Plt/Remain Plt/Extra Plt columns in Scan.tsx.
+    // Exp → Remain → Received → Extra order as the qty block above, matching the Scan Order
+    // page's own Exp/Remain/Received/Extra Plt columns in Scan.tsx.
     {
       id: "expPlt",
       header: columnHeader("expPlt", "Exp Plt"),
@@ -557,9 +673,25 @@ export default function ScanViewer() {
       align: "right",
       sortable: true,
       accessor: (row) => pltQty(rowState(row).exp, row.itemsPerPallet ?? 0),
+      // Each row contributes qty ÷ ITS OWN pallet size — never one blended size — then those are
+      // added and shown to 2dp, same rule as pltTotal in Scan.tsx. Without an explicit total the
+      // auto-sum would print the raw float's full precision.
+      total: (rows) => rows.reduce((s, r) => s + pltQty(rowState(r).exp, r.itemsPerPallet ?? 0), 0).toFixed(2),
       headerClassName: headerBorder,
       cellClassName: `tabular-nums text-gray-500 ${cellBorder}`,
       render: (row) => pltQty(rowState(row).exp, row.itemsPerPallet ?? 0).toFixed(2),
+    },
+    {
+      id: "leftPlt",
+      header: columnHeader("leftPlt", "Remain Plt"),
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (row) => pltQty(rowState(row).left, row.itemsPerPallet ?? 0),
+      total: (rows) => rows.reduce((s, r) => s + pltQty(rowState(r).left, r.itemsPerPallet ?? 0), 0).toFixed(2),
+      headerClassName: headerBorder,
+      cellClassName: `tabular-nums font-semibold text-purple-600 ${cellBorder}`,
+      render: (row) => pltQty(rowState(row).left, row.itemsPerPallet ?? 0).toFixed(2),
     },
     {
       id: "receivedPlt",
@@ -568,20 +700,10 @@ export default function ScanViewer() {
       align: "right",
       sortable: true,
       accessor: (row) => pltQty(rowState(row).received, row.itemsPerPallet ?? 0),
+      total: (rows) => rows.reduce((s, r) => s + pltQty(rowState(r).received, r.itemsPerPallet ?? 0), 0).toFixed(2),
       headerClassName: headerBorder,
       cellClassName: `tabular-nums font-semibold text-[#001d6e] ${cellBorder}`,
       render: (row) => pltQty(rowState(row).received, row.itemsPerPallet ?? 0).toFixed(2),
-    },
-    {
-      id: "leftPlt",
-      header: columnHeader("leftPlt", "Left Plt"),
-      width: 80,
-      align: "right",
-      sortable: true,
-      accessor: (row) => pltQty(rowState(row).left, row.itemsPerPallet ?? 0),
-      headerClassName: headerBorder,
-      cellClassName: `tabular-nums font-semibold text-purple-600 ${cellBorder}`,
-      render: (row) => pltQty(rowState(row).left, row.itemsPerPallet ?? 0).toFixed(2),
     },
     {
       id: "extraPlt",
@@ -590,6 +712,7 @@ export default function ScanViewer() {
       align: "right",
       sortable: true,
       accessor: (row) => pltQty(rowState(row).extra, row.itemsPerPallet ?? 0),
+      total: (rows) => rows.reduce((s, r) => s + pltQty(rowState(r).extra, r.itemsPerPallet ?? 0), 0).toFixed(2),
       headerClassName: headerBorder,
       cellClassName: `tabular-nums font-semibold text-amber-600 ${cellBorder}`,
       render: (row) => pltQty(rowState(row).extra, row.itemsPerPallet ?? 0).toFixed(2),
@@ -627,7 +750,13 @@ export default function ScanViewer() {
   ];
 
   return (
-    <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
+    <div ref={pageScrollRef} className={`flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6 ${rotateClass}`}>
+      <RotateButton />
+      {isRotated && (
+        <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
+          <ScrollNudgeButtons targetRef={pageScrollRef} />
+        </div>
+      )}
       <div className="mx-auto max-w-6xl space-y-4">
         <PageHeader icon={Eye} title="Scan Viewer" description="Look up any order's scan progress by plant and date — view-only, with the ability to void a mistaken scan if you're allowed to." />
 
@@ -673,6 +802,7 @@ export default function ScanViewer() {
                 </SelectContent>
               </Select>
             )}
+
           </span>
         </div>
 
@@ -688,31 +818,66 @@ export default function ScanViewer() {
           </div>
         ) : (
           <>
-          {/* Same 4-tile Total/Received/Remaining/Extra strip as the Scan tab — count plus a
-              pallet total under each, each tile click-to-filter the table below. */}
-          <div className="grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white">
-            {([
-              { key: "", label: "Total", value: totals.expected, plt: totals.palletsExpected, text: "text-gray-900" },
-              { key: "done", label: "Received", value: totals.done, plt: totals.palletsDone, text: "text-emerald-600" },
-              { key: "remaining", label: "Remaining", value: totals.remaining, plt: totals.palletsRemaining, text: "text-red-600" },
-              { key: "extra", label: "Extra", value: totals.extra, plt: totals.palletsExtra, text: totals.extra > 0 ? "text-amber-600" : "text-gray-300" },
-            ] as const).map((s) => {
-              const isActive = statFilter === s.key;
-              return (
-                <button
-                  key={s.label}
-                  type="button"
-                  onClick={() => setStatFilter(isActive ? "" : (s.key as typeof statFilter))}
-                  aria-pressed={isActive}
-                  title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                  className={`text-center px-2 py-3 transition-colors ${isActive ? "bg-[#001d6e]/[0.06] ring-1 ring-inset ring-[#001d6e]/30" : "hover:bg-gray-50"}`}
-                >
-                  <p className="text-[11px] uppercase tracking-wide text-gray-400">{s.label}</p>
-                  <p className={`font-bold text-xl ${s.text}`}>{s.value}</p>
-                  <p className={`font-bold text-lg ${s.text}`}>{s.plt.toFixed(2)} plt</p>
-                </button>
-              );
-            })}
+          {/* Order Totals — same card as the Scan Order page's: heading with a % complete
+              readout, four click-to-filter tiles carrying a count and a pallet figure, and a
+              progress bar underneath. Totals live in one card rather than four free-floating
+              boxes so the block reads as a single unit. */}
+          <div className="flex flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
+            <div className="flex items-baseline justify-between">
+              <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
+              <p className="text-sm font-medium text-gray-400">
+                {totals.expected > 0
+                  ? `${Math.round((totals.done / totals.expected) * 100)}% complete`
+                  : "—"}
+              </p>
+            </div>
+
+            {/* Each box filters the items table to its own rows; clicking the active one clears
+                the filter. Total is the "show everything" box, so it doubles as Clear. */}
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {([
+                { key: "", label: "Total", value: totals.expected, plt: totals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                { key: "done", label: "Received", value: totals.done, plt: totals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                { key: "remaining", label: "Remaining", value: totals.remaining, plt: totals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
+                { key: "extra", label: "Extra", value: totals.extra, plt: totals.palletsExtra, dot: "bg-orange-500", text: totals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+              ] as const).map((s) => {
+                const isActive = statFilter === s.key;
+                return (
+                  <button
+                    key={s.label}
+                    type="button"
+                    onClick={() => setStatFilter(isActive ? "" : (s.key as typeof statFilter))}
+                    aria-pressed={isActive}
+                    title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                    className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                      isActive
+                        ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
+                        : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                    }`}
+                  >
+                    <div className="flex items-center justify-center gap-1.5">
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                    </div>
+                    <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                    <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="space-y-1">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                  style={{ width: `${totals.expected > 0 ? Math.min(100, (totals.done / totals.expected) * 100) : 0}%` }}
+                />
+              </div>
+              <div className="flex justify-between text-[10px] font-medium text-gray-400">
+                <span>{totals.done} received</span>
+                <span>{totals.remaining} remaining</span>
+              </div>
+            </div>
           </div>
 
           {/* Same TableCard + DataTable used by Overall Stock/Reports — navy header, built-in
@@ -860,6 +1025,14 @@ export default function ScanViewer() {
               isRowExpandable={(row) => !!row.barcode}
               expandedRowId={historyItem ? String(historyItem.id) : null}
               emptyState={items.length === 0 ? "No items in this order." : "No items match your filters."}
+              // Same treatment as the Scan Order page's own items table: a totals row closing the
+              // table, and a bounded scroll box so the header stays put while the rows move.
+              enableTotalsRow
+              totalsLabelColumnId="item"
+              enableColumnResizing
+              isStickyHeader
+              maxHeight={tableMaxHeight}
+              showMobileSwipeHint
             />
           </TableCard>
           </>
@@ -868,7 +1041,9 @@ export default function ScanViewer() {
 
       {/* Void confirmation — same rule as Scan/Scan History's own void dialog. */}
       <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
-        <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+        {/* Radix portals this to <body>, outside the rotated container, so on a turned screen it
+            would otherwise open upright while everything behind it is rotated. */}
+        <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${portalRotate}`}>
           <DialogHeader>
             <DialogTitle className="text-red-600">Void this scan?</DialogTitle>
             <DialogDescription>
