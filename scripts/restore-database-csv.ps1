@@ -137,7 +137,11 @@ try {
         }
         $lines += "SET session_replication_role = DEFAULT;"
         $lines += "COMMIT;"
-        Set-Content -Path $importScriptPath -Value $lines -Encoding UTF8
+        # Windows PowerShell 5.1's `-Encoding UTF8` always writes a byte-order-mark, which psql
+        # does NOT strip - it ends up as literal characters before the first statement (BEGIN
+        # becomes the unparseable "BOM;BEGIN;"). Writing via .NET directly with BOM explicitly
+        # turned off avoids that.
+        [System.IO.File]::WriteAllLines($importScriptPath, $lines, (New-Object System.Text.UTF8Encoding $false))
 
         & $psql --host=$dbHost --port=$dbPort --username=$dbUser --dbname=$dbName `
             --set=ON_ERROR_STOP=1 --file=$importScriptPath

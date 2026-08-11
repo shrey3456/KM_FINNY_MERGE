@@ -136,7 +136,10 @@ ORDER BY table_name;
             $csvPath = (Join-Path $outDir "$table.csv") -replace '\\', '/'
             "\copy ""$table"" TO '$csvPath' WITH (FORMAT CSV, HEADER)"
         }
-        Set-Content -Path $copyScriptPath -Value $lines -Encoding UTF8
+        # Windows PowerShell 5.1's `-Encoding UTF8` always writes a byte-order-mark, which psql
+        # does NOT strip - on some psql builds it ends up as literal characters before the first
+        # command. Writing via .NET directly with BOM explicitly turned off avoids that.
+        [System.IO.File]::WriteAllLines($copyScriptPath, $lines, (New-Object System.Text.UTF8Encoding $false))
 
         & $psql --host=$dbHost --port=$dbPort --username=$dbUser --dbname=$dbName --file=$copyScriptPath
         if ($LASTEXITCODE -ne 0) { throw "psql exited with code $LASTEXITCODE while exporting." }
