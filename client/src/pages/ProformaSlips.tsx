@@ -73,8 +73,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronFirst,
-  ChevronLast,
   Check,
   X,
   Save,
@@ -157,6 +155,71 @@ async function lockSlip(orderNumber: string, printedByCode?: string) {
 
 type ProformaSlipItemFormValues = z.infer<typeof proformaSlipItemFormSchema>;
 
+// Filters survive leaving the page and coming back. They live in component state, so navigating
+// away used to drop whatever you had narrowed the table to, and you had to set it all up again.
+//
+// sessionStorage rather than localStorage on purpose: a filter is working context, not a saved
+// preference. Keeping it for the life of the tab matches "I'll go look at something else and come
+// straight back"; keeping it forever would mean opening the app tomorrow to a table that's
+// mysteriously filtered, with no memory of having done it.
+const SLIP_FILTERS_KEY = "proformaSlips:filters";
+
+type SavedSlipFilters = {
+  search?: string;
+  plant?: string;
+  date?: string;
+  conditions?: Record<string, FilterCondition>;
+};
+
+function readSavedSlipFilters(): SavedSlipFilters {
+  try {
+    return JSON.parse(sessionStorage.getItem(SLIP_FILTERS_KEY) ?? "{}") as SavedSlipFilters;
+  } catch {
+    // Corrupt or unreadable (private-mode storage throws) — start clean rather than break the page.
+    return {};
+  }
+}
+
+/**
+ * Which page numbers a pager should offer, given the current page and how many there are — all of
+ * them when they fit, otherwise the first, the last, a window around the current page, and "gap"
+ * where the run is broken. Both indexes are 0-based, matching DataTable's own pageIndex.
+ *
+ * e.g. page 1 of 442 → 1 2 3 … 442, and page 10 → 1 … 9 10 11 … 442.
+ */
+function buildPageList(pageIndex: number, pageCount: number, window = 1): Array<number | "gap"> {
+  // Small enough to list in full — an ellipsis is never narrower than just showing the numbers.
+  const maxWithoutGaps = window * 2 + 5;
+  if (pageCount <= maxWithoutGaps) return Array.from({ length: pageCount }, (_, i) => i);
+
+  const last = pageCount - 1;
+  // Near either end the window would be clipped by the edge, leaving a stubby "1 2 … 442". Extend
+  // it inward instead so the run of numbers stays the same length wherever you are.
+  let from: number;
+  let to: number;
+  if (pageIndex <= window) {
+    from = 1;
+    to = Math.min(last - 1, window * 2);
+  } else if (pageIndex >= last - window) {
+    from = Math.max(1, last - window * 2);
+    to = last - 1;
+  } else {
+    from = pageIndex - window;
+    to = pageIndex + window;
+  }
+
+  const pages: Array<number | "gap"> = [0];
+  // A gap standing in for a single page would take as much room as the page itself, so only use
+  // one where at least two pages are actually being hidden — otherwise show that page.
+  if (from > 2) pages.push("gap");
+  else if (from === 2) pages.push(1);
+  for (let i = from; i <= to; i++) pages.push(i);
+  if (to < last - 2) pages.push("gap");
+  else if (to === last - 2) pages.push(last - 1);
+  pages.push(last);
+  return pages;
+}
+
 export default function ProformaSlips() {
   const [selectedSlip, setSelectedSlip] = useState<ProformaSlip | null>(null);
   const [isNewSlipDialogOpen, setIsNewSlipDialogOpen] = useState(false);
@@ -170,7 +233,7 @@ export default function ProformaSlips() {
   const [slipItems, setSlipItems] = useState<Record<number, ProformaSlipItem[]>>({});
   const [editableSlipData, setEditableSlipData] = useState<Record<number, Partial<ProformaSlipFormValues>>>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [slipSearchQuery, setSlipSearchQuery] = useState('');
+  const [slipSearchQuery, setSlipSearchQuery] = useState(() => readSavedSlipFilters().search ?? '');
   const [filteredProducts, setFilteredProducts] = useState<Product[] | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [selectedSlipIds, setSelectedSlipIds] = useState<number[]>([]);
@@ -196,11 +259,14 @@ export default function ProformaSlips() {
   // Plant is a tab strip (single active plant, "" = All). Date is its own standalone control
   // (single day "d:YYYY-MM-DD" or range "r:from:to", both editable, plus quick-range presets).
   // Every other column gets an Excel-style per-column filter via the shared column-filter engine.
-  const [activePlantTab, setActivePlantTab] = useState<string>("");
-  const [dateValue, setDateValue] = useState<string>("");
+  // Seeded from whatever was left applied last time this page was open — see SLIP_FILTERS_KEY.
+  const [activePlantTab, setActivePlantTab] = useState<string>(() => readSavedSlipFilters().plant ?? "");
+  const [dateValue, setDateValue] = useState<string>(() => readSavedSlipFilters().date ?? "");
   const [dateOpen, setDateOpen] = useState(false);
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
-  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>({});
+  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
+    () => readSavedSlipFilters().conditions ?? {},
+  );
   const [filterPickerOpen, setFilterPickerOpen] = useState(false);
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
@@ -1040,6 +1106,25 @@ export default function ProformaSlips() {
     setCurrentPage(1);
   }, [activePlantTab, slipSearchQuery, dateValue, columnConditionList]);
 
+  // Keep the saved copy in step with whatever is applied right now, so coming back to this page
+  // restores it. The page number itself is deliberately NOT saved — returning to a filtered table
+  // should start at the top of the results, not partway down where you happened to leave off.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        SLIP_FILTERS_KEY,
+        JSON.stringify({
+          search: slipSearchQuery,
+          plant: activePlantTab,
+          date: dateValue,
+          conditions: columnConditions,
+        } satisfies SavedSlipFilters),
+      );
+    } catch {
+      // Storage unavailable (private mode / quota) — the filters just won't outlive the page.
+    }
+  }, [slipSearchQuery, activePlantTab, dateValue, columnConditions]);
+
   // Helper: parse various orderDate formats into a Date (returns null on failure)
   function parseSlipDate(value: any): Date | null {
     try {
@@ -1646,7 +1731,10 @@ export default function ProformaSlips() {
 
         <TableRow>
           <TableCell colSpan={ctx.columnCount} className="text-center py-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            {/* Three tracks so the pager sits in the TRUE centre of the row — with a plain
+                justify-between it would only be centred when the left-hand text happened to match
+                the empty right-hand side. The outer tracks share the leftover space evenly. */}
+            <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[1fr_auto_1fr]">
               <div className="flex items-center gap-3">
                 <div className="text-sm text-muted-foreground">
                   Showing {ctx.totalRows > 0 ? (ctx.pageIndex * ctx.pageSize + 1).toLocaleString() : 0} to {Math.min((ctx.pageIndex + 1) * ctx.pageSize, ctx.totalRows).toLocaleString()} of {ctx.totalRows.toLocaleString()} entries
@@ -1668,43 +1756,58 @@ export default function ProformaSlips() {
                   </select>
                 </label>
               </div>
-              <div className="flex items-center space-x-2">
+              {/* Numbered pages rather than a bare "Page 1 of 442": with 442 pages you can now
+                  see where you are, step a page at a time, or jump straight to the last one. */}
+              <nav className="flex items-center justify-center gap-1" aria-label="Pagination">
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => ctx.setPageIndex(0)}
-                  disabled={ctx.pageIndex === 0}
-                >
-                  <ChevronFirst className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
+                  className="h-8 w-8 p-0"
                   onClick={() => ctx.setPageIndex(Math.max(0, ctx.pageIndex - 1))}
                   disabled={ctx.pageIndex === 0}
+                  aria-label="Previous page"
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-sm text-muted-foreground px-2">
-                  Page {ctx.pageIndex + 1} of {ctx.pageCount}
-                </span>
+
+                {buildPageList(ctx.pageIndex, ctx.pageCount).map((p, i) =>
+                  p === "gap" ? (
+                    // Not a button: it stands for pages that aren't offered, so it mustn't look
+                    // clickable. aria-hidden keeps it out of the screen-reader page list.
+                    <span key={`gap-${i}`} aria-hidden className="px-1 text-sm text-muted-foreground select-none">
+                      …
+                    </span>
+                  ) : (
+                    <Button
+                      key={p}
+                      variant={p === ctx.pageIndex ? "default" : "outline"}
+                      size="sm"
+                      className={`h-8 min-w-8 px-2 tabular-nums ${
+                        p === ctx.pageIndex ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""
+                      }`}
+                      onClick={() => ctx.setPageIndex(p)}
+                      aria-label={`Page ${p + 1}`}
+                      aria-current={p === ctx.pageIndex ? "page" : undefined}
+                    >
+                      {p + 1}
+                    </Button>
+                  ),
+                )}
+
                 <Button
                   variant="outline"
                   size="sm"
+                  className="h-8 w-8 p-0"
                   onClick={() => ctx.setPageIndex(Math.min(ctx.pageCount - 1, ctx.pageIndex + 1))}
                   disabled={ctx.pageIndex >= ctx.pageCount - 1}
+                  aria-label="Next page"
                 >
                   <ChevronRight className="h-4 w-4" />
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => ctx.setPageIndex(ctx.pageCount - 1)}
-                  disabled={ctx.pageIndex >= ctx.pageCount - 1}
-                >
-                  <ChevronLast className="h-4 w-4" />
-                </Button>
-              </div>
+              </nav>
+
+              {/* Balances the left-hand track so the pager above lands dead centre. */}
+              <div className="hidden sm:block" />
             </div>
           </TableCell>
         </TableRow>

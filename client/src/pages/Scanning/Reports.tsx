@@ -95,6 +95,26 @@ const HISTORY_OPTIONAL_COLUMNS = ["barcode", "order", "plant", "qty", "pallets",
 // query below for why this page is paginated rather than loading the whole history.
 const HISTORY_PAGE_SIZE = 20;
 
+// Filters survive leaving the page and coming back — they live in component state, so navigating
+// away used to drop whatever the history had been narrowed to. sessionStorage rather than
+// localStorage: a filter is working context for the current sitting, not a preference that should
+// still be applied when the app is opened fresh tomorrow.
+const HISTORY_FILTERS_KEY = "scanHistory:filters";
+
+type SavedHistoryFilters = {
+  search?: string;
+  activeFilters?: { id: number; field: string; value: string }[];
+  conditions?: Record<string, FilterCondition>;
+};
+
+function readSavedHistoryFilters(): SavedHistoryFilters {
+  try {
+    return JSON.parse(sessionStorage.getItem(HISTORY_FILTERS_KEY) ?? "{}") as SavedHistoryFilters;
+  } catch {
+    return {};
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function buildQueryUrl(base: string, params: Record<string, string | number | undefined>) {
@@ -228,7 +248,8 @@ const Reports = () => {
     },
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
-  const [historySearch,  setHistorySearch]  = useState("");
+  // Seeded from whatever was left applied last time — see HISTORY_FILTERS_KEY.
+  const [historySearch,  setHistorySearch]  = useState(() => readSavedHistoryFilters().search ?? "");
   const [historyPage,    setHistoryPage]    = useState(1);
   const [historyExporting, setHistoryExporting] = useState<string | null>(null);
   // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Overall Stock's
@@ -236,8 +257,14 @@ const Reports = () => {
   // server param, not a column/operator/value condition). Plant used to live here too, but is
   // now a regular generic column (see filterableColumns) so it gets the same Values checklist
   // and header icon as Item/Barcode/etc.
-  const [activeFilters, setActiveFilters] = useState<{ id: number; field: string; value: string }[]>([]);
-  const filterIdRef = useRef(0);
+  const [activeFilters, setActiveFilters] = useState<{ id: number; field: string; value: string }[]>(
+    () => readSavedHistoryFilters().activeFilters ?? [],
+  );
+  // Start the id counter past anything restored, so a newly added filter can't collide with one
+  // that came back from storage (ids are the React keys and the remove-by-id handle).
+  const filterIdRef = useRef(
+    (readSavedHistoryFilters().activeFilters ?? []).reduce((max, f) => Math.max(max, f.id), 0),
+  );
   const selectedDate   = activeFilters.find((f) => f.field === "date")?.value ?? "";
   const historyScanner = activeFilters.find((f) => f.field === "scanner")?.value ?? "";
   const historyType    = activeFilters.find((f) => f.field === "type")?.value ?? "";
@@ -327,7 +354,9 @@ const Reports = () => {
     { id: "time", label: "Time", filterType: "date", options: filterValues.time ?? [], accessor: (r) => r.scannedAt },
     { id: "plant", label: "Plant", filterType: "enum", options: filterValues.plant ?? [], accessor: (r) => r.plant },
   ], [filterValues]);
-  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>({});
+  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
+    () => readSavedHistoryFilters().conditions ?? {},
+  );
   const setColumnCondition = (columnId: string, condition: FilterCondition) =>
     setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
   const clearColumnCondition = (columnId: string) =>
@@ -442,6 +471,23 @@ const Reports = () => {
   // a 5s poll restarted the walk) and took ~20s to show anything — pagination is what made it
   // about a second, so it's back.
   useEffect(() => { setHistoryPage(1); }, [selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+
+  // Keep the saved copy in step with what's applied, so coming back to this page restores it. The
+  // page number isn't saved — a filtered report should reopen at the top of its results.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        HISTORY_FILTERS_KEY,
+        JSON.stringify({
+          search: historySearch,
+          activeFilters,
+          conditions: columnConditions,
+        } satisfies SavedHistoryFilters),
+      );
+    } catch {
+      // Storage unavailable (private mode / quota) — filters just won't outlive the page.
+    }
+  }, [historySearch, activeFilters, columnConditions]);
 
   const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {

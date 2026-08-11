@@ -222,6 +222,27 @@ function downloadPdf(
 
 const PAGE_SIZE = 20;
 
+// Filters survive leaving the page and coming back — they live in component state, so navigating
+// away used to drop whatever the table had been narrowed to. sessionStorage rather than
+// localStorage: a filter is working context for the current sitting, not a preference that should
+// still be applied when the app is opened fresh tomorrow.
+const STOCK_FILTERS_KEY = "overallStock:filters";
+
+type SavedStockFilters = {
+  search?: string;
+  activeFilters?: { id: number; field: string; value: string }[];
+  conditions?: Record<string, FilterCondition>;
+};
+
+function readSavedStockFilters(): SavedStockFilters {
+  try {
+    return JSON.parse(sessionStorage.getItem(STOCK_FILTERS_KEY) ?? "{}") as SavedStockFilters;
+  } catch {
+    // Corrupt or unreadable (private-mode storage throws) — start clean rather than break the page.
+    return {};
+  }
+}
+
 // Solid navy fill, matching the Product Master action buttons. Squared off (rounded-xl)
 // for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
@@ -233,18 +254,27 @@ export default function OverallStock() {
   const isAdminOrSuper = ["admin", "super-admin"].includes(((user as any)?.role ?? "").toLowerCase());
   // Matches the server's actual rule (POST /reports/exchange-stock: requirePageWrite('overall-stock')).
   const canExchange = isAdminOrSuper || hasPageWriteAccess("overall-stock");
-  const [search,      setSearch]      = useState("");
+  // Seeded from whatever was left applied last time — see STOCK_FILTERS_KEY.
+  const [search,      setSearch]      = useState(() => readSavedStockFilters().search ?? "");
   const [pageIndex,   setPageIndex]   = useState(0);
   // Dynamic "+ Filter" conditions the operator adds on demand. Each is one field + a chosen value;
   // an empty value means "added but not yet set" and matches everything until picked. See
   // FILTER_FIELDS below for the available dimensions and how each one matches a row.
-  const [activeFilters, setActiveFilters] = useState<{ id: number; field: string; value: string }[]>([]);
-  const filterIdRef = useRef(0);
+  const [activeFilters, setActiveFilters] = useState<{ id: number; field: string; value: string }[]>(
+    () => readSavedStockFilters().activeFilters ?? [],
+  );
+  // Start the id counter past anything restored, so a newly added filter can't collide with one
+  // that came back from storage (ids are the React keys and the remove-by-id handle).
+  const filterIdRef = useRef(
+    (readSavedStockFilters().activeFilters ?? []).reduce((max, f) => Math.max(max, f.id), 0),
+  );
   // Excel-style per-column filters — one condition per column id, triggered from the filter icon
   // on that column's header (or the global "+ Filter" button). A separate, more flexible system
   // from the Plant/Date chips above, which stay special since Date changes what the server query
   // even means. See client/src/lib/columnFilters.ts for the matching engine.
-  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>({});
+  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
+    () => readSavedStockFilters().conditions ?? {},
+  );
   const setColumnCondition = (columnId: string, condition: FilterCondition) => {
     setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
   };
@@ -610,6 +640,19 @@ export default function OverallStock() {
   useEffect(() => {
     setPageIndex(0);
   }, [search, activePlant, activeFilters, columnConditionList]);
+
+  // Keep the saved copy in step with what's applied, so coming back restores it. The page number
+  // isn't saved — a filtered table should reopen at the top of its results.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        STOCK_FILTERS_KEY,
+        JSON.stringify({ search, activeFilters, conditions: columnConditions } satisfies SavedStockFilters),
+      );
+    } catch {
+      // Storage unavailable (private mode / quota) — filters just won't outlive the page.
+    }
+  }, [search, activeFilters, columnConditions]);
 
   // Export rows — same order as the table's own columns.
   const exportRows = (src: PlantStockRow[]): Array<Array<string | number>> => [

@@ -65,6 +65,26 @@ const normalize = (v?: string | null) => String(v ?? "").trim().toLowerCase();
 const ROTATIONS = [0, 90, 180, 270] as const;
 type Rotation = (typeof ROTATIONS)[number];
 
+// Filters survive leaving the page and coming back — they live in component state, so navigating
+// away used to drop whatever the table had been narrowed to. sessionStorage rather than
+// localStorage: a filter is working context for the current sitting, not a preference that should
+// still be applied when the app is opened fresh tomorrow.
+const VIEWER_FILTERS_KEY = "scanViewer:filters";
+
+type SavedViewerFilters = {
+  search?: string;
+  conditions?: Record<string, FilterCondition>;
+};
+
+function readSavedViewerFilters(): SavedViewerFilters {
+  try {
+    return JSON.parse(sessionStorage.getItem(VIEWER_FILTERS_KEY) ?? "{}") as SavedViewerFilters;
+  } catch {
+    // Corrupt or unreadable (private-mode storage throws) — start clean rather than break the page.
+    return {};
+  }
+}
+
 function getLocalISODate(date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -106,7 +126,8 @@ export default function ScanViewer() {
   // this is just the initial value handed to the same filter, not a client-side default view.
   const [date, setDate] = useState(() => getLocalISODate());
   const [sessionId, setSessionId] = useState<number | null>(null);
-  const [search, setSearch] = useState("");
+  // Seeded from whatever was left applied last time — see VIEWER_FILTERS_KEY.
+  const [search, setSearch] = useState(() => readSavedViewerFilters().search ?? "");
 
   // ── Kiosk rotation — the same control the Scan Order page has, for a screen mounted at an
   // angle. Its own storage key, so the two pages can sit on differently-mounted screens.
@@ -374,7 +395,9 @@ export default function ScanViewer() {
   // Excel-style per-column filters for the items table (Item, Exp, Received, Left, Extra,
   // Status) — matched client-side since this order's item list is already fully loaded (not
   // paginated the way Scan History is), same approach as Overall Stock.
-  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>({});
+  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
+    () => readSavedViewerFilters().conditions ?? {},
+  );
   const setColumnCondition = (columnId: string, condition: FilterCondition) =>
     setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
   const clearColumnCondition = (columnId: string) =>
@@ -442,6 +465,20 @@ export default function ScanViewer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, extrasQuery.data, stvOptions, stvsByBarcode]);
   const columnConditionList = useMemo(() => Object.values(columnConditions), [columnConditions]);
+
+  // Keep the saved copy in step with what's applied, so coming back to this page restores it.
+  // Plant/date aren't saved: they choose WHICH order you're looking at rather than filtering it,
+  // and the page deliberately opens on the live order for your plant.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        VIEWER_FILTERS_KEY,
+        JSON.stringify({ search, conditions: columnConditions } satisfies SavedViewerFilters),
+      );
+    } catch {
+      // Storage unavailable (private mode / quota) — filters just won't outlive the page.
+    }
+  }, [search, columnConditions]);
 
   // The single "+ Filter" entry point — every generic column in one searchable list, same
   // pattern as Overall Stock/Scan History (no special-cased dims here: Plant/Order Date are
