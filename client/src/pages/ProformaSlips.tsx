@@ -1030,11 +1030,24 @@ export default function ProformaSlips() {
   }, [proformaSlips]);
 
   const filterPickerOptions = useMemo(() => {
-    const dims = filterableColumns.map((c) => ({ key: c.id, label: c.label }));
+    // Already-filtered columns are left OUT of this list: "+ Filter" adds a new one, while
+    // changing or removing an existing filter happens in the "Filters (N)" dropdown, which lists
+    // them all and opens each one's builder pre-filled.
     const q = filterPickerSearch.trim().toLowerCase();
-    return dims.filter((d) => !columnConditions[d.key] && (!q || d.label.toLowerCase().includes(q)));
+    return filterableColumns
+      .filter((c) => !columnConditions[c.id])
+      .filter((c) => !q || c.label.toLowerCase().includes(q))
+      .map((c) => ({ key: c.id, label: c.label }));
   }, [filterableColumns, columnConditions, filterPickerSearch]);
   const pickedFilterColumn = filterableColumns.find((c) => c.id === filterPickerKey) ?? null;
+
+  // The "Filters (N)" popover doubles as the editor: it lists everything applied, and drilling
+  // into one swaps the list for that filter's own builder (editFilterKey), with a Back link — a
+  // drill-down inside the same popover rather than a popover within a popover.
+  const [editFilterOpen, setEditFilterOpen] = useState(false);
+  const [editFilterKey, setEditFilterKey] = useState("");
+  const editFilterColumn = filterableColumns.find((c) => c.id === editFilterKey) ?? null;
+
   const columnConditionList = useMemo(() => Object.values(columnConditions), [columnConditions]);
 
   // Renders a column header's label plus its Excel-style filter icon (for filterable columns).
@@ -2109,27 +2122,57 @@ export default function ProformaSlips() {
 
             {/* Active column filters */}
             {Object.keys(columnConditions).length > 0 && (
-              <Popover>
+              <Popover open={editFilterOpen} onOpenChange={(o) => { setEditFilterOpen(o); if (!o) setEditFilterKey(""); }}>
                 <PopoverTrigger asChild>
                   <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
                     <ListFilter className="h-3.5 w-3.5 mr-1" /> Filters ({Object.keys(columnConditions).length})
                   </Button>
                 </PopoverTrigger>
+                {/* One place to see AND change every applied filter. */}
                 <PopoverContent align="start" className="w-72">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between pb-1">
-                      <span className="text-xs font-semibold text-gray-700">Active filters</span>
-                      <button type="button" onClick={() => setColumnConditions({})} className="text-[11px] text-red-500 hover:underline">Clear all</button>
+                  {editFilterColumn ? (
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditFilterKey("")}
+                        className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
+                      >
+                        <ChevronLeft className="h-3 w-3" /> Back to filters
+                      </button>
+                      <ColumnFilterPopoverContent
+                        column={editFilterColumn}
+                        initial={columnConditions[editFilterColumn.id]}
+                        onApply={(c) => { setColumnCondition(editFilterColumn.id, c); setEditFilterKey(""); }}
+                        onClear={() => { clearColumnCondition(editFilterColumn.id); setEditFilterKey(""); }}
+                        onCancel={() => setEditFilterKey("")}
+                      />
                     </div>
-                    {Object.entries(columnConditions).map(([columnId, condition]) => (
-                      <div key={columnId} className="flex items-center justify-between gap-2 rounded border border-gray-200 px-2 py-1">
-                        <span className="text-gray-700 text-xs">{conditionSummary(condition, filterableColumns)}</span>
-                        <button type="button" onClick={() => clearColumnCondition(columnId)} className="text-gray-400 hover:text-red-500" aria-label="Remove filter">
-                          <X className="h-3 w-3" />
-                        </button>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between pb-1">
+                        <span className="text-xs font-semibold text-gray-700">Active filters</span>
+                        <button type="button" onClick={() => setColumnConditions({})} className="text-[11px] text-red-500 hover:underline">Clear all</button>
                       </div>
-                    ))}
-                  </div>
+                      {Object.entries(columnConditions).map(([columnId, condition]) => (
+                        <div key={columnId} className="flex items-center justify-between gap-2 rounded border border-gray-200">
+                          {/* The summary itself is the edit control — clicking it opens this
+                              filter's builder pre-filled, so it can be changed in place. */}
+                          <button
+                            type="button"
+                            onClick={() => setEditFilterKey(columnId)}
+                            className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left text-xs text-gray-700 hover:text-[#001d6e]"
+                            title="Edit this filter"
+                          >
+                            <Pencil className="h-3 w-3 shrink-0 opacity-40" />
+                            <span className="truncate">{conditionSummary(condition, filterableColumns)}</span>
+                          </button>
+                          <button type="button" onClick={() => clearColumnCondition(columnId)} className="mr-2 shrink-0 text-gray-400 hover:text-red-500" aria-label="Remove filter">
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </PopoverContent>
               </Popover>
             )}

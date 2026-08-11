@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { ChevronDown, ChevronLeft, ChevronUp, Eye, ListFilter, Loader2, Plus, RotateCw, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronUp, Eye, ListFilter, Loader2, Pencil, Plus, RotateCw, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -487,6 +487,9 @@ export default function ScanViewer() {
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
   const filterPickerOptions = useMemo(() => {
+    // Already-filtered columns are left OUT of this list: "+ Filter" adds a new one, while
+    // changing or removing an existing filter happens in the "Filters (N)" dropdown, which lists
+    // them all and opens each one's builder pre-filled.
     const q = filterPickerSearch.trim().toLowerCase();
     return filterableColumns
       .filter((c) => !columnConditions[c.id])
@@ -494,6 +497,14 @@ export default function ScanViewer() {
       .map((c) => ({ key: c.id, label: c.label }));
   }, [filterableColumns, columnConditions, filterPickerSearch]);
   const pickedFilterColumn = filterableColumns.find((c) => c.id === filterPickerKey) ?? null;
+
+  // The "Filters (N)" popover doubles as the editor: it lists everything applied, and drilling
+  // into one swaps the list for that filter's own builder (editFilterKey), with a Back link — a
+  // drill-down inside the same popover rather than a popover within a popover.
+  const [editFilterOpen, setEditFilterOpen] = useState(false);
+  const [editFilterKey, setEditFilterKey] = useState("");
+  const editFilterColumn = filterableColumns.find((c) => c.id === editFilterKey) ?? null;
+
   // Wraps a plain header label with the Excel-style filter icon — same columnHeader() pattern
   // as Overall Stock/Scan History.
   const columnHeader = (id: string, label: string) => {
@@ -1039,25 +1050,55 @@ export default function ScanViewer() {
 
                 {/* Every active column filter in one list, with its own remove button. */}
                 {Object.keys(columnConditions).length > 0 && (
-                  <Popover>
+                  <Popover open={editFilterOpen} onOpenChange={(o) => { setEditFilterOpen(o); if (!o) setEditFilterKey(""); }}>
                     <PopoverTrigger asChild>
                       <Button size="sm" variant="outline" className="h-8 rounded-full border-0 bg-[#001d6e] text-xs text-white hover:bg-[#001552] hover:text-white">
                         <ListFilter className="h-3.5 w-3.5 mr-1" />
                         Filters ({Object.keys(columnConditions).length})
                       </Button>
                     </PopoverTrigger>
+                    {/* One place to see AND change every applied filter. */}
                     <PopoverContent align="end" className="w-72">
-                      <div className="space-y-0.5">
-                        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Active filters</p>
-                        {Object.entries(columnConditions).map(([columnId, condition]) => (
-                          <div key={columnId} className="flex items-center justify-between gap-2 rounded px-1.5 py-1 text-xs hover:bg-gray-50">
-                            <span className="text-gray-700">{conditionSummary(condition, filterableColumns)}</span>
-                            <button type="button" onClick={() => clearColumnCondition(columnId)} className="text-gray-400 hover:text-red-500" aria-label="Remove filter">
-                              <X className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
+                      {editFilterColumn ? (
+                        <div className="space-y-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditFilterKey("")}
+                            className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
+                          >
+                            <ChevronLeft className="h-3 w-3" /> Back to filters
+                          </button>
+                          <ColumnFilterPopoverContent
+                            column={editFilterColumn}
+                            initial={columnConditions[editFilterColumn.id]}
+                            onApply={(c) => { setColumnCondition(editFilterColumn.id, c); setEditFilterKey(""); }}
+                            onClear={() => { clearColumnCondition(editFilterColumn.id); setEditFilterKey(""); }}
+                            onCancel={() => setEditFilterKey("")}
+                          />
+                        </div>
+                      ) : (
+                        <div className="space-y-0.5">
+                          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Active filters</p>
+                          {Object.entries(columnConditions).map(([columnId, condition]) => (
+                            <div key={columnId} className="flex items-center justify-between gap-2 rounded text-xs hover:bg-gray-50">
+                              {/* The summary itself is the edit control — clicking it opens this filter's
+                                  builder pre-filled, so it can be changed without removing it first. */}
+                              <button
+                                type="button"
+                                onClick={() => setEditFilterKey(columnId)}
+                                className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5 py-1 text-left text-gray-700 hover:text-[#001d6e]"
+                                title="Edit this filter"
+                              >
+                                <Pencil className="h-3 w-3 shrink-0 opacity-40" />
+                                <span className="truncate">{conditionSummary(condition, filterableColumns)}</span>
+                              </button>
+                              <button type="button" onClick={() => clearColumnCondition(columnId)} className="mr-1.5 shrink-0 text-gray-400 hover:text-red-500" aria-label="Remove filter">
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </PopoverContent>
                   </Popover>
                 )}
