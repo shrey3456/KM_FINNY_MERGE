@@ -150,6 +150,17 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
         scanStatus:     orderImportSessions.scanStatus,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex:      orderImportSessions.partIndex,
+        // Ordered totals for this CSV. rowCount alone says how many LINES the file has, which
+        // isn't what anyone means by "how big is this order" — these give the quantity and pallet
+        // figures, so the list can show them without expanding every session to add them up.
+        totalQty: sql<number>`(
+          SELECT COALESCE(SUM(oii.quantity), 0)::int
+          FROM order_import_items oii WHERE oii.session_id = ${orderImportSessions.id}
+        )`,
+        totalPallets: sql<number>`(
+          SELECT COALESCE(SUM(oii.expected_pallets), 0)::float
+          FROM order_import_items oii WHERE oii.session_id = ${orderImportSessions.id}
+        )`,
       })
       .from(orderImportSessions)
       .leftJoin(users, eq(orderImportSessions.importedByCode, users.userCode))

@@ -147,6 +147,9 @@ function autoMatch(headers: string[]): Mapping {
 
 type ScanSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
+  // Ordered totals across this CSV's rows — rowCount is only how many LINES it has, which isn't
+  // what "how big is this order" means. Optional: older responses won't carry them.
+  totalQty?: number; totalPallets?: number;
   scanStatus: string; importedByName: string | null; createdAt: string | null;
   // The date this CSV was uploaded FOR (chosen at upload) — distinct from createdAt (when it
   // was uploaded). All date filters/labels on this page use orderDate.
@@ -1467,9 +1470,19 @@ export default function OrderImport() {
                               </div>
                             </div>
                             <div className="flex shrink-0 items-center gap-1.5">
-                              <span className="inline-flex items-center bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">
+                              <span className="inline-flex items-center bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]" title={`${s.rowCount} rows`}>
                                 {s.rowCount}
                               </span>
+                              {/* Ordered quantity next to the row count — the row count says how
+                                  many lines the CSV has, not how much was ordered. */}
+                              {s.totalQty != null && (
+                                <span
+                                  className="inline-flex items-center gap-1 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700 tabular-nums"
+                                  title="Total ordered quantity across this CSV"
+                                >
+                                  {s.totalQty.toLocaleString()} qty
+                                </span>
+                              )}
                               {canWriteOrderImport && (
                                 <Button size="sm"
                                   className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-full"
@@ -1546,6 +1559,19 @@ export default function OrderImport() {
                                         <td className="px-3 py-1.5 text-right">{item.expectedPallets ?? "—"}</td>
                                       </tr>
                                     ))}
+                                    {/* Totals close the table. Over the rows ON SCREEN, so a search
+                                        narrows the total with the list rather than contradicting it. */}
+                                    {scanFiltered.length > 0 && (
+                                      <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                                        <td className="border-r px-3 py-2" colSpan={4}>Total</td>
+                                        <td className="border-r px-3 py-2 text-right tabular-nums">
+                                          {scanFiltered.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                        </td>
+                                        <td className="px-3 py-2 text-right tabular-nums">
+                                          {scanFiltered.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)}
+                                        </td>
+                                      </tr>
+                                    )}
                                   </tbody>
                                 </table>
                               </div>
@@ -1824,9 +1850,19 @@ export default function OrderImport() {
                                 </div>
                               </div>
                               <div className="flex shrink-0 items-center gap-1 ml-1">
-                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl">
+                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>
                                   {session.rowCount}
                                 </Badge>
+                                {/* Ordered quantity next to the row count — the row count says how
+                                    many lines the CSV has, not how much was ordered. */}
+                                {(session as any).totalQty != null && (
+                                  <Badge
+                                    className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50 text-xs px-1.5 rounded-xl tabular-nums"
+                                    title="Total ordered quantity across this CSV"
+                                  >
+                                    {Number((session as any).totalQty).toLocaleString()} qty
+                                  </Badge>
+                                )}
                                 {(session as any).scanStatus === "active" && (
                                   <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap">
                                     <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -1904,6 +1940,20 @@ export default function OrderImport() {
                                           <td className="px-3 py-1.5">{(item as any).date || "—"}</td>
                                         </tr>
                                       ))}
+                                      {/* Totals close the table. Over the rows ON SCREEN, so a
+                                          search narrows the total with the list. */}
+                                      {filteredItems.length > 0 && (
+                                        <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                                          <td className="border-r px-3 py-2" colSpan={4}>Total</td>
+                                          <td className="border-r px-3 py-2 text-right tabular-nums">
+                                            {filteredItems.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                          </td>
+                                          <td className="border-r px-3 py-2 text-right tabular-nums">
+                                            {filteredItems.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)}
+                                          </td>
+                                          <td className="px-3 py-2" />
+                                        </tr>
+                                      )}
                                     </tbody>
                                   </table>
                                 </div>

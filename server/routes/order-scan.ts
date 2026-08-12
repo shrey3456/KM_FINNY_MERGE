@@ -849,6 +849,18 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
         scanCompletedAt:      orderImportSessions.scanCompletedAt,
         receivingSessionId:   orderImportSessions.receivingSessionId,
         partIndex:            orderImportSessions.partIndex,
+        // Ordered totals across this CSV's rows. rowCount alone says how many LINES the file has,
+        // which isn't what anyone means by "how big is this order" — these let the Order Import
+        // tabs show the quantity without expanding every session to add it up. Mirrors the same
+        // two columns on GET /order-import/sessions, which feeds the History tab.
+        totalQty: sql<number>`(
+          SELECT COALESCE(SUM(oii.quantity), 0)::int
+          FROM order_import_items oii WHERE oii.session_id = ${orderImportSessions.id}
+        )`,
+        totalPallets: sql<number>`(
+          SELECT COALESCE(SUM(oii.expected_pallets), 0)::float
+          FROM order_import_items oii WHERE oii.session_id = ${orderImportSessions.id}
+        )`,
       })
       .from(orderImportSessions)
       .leftJoin(importedBy,  eq(orderImportSessions.importedByCode,      importedBy.userCode))
