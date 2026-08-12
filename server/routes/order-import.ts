@@ -343,7 +343,10 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     const rows = items.map((item) => ({
       sessionId: session.id,
       plant,
-      barcode: item.barcode || null,
+      // Trimmed here too — a CSV cell can carry leading/trailing whitespace from an Excel
+      // export (e.g. a barcode column padded to a fixed width), and this barcode becomes the
+      // key everything downstream (scanning, product_plant_stock) matches against.
+      barcode: typeof item.barcode === 'string' ? item.barcode.trim() || null : item.barcode || null,
       itemName: item.itemName || null,
       sapCode: item.sapCode || null,
       quantity: item.quantity ?? 0,

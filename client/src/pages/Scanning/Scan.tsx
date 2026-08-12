@@ -1094,7 +1094,13 @@ export default function ScanOrderPage() {
     setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize });
   };
 
-  const handleOsBarcode = (barcode: string) => {
+  const handleOsBarcode = (rawBarcode: string) => {
+    // Trimmed once, right at the funnel both the barcode gun and camera scanner feed into —
+    // normalize() below already trims for internal matching, but the RAW value is what gets
+    // held in state and eventually sent to the server, and a stray leading/trailing space
+    // there becomes a permanently different barcode as far as product_plant_stock is concerned
+    // (it's keyed on the literal string), silently splitting stock into an orphaned row.
+    const barcode = rawBarcode.trim();
     if (osPendingRef.current || osMultiMatchRef.current || osScanLockRef.current) return;
     // STV (when the plant has any configured) is picked once up front via the persistent
     // selector above the scanner, not per scan — see osSelectedStv's own comment. Scanning

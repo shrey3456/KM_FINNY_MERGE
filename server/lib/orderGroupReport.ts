@@ -363,15 +363,18 @@ export async function applySessionStock(client: import('pg').PoolClient, session
   const plant: string = guard.rows[0].plant;
 
   // Per-barcode received + extra for this session. Barcodes are numeric here so the raw
-  // string equals its lowercase — MAX(barcode) picks a canonical spelling per group.
+  // string equals its lowercase — MAX(barcode) picks a canonical spelling per group. Grouped
+  // by TRIM()med barcode too — a stray whitespace-padded scan (barcode gun double-fire, a
+  // camera decode glitch) would otherwise group as its OWN barcode and later become a second,
+  // orphaned product_plant_stock row instead of adding to the real one.
   const { rows: received } = await client.query(
-    `SELECT MAX(barcode) AS barcode,
+    `SELECT MAX(TRIM(barcode)) AS barcode,
             SUM(total_qty)::int AS qty,
             COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
      FROM order_scan_events
      WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
        AND barcode <> 'EMPTY_BOX'
-     GROUP BY LOWER(barcode)
+     GROUP BY LOWER(TRIM(barcode))
      HAVING SUM(total_qty) <> 0`,
     [sessionId],
   );
@@ -435,6 +438,10 @@ export async function applyLiveScanStock(
   extraQty: number,
   sessionId: number,
 ): Promise<void> {
+  // Trimmed defensively — the /scan endpoint that's the normal caller already trims at its own
+  // boundary, but this is also the exact function whose ON CONFLICT (barcode, plant) upsert
+  // creates a second, orphaned product_plant_stock row for any caller that doesn't.
+  barcode = barcode.trim();
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
 
@@ -475,6 +482,7 @@ export async function reverseLiveScanStock(
   extraQty: number,
   sessionId: number,
 ): Promise<void> {
+  barcode = barcode.trim();
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
 

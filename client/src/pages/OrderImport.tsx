@@ -891,7 +891,10 @@ export default function OrderImport() {
         return col && col !== SKIP ? (row[col] ?? "") : "";
       };
       return {
-        barcode:         get("barcode") || null,
+        // Trimmed — an Excel-exported CSV can pad a barcode cell to a fixed width with
+        // whitespace, and this value becomes the literal key product_plant_stock upserts
+        // against later; an untrimmed one silently splits stock into a second, orphaned row.
+        barcode:         get("barcode").trim() || null,
         itemName:        get("itemName") || null,
         sapCode:         get("sapCode") || null,
         quantity:        parseInt(get("quantity")) || 0,

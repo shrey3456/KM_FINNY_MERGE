@@ -354,20 +354,24 @@ async function seedSessionItemsWithClient(client: any, id: number, plant: string
   const state = await getPlantStateCode(client, plant);
   const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
   const productMap = new Map<string, any>();
+  // Normalized (trim + lowercase) on both sides, same as every other product lookup in this
+  // app — an exact match here would silently miss a product whenever the two barcodes differ
+  // only by case or incidental whitespace (a CSV cell padded from an Excel export, etc.).
+  const normKey = (b: string) => b.trim().toLowerCase();
   if (barcodes.length > 0) {
     const prodResult = await client.query(
       `SELECT barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
-       FROM products WHERE barcode = ANY($1)`,
-      [barcodes],
+       FROM products WHERE LOWER(TRIM(barcode)) = ANY($1)`,
+      [barcodes.map(normKey)],
     );
-    prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
+    prodResult.rows.forEach((p: any) => productMap.set(normKey(p.barcode), p));
   }
 
   const vals: any[] = [];
   const placeholders: string[] = [];
   let pi = 1;
   for (const item of importItems) {
-    const prod = item.barcode ? productMap.get(item.barcode) : null;
+    const prod = item.barcode ? productMap.get(normKey(item.barcode)) : null;
     const prodObj = prod
       ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
       : null;
@@ -1463,9 +1467,14 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
   // send `qty`, they're reconstructed via pallets*itemsPerPallet+looseQty using the
   // CLIENT's idea of itemsPerPallet, which can silently diverge from the server's live-
   // resolved value (see the itemsPerPallet resolution below) and corrupt the box count.
-  const { barcode, qty, pallets = 1, looseQty = 0, stv = null } = req.body as {
+  const { barcode: rawBarcode, qty, pallets = 1, looseQty = 0, stv = null } = req.body as {
     barcode: string; qty?: number; pallets?: number; looseQty?: number; isExtra?: boolean; stv?: string | null;
   };
+  // Trimmed at the boundary — a barcode-gun double-fire or a camera decode can prefix/suffix
+  // stray whitespace, and product_plant_stock keys on the literal string (unique on
+  // barcode+plant), so an untrimmed value doesn't just fail to match a product; it creates a
+  // SEPARATE stock row that silently orphans whatever quantity gets scanned under it.
+  const barcode = typeof rawBarcode === 'string' ? rawBarcode.trim() : rawBarcode;
   if (!barcode) return res.status(400).json({ message: 'barcode is required' });
 
   const client = await pool.connect();
