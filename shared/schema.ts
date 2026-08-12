@@ -1096,6 +1096,14 @@ export type ProformaSlipItemBackup = typeof proformaSlipItemsBackup.$inferSelect
 export const productPlantStock = pgTable("product_plant_stock", {
   id: serial("id").primaryKey(),
   barcode: text("barcode").notNull(),
+  // Stable link to the product row, alongside barcode — a product's barcode can be edited in
+  // Notion and synced in (notionInventorySync.ts matches/updates existing products by
+  // notionPageId, not barcode, and overwrites barcode when it differs), which silently orphans
+  // any stock already recorded under the old barcode from a barcode-only join. product_id
+  // survives that rename since it never changes. Nullable/no FK constraint: older rows written
+  // before this column existed won't have it until backfilled, and a product can be deleted
+  // without needing to touch historical stock rows.
+  productId: integer("product_id"),
   plant: text("plant").notNull(),
   inStock: integer("in_stock").default(0).notNull(),
   extraQty: integer("extra_qty").default(0).notNull(),
@@ -1113,6 +1121,9 @@ export const productPlantStock = pgTable("product_plant_stock", {
 export const stockMovements = pgTable("stock_movements", {
   id: serial("id").primaryKey(),
   barcode: text("barcode").notNull(),
+  // Same reasoning as product_plant_stock.productId above — a stable id alongside barcode so a
+  // later barcode edit in Product Master/Notion can't orphan this row's link to its product.
+  productId: integer("product_id"),
   plant: text("plant").notNull(),
   qty: integer("qty").notNull(),                 // +received / −sent (future)
   extraQty: integer("extra_qty").default(0),     // portion of qty that was extra (over-order)

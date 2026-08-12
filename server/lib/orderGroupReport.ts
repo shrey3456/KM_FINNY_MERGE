@@ -377,29 +377,38 @@ export async function applySessionStock(client: import('pg').PoolClient, session
   );
 
   for (const r of received) {
-    // 1. Global all-plants total (only for barcodes that exist in the catalogue).
-    await client.query(
+    // 1. Global all-plants total (only for barcodes that exist in the catalogue). RETURNING id
+    //    so the same product row's stable id (rather than its barcode, which can be edited in
+    //    Notion later and silently orphan a barcode-only join) is recorded on the stock rows
+    //    below too.
+    const { rows: productRows } = await client.query(
       `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1
-       WHERE LOWER(barcode) = LOWER($2)`,
+       WHERE LOWER(barcode) = LOWER($2)
+       RETURNING id`,
       [r.qty, r.barcode],
     );
+    const productId = productRows[0]?.id ?? null;
 
     // 2. Plant-wise running total (upsert; extras tracked alongside the physical total).
+    // product_id is only ever set from empty/NULL on conflict — an existing row's link to its
+    // product must never be overwritten by a later scan of the same barcode under a different
+    // (possibly stale) product_id.
     await client.query(
-      `INSERT INTO product_plant_stock (barcode, plant, in_stock, extra_qty, updated_at)
-       VALUES ($1, $2, $3, $4, NOW())
+      `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
        ON CONFLICT (barcode, plant) DO UPDATE
          SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
              extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
+             product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
              updated_at = NOW()`,
-      [r.barcode, plant, r.qty, r.extra_qty],
+      [r.barcode, productId, plant, r.qty, r.extra_qty],
     );
 
     // 3. Append-only ledger row (positive = received). Future dispatch inserts negatives.
     await client.query(
-      `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-       VALUES ($1, $2, $3, $4, 'receive', 'Order scan completed', $5, NOW())`,
-      [r.barcode, plant, r.qty, r.extra_qty, sessionId],
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'receive', 'Order scan completed', $6, NOW())`,
+      [r.barcode, productId, plant, r.qty, r.extra_qty, sessionId],
     );
   }
 
@@ -429,25 +438,27 @@ export async function applyLiveScanStock(
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
 
-  await client.query(
-    `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2)`,
+  const { rows: productRows } = await client.query(
+    `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2) RETURNING id`,
     [totalQty, barcode],
   );
+  const productId = productRows[0]?.id ?? null;
 
   await client.query(
-    `INSERT INTO product_plant_stock (barcode, plant, in_stock, extra_qty, updated_at)
-     VALUES ($1, $2, $3, $4, NOW())
+    `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
+     VALUES ($1, $2, $3, $4, $5, NOW())
      ON CONFLICT (barcode, plant) DO UPDATE
        SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
            extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
+           product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
            updated_at = NOW()`,
-    [barcode, plant, totalQty, extraQty],
+    [barcode, productId, plant, totalQty, extraQty],
   );
 
   await client.query(
-    `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-     VALUES ($1, $2, $3, $4, 'receive', 'Order scan', $5, NOW())`,
-    [barcode, plant, totalQty, extraQty, sessionId],
+    `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, 'receive', 'Order scan', $6, NOW())`,
+    [barcode, productId, plant, totalQty, extraQty, sessionId],
   );
 }
 
@@ -467,24 +478,29 @@ export async function reverseLiveScanStock(
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
 
-  await client.query(
-    `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
+  const { rows: productRows } = await client.query(
+    `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2) RETURNING id`,
     [totalQty, barcode],
   );
+  const productId = productRows[0]?.id ?? null;
 
+  // Backfills product_id here too when it's still missing on this row (an older row from
+  // before this column existed, or one whose original insert somehow couldn't resolve it) -
+  // free to do opportunistically since this UPDATE already has the barcode/plant to key on.
   await client.query(
     `UPDATE product_plant_stock
      SET in_stock  = GREATEST(0, in_stock  - $1),
          extra_qty = GREATEST(0, extra_qty - $2),
+         product_id = COALESCE(product_plant_stock.product_id, $5),
          updated_at = NOW()
      WHERE LOWER(barcode) = LOWER($3) AND LOWER(plant) = LOWER($4)`,
-    [totalQty, extraQty, barcode, plant],
+    [totalQty, extraQty, barcode, plant, productId],
   );
 
   await client.query(
-    `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-     VALUES ($1, $2, $3, $4, 'adjust', 'Voided scan', $5, NOW())`,
-    [barcode, plant, -totalQty, -extraQty, sessionId],
+    `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, 'adjust', 'Voided scan', $6, NOW())`,
+    [barcode, productId, plant, -totalQty, -extraQty, sessionId],
   );
 }
 

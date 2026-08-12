@@ -159,6 +159,36 @@ app.use((req, res, next) => {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    // product_plant_stock/stock_movements previously linked to a product ONLY by barcode text.
+    // A product's barcode can be edited later (most commonly via the Notion inventory sync,
+    // which matches/updates existing products by their stable Notion page id, not barcode, and
+    // overwrites barcode whenever Notion's value differs) — once that happens, stock recorded
+    // under the old barcode no longer matches any current product row, and Overall Stock falls
+    // back to showing just the bare barcode instead of the item's name/category/etc. product_id
+    // is a stable link alongside barcode that survives a later barcode edit. Backfilled from
+    // each row's CURRENT barcode below — only fixes rows that haven't drifted yet (nothing
+    // remembers what a barcode used to be), but every write from here on populates product_id
+    // directly, so this can't happen again going forward. WHERE product_id IS NULL makes this
+    // safe to run on every server start — a no-op once everything's backfilled.
+    await pool.query(`
+      ALTER TABLE product_plant_stock
+      ADD COLUMN IF NOT EXISTS product_id INTEGER
+    `);
+    await pool.query(`
+      ALTER TABLE stock_movements
+      ADD COLUMN IF NOT EXISTS product_id INTEGER
+    `);
+    await pool.query(`
+      UPDATE product_plant_stock pps SET product_id = p.id
+      FROM products p
+      WHERE pps.product_id IS NULL AND LOWER(p.barcode) = LOWER(pps.barcode)
+    `);
+    await pool.query(`
+      UPDATE stock_movements sm SET product_id = p.id
+      FROM products p
+      WHERE sm.product_id IS NULL AND LOWER(p.barcode) = LOWER(sm.barcode)
+    `);
+
     console.log('Database migrations completed successfully');
 
     // Auto-sync scan history to the configured Notion inventory DB every 30 minutes. No-ops

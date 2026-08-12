@@ -1911,16 +1911,17 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
               }
 
               if (plant) {
-                await client.query(
+                const { rows: pps } = await client.query(
                   `UPDATE product_plant_stock
                    SET extra_qty = GREATEST(0, extra_qty - $1), updated_at = NOW()
-                   WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
+                   WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
+                   RETURNING product_id`,
                   [take, event.barcode, plant],
                 );
                 await client.query(
-                  `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-                   VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW())`,
-                  [event.barcode, plant, -take, 'Extra reclassified to Regular — backfilled a shortfall left by a voided scan', event.session_id],
+                  `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+                   VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
+                  [event.barcode, pps[0]?.product_id ?? null, plant, -take, 'Extra reclassified to Regular — backfilled a shortfall left by a voided scan', event.session_id],
                 );
               }
 
@@ -1960,16 +1961,17 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       );
       if (plant && event.barcode) {
         const qty = Number(event.total_qty ?? 0);
-        await client.query(
+        const { rows: pps } = await client.query(
           `UPDATE product_plant_stock
            SET extra_qty = extra_qty + $1, updated_at = NOW()
-           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
+           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
+           RETURNING product_id`,
           [qty, event.barcode, plant],
         );
         await client.query(
-          `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-           VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW())`,
-          [event.barcode, plant, qty, 'Un-did a backfill conversion — restored to Extra', event.session_id],
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+           VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
+          [event.barcode, pps[0]?.product_id ?? null, plant, qty, 'Un-did a backfill conversion — restored to Extra', event.session_id],
         );
       }
       await client.query('COMMIT');
@@ -1998,16 +2000,17 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       // (same session_id on both sides is what tells these two apart).
       if (src && plant && Number(src.session_id) === Number(event.session_id)) {
         const qty = Number(event.total_qty ?? 0);
-        await client.query(
+        const { rows: pps } = await client.query(
           `UPDATE product_plant_stock
            SET extra_qty = extra_qty + $1, updated_at = NOW()
-           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
+           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
+           RETURNING product_id`,
           [qty, src.barcode, plant],
         );
         await client.query(
-          `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-           VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW())`,
-          [src.barcode, plant, qty, 'Voided a backfill — qty restored to Extra', event.session_id],
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+           VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
+          [src.barcode, pps[0]?.product_id ?? null, plant, qty, 'Voided a backfill — qty restored to Extra', event.session_id],
         );
       }
     } else if (plant && event.barcode) {

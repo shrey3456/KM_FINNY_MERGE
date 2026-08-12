@@ -835,12 +835,13 @@ router.delete('/order-import/sessions/:id', requireOrderImportWrite, async (req:
         // ledger row claims. Computing the actual delta up front keeps the negative
         // stock_movements row truthful (what was actually reversed, not what was requested).
         const { rows: plantRows } = await client.query(
-          `SELECT in_stock, extra_qty FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
+          `SELECT in_stock, extra_qty, product_id FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
           [r.barcode, session.plant],
         );
         const actualQty = Math.min(r.qty, Number(plantRows[0]?.in_stock ?? 0));
         const actualExtraQty = Math.min(r.extra_qty, Number(plantRows[0]?.extra_qty ?? 0));
         if (actualQty <= 0 && actualExtraQty <= 0) continue;
+        const productId = plantRows[0]?.product_id ?? null;
 
         await client.query(
           `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
@@ -855,9 +856,9 @@ router.delete('/order-import/sessions/:id', requireOrderImportWrite, async (req:
           );
         }
         await client.query(
-          `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-           VALUES ($1, $2, $3, $4, 'adjust', 'Order CSV deleted — rollback', $5, NOW())`,
-          [r.barcode, session.plant, -actualQty, -actualExtraQty, id],
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, 'adjust', 'Order CSV deleted — rollback', $6, NOW())`,
+          [r.barcode, productId, session.plant, -actualQty, -actualExtraQty, id],
         );
         stockReversed.push({ barcode: r.barcode, qty: actualQty, extraQty: actualExtraQty });
       }
