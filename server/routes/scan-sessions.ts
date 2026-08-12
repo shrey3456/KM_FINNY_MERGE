@@ -1159,7 +1159,13 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
     SELECT
       (2000000000 + sm.id) AS id,
       sm.barcode,
-      (SELECT p.name FROM products p WHERE LOWER(p.barcode) = LOWER(sm.barcode) LIMIT 1) AS "itemName",
+      -- Prefer the stable product_id link (set at write time — see its comment in
+      -- shared/schema.ts); a barcode-only lookup here would show nothing once the product's
+      -- barcode is later edited (most commonly via the Notion inventory sync).
+      COALESCE(
+        (SELECT p.name FROM products p WHERE p.id = sm.product_id),
+        (SELECT p.name FROM products p WHERE LOWER(p.barcode) = LOWER(sm.barcode) LIMIT 1)
+      ) AS "itemName",
       NULL::integer AS pallets,
       sm.qty AS "totalQty",
       NULL::integer AS "itemsPerPallet",
@@ -1175,7 +1181,10 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
-      (SELECT p.new_sr FROM products p WHERE LOWER(p.barcode) = LOWER(sm.barcode) LIMIT 1) AS "srNo",
+      COALESCE(
+        (SELECT p.new_sr FROM products p WHERE p.id = sm.product_id),
+        (SELECT p.new_sr FROM products p WHERE LOWER(p.barcode) = LOWER(sm.barcode) LIMIT 1)
+      ) AS "srNo",
       sm.reason AS "orderName",
       NULL::text AS "orderDate",
       sm.plant AS "plant"
@@ -1567,7 +1576,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
                sm.plant,
                SUM(sm.qty)::int       AS in_stock,
                SUM(sm.extra_qty)::int AS extra_qty,
-               MAX(sm.created_at)     AS updated_at
+               MAX(sm.created_at)     AS updated_at,
+               MAX(sm.product_id)     AS product_id
         FROM stock_movements sm
         LEFT JOIN order_import_sessions ois ON ois.id = sm.session_id
         WHERE ${dateConds.join(' AND ')}
@@ -1590,37 +1600,47 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
       const n = params.length;
-      conds.push(`(LOWER(COALESCE(p.name, pps.barcode)) LIKE $${n} OR LOWER(pps.barcode) LIKE $${n} OR LOWER(COALESCE(p.sap_code,'')) LIKE $${n} OR LOWER(COALESCE(p.category,'')) LIKE $${n})`);
+      conds.push(`(LOWER(COALESCE(p.name, p_bc.name, pps.barcode)) LIKE $${n} OR LOWER(pps.barcode) LIKE $${n} OR LOWER(COALESCE(p.sap_code, p_bc.sap_code,'')) LIKE $${n} OR LOWER(COALESCE(p.category, p_bc.category,'')) LIKE $${n})`);
     }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
+    // Joined to products TWO ways: primarily by product_id (a stable link, set at scan time —
+    // see product_id's comment in shared/schema.ts), falling back to a barcode match only when
+    // product_id is missing (an older row from before this column existed, or one whose insert
+    // couldn't resolve a product). Barcode alone used to be the ONLY link, which silently orphans
+    // a row once a product's barcode is edited later (most commonly the Notion inventory sync,
+    // which matches existing products by their stable Notion page id and overwrites barcode
+    // when it differs) — the item would then show as a bare barcode with no name. Same
+    // product_id-then-barcode pattern already used by the Extras report query above.
     const { rows } = await pool.query(`
       SELECT
         pps.barcode,
         pps.plant,
         pps.in_stock                                       AS "inStock",
         pps.extra_qty                                      AS "extraQty",
-        COALESCE(p.name, pps.barcode)                      AS "itemName",
-        p.item_no                                          AS "itemNo",
+        COALESCE(p.name, p_bc.name, pps.barcode)            AS "itemName",
+        COALESCE(p.item_no, p_bc.item_no)                   AS "itemNo",
         CASE
-          WHEN UPPER(pps.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code)
-          WHEN UPPER(pps.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code)
-          ELSE p.sap_code
+          WHEN UPPER(pps.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p_bc.gj_sap, p.sap_code, p_bc.sap_code)
+          WHEN UPPER(pps.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p_bc.mp_sap, p.sap_code, p_bc.sap_code)
+          ELSE COALESCE(p.sap_code, p_bc.sap_code)
         END                                                AS "sapCode",
-        p.hsn_code                                         AS "hsnCode",
-        p.category,
-        p.brand,
+        COALESCE(p.hsn_code, p_bc.hsn_code)                 AS "hsnCode",
+        COALESCE(p.category, p_bc.category)                 AS category,
+        COALESCE(p.brand, p_bc.brand)                       AS brand,
         -- Pallet size is a per-STATE fact (products.gj_plt/mp_plt), resolved via which state
         -- this row's plant is in (plants.state) — not a plant-name guess like the sapCode
         -- CASE above still is (that one's untouched, out of scope for this change).
         COALESCE(
-          CASE WHEN UPPER(pl.state) = 'GJ' THEN NULLIF(p.gj_plt, 0)
-               WHEN UPPER(pl.state) = 'MP' THEN NULLIF(p.mp_plt, 0) END,
-          NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0)
+          CASE WHEN UPPER(pl.state) = 'GJ' THEN NULLIF(COALESCE(p.gj_plt, p_bc.gj_plt), 0)
+               WHEN UPPER(pl.state) = 'MP' THEN NULLIF(COALESCE(p.mp_plt, p_bc.mp_plt), 0) END,
+          NULLIF(COALESCE(p.items_per_pallet, p_bc.items_per_pallet), 0),
+          NULLIF(COALESCE(p.pallets, p_bc.pallets), 0)
         )                                                  AS "itemsPerPallet",
         pps.updated_at                                     AS "lastArrived"
       FROM ${sourceSql} pps
-      LEFT JOIN products p ON LOWER(p.barcode) = LOWER(pps.barcode)
+      LEFT JOIN products p    ON p.id = pps.product_id
+      LEFT JOIN products p_bc ON p.id IS NULL AND LOWER(p_bc.barcode) = LOWER(pps.barcode)
       LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(pps.plant)
       ${where}
       ORDER BY ${
@@ -1935,8 +1955,8 @@ router.post('/reports/exchange-stock', requirePageWrite('overall-stock'), async 
     await client.query('BEGIN');
 
     const [fromProduct, toProduct] = await Promise.all([
-      client.query(`SELECT name FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`, [fromBarcode]),
-      client.query(`SELECT name FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`, [toBarcode]),
+      client.query(`SELECT id, name FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`, [fromBarcode]),
+      client.query(`SELECT id, name FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`, [toBarcode]),
     ]);
     if (!fromProduct.rows[0]) {
       await client.query('ROLLBACK');
@@ -1948,6 +1968,8 @@ router.post('/reports/exchange-stock', requirePageWrite('overall-stock'), async 
     }
     const fromName = fromProduct.rows[0].name as string;
     const toName = toProduct.rows[0].name as string;
+    const fromProductId = fromProduct.rows[0].id as number;
+    const toProductId = toProduct.rows[0].id as number;
 
     const { rows: stockRows } = await client.query(
       `SELECT in_stock FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
@@ -1971,11 +1993,13 @@ router.post('/reports/exchange-stock', requirePageWrite('overall-stock'), async 
 
     // Add to target
     await client.query(
-      `INSERT INTO product_plant_stock (barcode, plant, in_stock, extra_qty, updated_at)
-       VALUES ($1, $2, $3, 0, NOW())
+      `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
+       VALUES ($1, $2, $3, $4, 0, NOW())
        ON CONFLICT (barcode, plant) DO UPDATE
-         SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
-      [toBarcode, plant, addQty],
+         SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock,
+             product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
+             updated_at = NOW()`,
+      [toBarcode, toProductId, plant, addQty],
     );
     await client.query(
       `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2)`,
@@ -1987,14 +2011,14 @@ router.post('/reports/exchange-stock', requirePageWrite('overall-stock'), async 
     const fromReason = `Exchanged ${removeQty} for ${addQty} × ${toName} (${toBarcode})${userNote ? ` — ${userNote}` : ''}`;
     const toReason = `Exchanged ${addQty} from ${removeQty} × ${fromName} (${fromBarcode})${userNote ? ` — ${userNote}` : ''}`;
     await client.query(
-      `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, created_by_code, created_at)
-       VALUES ($1, $2, $3, 0, 'exchange', $4, $5, NOW())`,
-      [fromBarcode, plant, -removeQty, fromReason, userCode],
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, created_at)
+       VALUES ($1, $2, $3, $4, 0, 'exchange', $5, $6, NOW())`,
+      [fromBarcode, fromProductId, plant, -removeQty, fromReason, userCode],
     );
     await client.query(
-      `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, created_by_code, created_at)
-       VALUES ($1, $2, $3, 0, 'exchange', $4, $5, NOW())`,
-      [toBarcode, plant, addQty, toReason, userCode],
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, created_at)
+       VALUES ($1, $2, $3, $4, 0, 'exchange', $5, $6, NOW())`,
+      [toBarcode, toProductId, plant, addQty, toReason, userCode],
     );
 
     await client.query('COMMIT');
