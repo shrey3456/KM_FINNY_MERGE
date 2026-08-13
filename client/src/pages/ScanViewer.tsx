@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { ChevronDown, ChevronLeft, ChevronUp, Eye, ListFilter, Loader2, Pencil, Plus, RotateCw, X } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -64,6 +64,11 @@ const normalize = (v?: string | null) => String(v ?? "").trim().toLowerCase();
 // Scan Order page's own control (see .kiosk-rotate-* in index.css for the mechanics).
 const ROTATIONS = [0, 90, 180, 270] as const;
 type Rotation = (typeof ROTATIONS)[number];
+
+// Pins the kiosk table's totals row to the bottom of its scroll frame. The background has to live
+// on the CELLS: a <tr> background paints at the row's natural position and does not travel with
+// sticky cells, so a bare row tint would be left behind and rows would scroll through in the clear.
+const KIOSK_TOTALS_CELL = "sticky bottom-0 z-[5] bg-[#f5f6f9] shadow-[inset_0_2px_0_0_rgba(0,29,110,0.2)]";
 
 // Filters survive leaving the page and coming back — they live in component state, so navigating
 // away used to drop whatever the table had been narrowed to. sessionStorage rather than
@@ -140,6 +145,19 @@ export default function ScanViewer() {
   const rotateNext = () => setRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
   const isRotated = rotation !== 0;
   const isQuarterTurn = rotation === 90 || rotation === 270;
+  // Natural portrait (window taller than wide) gets the same big, single-column treatment as the
+  // manual Rotate mode, just without the 90° turn — the screen is already upright. Mirrors the
+  // Scan Order page's own isPortrait/bigView split.
+  const [isPortrait, setIsPortrait] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(orientation: portrait)");
+    const onChange = () => setIsPortrait(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const bigView = isRotated || isPortrait;
   const rotateClass = isRotated ? `kiosk-rotate-${rotation}` : "";
   // Radix portals dialogs to <body>, outside the rotated container, so they need the matching turn
   // applied by hand or they open upright while everything behind them is rotated.
@@ -152,6 +170,10 @@ export default function ScanViewer() {
   const tableMaxHeight = isQuarterTurn
     ? "max(420px, calc(100vw - 340px))"
     : "max(420px, calc(100vh - 340px))";
+  // Bounded scroll frame for the kiosk table below, so its header holds at the top and its totals
+  // row at the bottom. Same unit flip as above: a quarter turn puts content-space height along the
+  // viewport's WIDTH, so it caps in vw there and vh when upright or naturally portrait.
+  const kioskTableBoxClass = `overflow-auto kiosk-scroll ${isQuarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`;
   // Rotated, the page's own scroll moves content sideways on the physical screen (a rigid turn
   // swaps which axis is "vertical"), so it gets discrete Up/Down buttons rather than relying on a
   // wheel/swipe whose direction no longer matches what the viewer sees. scrollBy drives the same
@@ -535,6 +557,26 @@ export default function ScanViewer() {
         if (statFilter === "remaining") return left > 0;
         return extra > 0;
       });
+
+  // Totals for the kiosk table's closing row and the card list's closing line. Over the rows
+  // actually on screen, so a search or filter narrows the total along with the list — the same
+  // rule the desktop table's own totals row follows. Pallets sum each row at ITS OWN pack size.
+  const cardTotals = filtered.reduce(
+    (acc, i) => {
+      const { exp, received, left, extra } = rowState(i);
+      const ipp = i.itemsPerPallet ?? 0;
+      acc.exp += exp;
+      acc.received += received;
+      acc.left += left;
+      acc.extra += extra;
+      acc.expPlt += pltQty(exp, ipp);
+      acc.receivedPlt += pltQty(received, ipp);
+      acc.leftPlt += pltQty(left, ipp);
+      acc.extraPlt += pltQty(extra, ipp);
+      return acc;
+    },
+    { exp: 0, received: 0, left: 0, extra: 0, expPlt: 0, receivedPlt: 0, leftPlt: 0, extraPlt: 0 },
+  );
 
   const selectedSession = sessionOptions.find((s) => s.id === sessionId) ?? null;
 
@@ -1134,7 +1176,217 @@ export default function ScanViewer() {
               isStickyHeader
               maxHeight={tableMaxHeight}
               showMobileSwipeHint
+              // Three layouts for three shapes of screen, the same split the Scan Order page uses:
+              // this table on a normal screen, the kiosk table below when rotated (bigger type,
+              // pallets stacked under each qty, read from a distance), and the card list on a
+              // narrow phone. Landscape keeps a real table either way.
+              className={`space-y-0 ${bigView ? "hidden" : "hidden min-[480px]:block landscape:block"}`}
             />
+
+            {/* Kiosk table — the rotated / portrait layout, matching the Scan Order page's own:
+                bigger type and the pallet figure stacked UNDER each quantity rather than in its
+                own column, so a whole row reads at a glance from across the floor. Its header
+                holds at the top of the frame and its totals row at the bottom. */}
+            {bigView && (
+              // Still hidden under 480px in portrait: the card list takes that case, since a
+              // 640px-min table on a phone would mean scrolling sideways to read a row.
+              <div className={`${kioskTableBoxClass} hidden min-[480px]:block landscape:block`}>
+                <table className="min-w-[640px] w-full border-collapse text-base">
+                  <thead>
+                    <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                      <th className="border-r border-gray-300 px-4 py-2.5 font-semibold">Item</th>
+                      {["Exp", "Received", "Left", "Extra"].map((h) => (
+                        <th key={h} className="border-r border-gray-300 px-3 py-2.5 text-right font-semibold">{h}</th>
+                      ))}
+                      <th className="px-4 py-2.5 text-center font-semibold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-10 text-center text-gray-400">
+                          {items.length === 0 ? "No items in this order." : "No items match your filters."}
+                        </td>
+                      </tr>
+                    ) : filtered.map((item) => {
+                      const { exp, received, left, extra } = rowState(item);
+                      const ipp = item.itemsPerPallet ?? 0;
+                      const status = item.status ?? "pending";
+                      const plt = (q: number) => pltQty(q, ipp).toFixed(2);
+                      const isOpen = historyItem?.id === item.id;
+                      return (
+                        <Fragment key={item.id}>
+                          <tr className={`border-b border-gray-200 ${
+                            status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
+                          }`}>
+                            <td className="min-w-[180px] max-w-[320px] border-r border-gray-200 px-4 py-2.5">
+                              {/* Same click-to-open scan history as the desktop table's Item cell. */}
+                              <button
+                                type="button"
+                                disabled={!item.barcode}
+                                onClick={() => setHistoryItem((cur) => (cur?.id === item.id ? null : item))}
+                                className={`whitespace-normal break-words text-left font-medium leading-snug text-gray-900 underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
+                              >
+                                {item.itemName ?? "—"}
+                              </button>
+                              <p className="whitespace-normal break-words font-mono text-gray-400">
+                                {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                              </p>
+                            </td>
+                            <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums text-gray-600">
+                              <span className="block text-lg">{exp || "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(exp)} plt</span>
+                            </td>
+                            <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold text-gray-900">
+                              <span className="block text-lg">{received}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(received)} plt</span>
+                            </td>
+                            <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${left > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
+                              <span className="block text-lg">{left || "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(left)} plt</span>
+                            </td>
+                            <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
+                              <span className="block text-lg">{extra > 0 ? `+${extra}` : "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
+                            </td>
+                            <td className="px-4 py-2.5 text-center">
+                              <span className={`inline-block px-2.5 py-1 text-xs font-semibold ${
+                                status === "complete" ? "bg-emerald-100 text-emerald-700"
+                                : status === "partial" ? "bg-amber-100 text-amber-700"
+                                : "bg-gray-100 text-gray-500"}`}>
+                                {status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+                              </span>
+                            </td>
+                          </tr>
+                          {isOpen && (
+                            <tr>
+                              <td colSpan={6} className="border-b border-gray-200 p-0">{historyPanel}</td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                    {/* Totals close the table, pinned to the bottom of the frame. The background
+                        lives on the CELLS, not the row — a row background paints at its natural
+                        position and doesn't travel with sticky cells. */}
+                    {filtered.length > 0 && (
+                      <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                        <td className={`border-r border-gray-200 px-4 py-2.5 ${KIOSK_TOTALS_CELL}`}>Total</td>
+                        {([
+                          ["exp", "expPlt"], ["received", "receivedPlt"], ["left", "leftPlt"], ["extra", "extraPlt"],
+                        ] as const).map(([qtyKey, pltKey]) => (
+                          <td key={qtyKey} className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums ${KIOSK_TOTALS_CELL}`}>
+                            <span className="block text-lg">{cardTotals[qtyKey].toLocaleString()}</span>
+                            <span className="block text-sm font-extrabold text-gray-500">{cardTotals[pltKey].toFixed(2)} plt</span>
+                          </td>
+                        ))}
+                        <td className={`px-4 py-2.5 ${KIOSK_TOTALS_CELL}`} />
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Mobile card list — the narrow-screen counterpart to the table above, matching the
+                Scan Order page's own treatment: fields stack as labelled lines instead of columns,
+                so nothing depends on sideways scrolling. Hidden once the screen is wide enough or
+                turned to landscape, and never used in the rotated kiosk view (which is always
+                wide enough for the real table). */}
+            {!isRotated && (
+              <div className="min-[480px]:hidden landscape:hidden">
+                {filtered.length === 0 ? (
+                  <p className="py-10 text-center text-sm text-gray-400">
+                    {items.length === 0 ? "No items in this order." : "No items match your filters."}
+                  </p>
+                ) : (
+                  filtered.map((item) => {
+                    const { exp, received, left, extra } = rowState(item);
+                    const ipp = item.itemsPerPallet ?? 0;
+                    const status = item.status ?? "pending";
+                    const expPlt = pltQty(exp, ipp).toFixed(2);
+                    const leftPlt = pltQty(left, ipp).toFixed(2);
+                    return (
+                      <div
+                        key={item.id}
+                        className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                          status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
+                        }`}
+                      >
+                        <span className="mt-0.5 shrink-0">
+                          {status === "complete" ? (
+                            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                            </span>
+                          ) : (
+                            <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
+                              status === "partial" ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                            }`}>
+                              <ScanLine className="h-3.5 w-3.5" />
+                            </span>
+                          )}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          {/* Tapping the name opens the same scan-history drill-down the table
+                              row does, so voiding a mistake is reachable on a phone too. */}
+                          <button
+                            type="button"
+                            disabled={!item.barcode}
+                            onClick={() => setHistoryItem((cur) => (cur?.id === item.id ? null : item))}
+                            className="text-left text-[15px] font-semibold leading-snug text-gray-900 underline decoration-dotted underline-offset-2 decoration-gray-300 disabled:no-underline"
+                          >
+                            {item.itemName ?? "—"}
+                          </button>
+                          <p className="mt-0.5 font-mono text-xs text-gray-400">
+                            {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                          </p>
+                          <p className="mt-1.5 text-sm leading-snug">
+                            <span className="font-bold text-gray-900">{received}</span>
+                            <span className="text-gray-400">/{exp}</span>{" "}
+                            <span className="text-gray-400">({expPlt} plt)</span>
+                            {left > 0 && (
+                              <>
+                                <span className="text-gray-300"> · </span>
+                                <span className="font-semibold text-[#001d6e]">{left} left</span>{" "}
+                                <span className="text-purple-500">(≈{leftPlt} plt)</span>
+                              </>
+                            )}
+                            {extra > 0 && (
+                              <>
+                                <span className="text-gray-300"> · </span>
+                                <span className="font-semibold text-amber-600">+{extra} extra</span>
+                              </>
+                            )}
+                          </p>
+                          {historyItem?.id === item.id && <div className="mt-2">{historyPanel}</div>}
+                        </div>
+                        <span className="shrink-0">
+                          <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                            status === "complete" ? "bg-emerald-100 text-emerald-700"
+                            : status === "partial" ? "bg-amber-100 text-amber-700"
+                            : "bg-gray-100 text-gray-500"}`}>
+                            {status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+                          </span>
+                        </span>
+                      </div>
+                    );
+                  })
+                )}
+                {/* The card list gets the same closing totals as the table — the numbers
+                    shouldn't disappear just because the screen is narrow. */}
+                {filtered.length > 0 && (
+                  <div className="flex items-center justify-between gap-3 border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] px-4 py-3 text-sm font-bold text-gray-900">
+                    <span>Total</span>
+                    <span className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
+                      <span>{cardTotals.received}/{cardTotals.exp}</span>
+                      <span className="text-gray-500">({cardTotals.expPlt.toFixed(2)} plt)</span>
+                      {cardTotals.left > 0 && <span className="text-[#001d6e]">{cardTotals.left} left</span>}
+                      {cardTotals.extra > 0 && <span className="text-amber-600">+{cardTotals.extra} extra</span>}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </TableCard>
           </>
         )}
