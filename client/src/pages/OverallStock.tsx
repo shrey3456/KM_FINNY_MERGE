@@ -299,6 +299,23 @@ export default function OverallStock() {
     () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
   );
 
+  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
+  // a rearranged table is working context for this sitting, not a permanent preference. An empty
+  // array means "declared order", which is also what Reset order restores.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("overallStock:columnOrder");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("overallStock:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
+
+
   // Arrival-history drill-down — clicking a row opens a dialog showing every dated entry from
   // the stock_movements ledger for that exact (barcode, plant): when it arrived and how much.
   const [detailRow, setDetailRow] = useState<PlantStockRow | null>(null);
@@ -1503,6 +1520,8 @@ export default function OverallStock() {
               )}
 
               <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
                 columns={stockColumns}
                 visibleColumnIds={visibleColumnIds}
                 onToggleColumn={toggleColumn}
@@ -1573,6 +1592,8 @@ export default function OverallStock() {
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}
+            columnOrder={columnOrder}
+            onColumnOrderChange={setColumnOrder}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
             headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"

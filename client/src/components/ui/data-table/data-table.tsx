@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -122,6 +122,17 @@ interface DataTableProps<TData> {
   enableColumnVisibility?: boolean;
   /** Controlled visible-column ids. When set, the consumer owns the toggle UI (e.g. render `DataTableColumnToggle` elsewhere) and DataTable won't render its own button. */
   columnVisibility?: Set<string>;
+  /**
+   * Column ids in the order they should appear. Partial lists are fine — anything not named keeps
+   * its declared position, so adding a column to the page doesn't require touching a saved order.
+   * Pair with DataTableColumnToggle's own reorder controls, which produce this array.
+   */
+  columnOrder?: string[];
+  /**
+   * Supply this to let a column be dragged by its header onto another to move it there. Receives
+   * the full id list of every column, hidden ones included.
+   */
+  onColumnOrderChange?: (ids: string[]) => void;
   onColumnVisibilityChange?: (ids: Set<string>) => void;
 
   onRowClick?: (row: TData) => void;
@@ -204,6 +215,8 @@ export function DataTable<TData>({
   pageSizeOptions = [10, 25, 50, 100],
   enableColumnVisibility = false,
   columnVisibility,
+  columnOrder,
+  onColumnOrderChange,
   onColumnVisibilityChange,
   onRowClick,
   isRowClickable,
@@ -239,6 +252,8 @@ export function DataTable<TData>({
     () => new Set(columns.filter((c) => !c.isHiddenByDefault).map((c) => c.id)),
   );
   const [colWidths, setColWidths] = useState<Record<string, number>>({});
+  // Set while a resize drag is in flight — see startResize and the header's onDragStart.
+  const resizingRef = useRef(false);
 
   const search = searchValue ?? internalSearch;
   const setSearch = (value: string) => (onSearchChange ? onSearchChange(value) : setInternalSearch(value));
@@ -258,7 +273,52 @@ export function DataTable<TData>({
         ...columns.filter((c) => c.hideable === false).map((c) => c.id),
       ])
     : new Set(columns.map((c) => c.id));
-  const visibleColumns = columns.filter((c) => visibleColumnIds.has(c.id));
+
+  // Caller-chosen column order, when one is supplied. Applied as a SORT over the declared columns
+  // rather than by rebuilding the list from the id array, so a column missing from the order (a
+  // newly added one, or a stale saved order from before it existed) still renders — it just falls
+  // back to its declared position instead of vanishing.
+  const orderIndex = new Map((columnOrder ?? []).map((id, i) => [id, i]));
+  const orderedColumns = columnOrder?.length
+    ? columns
+        .map((c, declaredIndex) => ({ c, declaredIndex }))
+        .sort((a, b) => {
+          const ai = orderIndex.get(a.c.id) ?? Infinity;
+          const bi = orderIndex.get(b.c.id) ?? Infinity;
+          return ai === bi ? a.declaredIndex - b.declaredIndex : ai - bi;
+        })
+        .map(({ c }) => c)
+    : columns;
+  const visibleColumns = orderedColumns.filter((c) => visibleColumnIds.has(c.id));
+
+  // ── Column reordering by dragging a header onto another ────────────────────
+  const canReorderColumns = !!onColumnOrderChange;
+  const [dragColId, setDragColId] = useState<string | null>(null);
+  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
+
+  /** True when `from` currently sits after `to`, i.e. dropping would insert it BEFORE `to`. */
+  const dropsBefore = (from: string | null, to: string) => {
+    if (!from) return false;
+    const ids = orderedColumns.map((c) => c.id);
+    return ids.indexOf(from) > ids.indexOf(to);
+  };
+
+  /**
+   * Move one column to another's position, emitting the full id list of EVERY column — hidden
+   * ones included. Reordering only what's visible would let a hidden column silently jump when it
+   * was shown again, since it has no recorded place of its own.
+   */
+  const moveColumn = (fromId: string, toId: string) => {
+    if (!onColumnOrderChange || fromId === toId) return;
+    const ids = orderedColumns.map((c) => c.id);
+    const from = ids.indexOf(fromId);
+    const to = ids.indexOf(toId);
+    if (from < 0 || to < 0) return;
+    const next = [...ids];
+    next.splice(from, 1);
+    next.splice(to, 0, fromId);
+    onColumnOrderChange(next);
+  };
 
   const rowsWithIds = useMemo(
     () => data.map((row, index) => ({ row, id: getRowId(row, index) })),
@@ -385,6 +445,10 @@ export function DataTable<TData>({
   const startResize = (e: React.MouseEvent, col: DataTableColumn<TData>) => {
     e.preventDefault();
     e.stopPropagation();
+    // The header is also draggable (column reordering). Both start from a mousedown inside the
+    // same <th>, so this flag tells the drag handler to stand down — grabbing the resize grip
+    // should widen the column, never pick it up and move it.
+    resizingRef.current = true;
     const startX = e.clientX;
     const startWidth = getColWidth(col);
     const minWidth = col.minWidth ?? 60;
@@ -394,6 +458,7 @@ export function DataTable<TData>({
       setColWidths((prev) => ({ ...prev, [col.id]: Math.max(minWidth, startWidth + delta) }));
     };
     const onUp = () => {
+      resizingRef.current = false;
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
     };
@@ -557,11 +622,46 @@ export function DataTable<TData>({
                     return (
                       <th
                         key={col.id}
+                        // Drag a header onto another to move the column there. Only enabled when
+                        // the caller supplies onColumnOrderChange; resizing takes precedence, so
+                        // a drag that began on the resize grip is refused in onDragStart below.
+                        draggable={canReorderColumns}
+                        onDragStart={(e) => {
+                          if (resizingRef.current) { e.preventDefault(); return; }
+                          setDragColId(col.id);
+                          e.dataTransfer.effectAllowed = "move";
+                          // Firefox won't start a drag without data on the transfer.
+                          e.dataTransfer.setData("text/plain", col.id);
+                        }}
+                        onDragOver={(e) => {
+                          if (!canReorderColumns || !dragColId || dragColId === col.id) return;
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "move";
+                          if (dragOverColId !== col.id) setDragOverColId(col.id);
+                        }}
+                        onDragLeave={() => { if (dragOverColId === col.id) setDragOverColId(null); }}
+                        onDrop={(e) => {
+                          if (!canReorderColumns || !dragColId) return;
+                          e.preventDefault();
+                          moveColumn(dragColId, col.id);
+                          setDragColId(null);
+                          setDragOverColId(null);
+                        }}
+                        onDragEnd={() => { setDragColId(null); setDragOverColId(null); }}
                         className={cn(
                           "relative whitespace-nowrap border-b border-r bg-background px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:px-2.5 sm:py-2.5 sm:text-[11px]",
                           isStickyHeader && "sticky top-0 z-10 bg-background",
                           isPinned && "left-0 z-20 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]",
                           col.sortable && "cursor-pointer select-none",
+                          canReorderColumns && "cursor-grab active:cursor-grabbing",
+                          // The column being carried fades; the one under the cursor shows a bar
+                          // on the edge it would land against, so the drop position is never a
+                          // guess. inset shadows, since a border would shift the column's width.
+                          dragColId === col.id && "opacity-40",
+                          dragOverColId === col.id &&
+                            (dropsBefore(dragColId, col.id)
+                              ? "shadow-[inset_3px_0_0_0_#facc15]"
+                              : "shadow-[inset_-3px_0_0_0_#facc15]"),
                           col.align === "right" && "text-right",
                           col.align === "center" && "text-center",
                           col.headerClassName,

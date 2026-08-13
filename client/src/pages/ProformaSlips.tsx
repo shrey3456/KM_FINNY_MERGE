@@ -246,6 +246,23 @@ export default function ProformaSlips() {
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'actions']),
   );
+
+  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
+  // a rearranged table is working context for this sitting, not a permanent preference. An empty
+  // array means "declared order", which is also what Reset order restores.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("proformaSlips:columnOrder");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("proformaSlips:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
+
   
   // Function to handle sorting by column
   const handleSort = (column: string) => {
@@ -2178,6 +2195,8 @@ export default function ProformaSlips() {
             )}
 
             <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
               columns={slipColumns}
               visibleColumnIds={visibleColumnIds}
               onToggleColumn={(id) =>
@@ -2241,6 +2260,8 @@ export default function ProformaSlips() {
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}
+            columnOrder={columnOrder}
+            onColumnOrderChange={setColumnOrder}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
             enableZebraStripes

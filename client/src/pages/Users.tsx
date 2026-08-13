@@ -234,6 +234,23 @@ const Users = () => {
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(['avatar', 'name', 'username', 'designation', 'role', 'plants', 'actions']),
   );
+
+  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
+  // a rearranged table is working context for this sitting, not a permanent preference. An empty
+  // array means "declared order", which is also what Reset order restores.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("users:columnOrder");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("users:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
+
   const { toast } = useToast();
 
   // Fetch users
@@ -835,6 +852,8 @@ const Users = () => {
             {/* Filters */}
             <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
               <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
                 columns={userColumns}
                 visibleColumnIds={visibleColumnIds}
                 onToggleColumn={(id) =>
@@ -884,6 +903,8 @@ const Users = () => {
               enableColumnResizing
               enableColumnVisibility
               columnVisibility={visibleColumnIds}
+            columnOrder={columnOrder}
+            onColumnOrderChange={setColumnOrder}
               onColumnVisibilityChange={setVisibleColumnIds}
               enableZebraStripes
               showMobileSwipeHint

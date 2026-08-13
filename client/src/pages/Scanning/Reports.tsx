@@ -423,6 +423,23 @@ const Reports = () => {
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(HISTORY_OPTIONAL_COLUMNS),
   );
+
+  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
+  // a rearranged table is working context for this sitting, not a permanent preference. An empty
+  // array means "declared order", which is also what Reset order restores.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("scanHistory:columnOrder");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("scanHistory:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
+
   const toggleColumn = (key: string) =>
     setVisibleColumnIds((prev) => {
       const next = new Set(prev);
@@ -1177,6 +1194,8 @@ const Reports = () => {
               )}
 
               <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
                 columns={historyColumns}
                 visibleColumnIds={visibleColumnIds}
                 onToggleColumn={toggleColumn}
@@ -1264,6 +1283,8 @@ const Reports = () => {
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}
+            columnOrder={columnOrder}
+            onColumnOrderChange={setColumnOrder}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
             // No isStickyHeader/maxHeight here, matching develop: a 20-row page is short enough to

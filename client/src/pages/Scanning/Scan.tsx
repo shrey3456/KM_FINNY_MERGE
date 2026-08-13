@@ -165,6 +165,26 @@ const pltCell = (qty: number, ipp: number, className: string) =>
     ? <span className={className}>{(qty / ipp).toFixed(2)}</span>
     : <span className="text-gray-300">0.00</span>;
 
+/**
+ * Column order for one table, remembered for the browser session — drag a column's header onto
+ * another to move it. Session-scoped, like the filters: a rearranged table is working context for
+ * this sitting, not a permanent preference. An empty array means "declared order".
+ */
+function useColumnOrder(storageKey: string) {
+  const [order, setOrder] = useState<string[]>(() => {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(storageKey) ?? "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem(storageKey, JSON.stringify(order)); } catch { /* storage unavailable */ }
+  }, [storageKey, order]);
+  return [order, setOrder] as const;
+}
+
 // Kiosk rotation steps — a full turn, so a screen mounted at any angle can be matched. The button
 // walks these in order and wraps back to 0.
 const ROTATIONS = [0, 90, 180, 270] as const;
@@ -1823,6 +1843,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // an order-scan session is active — without this, a refresh always flashes the
   // dashboard first (since the notification query hasn't resolved yet) and then jumps
   // to the scan view once it loads a moment later.
+  // Drag-to-reorder for each of this page's three tables, each remembering its own arrangement.
+  // Declared ABOVE the early return below: every hook has to run on every render, and this
+  // component bails out to a spinner while the notification query resolves.
+  const [osColumnOrder, setOsColumnOrder] = useColumnOrder("scanOrder:osColumnOrder");
+  const [mvColumnOrder, setMvColumnOrder] = useColumnOrder("scanOrder:mvColumnOrder");
+  const [csvColumnOrder, setCsvColumnOrder] = useColumnOrder("scanOrder:csvColumnOrder");
+
   if (orderScanNotifLoading) {
     return (
       <div className="flex-1 flex items-center justify-center bg-gray-50">
@@ -4443,6 +4470,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     sortMode="client"
                     enableTotalsRow
                     totalsLabelColumnId="itemName"
+                    columnOrder={osColumnOrder}
+                    onColumnOrderChange={setOsColumnOrder}
                     enableColumnResizing
                     isStickyHeader
                     maxHeight="max(420px, calc(100vh - 340px))"
@@ -4535,6 +4564,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           sortMode="client"
                           enableTotalsRow
                           totalsLabelColumnId="itemName"
+                          columnOrder={mvColumnOrder}
+                          onColumnOrderChange={setMvColumnOrder}
                           enableColumnVisibility
                           columnVisibility={mvVisibleColumnIds}
                           enableColumnResizing
@@ -4653,6 +4684,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               // totals row, so this table matches Scan/Master View/Reports/Overall
                               // Stock — pinned under the header AND repeated at the end.
                               enableTotalsRow
+                              columnOrder={csvColumnOrder}
+                              onColumnOrderChange={setCsvColumnOrder}
                               enableColumnResizing
                               isStickyHeader
                               maxHeight="max(420px, calc(100vh - 340px))"

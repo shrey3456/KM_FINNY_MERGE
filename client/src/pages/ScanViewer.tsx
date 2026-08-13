@@ -420,6 +420,20 @@ export default function ScanViewer() {
   const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
     () => readSavedViewerFilters().conditions ?? {},
   );
+
+  // Drag a column's header onto another to move it. Session-scoped, like the filters — a
+  // rearranged table is working context for this sitting, not a permanent preference.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem("scanViewer:columnOrder") ?? "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("scanViewer:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
   const setColumnCondition = (columnId: string, condition: FilterCondition) =>
     setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
   const clearColumnCondition = (columnId: string) =>
@@ -1172,6 +1186,8 @@ export default function ScanViewer() {
               // table, and a bounded scroll box so the header stays put while the rows move.
               enableTotalsRow
               totalsLabelColumnId="item"
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
               enableColumnResizing
               isStickyHeader
               maxHeight={tableMaxHeight}
