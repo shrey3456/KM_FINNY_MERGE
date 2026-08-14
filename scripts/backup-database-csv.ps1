@@ -8,7 +8,12 @@
   Three Notion-related tables are excluded by default:
     - products                       - the product catalog mirrored from Notion
                                         (server/services/notionInventorySync.ts)
-    - notion_inventory_sync_config   - which Notion database that sync points at
+    - notion_inventory_sync_config   - which Notion database that sync points atDELETE FROM product_plant_stock WHERE id = 9734;
+    
+    -- Verify: one row, in_stock = 10608, extra_qty = 192
+    SELECT id, barcode, plant, in_stock, extra_qty, product_id, updated_at
+    FROM product_plant_stock
+    
     - scan_history_notion_config     - which Notion database Scan History's own upload points at
   All three are re-creatable (re-run the sync / re-enter the config) rather than needing a
   restore, and none of them are Drizzle-managed tables (see the note on

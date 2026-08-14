@@ -111,6 +111,7 @@ type MvMergedItem = {
 type ImpSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
   importedByName: string | null; createdAt: string | null; scanStatus: string;
+  orderDate: string | null; totalQty: number; totalPallets: number;
 };
 type ImpItem = {
   id: number; barcode: string | null; itemName: string | null;
@@ -127,6 +128,19 @@ function scanFmtIST(dt: string | null | undefined): string {
   const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
   if (isNaN(d.getTime())) return "—";
   return d.toLocaleString("en-IN", { timeZone: "UTC" });
+}
+
+// Order date — a bare "YYYY-MM-DD" (order_import_sessions.orderDate is a text column, not a
+// timestamp), so parsed by hand from its Y/M/D parts rather than through `new Date(string)`,
+// which is timezone-sensitive for date-only strings and would risk shifting it a day off.
+function scanFmtOrderDate(d: string | null | undefined): string {
+  if (!d) return "—";
+  const s = String(d).slice(0, 10);
+  const [y, m, day] = s.split("-").map(Number);
+  if (!y || !m || !day) return s;
+  const dt = new Date(y, m - 1, day);
+  if (isNaN(dt.getTime())) return s;
+  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
 // Upload date for the session header — date only, no clock, since it identifies which day's
@@ -3875,19 +3889,25 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
                     <div key={sess.id} className="border bg-white shadow-sm overflow-hidden">
-                      <button className="flex w-full items-center justify-between px-3 py-2.5 hover:bg-gray-50 transition-colors"
+                      <button className="flex w-full items-start justify-between gap-2 px-3 py-2.5 hover:bg-gray-50 transition-colors"
                         onClick={() => { if (csvExpId === sess.id) { setCsvExpId(null); setCsvSearch(""); } else { setCsvExpId(sess.id); setCsvSearch(""); } }}>
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <Layers className="h-4 w-4 text-gray-400 shrink-0" />
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <Layers className="h-4 w-4 text-gray-400 shrink-0 mt-0.5" />
                           <div className="text-left min-w-0">
-                            <p className="text-sm font-medium text-gray-900 truncate">{stripCsvExt(sess.csvFileName)}</p>
-                            <p className="text-[11px] text-gray-400">
-                              {sess.plant && <span className="mr-1.5">Plant: {sess.plant}</span>}
-                              {sess.rowCount} rows · {scanFmtIST(sess.createdAt)}
-                            </p>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <p className="text-sm font-semibold text-gray-900 truncate">{stripCsvExt(sess.csvFileName)}</p>
+                              {sess.plant && <PlantBadge plant={sess.plant} />}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-gray-400">
+                              <span className="font-semibold text-gray-600">{sess.rowCount} rows</span>
+                              <span className="font-semibold text-gray-600">{sess.totalQty} qty · {sess.totalPallets.toFixed(2)} plt</span>
+                              <span>By {sess.importedByName ?? "Unknown"}</span>
+                              <span>Order date: {scanFmtOrderDate(sess.orderDate)}</span>
+                              <span>Uploaded: {scanFmtIST(sess.createdAt)}</span>
+                            </div>
                           </div>
                         </div>
-                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
+                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 mt-0.5 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
                       </button>
                       {csvExpId === sess.id && (
                         <div className="border-t">
@@ -4607,19 +4627,25 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
                     <div key={sess.id} className="border bg-white shadow-sm overflow-hidden">
-                      <button className="flex w-full items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
+                      <button className="flex w-full items-start justify-between gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
                         onClick={() => { if (csvExpId === sess.id) { setCsvExpId(null); setCsvSearch(""); } else { setCsvExpId(sess.id); setCsvSearch(""); } }}>
-                        <div className="flex items-center gap-3 min-w-0">
-                          <Layers className="h-4 w-4 text-gray-400 shrink-0" />
+                        <div className="flex items-start gap-3 min-w-0">
+                          <Layers className="h-4 w-4 text-gray-400 shrink-0 mt-0.5" />
                           <div className="text-left min-w-0">
-                            <p className="text-sm font-medium text-gray-900 truncate">{stripCsvExt(sess.csvFileName)}</p>
-                            <p className="text-xs text-gray-400">
-                              {sess.plant && <span className="mr-2">Plant: {sess.plant}</span>}
-                              {sess.rowCount} rows · {sess.importedByName ?? "Unknown"} · {scanFmtIST(sess.createdAt)}
-                            </p>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-semibold text-gray-900 truncate">{stripCsvExt(sess.csvFileName)}</p>
+                              {sess.plant && <PlantBadge plant={sess.plant} />}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-400">
+                              <span className="font-semibold text-gray-600">{sess.rowCount} rows</span>
+                              <span className="font-semibold text-gray-600">{sess.totalQty} qty · {sess.totalPallets.toFixed(2)} plt</span>
+                              <span>By {sess.importedByName ?? "Unknown"}</span>
+                              <span>Order date: {scanFmtOrderDate(sess.orderDate)}</span>
+                              <span>Uploaded: {scanFmtIST(sess.createdAt)}</span>
+                            </div>
                           </div>
                         </div>
-                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
+                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 mt-0.5 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
                       </button>
                       {csvExpId === sess.id && (
                         <div className="border-t p-3">

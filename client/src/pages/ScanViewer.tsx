@@ -884,7 +884,7 @@ export default function ScanViewer() {
           <ScrollNudgeButtons targetRef={pageScrollRef} />
         </div>
       )}
-      <div className="mx-auto max-w-6xl space-y-4">
+      <div className="mx-auto w-full max-w-[1800px] space-y-4">
         <PageHeader icon={Eye} title="Scan Viewer" description="Look up any order's scan progress by plant and date — view-only, with the ability to void a mistaken scan if you're allowed to." />
 
         {/* Plant switcher — unboxed, same exact markup/style as the Scan page's own "Active:"

@@ -109,11 +109,23 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
       : null;
 
     const forcedPlants = (req as any).importViewPlants as string[] | null;
-    const plantCondition = forcedPlants
-      ? inArray(sql`LOWER(${orderImportSessions.plant})`, forcedPlants)
-      : req.query.plant
-      ? sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`
-      : null;
+    // Same fix as /order-import/master-view: a restricted user's forcedPlants set covers
+    // every plant they're assigned to, but when they're viewing one specific plant (Part
+    // Order sends its own plant via csvEffPlant) the list must narrow to just that plant —
+    // otherwise a Baroda-only view for a user assigned to Baroda + others silently included
+    // every one of those other plants' CSVs too.
+    let plantCondition: any = null;
+    if (forcedPlants && req.query.plant) {
+      const requestedPlant = String(req.query.plant).toLowerCase();
+      if (!forcedPlants.includes(requestedPlant)) {
+        return res.json({ sessions: [], total: 0, page, pageSize, totalPages: 1 });
+      }
+      plantCondition = sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`;
+    } else if (forcedPlants) {
+      plantCondition = inArray(sql`LOWER(${orderImportSessions.plant})`, forcedPlants);
+    } else if (req.query.plant) {
+      plantCondition = sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`;
+    }
 
     // scanStatus only ever takes one of these three values (see shared/schema.ts) — validated
     // against that fixed set rather than passed through raw.
@@ -979,7 +991,18 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         eq(orderImportSessions.isDeleted, false),
         eq(orderImportSessions.orderDate, dateStr),
       ];
-      if (forcedPlants !== null) {
+      if (forcedPlants !== null && req.query.plant) {
+        // Narrow to the one plant actually being viewed (mirrors the admin branch below) —
+        // still validated against forcedPlants so a restricted user can't request a plant
+        // outside their assigned set. Without this check, a user assigned to more than one
+        // plant always got every one of their plants' sessions merged together for the date,
+        // regardless of which plant they'd switched to in the UI (see Scan.tsx's mvPlant).
+        const requestedPlant = String(req.query.plant).toLowerCase();
+        if (!forcedPlants.includes(requestedPlant)) {
+          return res.json({ date: dateStr, totalFiles: 0, totalRows: 0, files: [] });
+        }
+        conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`);
+      } else if (forcedPlants !== null) {
         conditions.push(inArray(sql`LOWER(${orderImportSessions.plant})`, forcedPlants as string[]));
       } else if (req.query.plant) {
         conditions.push(sql`LOWER(${orderImportSessions.plant}) = LOWER(${String(req.query.plant)})`);
