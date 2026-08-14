@@ -65,6 +65,14 @@ type PlantStockRow = {
   // summing every slip ever raised. null when Sale Qty isn't populated at all.
   saleQty?: number | null;
   salePallets?: number | null;
+  // Only populated when a single explicit date is selected — the running physical balance as
+  // of the START (openingStock) and END (closingStock) of that date. closingStock = openingStock
+  // + Purchase (inStock + extraQty, which in dateMode already mean "received on this date") −
+  // saleQty, and becomes tomorrow's openingStock automatically. null outside single-date mode.
+  openingStock?: number | null;
+  openingPallets?: number | null;
+  closingStock?: number | null;
+  closingPallets?: number | null;
 };
 
 type PlantStockResponse = {
@@ -113,15 +121,13 @@ const ALL_COLUMNS = [
   { key: "sapCode",     label: "SAP Code" },
   { key: "category",    label: "Category" },
   { key: "brand",       label: "Brand" },
-  { key: "totalStock",  label: "Total Stock (Extra + Received − Sale)" },
-  { key: "expected",    label: "Expected Qty" },
-  { key: "expectedPallets", label: "Expected Pallets" },
-  { key: "stock",       label: "Received Qty" },
-  { key: "pallets",     label: "Received Pallet" },
-  { key: "sale",        label: "Sale Qty" },
-  { key: "salePallets", label: "Sale Pallets" },
+  { key: "expected",    label: "Expected" },
+  { key: "opening",     label: "Previous (Opening) — date filter only" },
+  { key: "purchase",    label: "Purchase (includes Extra)" },
   { key: "extra",       label: "Extra" },
-  { key: "extraPallets", label: "Extra Pallets" },
+  { key: "sale",        label: "Sale" },
+  { key: "closing",     label: "Closing — date filter only" },
+  { key: "remain",      label: "Remain (Purchase − Sale) — no-date view only" },
   { key: "lastUpdated", label: "Last Updated" },
 ] as const;
 
@@ -187,13 +193,12 @@ function downloadPdf(
   doc.setTextColor(0, 0, 0);
 
   const [header, ...body] = rows;
-  // Right-align every numeric/quantity column — matches the header order built by exportRows:
-  // #, Item, Barcode, SAP Code, HSN Code, Category, Brand, Plant, Total Stock, Expected Qty,
-  // Expected Pallets, Received Qty, Received Pallet, Sale Qty, Sale Pallets, Extra, Extra
-  // Pallets, Last Updated.
-  const rightAlignCols = [0, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-  const columnStyles: Record<number, { halign: "right" }> = {};
-  rightAlignCols.forEach((i) => { columnStyles[i] = { halign: "right" }; });
+  // Right-align every numeric/quantity column — matches exportRows' header order: #, Item,
+  // Barcode, SAP Code, HSN Code, Category, Brand, Plant (indices 0-7, "#" excepted), then every
+  // quantity column from index 8 onward (Expected/Opening/Purchase/Sale/Closing-or-Remain/etc.,
+  // whose exact count varies with dateMode) through to the end.
+  const columnStyles: Record<number, { halign: "right" }> = { 0: { halign: "right" } };
+  for (let i = 8; i < header.length; i++) columnStyles[i] = { halign: "right" };
 
   autoTable(doc, {
     head: [header as string[]],
@@ -385,8 +390,13 @@ export default function OverallStock() {
     { value: "month", label: "This month" },
   ];
 
+  // Extra tab — server-side filter (pps.extra_qty > 0, see /reports/plant-stock) rather than
+  // filtering the already-loaded rows client-side, so it stays correct against whatever date
+  // scoping is active too (extraQty means "extra received in the window" in dateMode).
+  const [extrasOnly, setExtrasOnly] = useState(false);
+
   // The plant chosen via a chip, if any — sent to the server to scope the query, same as the
-  // date preset below. Extras is a purely client-side "+ Filter" dimension (see filterFields).
+  // date preset below.
   const activePlant = activeFilters.find((f) => f.field === "plant")?.value || "";
   // The state tab chosen, if any — a separate chip from "plant" so a state can be viewed
   // combined (every plant in it at once) without narrowing to one specific plant.
@@ -438,9 +448,10 @@ export default function OverallStock() {
     state: (!activePlant && activeState) || undefined,
     from: fromDate || undefined,
     to: toDate || undefined,
+    extrasOnly: extrasOnly ? "true" : undefined,
   });
   const { data: stockData } = useQuery<PlantStockResponse>({
-    queryKey: ["/api/scan-sessions/reports/plant-stock", activePlant, activeState, fromDate, toDate],
+    queryKey: ["/api/scan-sessions/reports/plant-stock", activePlant, activeState, fromDate, toDate, extrasOnly],
     queryFn: () => apiRequest("GET", stockUrl, undefined, false, true),
     refetchInterval: 30000,
   });
@@ -536,15 +547,13 @@ export default function OverallStock() {
       { id: "sapCode", label: "SAP Code", filterType: "text", options: textOptions((r) => r.sapCode), accessor: (r) => r.sapCode },
       { id: "category", label: "Category", filterType: "enum", options: textOptions((r) => r.category), accessor: (r) => r.category },
       { id: "brand", label: "Brand", filterType: "enum", options: textOptions((r) => r.brand), accessor: (r) => r.brand },
-      { id: "totalStock", label: "Total Stock", filterType: "number", options: numberOptions((r) => totalStockOf(r)), accessor: (r) => totalStockOf(r) },
-      { id: "expected", label: "Expected Qty", filterType: "number", options: numberOptions((r) => r.expectedQty), accessor: (r) => r.expectedQty ?? null },
-      { id: "expectedPallets", label: "Expected Pallets", filterType: "number", options: numberOptions((r) => r.expectedPallets, 2), accessor: (r) => r.expectedPallets ?? null },
-      { id: "stock", label: "Received Qty", filterType: "number", options: numberOptions((r) => r.inStock), accessor: (r) => r.inStock },
-      { id: "pallets", label: "Received Pallet", filterType: "number", options: numberOptions((r) => r.pallets, 2), accessor: (r) => r.pallets },
-      { id: "sale", label: "Sale Qty", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
-      { id: "salePallets", label: "Sale Pallets", filterType: "number", options: numberOptions((r) => r.salePallets, 2), accessor: (r) => r.salePallets ?? null },
+      { id: "expected", label: "Expected", filterType: "number", options: numberOptions((r) => r.expectedQty), accessor: (r) => r.expectedQty ?? null },
+      { id: "opening", label: "Previous (Opening)", filterType: "number", options: numberOptions((r) => r.openingStock), accessor: (r) => r.openingStock ?? null },
+      { id: "purchase", label: "Purchase", filterType: "number", options: numberOptions((r) => r.inStock + r.extraQty), accessor: (r) => r.inStock + r.extraQty },
       { id: "extra", label: "Extra", filterType: "number", options: numberOptions((r) => r.extraQty), accessor: (r) => r.extraQty },
-      { id: "extraPallets", label: "Extra Pallets", filterType: "number", options: numberOptions((r) => r.extraPallets, 2), accessor: (r) => r.extraPallets },
+      { id: "sale", label: "Sale", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
+      { id: "closing", label: "Closing", filterType: "number", options: numberOptions((r) => r.closingStock), accessor: (r) => r.closingStock ?? null },
+      { id: "remain", label: "Remain", filterType: "number", options: numberOptions((r) => totalStockOf(r)), accessor: (r) => totalStockOf(r) },
       { id: "lastUpdated", label: "Last Updated", filterType: "date", options: dateOptions((r) => r.lastArrived), accessor: (r) => r.lastArrived },
     ];
   }, [rows]);
@@ -630,6 +639,16 @@ export default function OverallStock() {
   const totalPallets = filtered.reduce((s, r) => s + (r.pallets ?? 0), 0);
   const totalExtra = filtered.reduce((s, r) => s + r.extraQty, 0);
   const totalExtraPallets = filtered.reduce((s, r) => s + (r.extraPallets ?? 0), 0);
+  // Purchase = Received + Extra combined (extra already included, not added on top) — same
+  // rule as the Purchase table column. Remain/Opening/Closing mirror the Remain/Opening/Closing
+  // table columns, summed over the filtered set.
+  const totalPurchase = totalStock + totalExtra;
+  const totalPurchasePallets = totalPallets + totalExtraPallets;
+  const totalRemain = filtered.reduce((s, r) => s + (totalStockOf(r) ?? 0), 0);
+  const totalOpening = filtered.reduce((s, r) => s + (r.openingStock ?? 0), 0);
+  const totalOpeningPallets = filtered.reduce((s, r) => s + (r.openingPallets ?? 0), 0);
+  const totalClosing = filtered.reduce((s, r) => s + (r.closingStock ?? 0), 0);
+  const totalClosingPallets = filtered.reduce((s, r) => s + (r.closingPallets ?? 0), 0);
   // Pallet equivalents of the Expected/Sale Qty totals below — summed over ALL rows (not
   // `filtered`), same scope as expectedTotal/saleTotal themselves (Plant/Date-scoped only,
   // unaffected by search/column filters), so those tiles' two numbers always agree with each
@@ -681,23 +700,49 @@ export default function OverallStock() {
     }
   }, [search, activeFilters, columnConditions]);
 
-  // Export rows — same order as the table's own columns.
+  // Export rows — same order as the table's own columns (Opening/Closing only appear once a
+  // single date is selected; Remain only in the all-dates view — see stockColumns below).
   const exportRows = (src: PlantStockRow[]): Array<Array<string | number>> => [
-    ["#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant", "Total Stock", "Expected Qty", "Expected Pallets", "Received Qty", "Received Pallet", "Sale Qty", "Sale Pallets", "Extra", "Extra Pallets", "Last Updated"],
-    ...src.map((r, i) => [
-      i + 1, r.itemName, r.barcode ?? "", r.sapCode ?? "", r.hsnCode ?? "",
-      r.category ?? "", r.brand ?? "", r.plant,
-      totalStockOf(r) ?? "",
-      r.expectedQty ?? "",
-      r.expectedPallets != null ? r.expectedPallets.toFixed(2) : "",
-      r.inStock,
-      r.pallets != null ? r.pallets.toFixed(2) : "",
-      r.saleQty ?? "",
-      r.salePallets != null ? r.salePallets.toFixed(2) : "",
-      r.extraQty,
-      r.extraPallets != null ? r.extraPallets.toFixed(2) : "",
-      r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "",
-    ]),
+    [
+      "#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant",
+      "Expected Qty", "Expected Pallets",
+      ...(dateMode ? ["Opening Stock", "Opening Pallets"] : []),
+      "Purchase Qty", "Purchase Pallets", "Extra Qty (within Purchase)", "Extra Pallets",
+      "Sale Qty", "Sale Pallets",
+      ...(dateMode ? ["Closing Stock", "Closing Pallets"] : ["Remain", "Remain Pallets"]),
+      "Last Updated",
+    ],
+    ...src.map((r, i) => {
+      const purchaseQty = r.inStock + r.extraQty;
+      const ipp = r.itemsPerPallet ? Number(r.itemsPerPallet) : 0;
+      const purchasePallets = ipp > 0 ? purchaseQty / ipp : null;
+      const total = totalStockOf(r);
+      const totalPallets = total != null && ipp > 0 ? total / ipp : null;
+      return [
+        i + 1, r.itemName, r.barcode ?? "", r.sapCode ?? "", r.hsnCode ?? "",
+        r.category ?? "", r.brand ?? "", r.plant,
+        r.expectedQty ?? "",
+        r.expectedPallets != null ? r.expectedPallets.toFixed(2) : "",
+        ...(dateMode ? [
+          r.openingStock ?? "",
+          r.openingPallets != null ? r.openingPallets.toFixed(2) : "",
+        ] : []),
+        purchaseQty,
+        purchasePallets != null ? purchasePallets.toFixed(2) : "",
+        r.extraQty,
+        r.extraPallets != null ? r.extraPallets.toFixed(2) : "",
+        r.saleQty ?? "",
+        r.salePallets != null ? r.salePallets.toFixed(2) : "",
+        ...(dateMode ? [
+          r.closingStock ?? "",
+          r.closingPallets != null ? r.closingPallets.toFixed(2) : "",
+        ] : [
+          total ?? "",
+          totalPallets != null ? totalPallets.toFixed(2) : "",
+        ]),
+        r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "",
+      ];
+    }),
   ];
 
   const dash = <span className="text-gray-300">—</span>;
@@ -705,6 +750,21 @@ export default function OverallStock() {
   // actual grid, not a barely-visible divider.
   const cellBorder = "border-r border-gray-300";
   const headerBorder = "border-r border-[#001d6e]/30";
+
+  // Shared qty+pallets stacked cell — every quantity column (Expected/Opening/Purchase/Sale/
+  // Closing/Remain) reads the same way: the number on top, its pallet figure underneath, and
+  // (Purchase only) a third line showing how much of that total was "extra" — already included
+  // in the number above, not added on top of it.
+  const stackedCell = (qty: number | null | undefined, plt: number | null | undefined, colorClass: string, extra?: number | null) => {
+    if (qty == null) return dash;
+    return (
+      <span>
+        <span className={`block font-bold tabular-nums ${colorClass}`}>{qty.toLocaleString()}</span>
+        {plt != null && plt > 0 && <span className="block text-[11px] font-semibold text-gray-500">{plt.toFixed(2)} plt</span>}
+        {extra != null && extra > 0 && <span className="block text-[11px] font-semibold text-amber-600">+{extra.toLocaleString()} extra</span>}
+      </span>
+    );
+  };
 
   const stockColumns: DataTableColumn<PlantStockRow>[] = [
     {
@@ -808,100 +868,89 @@ export default function OverallStock() {
       render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : dash),
     },
     {
-      id: "totalStock",
-      header: columnHeader("totalStock", "Total Stock"),
-      width: 120,
-      align: "right",
-      sortable: true,
-      accessor: (row) => totalStockOf(row),
-      total: (rows) => {
-        const withTotal = rows.filter((r) => totalStockOf(r) != null);
-        return withTotal.length > 0 ? withTotal.reduce((sum, r) => sum + (totalStockOf(r) ?? 0), 0).toLocaleString() : null;
-      },
-      headerClassName: headerBorder,
-      cellClassName: cellBorder,
-      render: (row) => {
-        const total = totalStockOf(row);
-        if (total == null) return dash;
-        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
-        const totalPlt = ipp > 0 ? total / ipp : null;
-        return (
-          <span title="Extra + Received (Stock) − Sale. Negative means more was sold than what's been received and marked Extra combined.">
-            <span className={`block font-bold tabular-nums ${total < 0 ? "text-red-600" : "text-gray-900"}`}>{total.toLocaleString()}</span>
-            {totalPlt != null && (
-              <span className="block text-[11px] font-semibold text-gray-500">{totalPlt.toFixed(2)} plt</span>
-            )}
-          </span>
-        );
-      },
-    },
-    {
       id: "expected",
-      header: columnHeader("expected", "Expected Qty"),
+      header: columnHeader("expected", "Expected"),
       width: 110,
       align: "right",
       sortable: true,
       accessor: (row) => row.expectedQty ?? 0,
+      total: (rows) => {
+        const withVal = rows.filter((r) => r.expectedQty != null);
+        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.expectedQty ?? 0), 0).toLocaleString() : null;
+      },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) =>
         row.isEmptyBox || row.expectedQty == null ? dash : (
-          <span className="font-bold text-purple-700 tabular-nums" title={expectedDate ? `Sum of ordered quantity across every CSV/part uploaded for ${expectedDate}` : "Sum of ordered quantity across every CSV/part ever uploaded (all dates)"}>
-            {row.expectedQty.toLocaleString()}
+          <span title={expectedDate ? `Sum of ordered quantity across every CSV/part uploaded for ${expectedDate}` : "Sum of ordered quantity across every CSV/part ever uploaded (all dates)"}>
+            {stackedCell(row.expectedQty, row.expectedPallets, "text-purple-700")}
           </span>
         ),
     },
-    {
-      id: "expectedPallets",
-      header: columnHeader("expectedPallets", "Expected Pallets"),
+    // Opening Stock — physical boxes remaining at the START of the selected date (= the
+    // previous date's Closing Stock). Only meaningful once a specific date is picked.
+    ...(dateMode ? [{
+      id: "opening",
+      header: columnHeader("opening", "Previous (Opening)"),
       width: 110,
-      align: "right",
+      align: "right" as const,
       sortable: true,
-      accessor: (row) => row.expectedPallets,
-      total: (rows) => rows.reduce((sum, r) => sum + (r.expectedPallets ?? 0), 0).toFixed(2),
+      accessor: (row: PlantStockRow) => row.openingStock ?? 0,
+      total: (rows: PlantStockRow[]) => {
+        const withVal = rows.filter((r) => r.openingStock != null);
+        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.openingStock ?? 0), 0).toLocaleString() : null;
+      },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
-      render: (row) =>
-        row.expectedPallets != null && row.expectedPallets > 0 ? (
-          <span className="font-semibold text-purple-700 tabular-nums">{row.expectedPallets.toFixed(2)}</span>
-        ) : (
-          dash
+      render: (row: PlantStockRow) =>
+        row.isEmptyBox ? dash : (
+          <span title="Physical boxes on hand at the start of this date — yesterday's Closing Stock carried forward.">
+            {stackedCell(row.openingStock, row.openingPallets, "text-gray-700")}
+          </span>
         ),
-    },
+    } as DataTableColumn<PlantStockRow>] : []),
     {
-      id: "stock",
-      header: columnHeader("stock", "Received Qty"),
-      width: 110,
+      // Total physical boxes received (Received + Extra combined) — in dateMode this is
+      // scoped to just the selected date ("Today Purchase"); otherwise it's the all-time
+      // total. The extra portion is already included in this number, not added on top — see
+      // the standalone Extra column right after this one for the breakdown.
+      id: "purchase",
+      header: columnHeader("purchase", dateMode ? "Today Purchase" : "Purchase"),
+      width: 120,
       align: "right",
       sortable: true,
-      accessor: (row) => row.inStock,
+      accessor: (row) => row.inStock + row.extraQty,
+      total: (rows) => rows.reduce((sum, r) => sum + r.inStock + r.extraQty, 0).toLocaleString(),
       headerClassName: headerBorder,
       cellClassName: `font-bold text-[#001d6e] tabular-nums ${cellBorder}`,
-      render: (row) =>
-        row.isEmptyBox
-          ? <span className="font-bold text-orange-600 tabular-nums" title="Empty boxes — not counted in stock totals">{row.inStock.toLocaleString()}</span>
-          : row.inStock.toLocaleString(),
+      render: (row) => {
+        if (row.isEmptyBox) {
+          return <span className="font-bold text-orange-600 tabular-nums" title="Empty boxes — not counted in stock totals">{row.inStock.toLocaleString()}</span>;
+        }
+        const purchaseQty = row.inStock + row.extraQty;
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        const purchasePlt = ipp > 0 ? purchaseQty / ipp : null;
+        return stackedCell(purchaseQty, purchasePlt, "text-[#001d6e]");
+      },
     },
     {
-      id: "pallets",
-      header: columnHeader("pallets", "Received Pallet"),
-      width: 110,
+      // Standalone, always-visible breakdown of how much of Purchase (above) was extra
+      // (over-order) — already included in Purchase's total, not additional stock on top of it.
+      id: "extra",
+      header: columnHeader("extra", "Extra"),
+      width: 100,
       align: "right",
       sortable: true,
-      accessor: (row) => row.pallets,
-      total: (rows) => rows.reduce((sum, r) => sum + (r.pallets ?? 0), 0).toFixed(2),
+      accessor: (row) => row.extraQty,
+      total: (rows) => rows.reduce((sum, r) => sum + r.extraQty, 0).toLocaleString(),
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) =>
-        row.pallets != null && row.pallets > 0 ? (
-          <span className="font-semibold text-[#001d6e] tabular-nums">{row.pallets.toFixed(2)}</span>
-        ) : (
-          dash
-        ),
+        row.isEmptyBox || !(row.extraQty > 0) ? dash : stackedCell(row.extraQty, row.extraPallets, "text-amber-600"),
     },
     {
       id: "sale",
-      header: columnHeader("sale", "Sale Qty"),
+      header: columnHeader("sale", "Sale"),
       width: 100,
       align: "right",
       sortable: true,
@@ -911,61 +960,63 @@ export default function OverallStock() {
       cellClassName: cellBorder,
       render: (row) =>
         row.isEmptyBox || row.saleQty == null ? dash : (
-          <span className="font-bold text-emerald-600 tabular-nums" title={saleDate ? `Sum of Proforma Slip quantity for ${saleDate}` : "Sum of Proforma Slip quantity since Aug 1, 2026"}>
-            {row.saleQty.toLocaleString()}
+          <span title={saleDate ? `Sum of Proforma Slip quantity for ${saleDate}` : "Sum of Proforma Slip quantity since Aug 1, 2026"}>
+            {stackedCell(row.saleQty, row.salePallets, "text-emerald-600")}
           </span>
         ),
     },
-    {
-      id: "salePallets",
-      header: columnHeader("salePallets", "Sale Pallets"),
-      width: 110,
-      align: "right",
+    // Closing Stock (date mode) = Opening + Purchase − Sale, the physical remaining count at
+    // end of the selected date — becomes tomorrow's Opening automatically. Remain (no-date
+    // mode) is the same underlying math (Extra + Received − Sale), just an all-time running
+    // balance instead of one day's.
+    ...(dateMode ? [{
+      id: "closing",
+      header: columnHeader("closing", "Closing"),
+      width: 120,
+      align: "right" as const,
       sortable: true,
-      accessor: (row) => row.salePallets,
-      total: (rows) => rows.reduce((sum, r) => sum + (r.salePallets ?? 0), 0).toFixed(2),
+      accessor: (row: PlantStockRow) => row.closingStock,
+      total: (rows: PlantStockRow[]) => {
+        const withVal = rows.filter((r) => r.closingStock != null);
+        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.closingStock ?? 0), 0).toLocaleString() : null;
+      },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
-      render: (row) =>
-        row.salePallets != null && row.salePallets > 0 ? (
-          <span className="font-semibold text-emerald-600 tabular-nums">{row.salePallets.toFixed(2)}</span>
-        ) : (
-          dash
-        ),
-    },
-    {
-      id: "extra",
-      header: columnHeader("extra", "Extra"),
-      width: 90,
-      align: "right",
+      render: (row: PlantStockRow) => {
+        if (row.closingStock == null) return dash;
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        const closingPlt = ipp > 0 ? row.closingStock / ipp : null;
+        return (
+          <span title="Opening + Purchase − Sale — physical boxes remaining at the end of this date.">
+            {stackedCell(row.closingStock, closingPlt, row.closingStock < 0 ? "text-red-600" : "text-gray-900")}
+          </span>
+        );
+      },
+    } as DataTableColumn<PlantStockRow>] : [{
+      id: "remain",
+      header: columnHeader("remain", "Remain"),
+      width: 120,
+      align: "right" as const,
       sortable: true,
-      accessor: (row) => row.extraQty,
+      accessor: (row: PlantStockRow) => totalStockOf(row),
+      total: (rows: PlantStockRow[]) => {
+        const withTotal = rows.filter((r) => totalStockOf(r) != null);
+        return withTotal.length > 0 ? withTotal.reduce((sum, r) => sum + (totalStockOf(r) ?? 0), 0).toLocaleString() : null;
+      },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
-      render: (row) =>
-        row.extraQty > 0 ? (
-          <span className="font-semibold text-amber-600 tabular-nums">{row.extraQty.toLocaleString()}</span>
-        ) : (
-          dash
-        ),
-    },
-    {
-      id: "extraPallets",
-      header: columnHeader("extraPallets", "Extra Pallets"),
-      width: 110,
-      align: "right",
-      sortable: true,
-      accessor: (row) => row.extraPallets,
-      total: (rows) => rows.reduce((sum, r) => sum + (r.extraPallets ?? 0), 0).toFixed(2),
-      headerClassName: headerBorder,
-      cellClassName: cellBorder,
-      render: (row) =>
-        row.extraPallets != null && row.extraPallets > 0 ? (
-          <span className="font-semibold text-amber-600 tabular-nums">{row.extraPallets.toFixed(2)}</span>
-        ) : (
-          dash
-        ),
-    },
+      render: (row: PlantStockRow) => {
+        const total = totalStockOf(row);
+        if (total == null) return dash;
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        const totalPlt = ipp > 0 ? total / ipp : null;
+        return (
+          <span title="Purchase (Extra + Received) − Sale. Negative means more was sold than what's been received and marked Extra combined.">
+            {stackedCell(total, totalPlt, total < 0 ? "text-red-600" : "text-gray-900")}
+          </span>
+        );
+      },
+    } as DataTableColumn<PlantStockRow>]),
     {
       id: "lastUpdated",
       header: columnHeader("lastUpdated", "Last Updated"),
@@ -1095,24 +1146,6 @@ export default function OverallStock() {
           wrapLabels
         
           stats={[
-            {
-              icon: Boxes,
-              tone: "navy",
-              value: totalStock.toLocaleString(),
-              // In date mode this is what ARRIVED in the window, not what's on hand — say so
-              // explicitly, otherwise the number reads as a (much smaller) total stock figure.
-              label: `${dateMode ? "Total Stock Received" : "Total Stock (Boxes)"} · ${totalPallets.toFixed(2)} plt${
-                activePlant ? ` · ${activePlant}`
-                : activeState ? ` · ${activeState} (${activeStateGroup?.plants.map((p) => p.name).join(", ") ?? activeState})`
-                : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · All Plants"
-              }`,
-            },
-            {
-              icon: TrendingUp,
-              tone: "amber",
-              value: totalExtra.toLocaleString(),
-              label: `Excess Stock (Over-Order) · ${totalExtraPallets.toFixed(2)} plt`,
-            },
             ...(hasExpected ? [{
               icon: CalendarDays,
               tone: "navy" as const,
@@ -1120,21 +1153,83 @@ export default function OverallStock() {
               // An explicit date filter scopes this to that one date's orders; with no filter
               // it's every order ever uploaded, summed across every date.
               label: expectedDate
-                ? `Total Order Qty (${expectedDate}) · ${expectedPalletsTotal.toFixed(2)} plt`
-                : `Total Order Qty (All Dates) · ${expectedPalletsTotal.toFixed(2)} plt`,
+                ? `Expected (${expectedDate}) · ${expectedPalletsTotal.toFixed(2)} plt`
+                : `Expected (All Dates) · ${expectedPalletsTotal.toFixed(2)} plt`,
             }] : []),
+            // Opening Stock — date-filter view only, physical balance carried in from before
+            // the selected date.
+            ...(dateMode ? [{
+              icon: History,
+              tone: "navy" as const,
+              value: totalOpening.toLocaleString(),
+              label: `Previous (Opening) · ${totalOpeningPallets.toFixed(2)} plt`,
+            }] : []),
+            {
+              icon: Boxes,
+              tone: "navy",
+              value: totalPurchase.toLocaleString(),
+              // Extra is already included in this total, never added on top — the tile's label
+              // just breaks out how much of it was extra, same as the Purchase table column.
+              label: `${dateMode ? "Today Purchase" : "Purchase"} · ${totalPurchasePallets.toFixed(2)} plt${totalExtra > 0 ? ` · +${totalExtra.toLocaleString()} extra` : ""}${
+                activePlant ? ` · ${activePlant}`
+                : activeState ? ` · ${activeState} (${activeStateGroup?.plants.map((p) => p.name).join(", ") ?? activeState})`
+                : allowedPlants && allowedPlants.length ? ` · ${plantOptions.join(", ")}` : " · All Plants"
+              }`,
+            },
             ...(hasSale ? [{
               icon: ShoppingCart,
               tone: "emerald" as const,
               value: saleTotal.toLocaleString(),
-              // Same explicit-date-vs-all-dates split as Expected Qty above, except "all dates"
+              // Same explicit-date-vs-all-dates split as Expected above, except "all dates"
               // here means "since Aug 1, 2026" — sales tracking isn't reliable before that.
               label: saleDate
-                ? `Total Sale Qty (${saleDate}) · ${salePalletsTotal.toFixed(2)} plt`
-                : `Total Sale Qty (Since Aug 1, 2026) · ${salePalletsTotal.toFixed(2)} plt`,
+                ? `Sale (${saleDate}) · ${salePalletsTotal.toFixed(2)} plt`
+                : `Sale (Since Aug 1, 2026) · ${salePalletsTotal.toFixed(2)} plt`,
             }] : []),
+            // Closing Stock (date-filter view) replaces Remain (all-dates view) — same math
+            // (Opening + Purchase − Sale, or Purchase − Sale with no Opening), just labeled for
+            // what it actually is in each mode.
+            dateMode ? {
+              icon: TrendingUp,
+              tone: totalClosing < 0 ? "amber" as const : "navy" as const,
+              value: totalClosing.toLocaleString(),
+              label: `Closing Stock · ${totalClosingPallets.toFixed(2)} plt`,
+            } : {
+              icon: TrendingUp,
+              tone: totalRemain < 0 ? "amber" as const : "navy" as const,
+              value: totalRemain.toLocaleString(),
+              label: `Remain (Purchase − Sale) · ${(totalPurchasePallets - salePalletsTotal).toFixed(2)} plt`,
+            },
           ]}
         />
+
+        {/* Extra tab — narrows the whole table down to just items with extra (over-order) stock.
+            A toggle rather than a chip-based filter, since it's a single yes/no dimension that
+            also has to change what the server sends (extraQty means different things in and out
+            of dateMode), not something matched against an already-loaded row. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">View</span>
+          <button
+            onClick={() => setExtrasOnly(false)}
+            className={
+              !extrasOnly
+                ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+            }
+          >
+            All Stock
+          </button>
+          <button
+            onClick={() => setExtrasOnly(true)}
+            className={
+              extrasOnly
+                ? "rounded-full bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-amber-500/30"
+                : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+            }
+          >
+            Extra Only
+          </button>
+        </div>
 
         {/* State tabs — quick switch to view a whole state's combined stock (or All). Picking a
             state with more than one plant under it reveals a second, nested pill row below to

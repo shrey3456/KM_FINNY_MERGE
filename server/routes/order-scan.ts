@@ -288,30 +288,29 @@ export function getUserPlants(user: any): string[] | null {
   return assigned;
 }
 
-// Pick correct pallet size based on the plant's STATE (products.gjPlt/mpPlt), not the plant
-// itself — see getPlantStateCode below for how a plant resolves to one of these codes.
+// Pick correct pallet size based on the plant's STATE (products.gjPlt/mpPlt) — the ONLY
+// source of a "defined" pallet size. Deliberately does NOT fall back to itemsPerPallet
+// ("Packets" in the Product Master UI) or the generic "pallets" column — those are a
+// different concept from a real pallet size and are no longer treated as equivalent to one.
 function getPalletSize(product: any, state: string | null): number {
   const s = (state ?? '').toUpperCase();
-  if (s === 'GJ') return Number(product.gjPlt) || Number(product.itemsPerPallet) || 0;
-  if (s === 'MP') return Number(product.mpPlt) || Number(product.itemsPerPallet) || 0;
-  return Number(product.itemsPerPallet) || 0;
+  if (s === 'GJ') return Number(product.gjPlt) || 0;
+  if (s === 'MP') return Number(product.mpPlt) || 0;
+  return 0;
 }
 
-// Full pallet-size fallback chain, shared by session population and the scan handler:
-// state-specific gj_plt/mp_plt → generic items_per_pallet → generic pallets column →
-// parse *NNN from the product name (e.g. "16GM*192 ..." → 192). Same chain the old
-// classic-scan flow used, so pallet math never silently falls back to 1.
-function resolveFullPalletSize(
-  product: { itemsPerPallet?: number | null; gjPlt?: number | null; mpPlt?: number | null; pallets?: number | null; name?: string | null },
+// Two cases only: if GJ PLT/MP PLT is defined for this product/state, use it. If not, the
+// item is treated as exactly ONE pallet sized to its own expected quantity (whatever qty is
+// being converted at this call site — CSV expected qty, live order qty, etc.) rather than
+// silently defaulting to 1-unit-per-pallet or guessing from the product name.
+function resolvePalletSizeOrQty(
+  product: { gjPlt?: number | null; mpPlt?: number | null } | null,
   state: string | null,
+  expectedQty: number,
 ): number {
-  let size = getPalletSize(product, state);
-  if (size === 0) size = Number(product.pallets ?? 0);
-  if (size === 0 && product.name) {
-    const m = String(product.name).match(/\*(\d{1,5})/);
-    if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) size = n; }
-  }
-  return size;
+  const defined = product ? getPalletSize(product, state) : 0;
+  if (defined > 0) return defined;
+  return Math.max(1, Math.round(expectedQty) || 1);
 }
 
 // Resolves a plant name to its Indian-state short code (plants.state, e.g. "GJ"/"MP") — pallet
@@ -372,10 +371,8 @@ async function seedSessionItemsWithClient(client: any, id: number, plant: string
   let pi = 1;
   for (const item of importItems) {
     const prod = item.barcode ? productMap.get(normKey(item.barcode)) : null;
-    const prodObj = prod
-      ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
-      : null;
-    const palletSize = prodObj ? resolveFullPalletSize(prodObj, state) : 0;
+    const prodObj = prod ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt } : null;
+    const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
     vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
     placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
     pi += 7;
@@ -1009,11 +1006,8 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'
       let pi = 1;
       for (const item of importItems) {
         const prod = item.barcode ? productMap.get(item.barcode) : null;
-        // Reuse getPalletSize but with snake_case keys from pg driver
-        const prodObj = prod
-          ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
-          : null;
-        const palletSize = prodObj ? resolveFullPalletSize(prodObj, state) : 0;
+        const prodObj = prod ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt } : null;
+        const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
         vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
         placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
         pi += 7;
@@ -1257,7 +1251,7 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
       .orderBy(asc(orderScanItems.id));
 
     // items_per_pallet on this row is a one-time snapshot taken when the session was
-    // activated (see resolveFullPalletSize / seedAndActivateSession) — if the product's
+    // activated (see resolvePalletSizeOrQty / seedAndActivateSession) — if the product's
     // pallet config was blank then and got filled in afterward, the stored value stays
     // stale forever for a session that's already active. Re-resolve live here too, same
     // as the scan handler, so every screen reading this endpoint (CSV Items table,
@@ -1277,11 +1271,7 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
       for (const item of items) {
         const p = item.barcode ? productMap.get(item.barcode.toLowerCase()) : null;
         if (!p) continue;
-        const liveIpp = resolveFullPalletSize(
-          { itemsPerPallet: p.items_per_pallet, gjPlt: p.gj_plt, mpPlt: p.mp_plt, pallets: p.pallets, name: p.name },
-          state,
-        );
-        if (liveIpp > 0) item.itemsPerPallet = liveIpp;
+        item.itemsPerPallet = resolvePalletSizeOrQty({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state, item.expectedQty ?? 0);
       }
     }
 
@@ -1557,10 +1547,12 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // against that CSV item would silently keep using the stale 0 forever, recording 1 box =
     // 1 "pallet". Resolving live here means pallet math is always correct regardless of when
     // the product's config was set relative to seeding.
-    let resolvedItemName: string | null = (matchedItem ?? itemRowsBySession.get(frontSession.id))?.item_name ?? null;
-    let resolvedIpp = Number((matchedItem ?? itemRowsBySession.get(frontSession.id))?.items_per_pallet ?? 0);
+    const anchorItem = matchedItem ?? itemRowsBySession.get(frontSession.id);
+    let resolvedItemName: string | null = anchorItem?.item_name ?? null;
+    const anchorExpectedQty = Number(anchorItem?.expected_qty ?? 0);
+    let resolvedIpp = Number(anchorItem?.items_per_pallet ?? 0);
     const prodResult = await client.query(
-      `SELECT name, items_per_pallet, pallets, gj_plt, mp_plt
+      `SELECT name, gj_plt, mp_plt
        FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
       [barcode],
     );
@@ -1568,11 +1560,7 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
       const p = prodResult.rows[0];
       resolvedItemName = resolvedItemName ?? p.name ?? null;
       const state = await getPlantStateCode(client, anchorSession.plant ?? '');
-      const liveIpp = resolveFullPalletSize(
-        { itemsPerPallet: p.items_per_pallet, gjPlt: p.gj_plt, mpPlt: p.mp_plt, pallets: p.pallets, name: p.name },
-        state,
-      );
-      if (liveIpp > 0) resolvedIpp = liveIpp;
+      resolvedIpp = resolvePalletSizeOrQty({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state, anchorExpectedQty);
     }
     const itemsPerPallet = resolvedIpp;
 

@@ -36,29 +36,20 @@ type CatalogProduct = {
   gjPlt?: number | null; mpPlt?: number | null;
 };
 
-// Same fallback chain used across the app (see Scan.tsx's getStatePalletSize): state-specific
-// pallet size first (resolved via which state the given plant is in, plants.state — not a
-// plant-name guess), then the generic itemsPerPallet/pallets fields, then a "*NNN" hint in the
-// product name itself. Returns 0 (not 1) when nothing is configured, so callers can tell
-// "no pallet data" apart from "genuinely 1 per pallet".
+// Same rule used across the app (see Scan.tsx's getStatePalletSize): only GJ PLT / MP PLT
+// (resolved via which state the given plant is in, plants.state — not a plant-name guess)
+// count as a "defined" pallet size — itemsPerPallet ("Packets" in the Product Master UI) and
+// the generic "pallets" column are a different concept and are not used as a fallback. Returns
+// 0 when nothing is configured, so the Qty<->Pallets auto-calc below simply skips (the operator
+// types both fields by hand) rather than showing a meaningless forced 1-pallet figure.
 function resolvePalletSize(product: CatalogProduct | null, plant: string | undefined, allPlants: any[] | undefined): number {
   if (!product) return 0;
   const plantName = (plant ?? "").trim().toLowerCase();
   const match = allPlants?.find((p) => String(p.name ?? "").trim().toLowerCase() === plantName);
   const state = match?.state ? String(match.state).trim().toUpperCase() : null;
-  let size = 0;
-  if (state === "GJ") {
-    size = Number(product.gjPlt) || Number(product.itemsPerPallet) || Number(product.pallets) || 0;
-  } else if (state === "MP") {
-    size = Number(product.mpPlt) || Number(product.itemsPerPallet) || Number(product.pallets) || 0;
-  } else {
-    size = Number(product.itemsPerPallet) || Number(product.pallets) || 0;
-  }
-  if (size === 0 && product.name) {
-    const m = product.name.match(/\*(\d{1,5})/);
-    if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) size = n; }
-  }
-  return size;
+  if (state === "GJ") return Number(product.gjPlt) || 0;
+  if (state === "MP") return Number(product.mpPlt) || 0;
+  return 0;
 }
 
 let tempKeyCounter = 0;

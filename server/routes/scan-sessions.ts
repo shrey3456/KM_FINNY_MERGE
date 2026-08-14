@@ -589,12 +589,18 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
             COALESCE(p.name, p_bc.name, se.item_name, se.code)             AS item_name,
             COALESCE(se.quantity, 0)                                        AS qty,
             se.scanned_at,
-            COALESCE(NULLIF(p.items_per_pallet, 0), NULLIF(p_bc.items_per_pallet, 0), 0) AS ipp,
+            -- Only GJ PLT/MP PLT count as a defined pallet size (not "Packets"/items_per_pallet
+            -- or the generic "pallets" column) — NULL here means undefined, and the grouped
+            -- aggregation below falls back to this barcode's own total quantity.
+            CASE WHEN UPPER(pl_old.state) = 'GJ' THEN NULLIF(COALESCE(p.gj_plt, p_bc.gj_plt), 0)
+                 WHEN UPPER(pl_old.state) = 'MP' THEN NULLIF(COALESCE(p.mp_plt, p_bc.mp_plt), 0) END AS ipp,
             COALESCE(p.sap_code,  p_bc.sap_code)                           AS sap_code,
             COALESCE(p.hsn_code,  p_bc.hsn_code)                           AS hsn_code,
             COALESCE(p.category,  p_bc.category)                           AS category,
             COALESCE(p.brand,     p_bc.brand)                              AS brand
           FROM scan_session_extras se
+          JOIN scan_sessions ss ON ss.id = se.session_id
+          LEFT JOIN plants pl_old ON LOWER(pl_old.name) = LOWER(ss.plant)
           LEFT JOIN products p    ON p.id    = se.product_id
           LEFT JOIN products p_bc ON p.id IS NULL
                                   AND p_bc.barcode IS NOT NULL
@@ -608,7 +614,8 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
             COALESCE(p.name, ose.item_name, ose.barcode)            AS item_name,
             COALESCE(ose.total_qty, 0)                              AS qty,
             ose.scanned_at,
-            COALESCE(ose.items_per_pallet, p.items_per_pallet, 0)   AS ipp,
+            CASE WHEN UPPER(pl_new.state) = 'GJ' THEN NULLIF(p.gj_plt, 0)
+                 WHEN UPPER(pl_new.state) = 'MP' THEN NULLIF(p.mp_plt, 0) END AS ipp,
             CASE
               WHEN UPPER(ois.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code)
               WHEN UPPER(ois.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code)
@@ -619,6 +626,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
             p.brand                                                 AS brand
           FROM order_scan_events ose
           JOIN  order_import_sessions ois ON ois.id = ose.session_id
+          LEFT JOIN plants pl_new ON LOWER(pl_new.name) = LOWER(ois.plant)
           LEFT JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
           WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'
           ${newDateAnd}
@@ -635,9 +643,11 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
             MAX(item_name)                                          AS "itemName",
             SUM(qty)                                                AS "totalQuantity",
             MAX(ipp)                                                AS "itemsPerPallet",
+            -- No GJ/MP PLT defined for this barcode — treat it as exactly one pallet sized
+            -- to its own total quantity, rather than leaving the figure blank.
             CASE WHEN MAX(ipp) > 0
               THEN ROUND(SUM(qty)::numeric / MAX(ipp), 2)
-              ELSE NULL
+              ELSE ROUND(SUM(qty)::numeric / GREATEST(SUM(qty), 1), 2)
             END                                                     AS "totalPallets",
             MIN(scanned_at)                                         AS "firstArrived",
             MAX(scanned_at)                                         AS "lastArrived",
@@ -684,13 +694,18 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
          se.reason,
          se.scanned_by_name   AS "scannedByName",
          se.scanned_at        AS "scannedAt",
+         -- Only GJ PLT/MP PLT count as a defined pallet size; otherwise this row is treated
+         -- as exactly one pallet sized to its own quantity rather than showing blank.
          CASE
-           WHEN COALESCE(p.items_per_pallet, 0) > 0
-           THEN ROUND(CAST(se.quantity AS NUMERIC) / p.items_per_pallet, 2)
-           ELSE NULL
+           WHEN UPPER(pl.state) = 'GJ' AND COALESCE(p.gj_plt, 0) > 0
+             THEN ROUND(CAST(se.quantity AS NUMERIC) / p.gj_plt, 2)
+           WHEN UPPER(pl.state) = 'MP' AND COALESCE(p.mp_plt, 0) > 0
+             THEN ROUND(CAST(se.quantity AS NUMERIC) / p.mp_plt, 2)
+           ELSE ROUND(CAST(se.quantity AS NUMERIC) / GREATEST(se.quantity, 1), 2)
          END                  AS pallets
        FROM scan_session_extras se
        INNER JOIN scan_sessions ss ON se.session_id = ss.id
+       LEFT  JOIN plants pl ON LOWER(pl.name) = LOWER(ss.plant)
        LEFT  JOIN products p ON p.id = se.product_id
                              OR (se.product_id IS NULL AND LOWER(p.barcode) = LOWER(se.code))
        ${oldWhere}
@@ -711,17 +726,24 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
          'not_in_order'                       AS reason,
          ose.scanned_by_name                  AS "scannedByName",
          ose.scanned_at                       AS "scannedAt",
+         -- ose.pallets/ose.items_per_pallet are real recorded-at-scan-time values (the latter
+         -- already resolved via GJ/MP PLT or an expected-qty fallback — see order-scan.ts's
+         -- resolvePalletSizeOrQty); only pre-existing rows from before that fix need the
+         -- state-aware fallback here, and anything left over defaults to one pallet = its own qty.
          CASE
            WHEN COALESCE(ose.pallets, 0) > 0
              THEN ROUND(CAST(ose.pallets AS NUMERIC), 2)
            WHEN COALESCE(ose.items_per_pallet, 0) > 0
              THEN ROUND(CAST(ose.total_qty AS NUMERIC) / ose.items_per_pallet, 2)
-           WHEN COALESCE(p.items_per_pallet, 0) > 0
-             THEN ROUND(CAST(ose.total_qty AS NUMERIC) / p.items_per_pallet, 2)
-           ELSE NULL
+           WHEN UPPER(pl.state) = 'GJ' AND COALESCE(p.gj_plt, 0) > 0
+             THEN ROUND(CAST(ose.total_qty AS NUMERIC) / p.gj_plt, 2)
+           WHEN UPPER(pl.state) = 'MP' AND COALESCE(p.mp_plt, 0) > 0
+             THEN ROUND(CAST(ose.total_qty AS NUMERIC) / p.mp_plt, 2)
+           ELSE ROUND(CAST(ose.total_qty AS NUMERIC) / GREATEST(ose.total_qty, 1), 2)
          END                                  AS pallets
        FROM order_scan_events ose
        INNER JOIN order_import_sessions ois ON ois.id = ose.session_id
+       LEFT  JOIN plants pl ON LOWER(pl.name) = LOWER(ois.plant)
        LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
        WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'
          ${osDateAnd}
@@ -1630,13 +1652,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         COALESCE(p.brand, p_bc.brand)                       AS brand,
         -- Pallet size is a per-STATE fact (products.gj_plt/mp_plt), resolved via which state
         -- this row's plant is in (plants.state) — not a plant-name guess like the sapCode
-        -- CASE above still is (that one's untouched, out of scope for this change).
-        COALESCE(
-          CASE WHEN UPPER(pl.state) = 'GJ' THEN NULLIF(COALESCE(p.gj_plt, p_bc.gj_plt), 0)
-               WHEN UPPER(pl.state) = 'MP' THEN NULLIF(COALESCE(p.mp_plt, p_bc.mp_plt), 0) END,
-          NULLIF(COALESCE(p.items_per_pallet, p_bc.items_per_pallet), 0),
-          NULLIF(COALESCE(p.pallets, p_bc.pallets), 0)
-        )                                                  AS "itemsPerPallet",
+        -- CASE above still is (that one's untouched, out of scope for this change). Deliberately
+        -- does NOT fall back to items_per_pallet ("Packets" in the UI) or the generic "pallets"
+        -- column — those are a different concept, not an equivalent pallet size. When GJ/MP PLT
+        -- isn't set, the JS mapping below falls back to the row's own in_stock instead.
+        CASE WHEN UPPER(pl.state) = 'GJ' THEN NULLIF(COALESCE(p.gj_plt, p_bc.gj_plt), 0)
+             WHEN UPPER(pl.state) = 'MP' THEN NULLIF(COALESCE(p.mp_plt, p_bc.mp_plt), 0) END
+                                                           AS "itemsPerPallet",
         pps.updated_at                                     AS "lastArrived"
       FROM ${sourceSql} pps
       LEFT JOIN products p    ON p.id = pps.product_id
@@ -1651,7 +1673,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     `, params);
 
     const items = rows.map((r: any, i: number) => {
-      const ipp = r.itemsPerPallet != null ? Number(r.itemsPerPallet) : 0;
+      const definedIpp = r.itemsPerPallet != null ? Number(r.itemsPerPallet) : 0;
+      const inStock = Number(r.inStock) || 0;
+      // No GJ/MP PLT configured — treat the item as exactly one pallet sized to its own
+      // current stock, rather than showing a blank/zero pallet figure.
+      const ipp = definedIpp > 0 ? definedIpp : Math.max(1, inStock);
       return {
         srNo: i + 1,
         barcode: r.barcode,
@@ -1662,11 +1688,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         hsnCode: r.hsnCode ?? null,
         category: r.category ?? null,
         brand: r.brand ?? null,
-        itemsPerPallet: ipp || null,
-        inStock: Number(r.inStock) || 0,
+        itemsPerPallet: definedIpp || null,
+        inStock,
         extraQty: Number(r.extraQty) || 0,
-        pallets: ipp > 0 ? parseFloat((Number(r.inStock) / ipp).toFixed(2)) : null,
-        extraPallets: ipp > 0 ? parseFloat((Number(r.extraQty) / ipp).toFixed(2)) : null,
+        pallets: parseFloat((inStock / ipp).toFixed(2)),
+        extraPallets: parseFloat(((Number(r.extraQty) || 0) / ipp).toFixed(2)),
         lastArrived: r.lastArrived ?? null,
       };
     });
@@ -1682,6 +1708,29 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     const allDatesMode = !from && !to;
     if (from && (!to || to === from)) {
       singleDate = from;
+    }
+
+    // ── Opening Stock — running balance as of the START of the selected date ──────────────
+    // Only meaningful for a single explicit date (the "date filter" view) — everything the
+    // client needs to build Opening → Today's Purchase → Closing as one running ledger, same
+    // COALESCE(order_date, created_at) date field the rest of this route already uses, so
+    // "yesterday" here means the same thing it means everywhere else on this page.
+    const openingByKey = new Map<string, number>();
+    if (singleDate) {
+      const openingParams: any[] = [singleDate];
+      const openingConds: string[] = [`COALESCE(ois.order_date::date, sm.created_at::date) < $1::date`];
+      if (allowed !== null) { openingParams.push(allowed); openingConds.push(`LOWER(sm.plant) = ANY($${openingParams.length}::text[])`); }
+      if (plantFilterList)  { openingParams.push(plantFilterList); openingConds.push(`LOWER(sm.plant) = ANY($${openingParams.length}::text[])`); }
+      const { rows: openingRows } = await pool.query(`
+        SELECT sm.barcode, sm.plant, (SUM(sm.qty) + SUM(sm.extra_qty))::int AS "openingQty"
+        FROM stock_movements sm
+        LEFT JOIN order_import_sessions ois ON ois.id = sm.session_id
+        WHERE ${openingConds.join(' AND ')}
+        GROUP BY sm.barcode, sm.plant
+      `, openingParams);
+      for (const r of openingRows as any[]) {
+        openingByKey.set(`${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`, Number(r.openingQty) || 0);
+      }
     }
 
     const expectedByKey = new Map<string, number>();
@@ -1722,11 +1771,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         const plantUpper = String(r.plant ?? '').toUpperCase();
         const sapCode = p ? (plantUpper.includes('VAL') ? (p.gj_sap ?? p.sap_code) : plantUpper.includes('IND') ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const state = plantStateByName.get((r.plant ?? '').toLowerCase());
-        const ipp = p ? Number(
-          (state === 'GJ' && p.gj_plt) || (state === 'MP' && p.mp_plt)
-            ? (state === 'GJ' ? p.gj_plt : p.mp_plt)
-            : (p.items_per_pallet || p.pallets || 0)
-        ) : 0;
+        const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
+        const ipp = definedIpp > 0 ? definedIpp : Math.max(1, Number(r.expectedQty) || 0);
         expectedOnlyRows.push({
           srNo: 0, barcode: r.barcode, plant: r.plant,
           itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
@@ -1815,11 +1861,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         const plantUpper = String(r.plant ?? '').toUpperCase();
         const sapCode = p ? (plantUpper.includes('VAL') ? (p.gj_sap ?? p.sap_code) : plantUpper.includes('IND') ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const state = plantStateByName.get((r.plant ?? '').toLowerCase());
-        const ipp = p ? Number(
-          (state === 'GJ' && p.gj_plt) || (state === 'MP' && p.mp_plt)
-            ? (state === 'GJ' ? p.gj_plt : p.mp_plt)
-            : (p.items_per_pallet || p.pallets || 0)
-        ) : 0;
+        const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
+        const ipp = definedIpp > 0 ? definedIpp : Math.max(1, Number(r.saleQty) || 0);
         saleOnlyRows.push({
           srNo: 0, barcode: r.barcode, plant: r.plant,
           itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
@@ -1870,12 +1913,28 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
           // Same qty÷itemsPerPallet rule as the Pallets/Extra Pallets columns above — each row's
           // own pallet size, never one blended figure.
           const ipp = it.itemsPerPallet ? Number(it.itemsPerPallet) : 0;
+          const pltOf = (q: number | null) => (ipp > 0 && q != null ? parseFloat((q / ipp).toFixed(2)) : null);
+          // Opening/Closing only apply to a single-date view — in dateMode, inStock/extraQty
+          // already mean "received on this date" (see sourceSql above), so their sum IS that
+          // date's Purchase; Closing = Opening + Purchase − Sale, the physical count remaining
+          // at end of day, which becomes tomorrow's Opening automatically.
+          let openingStock: number | null = null;
+          let closingStock: number | null = null;
+          if (singleDate != null) {
+            openingStock = openingByKey.get(key) ?? 0;
+            const purchaseQty = (Number(it.inStock) || 0) + (Number(it.extraQty) || 0);
+            closingStock = openingStock + purchaseQty - (saleQty ?? 0);
+          }
           return {
             ...it,
             expectedQty,
             saleQty,
-            expectedPallets: ipp > 0 && expectedQty != null ? parseFloat((expectedQty / ipp).toFixed(2)) : null,
-            salePallets: ipp > 0 && saleQty != null ? parseFloat((saleQty / ipp).toFixed(2)) : null,
+            expectedPallets: pltOf(expectedQty),
+            salePallets: pltOf(saleQty),
+            openingStock,
+            openingPallets: pltOf(openingStock),
+            closingStock,
+            closingPallets: pltOf(closingStock),
           };
         })
       : items;

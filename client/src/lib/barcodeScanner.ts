@@ -23,6 +23,9 @@ export class BarcodeScanner {
 
   constructor(options: ScannerOptions) {
     const hints = new Map();
+    // Every format ZXing can decode — previously limited to a fixed 1D subset, so any barcode
+    // outside that list (QR, Data Matrix, PDF417, Aztec, DataBar/RSS, UPC extension) was silently
+    // never detected, no matter how clearly it was in frame.
     const formats = options.formats ?? [
       BarcodeFormat.CODE_128,
       BarcodeFormat.CODE_39,
@@ -31,8 +34,15 @@ export class BarcodeScanner {
       BarcodeFormat.EAN_8,
       BarcodeFormat.UPC_A,
       BarcodeFormat.UPC_E,
+      BarcodeFormat.UPC_EAN_EXTENSION,
       BarcodeFormat.ITF,
       BarcodeFormat.CODABAR,
+      BarcodeFormat.QR_CODE,
+      BarcodeFormat.DATA_MATRIX,
+      BarcodeFormat.PDF_417,
+      BarcodeFormat.AZTEC,
+      BarcodeFormat.RSS_14,
+      BarcodeFormat.RSS_EXPANDED,
     ];
     hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
     // TRY_HARDER intentionally disabled — causes false positives on faces/backgrounds

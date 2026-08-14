@@ -1044,6 +1044,7 @@ export default function ScanViewer() {
                       className="h-8 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
                     >
                       <Plus className="h-3.5 w-3.5" /> Filter
+
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent align="start" className="w-64">
@@ -1162,7 +1163,6 @@ export default function ScanViewer() {
             }
           >
             <DataTable<OsScanItem>
-              className="space-y-0"
               containerClassName="rounded-none border-0"
               headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
               columns={itemColumns}

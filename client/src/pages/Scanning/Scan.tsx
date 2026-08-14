@@ -164,16 +164,6 @@ const normalize = (value?: string | number | null) =>
 // Display-only: strips a trailing ".csv" from a file name so it reads cleanly in the UI.
 const stripCsvExt = (name?: string | null) => (name ?? "").replace(/\.csv$/i, "");
 
-// Pallet-count cell: qty ÷ items-per-pallet, or a muted 0.00 when not applicable. Shared by the
-// Scan tab's CSV Items table and Master View so both render pallet figures identically.
-// A CSV row (ImpItem) carries no itemsPerPallet — the import gives an expectedPallets figure
-// instead — so Part Order's pack size is backed out of that. Everything it shows in pallets goes
-// through here, so the table, its totals and the card list can't drift apart.
-const impItemsPerPallet = (i: { quantity: number | null; expectedPallets: number | null }) => {
-  const qty = i.quantity ?? 0;
-  return qty > 0 && i.expectedPallets ? qty / i.expectedPallets : 0;
-};
-
 const pltCell = (qty: number, ipp: number, className: string) =>
   qty > 0 && ipp > 0
     ? <span className={className}>{(qty / ipp).toFixed(2)}</span>
@@ -598,11 +588,15 @@ export default function ScanOrderPage() {
     const state = match?.state;
     return state ? String(state).trim().toUpperCase() : null;
   };
+  // Only GJ PLT / MP PLT count as a "defined" pallet size — itemsPerPallet ("Packets" in the
+  // Product Master UI) and the generic "pallets" column are a different concept and are no
+  // longer treated as an equivalent fallback. Callers fall back to the item's own expected
+  // quantity when this returns 0 (see _computePlantPalletSize and the Master View merge below).
   const getStatePalletSize = (product: Product | null, stateCode: string | null): number => {
     if (!product) return 0;
-    if (stateCode === "GJ") return Number(product.gjPlt) || Number(product.itemsPerPallet) || Number(product.pallets) || 0;
-    if (stateCode === "MP") return Number(product.mpPlt) || Number(product.itemsPerPallet) || Number(product.pallets) || 0;
-    return Number(product.itemsPerPallet) || Number(product.pallets) || 0;
+    if (stateCode === "GJ") return Number(product.gjPlt) || 0;
+    if (stateCode === "MP") return Number(product.mpPlt) || 0;
+    return 0;
   };
   const autoScanEnabled = (() => {
     const plantName = (activeOrderScanSession?.plant ?? "").toLowerCase();
@@ -1018,34 +1012,16 @@ export default function ScanOrderPage() {
   // mismatch here only affects what's shown before confirming, never the recorded data.
   const _computePlantPalletSize = (firstMatch: OsScanItem | null, invProduct: Product | null): number => {
     const state = getPlantState(activeOrderScanSession?.plant ?? "");
-    let size = firstMatch?.itemsPerPallet ?? 1;
+    // firstMatch.itemsPerPallet is a server-resolved snapshot (same GJ/MP-PLT-or-expectedQty
+    // rule — see resolvePalletSizeOrQty in order-scan.ts); a fresh invProduct lookup here only
+    // overrides it when GJ/MP PLT is genuinely defined, so a just-edited Product Master value
+    // is reflected before the next server round-trip re-resolves and stores it.
+    let size = firstMatch?.itemsPerPallet || firstMatch?.expectedQty || 1;
     if (invProduct) {
-      let fromInv = getStatePalletSize(invProduct, state);
-      // Last resort: parse *NNN from the product name (e.g. "16GM*192 ..." → 192), same
-      // fallback the old classic-scan flow used, for products with no pallet columns set.
-      if (fromInv === 0 && invProduct.name) {
-        const m = String(invProduct.name).match(/\*(\d{1,5})/);
-        if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) fromInv = n; }
-      }
+      const fromInv = getStatePalletSize(invProduct, state);
       if (fromInv > 0) size = fromInv;
     }
     return Math.max(1, size || 1);
-  };
-
-  // Same fallback chain as _computePlantPalletSize, but for Master View items (which have
-  // no OsScanItem/session-scoped itemsPerPallet snapshot to fall back on) — and returns 0
-  // rather than clamping to 1 when nothing is configured, so the UI can tell "no pallet
-  // data" apart from "genuinely 1 per pallet" (matching how OsScanItem.itemsPerPallet==0
-  // is already treated elsewhere in this file).
-  const _resolveMvPalletSize = (invProduct: Product | null, plant: string): number => {
-    if (!invProduct) return 0;
-    const state = getPlantState(plant);
-    let fromInv = getStatePalletSize(invProduct, state);
-    if (fromInv === 0 && invProduct.name) {
-      const m = String(invProduct.name).match(/\*(\d{1,5})/);
-      if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) fromInv = n; }
-    }
-    return fromInv;
   };
 
   const _defaultScanQty = (match: OsScanItem | null, plantPalletSize: number): number => {
@@ -1530,6 +1506,17 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     return map;
   }, [products]);
 
+  // Pallet-count cell: qty ÷ items-per-pallet, or a muted 0.00 when not applicable. Shared by
+  // Part Order's CSV Items table. Looks up the item's own GJ/MP PLT in Product Master (NOT the
+  // CSV's own Pallets/expectedPallets column, and not "Packets"/itemsPerPallet) — falling back
+  // to treating the item as exactly one pallet sized to its own quantity when no PLT is defined.
+  const impItemsPerPallet = (i: { barcode: string | null; quantity: number | null }): number => {
+    const qty = i.quantity ?? 0;
+    const invProduct = i.barcode ? productLookup.get(normalize(i.barcode)) ?? null : null;
+    const defined = invProduct ? getStatePalletSize(invProduct, getPlantState(csvEffPlant)) : 0;
+    return defined > 0 ? defined : Math.max(1, qty || 1);
+  };
+
   // ── Barcode gun (HID keyboard-wedge) support ─────────────────────────────
   useEffect(() => {
     if (!activeOrderScanSession) return;
@@ -1889,10 +1876,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         let g = groups.get(key);
         if (!g) {
           const invProduct = productLookup.get(normalize(item.barcode ?? item.itemName ?? "")) ?? null;
+          // Only the GJ/MP-PLT-defined size (0 if not defined) — the expected-qty fallback
+          // needs this item's FINAL summed quantity across every contributing file, which
+          // isn't known until the accumulation loop below finishes, so that fallback is
+          // applied in one pass over `merged` further down instead of here.
           g = {
             barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
             quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
-            itemsPerPallet: _resolveMvPalletSize(invProduct, mvPlant),
+            itemsPerPallet: invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0,
             _files: [], _isExtra: true, _lastScannedAt: null,
           };
           groups.set(key, g);
@@ -1919,6 +1910,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       });
     });
     const merged = Array.from(groups.values());
+    // No GJ/MP PLT was defined for these — now that every file's contribution has been
+    // summed into g.quantity, treat each as exactly one pallet sized to its own total.
+    merged.forEach((g) => { if (!(g.itemsPerPallet > 0)) g.itemsPerPallet = Math.max(1, g.quantity || 1); });
     // Append ONE distinct "Empty Box" entry summing every file's empty boxes for this view —
     // a separate labeled row, never mixed into order quantity/scanned/extra.
     const ebQty = mvData.files.reduce((s, f) => s + (f.emptyBoxTotalQty ?? 0), 0);
