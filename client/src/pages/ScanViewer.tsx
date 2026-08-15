@@ -9,6 +9,7 @@ import { apiRequest } from "@/lib/queryClient";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
+import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { ColumnHeaderFilterButton, ColumnFilterPopoverContent } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, conditionSummary, matchAllConditions } from "@/lib/columnFilters";
@@ -563,9 +564,20 @@ export default function ScanViewer() {
     () => items.filter((i) => matchAllConditions(i, columnConditionList, filterableColumns)),
     [items, columnConditionList, filterableColumns],
   );
+  // Free-text search from the card header's collapsible button. Applied here rather than by the
+  // table, so the ONE search box drives every layout — the desktop table, the kiosk table and the
+  // mobile cards all read from `filtered`. Matches the same three fields the Item column shows.
+  const searched = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return columnFiltered;
+    return columnFiltered.filter((i) =>
+      [i.itemName, i.barcode, i.sapCode].some((v) => v?.toLowerCase().includes(q)),
+    );
+  }, [columnFiltered, search]);
+
   const filtered = !statFilter
-    ? columnFiltered
-    : columnFiltered.filter((i) => {
+    ? searched
+    : searched.filter((i) => {
         const { received, left, extra } = rowState(i);
         if (statFilter === "done") return received > 0;
         if (statFilter === "remaining") return left > 0;
@@ -1022,9 +1034,6 @@ export default function ScanViewer() {
               </span>
             }
             className="rounded-xl shadow-sm border-gray-200"
-            searchValue={search}
-            onSearchChange={setSearch}
-            searchPlaceholder="Search items…"
             headerActions={
               <>
                 {/* One unified "+ Filter" — every generic column (Item, Barcode/SAP, Exp,
@@ -1159,6 +1168,14 @@ export default function ScanViewer() {
                     </PopoverContent>
                   </Popover>
                 )}
+                {/* Search as a button that expands, matching the Scan Order page — rather than a
+                    permanently-open input taking up header width. Shown in every layout, since it
+                    lives in the card header the desktop, kiosk and mobile views all share. */}
+                <CollapsibleSearch
+                  value={search}
+                  onChange={setSearch}
+                  placeholder="Search by name or barcode…"
+                />
               </>
             }
           >
@@ -1169,10 +1186,10 @@ export default function ScanViewer() {
               data={filtered}
               getRowId={(row) => String(row.id)}
               isLoading={itemsQuery.isLoading}
-              enableSearch
-              searchValue={search}
-              onSearchChange={setSearch}
-              searchableColumnIds={["item"]}
+              // No enableSearch here: the card header already carries a collapsible search
+              // button, and having the table render its own always-open bar underneath meant two
+              // search boxes driving the same value. The header button is the one that stays; its
+              // text is applied in `searched` below, which is what feeds this table.
               enableZebraStripes
               rowClassName={(row) => {
                 const status = row.status ?? "pending";
