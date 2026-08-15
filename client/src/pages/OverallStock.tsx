@@ -1692,7 +1692,65 @@ export default function OverallStock() {
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
             headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+            // Below 480px the card list below replaces this table — sixteen columns on a phone
+            // means reading every row by scrolling sideways.
+            className="space-y-0 hidden min-[480px]:block landscape:block"
           />
+
+          {/* Mobile card list — the narrow-screen counterpart to the table, same treatment as the
+              Scan pages: the identifying fields stacked, then the figures as labelled pairs, so
+              nothing depends on horizontal scrolling. */}
+          <div className="min-[480px]:hidden landscape:hidden">
+            {displayRows.length === 0 ? (
+              <p className="py-10 text-center text-sm text-gray-400">
+                No stock rows match your filters.
+              </p>
+            ) : (
+              displayRows.map((row) => {
+                const remain = totalStockOf(row) ?? 0;
+                // Only the measures this view actually has — Opening/Closing exist in date mode,
+                // Expected/Sale only when populated — so a card never shows an empty figure.
+                const figures: { label: string; value: string; tone?: string }[] = [
+                  ...(hasExpected ? [{ label: "Expected", value: (row.expectedQty ?? 0).toLocaleString() }] : []),
+                  ...(dateMode ? [{ label: "Opening", value: (row.openingStock ?? 0).toLocaleString() }] : []),
+                  { label: "Purchase", value: (row.inStock + row.extraQty).toLocaleString() },
+                  ...(row.extraQty > 0 ? [{ label: "Extra", value: `+${row.extraQty.toLocaleString()}`, tone: "text-amber-600" }] : []),
+                  ...(hasSale ? [{ label: "Sale", value: (row.saleQty ?? 0).toLocaleString(), tone: "text-emerald-600" }] : []),
+                  dateMode
+                    ? { label: "Closing", value: (row.closingStock ?? 0).toLocaleString(), tone: (row.closingStock ?? 0) < 0 ? "text-amber-600" : "text-[#001d6e]" }
+                    : { label: "Remain", value: remain.toLocaleString(), tone: remain < 0 ? "text-amber-600" : "text-[#001d6e]" },
+                ];
+                return (
+                  <div
+                    key={`${row.isEmptyBox ? "EB" : row.barcode}-${row.plant}`}
+                    className={`border-b border-gray-100 px-4 py-3 ${row.isEmptyBox ? "bg-orange-50/40" : ""}`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-[15px] font-semibold leading-snug text-gray-900">
+                          {row.isEmptyBox ? "Empty Box" : row.itemName}
+                        </p>
+                        {!row.isEmptyBox && (
+                          <p className="mt-0.5 font-mono text-xs text-gray-400">
+                            {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+                          </p>
+                        )}
+                      </div>
+                      {row.plant && <PlantBadge plant={row.plant} />}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                      {figures.map((f) => (
+                        <span key={f.label} className="text-sm">
+                          <span className="text-gray-400">{f.label} </span>
+                          <span className={`font-bold tabular-nums ${f.tone ?? "text-gray-900"}`}>{f.value}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </TableCard>
       </div>
 
