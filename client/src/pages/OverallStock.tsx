@@ -67,8 +67,9 @@ type PlantStockRow = {
   salePallets?: number | null;
   // Only populated when a single explicit date is selected — the running physical balance as
   // of the START (openingStock) and END (closingStock) of that date. closingStock = openingStock
-  // + Purchase (inStock + extraQty, which in dateMode already mean "received on this date") −
-  // saleQty, and becomes tomorrow's openingStock automatically. null outside single-date mode.
+  // + Purchase (inStock alone, which in dateMode already means "received on this date" AND
+  // already includes any extra portion — extraQty is a breakdown tag, not additional quantity)
+  // − saleQty, and becomes tomorrow's openingStock automatically. null outside single-date mode.
   openingStock?: number | null;
   openingPallets?: number | null;
   closingStock?: number | null;
@@ -133,12 +134,15 @@ const ALL_COLUMNS = [
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// Total Stock — Extra + Received (Stock), minus what's already gone out via Sales. null (not a
-// number, not even 0) when Sale Qty itself isn't loaded, so "no sales data" is never confused
-// with "confirmed zero total".
+// Remain — Purchase minus what's already gone out via Sales. inStock is the full physical
+// total already (extra included — see product_plant_stock's write path in
+// server/lib/orderGroupReport.ts), NOT a separate quantity on top of extraQty, so it must NOT
+// be added to extraQty here — that would double-count the extra portion. null (not a number,
+// not even 0) when Sale Qty itself isn't loaded, so "no sales data" is never confused with
+// "confirmed zero total".
 function totalStockOf(r: PlantStockRow): number | null {
   if (r.isEmptyBox || r.saleQty == null) return null;
-  return r.extraQty + r.inStock - r.saleQty;
+  return r.inStock - r.saleQty;
 }
 
 function buildUrl(base: string, params: Record<string, string | number | undefined>) {
@@ -549,7 +553,7 @@ export default function OverallStock() {
       { id: "brand", label: "Brand", filterType: "enum", options: textOptions((r) => r.brand), accessor: (r) => r.brand },
       { id: "expected", label: "Expected", filterType: "number", options: numberOptions((r) => r.expectedQty), accessor: (r) => r.expectedQty ?? null },
       { id: "opening", label: "Previous (Opening)", filterType: "number", options: numberOptions((r) => r.openingStock), accessor: (r) => r.openingStock ?? null },
-      { id: "purchase", label: "Purchase", filterType: "number", options: numberOptions((r) => r.inStock + r.extraQty), accessor: (r) => r.inStock + r.extraQty },
+      { id: "purchase", label: "Purchase", filterType: "number", options: numberOptions((r) => r.inStock), accessor: (r) => r.inStock },
       { id: "extra", label: "Extra", filterType: "number", options: numberOptions((r) => r.extraQty), accessor: (r) => r.extraQty },
       { id: "sale", label: "Sale", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
       { id: "closing", label: "Closing", filterType: "number", options: numberOptions((r) => r.closingStock), accessor: (r) => r.closingStock ?? null },
@@ -639,11 +643,12 @@ export default function OverallStock() {
   const totalPallets = filtered.reduce((s, r) => s + (r.pallets ?? 0), 0);
   const totalExtra = filtered.reduce((s, r) => s + r.extraQty, 0);
   const totalExtraPallets = filtered.reduce((s, r) => s + (r.extraPallets ?? 0), 0);
-  // Purchase = Received + Extra combined (extra already included, not added on top) — same
-  // rule as the Purchase table column. Remain/Opening/Closing mirror the Remain/Opening/Closing
-  // table columns, summed over the filtered set.
-  const totalPurchase = totalStock + totalExtra;
-  const totalPurchasePallets = totalPallets + totalExtraPallets;
+  // Purchase = inStock, which already IS the full physical total (extra included in the
+  // underlying data — see totalStockOf's comment above) — must NOT add totalExtra on top,
+  // that would double-count the extra portion. Remain/Opening/Closing mirror the
+  // Remain/Opening/Closing table columns, summed over the filtered set.
+  const totalPurchase = totalStock;
+  const totalPurchasePallets = totalPallets;
   const totalRemain = filtered.reduce((s, r) => s + (totalStockOf(r) ?? 0), 0);
   const totalOpening = filtered.reduce((s, r) => s + (r.openingStock ?? 0), 0);
   const totalOpeningPallets = filtered.reduce((s, r) => s + (r.openingPallets ?? 0), 0);
@@ -713,7 +718,9 @@ export default function OverallStock() {
       "Last Updated",
     ],
     ...src.map((r, i) => {
-      const purchaseQty = r.inStock + r.extraQty;
+      // inStock already IS the full physical total (extra included) — see totalStockOf's
+      // comment above; must not add extraQty on top of it.
+      const purchaseQty = r.inStock;
       const ipp = r.itemsPerPallet ? Number(r.itemsPerPallet) : 0;
       const purchasePallets = ipp > 0 ? purchaseQty / ipp : null;
       const total = totalStockOf(r);
@@ -910,24 +917,25 @@ export default function OverallStock() {
         ),
     } as DataTableColumn<PlantStockRow>] : []),
     {
-      // Total physical boxes received (Received + Extra combined) — in dateMode this is
-      // scoped to just the selected date ("Today Purchase"); otherwise it's the all-time
-      // total. The extra portion is already included in this number, not added on top — see
-      // the standalone Extra column right after this one for the breakdown.
+      // Total physical boxes received — in dateMode this is scoped to just the selected date
+      // ("Today Purchase"); otherwise it's the all-time total. inStock already IS this full
+      // total (extra included in the underlying data, see totalStockOf's comment above) — must
+      // NOT add extraQty on top, that would double-count the extra portion. See the standalone
+      // Extra column right after this one for the breakdown.
       id: "purchase",
       header: columnHeader("purchase", dateMode ? "Today Purchase" : "Purchase"),
       width: 120,
       align: "right",
       sortable: true,
-      accessor: (row) => row.inStock + row.extraQty,
-      total: (rows) => rows.reduce((sum, r) => sum + r.inStock + r.extraQty, 0).toLocaleString(),
+      accessor: (row) => row.inStock,
+      total: (rows) => rows.reduce((sum, r) => sum + r.inStock, 0).toLocaleString(),
       headerClassName: headerBorder,
       cellClassName: `font-bold text-[#001d6e] tabular-nums ${cellBorder}`,
       render: (row) => {
         if (row.isEmptyBox) {
           return <span className="font-bold text-orange-600 tabular-nums" title="Empty boxes — not counted in stock totals">{row.inStock.toLocaleString()}</span>;
         }
-        const purchaseQty = row.inStock + row.extraQty;
+        const purchaseQty = row.inStock;
         const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
         const purchasePlt = ipp > 0 ? purchaseQty / ipp : null;
         return stackedCell(purchaseQty, purchasePlt, "text-[#001d6e]");

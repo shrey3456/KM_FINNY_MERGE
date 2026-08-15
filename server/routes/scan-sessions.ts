@@ -1354,8 +1354,12 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       const openingConds: string[] = [`COALESCE(ois.order_date::date, sm.created_at::date) < $1::date`];
       if (allowed !== null) { openingParams.push(allowed); openingConds.push(`LOWER(sm.plant) = ANY($${openingParams.length}::text[])`); }
       if (plantFilterList)  { openingParams.push(plantFilterList); openingConds.push(`LOWER(sm.plant) = ANY($${openingParams.length}::text[])`); }
+      // sm.qty is already the full physical quantity per movement, extra portion included —
+      // sm.extra_qty is tracked alongside it purely as a breakdown tag (same as
+      // product_plant_stock.in_stock/extra_qty, see orderGroupReport.ts's write path), so it
+      // must NOT be added here — that would double-count every extra scan.
       const { rows: openingRows } = await pool.query(`
-        SELECT sm.barcode, sm.plant, (SUM(sm.qty) + SUM(sm.extra_qty))::int AS "openingQty"
+        SELECT sm.barcode, sm.plant, SUM(sm.qty)::int AS "openingQty"
         FROM stock_movements sm
         LEFT JOIN order_import_sessions ois ON ois.id = sm.session_id
         WHERE ${openingConds.join(' AND ')}
@@ -1544,15 +1548,17 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
           // own pallet size, never one blended figure.
           const ipp = it.itemsPerPallet ? Number(it.itemsPerPallet) : 0;
           const pltOf = (q: number | null) => (ipp > 0 && q != null ? parseFloat((q / ipp).toFixed(2)) : null);
-          // Opening/Closing only apply to a single-date view — in dateMode, inStock/extraQty
-          // already mean "received on this date" (see sourceSql above), so their sum IS that
-          // date's Purchase; Closing = Opening + Purchase − Sale, the physical count remaining
-          // at end of day, which becomes tomorrow's Opening automatically.
+          // Opening/Closing only apply to a single-date view — in dateMode, inStock already
+          // means "received on this date" (see sourceSql above) and already includes any extra
+          // portion (extraQty is a breakdown tag, not additional quantity — same as
+          // product_plant_stock.in_stock/extra_qty), so it alone IS that date's Purchase;
+          // Closing = Opening + Purchase − Sale, the physical count remaining at end of day,
+          // which becomes tomorrow's Opening automatically.
           let openingStock: number | null = null;
           let closingStock: number | null = null;
           if (singleDate != null) {
             openingStock = openingByKey.get(key) ?? 0;
-            const purchaseQty = (Number(it.inStock) || 0) + (Number(it.extraQty) || 0);
+            const purchaseQty = Number(it.inStock) || 0;
             closingStock = openingStock + purchaseQty - (saleQty ?? 0);
           }
           return {
