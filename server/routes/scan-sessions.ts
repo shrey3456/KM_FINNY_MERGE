@@ -617,8 +617,8 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
             CASE WHEN UPPER(pl_new.state) = 'GJ' THEN NULLIF(p.gj_plt, 0)
                  WHEN UPPER(pl_new.state) = 'MP' THEN NULLIF(p.mp_plt, 0) END AS ipp,
             CASE
-              WHEN UPPER(ois.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code)
-              WHEN UPPER(ois.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code)
+              WHEN UPPER(pl_new.state) = 'GJ' THEN COALESCE(p.gj_sap, p.sap_code)
+              WHEN UPPER(pl_new.state) = 'MP' THEN COALESCE(p.mp_sap, p.sap_code)
               ELSE p.sap_code
             END                                                     AS sap_code,
             p.hsn_code                                              AS hsn_code,
@@ -768,373 +768,6 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
   }
 });
 
-// ── Overall stock report: all orders aggregated by SKU ────────────────────
-// Groups every scan_session_item by barcode/SKU, sums expected + scanned across
-// all sessions, and enriches each row with live product specs from the inventory.
-router.get('/reports/overall-stock', async (_req: Request, res: Response) => {
-  try {
-    const rows = await db
-      .select({
-        sku: scanSessionItems.sku,
-        barcode: scanSessionItems.barcode,
-        itemName: scanSessionItems.itemName,
-        itemNo: scanSessionItems.itemNo,
-        sapCode: scanSessionItems.sapCode,
-        productId: scanSessionItems.productId,
-        expectedQty: scanSessionItems.expectedQty,
-        scannedQty: scanSessionItems.scannedQty,
-        sessionId: scanSessionItems.sessionId,
-        sessionOrderName: scanSessions.orderName,
-        sessionStatus: scanSessions.status,
-        sessionCreatedAt: scanSessions.createdAt,
-        // Live product specs & stock
-        inStock: products.inStock,
-        hsnCode: products.hsnCode,
-        category: products.category,
-        itemsPerPallet: products.itemsPerPallet,
-        volumeInCuFt: products.volumeInCuFt,
-        productSapCode: products.sapCode,
-        productItemNo: products.itemNo,
-        productName: products.name,
-      })
-      .from(scanSessionItems)
-      .innerJoin(scanSessions, eq(scanSessionItems.sessionId, scanSessions.id))
-      .leftJoin(products, eq(scanSessionItems.productId, products.id))
-      .orderBy(asc(scanSessionItems.itemName));
-
-    // Aggregate by barcode (fall back to sku when barcode is null)
-    const skuMap = new Map<string, {
-      sku: string;
-      barcode: string | null;
-      itemName: string;
-      itemNo: string | null;
-      sapCode: string | null;
-      productId: number | null;
-      inStock: number | null;
-      hsnCode: string | null;
-      category: string | null;
-      itemsPerPallet: number | null;
-      volumeInCuFt: string | null;
-      totalExpected: number;
-      totalScanned: number;
-      sessions: Array<{
-        sessionId: number;
-        orderName: string;
-        status: string;
-        expectedQty: number;
-        scannedQty: number;
-      }>;
-    }>();
-
-    for (const row of rows) {
-      const key = row.barcode ?? row.sku;
-      if (!skuMap.has(key)) {
-        skuMap.set(key, {
-          sku: row.sku,
-          barcode: row.barcode ?? null,
-          itemName: row.productName ?? row.itemName,
-          itemNo: row.itemNo ?? row.productItemNo ?? null,
-          sapCode: row.sapCode ?? row.productSapCode ?? null,
-          productId: row.productId ?? null,
-          inStock: row.inStock ?? null,
-          hsnCode: row.hsnCode ?? null,
-          category: row.category ?? null,
-          itemsPerPallet: row.itemsPerPallet ?? null,
-          volumeInCuFt: row.volumeInCuFt ?? null,
-          totalExpected: 0,
-          totalScanned: 0,
-          sessions: [],
-        });
-      }
-      const entry = skuMap.get(key)!;
-      entry.totalExpected += row.expectedQty ?? 0;
-      entry.totalScanned += row.scannedQty ?? 0;
-      entry.sessions.push({
-        sessionId: row.sessionId,
-        orderName: row.sessionOrderName,
-        status: row.sessionStatus ?? 'scanning',
-        expectedQty: row.expectedQty ?? 0,
-        scannedQty: row.scannedQty ?? 0,
-      });
-    }
-
-    return res.json(Array.from(skuMap.values()));
-  } catch (error) {
-    console.error('Error generating overall stock report:', error);
-    return res.status(500).json({ error: 'Failed to generate overall stock report' });
-  }
-});
-
-// ── Completed-sessions stock sheet ───────────────────────────────────────
-// Returns every scanned item (scannedQty > 0) from ALL sessions,
-// grouped by barcode/SKU with full product specs and which orders it appeared in.
-// Includes active (scanning) sessions so the report updates live as boxes are scanned.
-router.get('/reports/completed-stock', async (req: Request, res: Response) => {
-  try {
-    // Optional date filter: ?date=YYYY-MM-DD — filters by the session's arrival date
-    const dateParam = typeof req.query.date === 'string' && req.query.date.trim()
-      ? req.query.date.trim()
-      : null;
-
-    const limit = Math.max(1, Math.min(200, parseInt(String(req.query.limit ?? '10'), 10) || 10));
-    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
-
-    // CTE pre-aggregates pallet scan data once — avoids N correlated subqueries per row.
-    // The WHERE sci.scanned_qty > 0 filter at SQL level keeps the result set small.
-    const queryParams: string[] = [];
-    const dateFilter = dateParam
-      ? `AND DATE(ss.created_at) = $${queryParams.push(dateParam)}`
-      : '';
-
-    const rawRows = await pool.query(`
-      WITH item_pallets AS (
-        SELECT
-          session_item_id,
-          MAX(product_id) FILTER (WHERE product_id IS NOT NULL)    AS pallet_product_id,
-          ROUND(CAST(SUM(num_pallets) AS NUMERIC), 2)              AS total_pallets
-        FROM  scan_session_pallet_scans
-        WHERE session_item_id IS NOT NULL
-        GROUP BY session_item_id
-      )
-      SELECT
-        sci.sku,
-        sci.barcode,
-        sci.item_name                                             AS "itemName",
-        sci.item_no                                               AS "itemNo",
-        sci.sap_code                                              AS "sapCode",
-        sci.scanned_qty                                           AS "scannedQty",
-        sci.session_id                                            AS "sessionId",
-        ss.order_name                                             AS "sessionOrderName",
-        ss.status                                                 AS "sessionStatus",
-        ss.created_at                                             AS "sessionCreatedAt",
-        COALESCE(sci.product_id, ip.pallet_product_id)           AS "productId",
-        COALESCE(p.in_stock,         p_bc.in_stock)              AS "inStock",
-        COALESCE(p.hsn_code,         p_bc.hsn_code)              AS "hsnCode",
-        COALESCE(p.category,         p_bc.category)              AS category,
-        COALESCE(
-          NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0),
-          NULLIF(p_bc.items_per_pallet, 0), NULLIF(p_bc.pallets, 0)
-        )                                                         AS "itemsPerPallet",
-        COALESCE(p.volume_in_cu_ft,  p_bc.volume_in_cu_ft)      AS "volumeInCuFt",
-        COALESCE(p.sap_code,         p_bc.sap_code)              AS "productSapCode",
-        COALESCE(p.item_no,          p_bc.item_no)               AS "productItemNo",
-        COALESCE(p.name,             p_bc.name)                  AS "productName",
-        COALESCE(p.brand,            p_bc.brand)                 AS brand,
-        CASE
-          WHEN UPPER(ss.plant) LIKE '%VAL%'
-            THEN COALESCE(p.gj_sap, p_bc.gj_sap, p.sap_code, p_bc.sap_code, sci.sap_code)
-          WHEN UPPER(ss.plant) LIKE '%IND%'
-            THEN COALESCE(p.mp_sap, p_bc.mp_sap, p.sap_code, p_bc.sap_code, sci.sap_code)
-          ELSE COALESCE(p.sap_code,  p_bc.sap_code, sci.sap_code)
-        END                                                       AS "plantSapCode",
-        ip.total_pallets                                          AS "storedNumPallets"
-      FROM  scan_session_items sci
-      JOIN  scan_sessions ss  ON ss.id  = sci.session_id
-      LEFT  JOIN item_pallets ip ON ip.session_item_id = sci.id
-      LEFT  JOIN products p    ON p.id    = COALESCE(sci.product_id, ip.pallet_product_id)
-      LEFT  JOIN products p_bc ON p.id IS NULL
-                               AND p_bc.barcode IS NOT NULL
-                               AND LOWER(p_bc.barcode) = LOWER(COALESCE(sci.barcode, sci.sku))
-      WHERE sci.scanned_qty > 0
-        ${dateFilter}
-      ORDER BY sci.item_name ASC
-    `, queryParams);
-    type StockRow = {
-      sku: string; barcode: string | null; itemName: string; itemNo: string | null;
-      sapCode: string | null; scannedQty: number; sessionId: number;
-      sessionOrderName: string; sessionStatus: string | null; sessionCreatedAt: Date | null;
-      productId: number | null; inStock: number | null; hsnCode: string | null;
-      category: string | null; itemsPerPallet: number | null; volumeInCuFt: string | null;
-      productSapCode: string | null; productItemNo: string | null; productName: string | null;
-      brand: string | null; storedNumPallets: number | null;
-    };
-    const rows: StockRow[] = rawRows.rows;
-
-    // Also include scans from the new order-scan system.
-    // When a date filter is active, sum individual scan events for that date so the
-    // quantity shown reflects what actually arrived on that day (not the all-time total).
-    // When no date filter, use the pre-aggregated order_scan_items totals.
-    let osRawRows: { rows: StockRow[] };
-    if (dateParam) {
-      // order_scan_events has: barcode, item_name, pallets, total_qty, items_per_pallet,
-      // is_extra, scanned_at, session_id — no sap_code column on that table.
-      osRawRows = await pool.query(`
-        SELECT
-          COALESCE(ose.barcode, '')                                                AS sku,
-          ose.barcode,
-          COALESCE(MAX(p.name), MAX(ose.item_name), ose.barcode)                  AS "itemName",
-          NULL::text                                                               AS "itemNo",
-          MAX(CASE
-            WHEN UPPER(ois.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code)
-            WHEN UPPER(ois.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code)
-            ELSE p.sap_code
-          END)                                                                     AS "sapCode",
-          SUM(ose.total_qty)                                                       AS "scannedQty",
-          ose.session_id                                                           AS "sessionId",
-          MAX(ois.csv_file_name)                                                   AS "sessionOrderName",
-          MAX(ois.scan_status)                                                     AS "sessionStatus",
-          MAX(ose.scanned_at)                                                      AS "sessionCreatedAt",
-          MAX(p.id)                                                                AS "productId",
-          MAX(p.in_stock)                                                          AS "inStock",
-          MAX(p.hsn_code)                                                          AS "hsnCode",
-          MAX(p.category)                                                          AS category,
-          MAX(COALESCE(
-            NULLIF(ose.items_per_pallet, 0),
-            NULLIF(p.items_per_pallet, 0),
-            NULLIF(p.pallets, 0)
-          ))                                                                       AS "itemsPerPallet",
-          MAX(p.volume_in_cu_ft)                                                   AS "volumeInCuFt",
-          MAX(p.sap_code)                                                          AS "productSapCode",
-          MAX(p.item_no)                                                           AS "productItemNo",
-          MAX(p.name)                                                              AS "productName",
-          MAX(p.brand)                                                             AS brand,
-          CASE
-            WHEN MAX(COALESCE(NULLIF(ose.items_per_pallet, 0), NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0))) > 0
-              THEN ROUND(
-                SUM(ose.total_qty)::NUMERIC /
-                MAX(COALESCE(NULLIF(ose.items_per_pallet, 0), NULLIF(p.items_per_pallet, 0), NULLIF(p.pallets, 0))),
-                2
-              )
-            ELSE NULL
-          END                                                                      AS "storedNumPallets"
-        FROM  order_scan_events ose
-        JOIN  order_import_sessions ois ON ois.id = ose.session_id
-        LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
-        WHERE DATE(ose.scanned_at AT TIME ZONE 'Asia/Kolkata') = $1
-          AND ose.barcode <> 'EMPTY_BOX'  -- empty boxes aren't stock (see order-scan.ts)
-          AND ose.voided IS NOT TRUE
-        GROUP BY ose.barcode, ose.session_id
-        ORDER BY MAX(COALESCE(p.name, ose.item_name)) ASC
-      `, queryParams);
-    } else {
-      osRawRows = await pool.query(`
-        SELECT
-          COALESCE(osi.barcode, '')                                                AS sku,
-          osi.barcode,
-          COALESCE(p.name, osi.item_name)                                         AS "itemName",
-          NULL::text                                                               AS "itemNo",
-          CASE
-            WHEN UPPER(ois.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p.sap_code, osi.sap_code)
-            WHEN UPPER(ois.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p.sap_code, osi.sap_code)
-            ELSE COALESCE(p.sap_code, osi.sap_code)
-          END                                                                     AS "sapCode",
-          osi.total_scanned_qty                                                   AS "scannedQty",
-          ois.id                                                                  AS "sessionId",
-          ois.csv_file_name                                                       AS "sessionOrderName",
-          ois.scan_status                                                         AS "sessionStatus",
-          COALESCE(osi.last_scanned_at, ois.created_at)                           AS "sessionCreatedAt",
-          p.id                                                                    AS "productId",
-          p.in_stock                                                              AS "inStock",
-          p.hsn_code                                                              AS "hsnCode",
-          p.category,
-          COALESCE(
-            NULLIF(osi.items_per_pallet, 0),
-            NULLIF(p.items_per_pallet, 0),
-            NULLIF(p.pallets, 0)
-          )                                                                       AS "itemsPerPallet",
-          p.volume_in_cu_ft                                                       AS "volumeInCuFt",
-          p.sap_code                                                              AS "productSapCode",
-          p.item_no                                                               AS "productItemNo",
-          p.name                                                                  AS "productName",
-          p.brand                                                                 AS brand,
-          CASE
-            WHEN COALESCE(osi.items_per_pallet, 0) > 0
-              THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / osi.items_per_pallet, 2)
-            WHEN COALESCE(p.items_per_pallet, 0) > 0
-              THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / p.items_per_pallet, 2)
-            WHEN COALESCE(p.pallets, 0) > 0
-              THEN ROUND(CAST(osi.total_scanned_qty AS NUMERIC) / p.pallets, 2)
-            ELSE NULL
-          END                                                                     AS "storedNumPallets"
-        FROM  order_scan_items osi
-        JOIN  order_import_sessions ois ON ois.id = osi.session_id
-        LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(osi.barcode)
-                              OR (osi.sap_code IS NOT NULL AND LOWER(p.sap_code) = LOWER(osi.sap_code))
-        WHERE osi.total_scanned_qty > 0
-        ORDER BY osi.item_name ASC
-      `, []);
-    }
-    const allRows: StockRow[] = [...rows, ...osRawRows.rows];
-
-    // Group by barcode (fall back to sku), sum scannedQty and storedNumPallets across all sessions
-    const skuMap = new Map<string, {
-      srNo: number;
-      sku: string;
-      barcode: string | null;
-      itemName: string;
-      itemNo: string | null;
-      sapCode: string | null;
-      hsnCode: string | null;
-      category: string | null;
-      brand: string | null;
-      itemsPerPallet: number | null;
-      volumeInCuFt: string | null;
-      inStock: number | null;
-      totalScanned: number;
-      totalPallets: number | null; // sum of stored numPallets
-      orders: Array<{ name: string; status: string }>;
-      lastArrived: string | null;
-    }>();
-
-    let srNo = 1;
-    for (const row of allRows) {
-      const key = row.barcode ?? row.sku;
-      if (!skuMap.has(key)) {
-        skuMap.set(key, {
-          srNo: srNo++,
-          sku:            row.sku,
-          barcode:        row.barcode ?? null,
-          itemName:       row.productName ?? row.itemName,
-          itemNo:         row.itemNo ?? row.productItemNo ?? null,
-          sapCode:        (row as any).plantSapCode ?? row.sapCode ?? row.productSapCode ?? null,
-          hsnCode:        row.hsnCode ?? null,
-          category:       row.category ?? null,
-          brand:          row.brand ?? null,
-          itemsPerPallet: row.itemsPerPallet != null ? Number(row.itemsPerPallet) : null,
-          volumeInCuFt:   row.volumeInCuFt ?? null,
-          inStock:        row.inStock != null ? Number(row.inStock) : null,
-          totalScanned:   0,
-          totalPallets:   null,
-          orders:         [],
-          lastArrived:    null,
-        });
-      }
-      const entry = skuMap.get(key)!;
-      entry.totalScanned += Number(row.scannedQty ?? 0);
-      // storedNumPallets comes back as a string from PostgreSQL NUMERIC type — parse it
-      const storedNum = row.storedNumPallets != null ? parseFloat(String(row.storedNumPallets)) : null;
-      if (storedNum != null && !isNaN(storedNum)) {
-        entry.totalPallets = parseFloat(((entry.totalPallets ?? 0) + storedNum).toFixed(2));
-      }
-      if (row.sessionOrderName && !entry.orders.find((o) => o.name === row.sessionOrderName)) {
-        entry.orders.push({ name: row.sessionOrderName, status: row.sessionStatus ?? 'scanning' });
-      }
-      if (row.sessionCreatedAt) {
-        const rowDate = row.sessionCreatedAt instanceof Date ? row.sessionCreatedAt : new Date(row.sessionCreatedAt);
-        if (!entry.lastArrived || rowDate > new Date(entry.lastArrived)) {
-          entry.lastArrived = rowDate.toISOString();
-        }
-      }
-    }
-
-    const items = Array.from(skuMap.values());
-    const total = items.length;
-    const pagedItems = items.slice(offset, offset + limit);
-
-    return res.json({
-      items: pagedItems,
-      total,
-      limit,
-      offset,
-    });
-  } catch (error) {
-    console.error('Error generating completed stock sheet:', error);
-    return res.status(500).json({ error: 'Failed to generate completed stock sheet' });
-  }
-});
-
-// ── Scan History: every individual scan event with scanner, time, item, qty ──
-// Supports filters: date, scanner name, type (regular/extra), free-text search.
 // Return configured Notion DB ID (masked for display)
 router.get('/reports/notion-config', (_req: Request, res: Response) => {
   const raw = process.env.SCAN_HISTORY_NOTION_DB_ID ?? '';
@@ -1643,8 +1276,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         COALESCE(p.name, p_bc.name, pps.barcode)            AS "itemName",
         COALESCE(p.item_no, p_bc.item_no)                   AS "itemNo",
         CASE
-          WHEN UPPER(pps.plant) LIKE '%VAL%' THEN COALESCE(p.gj_sap, p_bc.gj_sap, p.sap_code, p_bc.sap_code)
-          WHEN UPPER(pps.plant) LIKE '%IND%' THEN COALESCE(p.mp_sap, p_bc.mp_sap, p.sap_code, p_bc.sap_code)
+          WHEN UPPER(pl.state) = 'GJ' THEN COALESCE(p.gj_sap, p_bc.gj_sap, p.sap_code, p_bc.sap_code)
+          WHEN UPPER(pl.state) = 'MP' THEN COALESCE(p.mp_sap, p_bc.mp_sap, p.sap_code, p_bc.sap_code)
           ELSE COALESCE(p.sap_code, p_bc.sap_code)
         END                                                AS "sapCode",
         COALESCE(p.hsn_code, p_bc.hsn_code)                 AS "hsnCode",
@@ -1767,10 +1400,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
         if (items.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key)) continue;
         const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
-        // Untouched, out of scope for this change — sapCode still resolves by plant-name guess.
-        const plantUpper = String(r.plant ?? '').toUpperCase();
-        const sapCode = p ? (plantUpper.includes('VAL') ? (p.gj_sap ?? p.sap_code) : plantUpper.includes('IND') ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const state = plantStateByName.get((r.plant ?? '').toLowerCase());
+        const sapCode = p ? (state === 'GJ' ? (p.gj_sap ?? p.sap_code) : state === 'MP' ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
         const ipp = definedIpp > 0 ? definedIpp : Math.max(1, Number(r.expectedQty) || 0);
         expectedOnlyRows.push({
@@ -1858,9 +1489,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
           saleOnlyRows.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key);
         if (alreadyHasRow) continue;
         const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
-        const plantUpper = String(r.plant ?? '').toUpperCase();
-        const sapCode = p ? (plantUpper.includes('VAL') ? (p.gj_sap ?? p.sap_code) : plantUpper.includes('IND') ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const state = plantStateByName.get((r.plant ?? '').toLowerCase());
+        const sapCode = p ? (state === 'GJ' ? (p.gj_sap ?? p.sap_code) : state === 'MP' ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
         const ipp = definedIpp > 0 ? definedIpp : Math.max(1, Number(r.saleQty) || 0);
         saleOnlyRows.push({

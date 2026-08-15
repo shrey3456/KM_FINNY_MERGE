@@ -114,7 +114,11 @@ export class BarcodeScanner {
       const callback = (result: Result | null, error: any) => {
         if (result) {
           const code = result.getText();
-          if (!code || code.trim().length < 3 || !/[a-zA-Z0-9]/.test(code)) return;
+          // Was `< 3`, which silently discarded any real barcode shorter than 3 characters
+          // (e.g. a 2-character code like "A1") — the two-reads-within-1.5s confirmation
+          // below is already the real defense against a noisy misread, so this only needs
+          // to reject a genuinely empty/whitespace decode, not filter by length.
+          if (!code || code.trim().length < 1 || !/[a-zA-Z0-9]/.test(code)) return;
           const now = Date.now();
           if (code === this.lastCode && now - this.lastCodeAt < this.CONFIRM_WINDOW_MS) {
             this.lastCodeCount++;
@@ -189,7 +193,11 @@ export class BarcodeScanner {
       const callback = (result: Result | null, error: any) => {
         if (result) {
           const code = result.getText();
-          if (!code || code.trim().length < 3 || !/[a-zA-Z0-9]/.test(code)) return;
+          // Was `< 3`, which silently discarded any real barcode shorter than 3 characters
+          // (e.g. a 2-character code like "A1") — the two-reads-within-1.5s confirmation
+          // below is already the real defense against a noisy misread, so this only needs
+          // to reject a genuinely empty/whitespace decode, not filter by length.
+          if (!code || code.trim().length < 1 || !/[a-zA-Z0-9]/.test(code)) return;
           const now = Date.now();
           if (code === this.lastCode && now - this.lastCodeAt < this.CONFIRM_WINDOW_MS) {
             this.lastCodeCount++;
