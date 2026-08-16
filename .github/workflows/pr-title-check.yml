@@ -24,22 +24,37 @@ jobs:
         with:
           types: |
             feat
+            Feat
             fix
+            Fix
             docs
+            Docs
             style
+            Style
             refactor
+            Refactor
             test
+            Test
             chore
+            Chore
             ci
+            Ci
             build
+            Build
             perf
+            Perf
             revert
+            Revert
 
           # Scope is optional: GitHub auto-fills a single-commit PR's title from
           # the commit message, so requiring "(scope)" made plain "feat: ..." /
           # "fix: ..." commit messages fail validation. A "type:" prefix is still
           # required, but the scope is now optional.
           requireScope: false
+          # Accept both conventional "fix: subject" and title-case "Fix subject"
+          # prefixes while keeping the allowed release types constrained.
+          headerPattern: '^(\w*)(?:\(([\w$.\-*/ ]*)\))?:? (.*)$'
+          headerPatternCorrespondence: type, scope, subject
 
       - name: "[PR Check] Pull Request Title Validation Passed"
         if: success()
