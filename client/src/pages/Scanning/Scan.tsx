@@ -266,6 +266,9 @@ const CUSTOM_SCAN_SOUND_URL = "/sounds/scan-beep.mp3";
 const OS_STV_STORAGE_KEY = "km-finny.scan.selectedStv";
 // Width split (percent) between the totals card and the scanner column — operator-draggable.
 const OS_TOTALS_PCT_KEY = "km-finny.scan.totalsWidthPct";
+// Remembers which plant's active session the operator was last on, so returning to the Scan
+// page (or reloading) defaults back to that plant instead of always the first active session.
+const OS_LAST_PLANT_KEY = "km-finny.scan.lastPlant";
 const OS_TOTALS_PCT_MIN = 30;
 const OS_TOTALS_PCT_MAX = 80;
 let customScanSoundBroken = false; // set once the custom file is confirmed missing/unplayable
@@ -563,12 +566,43 @@ export default function ScanOrderPage() {
   const activeOrderScanSession = (() => {
     const list = osActiveSessions ?? [];
     if (list.length > 0) {
-      return list.find((s) => s.id === osSelectedSessionId) ?? list[0];
+      if (osSelectedSessionId != null) {
+        const picked = list.find((s) => s.id === osSelectedSessionId);
+        if (picked) return picked;
+      }
+      // No explicit pick yet this load — default to whichever plant the operator was on last
+      // (remembered across page visits/reloads via OS_LAST_PLANT_KEY), falling back to the
+      // first active session if that plant isn't actively being scanned right now.
+      let lastPlant: string | null = null;
+      try { lastPlant = localStorage.getItem(OS_LAST_PLANT_KEY); } catch { /* private mode */ }
+      const remembered = lastPlant
+        ? list.find((s) => (s.plant ?? "").toUpperCase() === lastPlant!.toUpperCase())
+        : null;
+      return remembered ?? list[0];
     }
     // Fallback to the singular endpoint (covers the moment active-sessions hasn't
     // resolved yet on first load) so behavior is identical to before this existed.
     return orderScanNotif?.active ? orderScanNotif.session : null;
   })();
+
+  // Shared by both the mobile and desktop plant-switch dropdowns — picks the session AND
+  // remembers its plant so the next visit to this page defaults back to it.
+  const selectPlantSession = (sessionId: number, plantName: string | null | undefined) => {
+    setOsSelectedSessionId(sessionId);
+    if (plantName) {
+      try { localStorage.setItem(OS_LAST_PLANT_KEY, plantName); } catch { /* private mode */ }
+    }
+    setOsSearch("");
+    setMvSearch("");
+  };
+
+  // Options for the plant-switch dropdown in the session header — always shown (not just
+  // when 2+ plants are simultaneously active), so it falls back to a single-entry list built
+  // from activeOrderScanSession itself when osActiveSessions hasn't resolved yet or only has
+  // the one plant. Keeps the dropdown populated (and never empty) in every case.
+  const osPlantSwitchOptions = (osActiveSessions && osActiveSessions.length > 0)
+    ? osActiveSessions
+    : (activeOrderScanSession ? [activeOrderScanSession] : []);
 
   // Plant config (colors + the scan behavior toggles like Auto Scan). Small, cacheable list;
   // we look up the active session's plant by name to read its per-plant flags. Auto Scan
@@ -578,6 +612,14 @@ export default function ScanOrderPage() {
     queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
     staleTime: 60000,
   });
+  // Plant Management's configured colors for a plant — same source/lookup PlantBadge itself
+  // uses, so the plant-switch dropdown's trigger/options are colored consistently with every
+  // other plant badge in the app instead of a flat, uncolored dropdown.
+  const getPlantColorCfg = (plantName: string | null | undefined) => {
+    const name = (plantName ?? "").trim().toUpperCase();
+    if (!name || !allPlants) return null;
+    return allPlants.find((p) => String(p.name ?? "").trim().toUpperCase() === name) ?? null;
+  };
   // Pallet size is a per-STATE fact (see products.mpPlt/gjPlt), not per-plant — a plant just
   // knows which state it's in (plants.state, set on the Plant Management page). Replaces the
   // old plant-name string-guessing ("valsad"/"indore" substring checks).
@@ -2239,7 +2281,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const exp = i.quantity ?? 0;
     return {
       exp,
-      done: Math.min(i.scannedQty ?? 0, exp),
+      // Received = full physical count (order-matched + extra) — same convention as the
+      // doneQty/donePlt columns above and the Scan tab's osRowState.doneQty.
+      done: (i.scannedQty ?? 0) + (i.extraQty ?? 0),
       remain: Math.max(0, exp - (i.scannedQty ?? 0)),
       extra: i.extraQty ?? 0,
       ipp: impItemsPerPallet(i),
@@ -2302,13 +2346,17 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       width: 90,
       align: "right",
       sortable: true,
-      accessor: (i) => i.scannedQty ?? 0,
+      // Received = the full physical count (order-matched scannedQty PLUS extra) — same
+      // convention as the Scan tab's osRowState.doneQty and Master View's mvRowState.done.
+      // Status/isDone below still gates on scannedQty alone (order fulfillment), unaffected.
+      accessor: (i) => (i.scannedQty ?? 0) + (i.extraQty ?? 0),
       cellClassName: "tabular-nums font-bold",
       render: (item) => {
         const exp = item.quantity ?? 0;
-        const done = item.scannedQty ?? 0;
-        const isDone = done >= exp && exp > 0;
-        const isPartial = done > 0 && !isDone;
+        const scanned = item.scannedQty ?? 0;
+        const done = scanned + (item.extraQty ?? 0);
+        const isDone = scanned >= exp && exp > 0;
+        const isPartial = scanned > 0 && !isDone;
         return <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>;
       },
     },
@@ -2356,8 +2404,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       width: 90,
       align: "right",
       cellClassName: "tabular-nums font-semibold",
-      total: (rows) => pltTotal(rows, (i) => ({ qty: i.scannedQty ?? 0, ipp: impItemsPerPallet(i) })),
-      render: (i) => pltCell(i.scannedQty ?? 0, impItemsPerPallet(i), "text-[#001d6e]"),
+      total: (rows) => pltTotal(rows, (i) => ({ qty: (i.scannedQty ?? 0) + (i.extraQty ?? 0), ipp: impItemsPerPallet(i) })),
+      render: (i) => pltCell((i.scannedQty ?? 0) + (i.extraQty ?? 0), impItemsPerPallet(i), "text-[#001d6e]"),
     },
     {
       id: "extraPlt",
@@ -2452,20 +2500,27 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     );
 
     // Per-row derived values shared by the CSV Items columns and the row tint.
-    // Credit from an earlier part's extra counts toward this part's Done and reduces
-    // Remain; Extra reflects real over-scan on THIS part (extras are separate events,
-    // not folded into totalScannedQty, which is capped at expectedQty).
+    // Credit from an earlier part's extra counts toward this part's Received and reduces
+    // Remain. Extra reflects real over-scan on THIS part (extras are separate events, not
+    // folded into totalScannedQty, which stays capped at expectedQty) — but IS folded into
+    // Received/doneQty below so Received always reads as the full physical count, same as
+    // Master View.
     const osRowState = (item: OsScanItem) => {
       const credit = osCreditByBarcode.get(normalize(item.barcode));
       const exp = item.expectedQty ?? 0;
       const effScanned = (item.totalScannedQty ?? 0) + (credit?.creditedQty ?? 0);
+      const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
       const done = exp > 0 && effScanned >= exp;
       return {
         credit,
         exp,
-        doneQty: Math.min(effScanned, exp),
+        // Received = the full physical count for this item — order-matched portion (capped at
+        // expected, plus any cross-part credit) PLUS extra — same convention as Master View's
+        // "done" (see mvRowState above). E.g. expected 100, 100 scanned regular + 10 extra
+        // shows Received: 110 (Extra Qty still separately shows 10 alongside it).
+        doneQty: effScanned + extra,
         rem: Math.max(0, exp - effScanned),
-        extra: extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0,
+        extra,
         ipp: item.itemsPerPallet ?? 0,
         done,
         partial: !done && effScanned > 0,
@@ -2492,11 +2547,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const osKioskTotals = sumKioskTotals(osVisible, (item) => {
       const exp = item.expectedQty ?? 0;
       const effScanned = (item.totalScannedQty ?? 0) + (osCreditByBarcode.get(normalize(item.barcode))?.creditedQty ?? 0);
+      const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
       return {
         exp,
-        done: Math.min(effScanned, exp),
+        done: effScanned + extra,
         remain: Math.max(0, exp - effScanned),
-        extra: Math.max(0, (item.totalScannedQty ?? 0) - exp),
+        extra,
         ipp: item.itemsPerPallet ?? 0,
       };
     });
@@ -2883,33 +2939,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
         )}
 
-        {/* ── Plant switcher — only appears when 2+ plants have a simultaneously active
-            session (e.g. Valsad + Indore both scanning at once). New/additive: for a
-            single active session, or non-admin users, this renders nothing and the page
-            behaves exactly as before. ── */}
-        {(osActiveSessions?.length ?? 0) > 1 && (
-          <div className="flex flex-wrap items-center gap-1.5 bg-white sm:bg-transparent px-3 py-2 sm:px-0 sm:py-0 sm:mb-3 border-b sm:border-0 border-gray-100">
-            <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wide text-gray-400 mr-1">Active:</span>
-            {(osActiveSessions ?? []).map((s) => (
-              <button
-                key={s.id}
-                onClick={() => {
-                  setOsSelectedSessionId(s.id);
-                  setOsSearch("");
-                  setMvSearch("");
-                }}
-                className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
-                  activeOrderScanSession?.id === s.id
-                    ? "bg-[#001d6e] text-white"
-                    : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                {s.plant}
-              </button>
-            ))}
-          </div>
-        )}
-
         {/* ══════════════════════════════════════════════════
             MOBILE LAYOUT  (hidden on sm+, or forced on when rotated)
             - Sticky header strip with session info + progress
@@ -2942,7 +2971,44 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   )}
                 </p>
                 <p className={`flex items-center gap-1.5 text-gray-500 truncate ${bigView ? "text-xs mt-0.5" : "text-[10px]"}`}>
-                  <PlantBadge plant={activeOrderScanSession.plant} />
+                  {/* Plant-switch dropdown — always shown (replaces the old plant tab strip
+                      above and the plain badge that used to sit here). Lists every plant
+                      with an active scan session right now; picking one switches to it,
+                      same as the old tabs did. Colored from Plant Management, same as
+                      every other PlantBadge in the app. */}
+                  <Select
+                    value={String(activeOrderScanSession.id)}
+                    onValueChange={(v) => {
+                      const picked = osPlantSwitchOptions.find((s) => String(s.id) === v);
+                      selectPlantSession(Number(v), picked?.plant);
+                    }}
+                  >
+                    <SelectTrigger
+                      className="h-5 w-auto gap-1 rounded-full border px-2 py-0 text-[10px] font-semibold shadow-none focus:ring-0 [&>svg]:h-3 [&>svg]:w-3"
+                      style={(() => {
+                        const cfg = getPlantColorCfg(activeOrderScanSession.plant);
+                        return cfg ? { backgroundColor: cfg.bgColor, color: cfg.textColor, borderColor: cfg.borderColor } : undefined;
+                      })()}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {osPlantSwitchOptions.map((s) => {
+                        const cfg = getPlantColorCfg(s.plant);
+                        return (
+                          <SelectItem key={s.id} value={String(s.id)}>
+                            <span className="flex items-center gap-1.5">
+                              <span
+                                className="h-2 w-2 shrink-0 rounded-full border"
+                                style={cfg ? { backgroundColor: cfg.bgColor, borderColor: cfg.borderColor } : undefined}
+                              />
+                              {s.plant}
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
+                    </SelectContent>
+                  </Select>
                   {activeOrderScanSession.importedByName && <span>· {activeOrderScanSession.importedByName}</span>}
                 </p>
               </div>
@@ -3367,9 +3433,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const creditQty = credit?.creditedQty ?? 0;
                         const effScanned = (item.totalScannedQty ?? 0) + creditQty;
                         const exp        = item.expectedQty ?? 0;
-                        const scanned    = Math.min(effScanned, exp);
+                        const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+                        // Received = full physical count (order-matched + credit, plus extra) —
+                        // matches Master View's convention. See osRowState's comment above.
+                        const scanned    = effScanned + extra;
                         const remaining  = Math.max(0, exp - effScanned);
-                        const extra      = Math.max(0, (item.totalScannedQty ?? 0) - exp);
                         const ipp        = item.itemsPerPallet ?? 0;
                         const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
                         const expPlt     = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
@@ -3469,12 +3537,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const creditQty = credit?.creditedQty ?? 0;
                         // The credit from an earlier part's extra counts toward this part's
                         // progress: it adds to "done" and subtracts from "left". Real over-scan
-                        // (extra) on THIS part is unaffected by the credit.
+                        // (extra) on THIS part is unaffected by the credit, but IS folded into
+                        // Received below (full physical count) — same convention as Master View.
                         const effScanned = (item.totalScannedQty ?? 0) + creditQty;
                         const exp        = item.expectedQty ?? 0;
-                        const scanned    = Math.min(effScanned, exp);
+                        const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+                        const scanned    = effScanned + extra;
                         const remaining  = Math.max(0, exp - effScanned);
-                        const extra      = Math.max(0, (item.totalScannedQty ?? 0) - exp);
                         const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
                         const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
                         // Pallet figure under each qty (qty ÷ items-per-pallet), same as Master View.
@@ -4096,7 +4165,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center bg-amber-400">
-                  <Zap className="h-4 w-4 text-white" />
+                  <Scan className="h-4 w-4 text-white" />
                 </div>
                 <div className="min-w-0">
                   {/* Order Date (what the CSV was uploaded FOR) rather than the CSV file name —
@@ -4114,7 +4183,44 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     )}
                   </p>
                   <p className="mt-1.5 flex items-center gap-1.5 text-xs text-gray-500 truncate">
-                    <PlantBadge plant={activeOrderScanSession.plant} />
+                    {/* Plant-switch dropdown — always shown (replaces the old plant tab strip
+                        above and the plain badge that used to sit here). Lists every plant
+                        with an active scan session right now; picking one switches to it,
+                        same as the old tabs did. Colored from Plant Management, same as
+                        every other PlantBadge in the app. */}
+                    <Select
+                      value={String(activeOrderScanSession.id)}
+                      onValueChange={(v) => {
+                        const picked = osPlantSwitchOptions.find((s) => String(s.id) === v);
+                        selectPlantSession(Number(v), picked?.plant);
+                      }}
+                    >
+                      <SelectTrigger
+                        className="h-6 w-auto gap-1 rounded-full border px-2.5 py-0 text-xs font-semibold shadow-none focus:ring-0 [&>svg]:h-3.5 [&>svg]:w-3.5"
+                        style={(() => {
+                          const cfg = getPlantColorCfg(activeOrderScanSession.plant);
+                          return cfg ? { backgroundColor: cfg.bgColor, color: cfg.textColor, borderColor: cfg.borderColor } : undefined;
+                        })()}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {osPlantSwitchOptions.map((s) => {
+                          const cfg = getPlantColorCfg(s.plant);
+                          return (
+                            <SelectItem key={s.id} value={String(s.id)}>
+                              <span className="flex items-center gap-1.5">
+                                <span
+                                  className="h-2 w-2 shrink-0 rounded-full border"
+                                  style={cfg ? { backgroundColor: cfg.bgColor, borderColor: cfg.borderColor } : undefined}
+                                />
+                                {s.plant}
+                              </span>
+                            </SelectItem>
+                          );
+                        })}
+                      </SelectContent>
+                    </Select>
                     {activeOrderScanSession.importedByName && <span>· loaded by {activeOrderScanSession.importedByName}</span>}
                   </p>
                 </div>
