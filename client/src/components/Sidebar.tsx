@@ -31,7 +31,9 @@ import {
   FileUp,
   PackageCheck,
   ChevronsLeft,
+  ChevronDown,
   LayoutList,
+  Eye,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -85,6 +87,15 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
 
   const [profileImageUrl, setProfileImageUrl] = useState<string | null>(null);
   const [imageError, setImageError] = useState(false);
+  // Collapsible category (department) sections — click a heading to show/hide its items. Tracks
+  // which sections are collapsed (default: none, i.e. all expanded).
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const toggleSection = (title: string) =>
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      next.has(title) ? next.delete(title) : next.add(title);
+      return next;
+    });
 
   useEffect(() => {
     // Handle profile image - check if user has profileImage data or load from API
@@ -132,7 +143,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
     try { return JSON.parse((currentUser as any)?.allowedPages || "[]"); } catch { return []; }
   })();
 
-  // Group menu items by categories as shown in the image
+  // Department-wise grouping (Dispatch/Sales/Billing/Steer), plus MAIN/ADMIN and two small
+  // leftover groups (OPERATIONS, INVENTORY) for pages that don't belong to any named
+  // department. Same pages/routes as before — this only changes which section each item
+  // renders under. Proforma Slips and Dispatch each appear in two department sections
+  // (same path/pageKey both times — access control is per-item via pageKey, so this is safe).
   const menuCategories: SidebarMenuCategory[] = [
     {
       title: "MAIN",
@@ -160,19 +175,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
       ],
     },
     {
-      title: "OPERATIONS",
+      title: "DISPATCH",
       items: [
-        {
-          label: "Load Operations",
-          icon: (
-            <Factory
-              className="h-5 w-5 mr-3 text-[#001d6e]"
-              style={{ fill: "#4d7eff" }}
-            />
-          ),
-          path: "/load-operations",
-          pageKey: "load-operations",
-        },
         {
           label: "Print Operations",
           icon: (
@@ -185,11 +189,65 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "print-operations",
         },
         {
+          label: "Scan Order",
+          icon: <ScanLine className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/scan",
+          badge: hasScanBadge ? 1 : 0,
+          pageKey: "scan-order",
+        },
+        {
+          label: "Scan Viewer",
+          icon: <Eye className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/scan-viewer",
+          pageKey: "scan-viewer",
+        },
+        {
+          label: "Scan History",
+          icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/reports",
+          pageKey: "scan-history",
+        },
+        {
+          label: "Stock Overview",
+          icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/overall-stock",
+          pageKey: "overall-stock",
+        },
+      ],
+    },
+    {
+      title: "SALES",
+      items: [
+        {
           label: "Proforma Slips",
           icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/proforma-slips",
           pageKey: "proforma",
         },
+        {
+          label: "Order Management",
+          icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/order-import",
+          pageKey: "order-import",
+        },
+        // {
+        //   label: "Order Reports",
+        //   icon: <PieChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
+        //   path: "/order-reports",
+        //   pageKey: "order-reports",
+        // },
+        {
+          label: "Product Master",
+          icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/notion-inventory",
+          pageKey: "notion-inventory",
+          permission: "canAccessInventory",
+        },
+      ],
+    },
+    {
+      title: "BILLING",
+      items: [
         {
           label: "Dispatch",
           icon: (
@@ -201,6 +259,11 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/dispatch",
           pageKey: "dispatch",
         },
+      ],
+    },
+    {
+      title: "STEER",
+      items: [
         {
           label: "Expense Voucher",
           icon: (
@@ -223,40 +286,21 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/toll-voucher",
           pageKey: "toll-voucher",
         },
+      ],
+    },
+    {
+      title: "OPERATIONS",
+      items: [
         {
-          label: "Scan Order",
-          icon: <ScanLine className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/scan",
-          badge: hasScanBadge ? 1 : 0,
-          pageKey: "scan-order",
-        },
-        {
-          label: "Overall Stock",
-          icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/overall-stock",
-          pageKey: "overall-stock",
-        },
-        {
-          label: "Scan History",
-          icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/reports",
-          pageKey: "scan-history",
-        },
-        {
-          label: "Order Management",
-          icon: <FileUp className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/order-import",
-          // permission: "canAccessOrderManagement",
-          // departments: ['billing'],
-          pageKey: "order-import",
-        },
-        {
-          label: "Order Reports",
-          icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" style={{ fill: "#c4b5fd" }} />,
-          path: "/order-reports",
-          // permission: "canAccessOrderManagement",
-          // departments: ['billing'],
-          pageKey: "order-import",
+          label: "Load Operations",
+          icon: (
+            <Factory
+              className="h-5 w-5 mr-3 text-[#001d6e]"
+              style={{ fill: "#4d7eff" }}
+            />
+          ),
+          path: "/load-operations",
+          pageKey: "load-operations",
         },
         {
           label: "Plant Management",
@@ -274,17 +318,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
     {
       title: "INVENTORY",
       items: [
-         {
-          label: "Inventory",
-          icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/notion-inventory",
-          pageKey: "notion-inventory",
-        },
         {
           label: "Purchases",
           icon: <ShoppingCart className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/purchases",
           pageKey: "purchases",
+          permission: "canAccessInventory",
         },
       ],
     },
@@ -316,20 +355,39 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
   // Get user permissions for conditional rendering
   // const userPermissions = getCurrentUserPermissions();
 
-  // Filter categories based on user permissions
+  // Whether a single menu item is visible to this user (access control). Extracted so both the
+  // render AND the "hide empty department" check below use the exact same rule.
+  const isItemVisible = (item: SidebarMenuItem) => {
+    const it = item as any;
+    if (it.adminOnly && !isSuperAdmin) return false;
+    if (it.roles) return it.roles.includes(userRole);
+    if (it.pageKey && !isAdminRole && allowedPages.includes(it.pageKey)) return true;
+    if (it.permission) {
+      return userPermissions[it.permission as keyof typeof userPermissions] === true
+        || it.departments?.includes(userDepartment) === true;
+    }
+    if (it.pageKey && !isAdminRole) {
+      return allowedPages.includes(it.pageKey);
+    }
+    return true;
+  };
+
+  // Filter categories based on user permissions, then drop any department that has NO items the
+  // user can access — an empty section heading is just noise.
   const filteredCategories = menuCategories.filter((category) => {
     if (category.title === "ADMIN") {
       // Show ADMIN category if user has canManageUsers OR has role-based access to any item
       const hasRoleBasedItem = category.items.some(
         (item) => (item as any).roles?.includes(userRole)
       );
-      return userPermissions.canManageUsers || hasRoleBasedItem;
+      if (!userPermissions.canManageUsers && !hasRoleBasedItem) return false;
     }
     // Hide INVENTORY category for users without inventory access
     if (category.title === "INVENTORY" && !userPermissions.canAccessInventory) {
       return false;
     }
-    return true;
+    // No accessible items → hide the whole department.
+    return category.items.some(isItemVisible);
   });
 
   return (
@@ -347,31 +405,23 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
 
       {/* Sidebar content */}
       <div className="flex-1 py-2 overflow-y-auto">
-        {filteredCategories.map((category, index) => (
+        {filteredCategories.map((category, index) => {
+          const isCollapsed = collapsedSections.has(category.title);
+          return (
           <div key={index} className="mb-6 px-4">
-            <h3 className="text-xs font-medium text-gray-700 mb-2">
-              {category.title}
-            </h3>
-            <ul className="space-y-1">
+            {/* Click the department heading to show/hide its items. */}
+            <button
+              type="button"
+              onClick={() => toggleSection(category.title)}
+              className="mb-2 flex w-full items-center justify-between text-xs font-medium text-gray-700 hover:text-[#001d6e]"
+              aria-expanded={!isCollapsed}
+            >
+              <span>{category.title}</span>
+              <ChevronDown className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${isCollapsed ? "-rotate-90" : ""}`} />
+            </button>
+            <ul className={`space-y-1 ${isCollapsed ? "hidden" : ""}`}>
               {category.items
-                .filter((item) => {
-                  const it = item as any;
-                  if (it.adminOnly && !isSuperAdmin) return false;
-                  // Role-based access: only show to listed roles
-                  if (it.roles) return it.roles.includes(userRole);
-                
-                  if (it.pageKey && !isAdminRole && allowedPages.includes(it.pageKey)) return true;
-                 
-                  if (it.permission) {
-                    return userPermissions[it.permission as keyof typeof userPermissions] === true
-                      || it.departments?.includes(userDepartment) === true;
-                  }
-                  // Page-based access control for non-admin users
-                  if (it.pageKey && !isAdminRole) {
-                    return allowedPages.includes(it.pageKey);
-                  }
-                  return true;
-                })
+                .filter(isItemVisible)
                 .map((item) => {
                   // @ts-ignore
                   if (item.disabled) {
@@ -409,7 +459,8 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
                 })}
             </ul>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Logout at bottom */}

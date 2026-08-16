@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { format } from "date-fns";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -13,12 +14,15 @@ import {
   Keyboard,
   Loader2,
   PackageCheck,
+  Package,
+  Scan,
   FileSpreadsheet,
   Layers,
   Plug,
   ScanLine,
   Search,
   Trash2,
+  Undo2,
   X,
   Zap,
   Eye,
@@ -29,15 +33,16 @@ import {
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
+import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/hooks/use-user";
+import { hasPageWriteAccess } from "@/lib/permissions";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
-import { TableCard } from "@/components/ui/table-card";
+import { DataTable, DATA_TABLE_TOTALS_ROW, type DataTableColumn } from "@/components/ui/data-table";
 import {
   Dialog,
   DialogContent,
@@ -67,8 +72,8 @@ type Product = {
   inStock?: number | null;
   itemsPerPallet?: number | null;
   pallets?: number | null;
-  indPlt?: number | null;   // Indore plant pallet qty
-  valPlt?: number | null;   // Valsad plant pallet qty
+  mpPlt?: number | null;   // Madhya Pradesh pallet qty (was indPlt)
+  gjPlt?: number | null;   // Gujarat pallet qty (was valPlt)
 };
 
 type OsScanItem = {
@@ -83,11 +88,13 @@ type MvItem = {
   id: number; barcode: string | null; itemName: string | null;
   sapCode: string | null; quantity: number | null; expectedPallets: number | null;
   scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
+  lastScannedAt?: string | null;
 };
 type MvFile = {
   sessionId: number; csvFileName: string; rowCount: number | null;
   uploadedAt: string | null; uploadedBy: string; plant: string;
   scanStatus: string | null; items: MvItem[];
+  emptyBoxCount?: number; emptyBoxTotalQty?: number;
 };
 type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
 type MvMergedItem = {
@@ -95,23 +102,25 @@ type MvMergedItem = {
   quantity: number; scannedQty: number; extraQty: number; expectedPallets: number | null;
   itemsPerPallet: number;
   _files: string[]; _isExtra: boolean;
+  // Distinct synthetic "Empty Box" entry — not a product, never counted toward order qty.
+  _isEmptyBox?: boolean; _emptyBoxCount?: number; _emptyBoxQty?: number;
+  // Server-side latest scan touch for this barcode — correct across reloads and other devices,
+  // used as a fallback for osScanSeqRef (this client's own instant feedback) when sorting.
+  _lastScannedAt?: string | null;
 };
 type ImpSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
   importedByName: string | null; createdAt: string | null; scanStatus: string;
+  orderDate: string | null; totalQty: number; totalPallets: number;
 };
 type ImpItem = {
   id: number; barcode: string | null; itemName: string | null;
   sapCode: string | null; quantity: number | null; expectedPallets: number | null;
   scannedQty: number | null; scanStatus: string | null;
+  extraQty: number | null; lastScannedAt: string | null;
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
-
-function scanLocalISODate(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 function scanFmtIST(dt: string | null | undefined): string {
   if (!dt) return "—";
@@ -121,11 +130,129 @@ function scanFmtIST(dt: string | null | undefined): string {
   return d.toLocaleString("en-IN", { timeZone: "UTC" });
 }
 
+// Order date — a bare "YYYY-MM-DD" (order_import_sessions.orderDate is a text column, not a
+// timestamp), so parsed by hand from its Y/M/D parts rather than through `new Date(string)`,
+// which is timezone-sensitive for date-only strings and would risk shifting it a day off.
+function scanFmtOrderDate(d: string | null | undefined): string {
+  if (!d) return "—";
+  const s = String(d).slice(0, 10);
+  const [y, m, day] = s.split("-").map(Number);
+  if (!y || !m || !day) return s;
+  const dt = new Date(y, m - 1, day);
+  if (isNaN(dt.getTime())) return s;
+  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+// Upload date for the session header — date only, no clock, since it identifies which day's
+// upload this is. Parses the same bare-timestamp shape scanFmtIST handles.
+function scanFmtUploadDate(dt: string | null | undefined): string {
+  if (!dt) return "—";
+  const s = String(dt);
+  const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-IN", {
+    timeZone: "UTC",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 const normalize = (value?: string | number | null) =>
   String(value ?? "").trim().toLowerCase();
 
 // Display-only: strips a trailing ".csv" from a file name so it reads cleanly in the UI.
 const stripCsvExt = (name?: string | null) => (name ?? "").replace(/\.csv$/i, "");
+
+const pltCell = (qty: number, ipp: number, className: string) =>
+  qty > 0 && ipp > 0
+    ? <span className={className}>{(qty / ipp).toFixed(2)}</span>
+    : <span className="text-gray-300">0.00</span>;
+
+/**
+ * Column order for one table, remembered for the browser session — drag a column's header onto
+ * another to move it. Session-scoped, like the filters: a rearranged table is working context for
+ * this sitting, not a permanent preference. An empty array means "declared order".
+ */
+function useColumnOrder(storageKey: string) {
+  const [order, setOrder] = useState<string[]>(() => {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(storageKey) ?? "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem(storageKey, JSON.stringify(order)); } catch { /* storage unavailable */ }
+  }, [storageKey, order]);
+  return [order, setOrder] as const;
+}
+
+// Kiosk rotation steps — a full turn, so a screen mounted at any angle can be matched. The button
+// walks these in order and wraps back to 0.
+const ROTATIONS = [0, 90, 180, 270] as const;
+type Rotation = (typeof ROTATIONS)[number];
+
+// Radix renders dialogs/dropdowns into document.body, outside the rotated container, so each needs
+// the matching turn applied by hand or it opens upright while everything behind it is rotated.
+function portalRotateClass(rotation: Rotation): string {
+  return rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : rotation === 270 ? "-rotate-90" : "";
+}
+
+// Totals-row counterpart to pltCell: each row contributes qty ÷ ITS OWN pallet size, then those
+// are added up — never one blended pallet size applied to a combined quantity, which would be
+// wrong for any table mixing items with different pack sizes.
+const pltTotal = <T,>(rows: T[], pick: (row: T) => { qty: number; ipp: number }) =>
+  rows
+    .reduce((sum, row) => {
+      const { qty, ipp } = pick(row);
+      return ipp > 0 ? sum + qty / ipp : sum;
+    }, 0)
+    .toFixed(2);
+
+// The desktop tables get their totals row from the shared DataTable. The mobile card lists and
+// the rotated-kiosk / portrait tables are hand-built, so they total up through here instead —
+// same rule as pltTotal for the pallet figures, and always over the rows actually on screen so
+// the line adds up to the column above it.
+type KioskTotals = {
+  exp: number; done: number; remain: number; extra: number;
+  expPlt: number; donePlt: number; remainPlt: number; extraPlt: number;
+};
+const sumKioskTotals = <T,>(
+  rows: T[],
+  pick: (row: T) => { exp: number; done: number; remain: number; extra: number; ipp: number },
+): KioskTotals =>
+  rows.reduce<KioskTotals>(
+    (acc, row) => {
+      const { exp, done, remain, extra, ipp } = pick(row);
+      acc.exp += exp;
+      acc.done += done;
+      acc.remain += remain;
+      acc.extra += extra;
+      if (ipp > 0) {
+        acc.expPlt += exp / ipp;
+        acc.donePlt += done / ipp;
+        acc.remainPlt += remain / ipp;
+        acc.extraPlt += extra / ipp;
+      }
+      return acc;
+    },
+    { exp: 0, done: 0, remain: 0, extra: 0, expPlt: 0, donePlt: 0, remainPlt: 0, extraPlt: 0 },
+  );
+
+// Hand-built totals lines borrow the DataTable's own totals styling rather than redefining it, so
+// the rotated/mobile views and the desktop tables stay one design.
+const KIOSK_TOTALS_ROW = DATA_TABLE_TOTALS_ROW;
+
+// Pins the hand-built totals row to the bottom of its table's scroll box, the way the DataTable
+// pins its own. The background has to live on the CELLS, not the <tr>: a row background paints at
+// the row's natural position and does not travel with sticky cells, so a bare <tr> tint would be
+// left behind and the rows would scroll through in the clear. The top rule is repeated as an inset
+// shadow for the same reason the DataTable repeats it — a border-collapse table drops a sticky
+// cell's own border while it is stuck.
+const KIOSK_TOTALS_CELL_PINNED =
+  "sticky bottom-0 z-[5] bg-[#f5f6f9] shadow-[inset_0_2px_0_0_rgba(0,29,110,0.2)]";
 
 // Sound played on every barcode detection. Drop an mp3/wav at client/public/sounds/scan-beep.mp3
 // to use a custom sound — it's tried first and used automatically. If that file is missing (or
@@ -137,6 +264,13 @@ const CUSTOM_SCAN_SOUND_URL = "/sounds/scan-beep.mp3";
 // Remembers the operator's STV pick across page navigations (the Scan page unmounts when you
 // leave it, which would otherwise clear the selection and re-trigger "Select an STV").
 const OS_STV_STORAGE_KEY = "km-finny.scan.selectedStv";
+// Width split (percent) between the totals card and the scanner column — operator-draggable.
+const OS_TOTALS_PCT_KEY = "km-finny.scan.totalsWidthPct";
+// Remembers which plant's active session the operator was last on, so returning to the Scan
+// page (or reloading) defaults back to that plant instead of always the first active session.
+const OS_LAST_PLANT_KEY = "km-finny.scan.lastPlant";
+const OS_TOTALS_PCT_MIN = 30;
+const OS_TOTALS_PCT_MAX = 80;
 let customScanSoundBroken = false; // set once the custom file is confirmed missing/unplayable
 let scanBeepCtx: AudioContext | null = null;
 
@@ -173,57 +307,171 @@ function playScanBeep() {
   }
 }
 
+// Closes/collapses something (a search box, an expanded row) as soon as a press lands outside
+// the returned ref's container — e.g. clicking anywhere else on the page hides an open search
+// bar instead of requiring an explicit cancel. `active` gates the listener so it's only attached
+// while there's actually something open to close. Uses `pointerdown` (fires before the target's
+// own `onClick`, and — unlike `mousedown` — fires consistently for touch taps too, not just a
+// mouse), so clicking/tapping the toggle button itself is seen as "inside" and only that
+// button's own handler runs — no double-toggle. Desktop/mobile both render their own markup for
+// the same tab (one hidden via CSS, not unmounted), so each needs its OWN ref/hook instance;
+// `offsetParent === null` (a reliable display:none check) skips the click-outside check
+// entirely for whichever instance's container isn't the one actually visible right now —
+// otherwise the hidden instance would see every press as "outside" and fire spuriously.
+function useOutsideClick(active: boolean, onOutside: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!active) return;
+    const handler = (e: PointerEvent) => {
+      const el = ref.current;
+      if (!el || el.offsetParent === null) return;
+      if (!el.contains(e.target as Node)) onOutside();
+    };
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
+  }, [active, onOutside]);
+  return ref;
+}
+
 // ─── Component ─────────────────────────────────────────────────────────────
 
 export default function ScanOrderPage() {
   const { toast } = useToast();
   const { user: currentUser } = useUser();
   const [, navigate] = useLocation();
-  const isDispatchUser = (currentUser?.department ?? '').toLowerCase().includes('dispatch');
-  // Force-completing a part (even with items still short) is admin-only by default — the
-  // shortage can be picked up by a later part and reconciled via the combined-report
-  // FIFO adjustment logic, so dispatch scanners shouldn't be the ones deciding to close it.
-  // Also allowed for: a user who BOTH has "scan-order" granted via Allowed Pages AND has
-  // the Supervisor designation — either alone is not enough.
+  // Anyone can complete a part EXCEPT designations "Loader"/"Helper"/"Driver"/"Scanner" (exact
+  // match) — those are physical/operational roles who shouldn't be the ones deciding to close
+  // an order out. Admin/super-admin always allowed regardless of designation.
   const userDesignation = String((currentUser as any)?.designation || "").toLowerCase().trim();
-  let osAllowedPagesList: string[] = [];
-  try { osAllowedPagesList = JSON.parse((currentUser as any)?.allowedPages || "[]"); } catch { osAllowedPagesList = []; }
-  const canCompletePart = ["admin", "super-admin"].includes(((currentUser as any)?.role ?? "").toLowerCase())
-    || (osAllowedPagesList.includes("scan-order") && userDesignation === "supervisor");
+  const isAdminOrSuperUser = ["admin", "super-admin"].includes(((currentUser as any)?.role ?? "").toLowerCase());
+  const canCompletePart = isAdminOrSuperUser || !["loader", "helper", "driver", "scanner"].includes(userDesignation);
+  // The simplified Dispatch Dashboard replaces the normal scanning UI for designation
+  // "Scanner" (exact match) only — no longer department-name-based ("Dispatch Valsad" etc.).
+  // Admin/super-admin always get the full scanning interface regardless of designation.
+  const isDispatchUser = !isAdminOrSuperUser && userDesignation === "scanner";
+  // Write access for the actual scanning actions (barcode scan, Empty Box) — server already
+  // enforces this (requirePageWrite('scan-order')); this just makes the buttons themselves
+  // reflect it instead of showing fully-clickable controls that would 403 for a view-only user.
+  const canScanWrite = isAdminOrSuperUser || hasPageWriteAccess("scan-order");
   const queryClient = useQueryClient();
 
   // ── Master View / Separate CSVs tab state ────────────────────────────────
   const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("master-view");
-  const scanTodayStr = scanLocalISODate();
   const [mvSearch,    setMvSearch]    = useState("");
+  // Desktop Master View search — collapsed by default (just an icon button); clicking it
+  // reveals the field inline in the plant-name row.
+  const [mvSearchOpen, setMvSearchOpen] = useState(false);
   const [mvShowFiles, setMvShowFiles] = useState(false); // toggle: show/hide source-file names in Master View
-  const [csvDate,     setCsvDate]     = useState(scanTodayStr);
-  const [csvPlant,    setCsvPlant]    = useState("");
+  // Clicking a totals box narrows the items table to just those rows. "" = show everything;
+  // clicking the active box again clears it.
+  const [osStatFilter, setOsStatFilter] = useState<"" | "done" | "remaining" | "extra">("");
+  // Draggable split between the totals card and the scanner column. Stored as a percent of the
+  // row's width so it survives a reload and adapts to any window size.
+  const totalsRowRef = useRef<HTMLDivElement | null>(null);
+  const [totalsPct, setTotalsPct] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem(OS_TOTALS_PCT_KEY));
+      return Number.isFinite(saved) && saved >= OS_TOTALS_PCT_MIN && saved <= OS_TOTALS_PCT_MAX ? saved : 60;
+    } catch { return 60; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(OS_TOTALS_PCT_KEY, String(Math.round(totalsPct))); } catch { /* private mode */ }
+  }, [totalsPct]);
+
+  // Pointer events (not mouse) so a stylus/touch drag works too. Listeners go on window so the
+  // drag keeps tracking even when the cursor leaves the thin handle.
+  const startTotalsResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const row = totalsRowRef.current;
+    if (!row) return;
+    const onMove = (ev: PointerEvent) => {
+      const rect = row.getBoundingClientRect();
+      if (!rect.width) return;
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setTotalsPct(Math.min(OS_TOTALS_PCT_MAX, Math.max(OS_TOTALS_PCT_MIN, pct)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
   const [csvExpId,    setCsvExpId]    = useState<number | null>(null);
   const [csvSearch,   setCsvSearch]   = useState("");
-
-  // Scanner sits in a collapsible panel above the full-width table. Closed on load so the
-  // table gets the whole viewport; the operator opens it when they need to scan.
-  const [osScannerOpen, setOsScannerOpen] = useState(false);
+  // Desktop Part Order search — collapsed by default (icon-only toggle), matching Scan/Master View.
+  const [csvSearchOpen, setCsvSearchOpen] = useState(false);
+  // Part Order's own date filter — "" means "follow the currently active order" (the old, only
+  // behavior). Setting it lets the operator browse a different day's uploaded CSVs (still
+  // scoped to the active order's plant) without leaving Scan Order or disturbing the active
+  // scanning session.
+  const [csvDate, setCsvDate] = useState("");
+  const resetCsvBrowse = () => { setCsvDate(""); setCsvExpId(null); setCsvSearch(""); };
 
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [historyPage, setHistoryPage] = useState(0);
 
-  // ── Kiosk rotation — for a screen mounted in portrait. Remembered across reloads
-  // (localStorage) since a mounted kiosk screen stays in the same physical orientation
-  // indefinitely. See .kiosk-rotate-90 in index.css for the actual rotate mechanics.
-  const [osRotated, setOsRotated] = useState(() => localStorage.getItem("scanOrderRotated") === "true");
+  // ── Kiosk rotation — for a screen mounted at any angle, not just portrait. The button steps
+  // 0° → 90° → 180° → 270° → 0°, a full turn, so a screen mounted upside-down or turned the other
+  // way is reachable instead of only the one quarter turn the old on/off toggle offered.
+  // Remembered across reloads (localStorage) since a mounted kiosk stays in the same physical
+  // orientation indefinitely. See .kiosk-rotate-* in index.css for the actual rotate mechanics.
+  const [osRotation, setOsRotation] = useState<Rotation>(() => {
+    const saved = Number(localStorage.getItem("scanOrderRotation"));
+    if ((ROTATIONS as readonly number[]).includes(saved)) return saved as Rotation;
+    // Carry over the older true/false flag so an already-mounted kiosk keeps its orientation.
+    return localStorage.getItem("scanOrderRotated") === "true" ? 90 : 0;
+  });
   useEffect(() => {
-    localStorage.setItem("scanOrderRotated", String(osRotated));
-  }, [osRotated]);
+    localStorage.setItem("scanOrderRotation", String(osRotation));
+  }, [osRotation]);
+  const osRotateNext = () =>
+    setOsRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
+  const osRotated = osRotation !== 0;
+  // A quarter turn swaps the screen's axes — what the CSS calls height then runs along the
+  // viewport's width. Anything sized in vh/vw has to know which case it's in; a half turn leaves
+  // the axes alone and only flips the content.
+  const osQuarterTurn = osRotation === 90 || osRotation === 270;
+  const kioskRotateClass = osRotated ? `kiosk-rotate-${osRotation}` : "";
+  const osPortalRotate = portalRotateClass(osRotation);
+  // Natural portrait orientation (window taller than wide) — a laptop/tablet held or resized to
+  // portrait should get the same single-column, larger-text layout as the manual Rotate mode,
+  // just WITHOUT the 90° kiosk rotation (the screen is already upright).
+  const [isPortrait, setIsPortrait] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(orientation: portrait)");
+    const onChange = () => setIsPortrait(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  // Drives the compact single-column layout + larger sizing (manual rotate OR natural portrait).
+  // The actual 90° CSS rotation stays tied to osRotated only.
+  const bigView = osRotated || isPortrait;
+
+  // Scroll frame for the hand-built kiosk/portrait tables. These used to just flow down the page,
+  // leaving them with no scrollbar of their own and nothing for a totals row to pin against. In
+  // bigView they now get a bounded, self-scrolling box — the same treatment the desktop DataTable
+  // gives its tables — so the header holds at the top, the totals row holds at the bottom, and
+  // there's a visible bar (kiosk-scroll) to drag.
+  // The unit flips on a QUARTER turn: that turns the subtree 90°, so content-space height runs
+  // along the viewport's WIDTH — vw there, vh when upright, half-turned, or naturally portrait.
+  const kioskTableBoxClass = bigView
+    ? `overflow-auto kiosk-scroll ${osQuarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
+    : "hidden overflow-x-auto min-[480px]:block landscape:block";
   const RotateToggleButton = () => (
     <button
-      onClick={() => setOsRotated((r) => !r)}
+      onClick={() => osRotateNext()}
       className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-      title={osRotated ? "Rotate back to normal" : "Rotate for a portrait-mounted screen"}
+      title={`Rotate the screen (now ${osRotation}°) — steps a quarter turn each press, back to 0° after 270°`}
     >
       <RotateCw className="h-5 w-5" />
-      <span className="hidden text-xs font-semibold sm:inline">{osRotated ? "Un-rotate" : "Rotate"}</span>
     </button>
   );
 
@@ -238,22 +486,22 @@ export default function ScanOrderPage() {
   // buttons — a button press doesn't carry the same "gesture went one way, screen went another"
   // mismatch that makes continuous swipe/wheel scrolling feel disorienting.
   const osTabBodyScrollRef = useRef<HTMLDivElement>(null);
-  const osCsvListScrollRef = useRef<HTMLDivElement>(null);
-  const osManageExtraScrollRef = useRef<HTMLDivElement>(null);
 
-  function ScrollNudgeButtons({ targetRef, amount = 240, className = "" }: {
-    targetRef: React.RefObject<HTMLElement>; amount?: number; className?: string;
+  function ScrollNudgeButtons({ targetRef, amount = 240, className = "", large = false }: {
+    targetRef: React.RefObject<HTMLElement>; amount?: number; className?: string; large?: boolean;
   }) {
-    const nudge = (dir: 1 | -1) => targetRef.current?.scrollBy({ top: dir * amount });
+    const nudge = (dir: 1 | -1) => targetRef.current?.scrollBy({ top: dir * amount, behavior: "smooth" });
+    const btn = large
+      ? "rounded-2xl bg-black/10 p-3.5 text-current hover:bg-black/20 active:scale-95 transition"
+      : "rounded-full bg-black/10 p-1.5 text-current hover:bg-black/20";
+    const icon = large ? "h-7 w-7" : "h-4 w-4";
     return (
-      <div className={`flex items-center gap-1 ${className}`}>
-        <button type="button" onClick={() => nudge(-1)} aria-label="Scroll up" title="Scroll up"
-          className="rounded-full bg-black/10 p-1.5 text-current hover:bg-black/20">
-          <ChevronUp className="h-4 w-4" />
+      <div className={`flex items-center ${large ? "flex-col gap-2" : "gap-1"} ${className}`}>
+        <button type="button" onClick={() => nudge(-1)} aria-label="Scroll up" title="Scroll up" className={btn}>
+          <ChevronUp className={icon} />
         </button>
-        <button type="button" onClick={() => nudge(1)} aria-label="Scroll down" title="Scroll down"
-          className="rounded-full bg-black/10 p-1.5 text-current hover:bg-black/20">
-          <ChevronDown className="h-4 w-4" />
+        <button type="button" onClick={() => nudge(1)} aria-label="Scroll down" title="Scroll down" className={btn}>
+          <ChevronDown className={icon} />
         </button>
       </div>
     );
@@ -318,12 +566,43 @@ export default function ScanOrderPage() {
   const activeOrderScanSession = (() => {
     const list = osActiveSessions ?? [];
     if (list.length > 0) {
-      return list.find((s) => s.id === osSelectedSessionId) ?? list[0];
+      if (osSelectedSessionId != null) {
+        const picked = list.find((s) => s.id === osSelectedSessionId);
+        if (picked) return picked;
+      }
+      // No explicit pick yet this load — default to whichever plant the operator was on last
+      // (remembered across page visits/reloads via OS_LAST_PLANT_KEY), falling back to the
+      // first active session if that plant isn't actively being scanned right now.
+      let lastPlant: string | null = null;
+      try { lastPlant = localStorage.getItem(OS_LAST_PLANT_KEY); } catch { /* private mode */ }
+      const remembered = lastPlant
+        ? list.find((s) => (s.plant ?? "").toUpperCase() === lastPlant!.toUpperCase())
+        : null;
+      return remembered ?? list[0];
     }
     // Fallback to the singular endpoint (covers the moment active-sessions hasn't
     // resolved yet on first load) so behavior is identical to before this existed.
     return orderScanNotif?.active ? orderScanNotif.session : null;
   })();
+
+  // Shared by both the mobile and desktop plant-switch dropdowns — picks the session AND
+  // remembers its plant so the next visit to this page defaults back to it.
+  const selectPlantSession = (sessionId: number, plantName: string | null | undefined) => {
+    setOsSelectedSessionId(sessionId);
+    if (plantName) {
+      try { localStorage.setItem(OS_LAST_PLANT_KEY, plantName); } catch { /* private mode */ }
+    }
+    setOsSearch("");
+    setMvSearch("");
+  };
+
+  // Options for the plant-switch dropdown in the session header — always shown (not just
+  // when 2+ plants are simultaneously active), so it falls back to a single-entry list built
+  // from activeOrderScanSession itself when osActiveSessions hasn't resolved yet or only has
+  // the one plant. Keeps the dropdown populated (and never empty) in every case.
+  const osPlantSwitchOptions = (osActiveSessions && osActiveSessions.length > 0)
+    ? osActiveSessions
+    : (activeOrderScanSession ? [activeOrderScanSession] : []);
 
   // Plant config (colors + the scan behavior toggles like Auto Scan). Small, cacheable list;
   // we look up the active session's plant by name to read its per-plant flags. Auto Scan
@@ -333,6 +612,34 @@ export default function ScanOrderPage() {
     queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
     staleTime: 60000,
   });
+  // Plant Management's configured colors for a plant — same source/lookup PlantBadge itself
+  // uses, so the plant-switch dropdown's trigger/options are colored consistently with every
+  // other plant badge in the app instead of a flat, uncolored dropdown.
+  const getPlantColorCfg = (plantName: string | null | undefined) => {
+    const name = (plantName ?? "").trim().toUpperCase();
+    if (!name || !allPlants) return null;
+    return allPlants.find((p) => String(p.name ?? "").trim().toUpperCase() === name) ?? null;
+  };
+  // Pallet size is a per-STATE fact (see products.mpPlt/gjPlt), not per-plant — a plant just
+  // knows which state it's in (plants.state, set on the Plant Management page). Replaces the
+  // old plant-name string-guessing ("valsad"/"indore" substring checks).
+  const getPlantState = (plantName: string): string | null => {
+    const name = (plantName ?? "").trim().toLowerCase();
+    if (!name || !allPlants) return null;
+    const match = allPlants.find((p) => String(p.name ?? "").trim().toLowerCase() === name);
+    const state = match?.state;
+    return state ? String(state).trim().toUpperCase() : null;
+  };
+  // Only GJ PLT / MP PLT count as a "defined" pallet size — itemsPerPallet ("Packets" in the
+  // Product Master UI) and the generic "pallets" column are a different concept and are no
+  // longer treated as an equivalent fallback. Callers fall back to the item's own expected
+  // quantity when this returns 0 (see _computePlantPalletSize and the Master View merge below).
+  const getStatePalletSize = (product: Product | null, stateCode: string | null): number => {
+    if (!product) return 0;
+    if (stateCode === "GJ") return Number(product.gjPlt) || 0;
+    if (stateCode === "MP") return Number(product.mpPlt) || 0;
+    return 0;
+  };
   const autoScanEnabled = (() => {
     const plantName = (activeOrderScanSession?.plant ?? "").toLowerCase();
     if (!plantName) return false;
@@ -349,6 +656,12 @@ export default function ScanOrderPage() {
   const mvDate = activeOrderScanSession?.orderDate
     ? String(activeOrderScanSession.orderDate).slice(0, 10)
     : "";
+
+  // Part Order CAN browse a different day — csvDate (blank by default) falls back to the
+  // active order's own date. Always scoped to the active order's plant.
+  const csvEffDate  = csvDate || mvDate;
+  const csvEffPlant = mvPlant;
+  const csvBrowsingOtherDate = csvEffDate !== mvDate;
 
   // ── Embedded order-scan state (admin-loaded CSV) ───────────────────────────
   // Two video elements exist (mobile sm:hidden block + desktop hidden sm:block block).
@@ -371,6 +684,14 @@ export default function ScanOrderPage() {
   const [osCameraError, setOsCameraError] = useState<string | null>(null);
   const [osPending, setOsPending] = useState<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osPendingRef = useRef<{ barcode: string; matchedItem: OsScanItem | null; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
+  // Tracks whether THIS scan's product image failed to load, so the image panel can hide via
+  // React state instead of an onError handler reaching into the DOM directly. The dialog stays
+  // mounted across back-to-back scans (its `open` prop never toggles false in between), so the
+  // <img> node persists too — a prior imperative `parentElement.style.display = "none"` would
+  // never get cleared and would wrongly keep hiding every later scan's image, even ones that
+  // load fine. Resetting this on every new osPending fixes that.
+  const [osImageFailed, setOsImageFailed] = useState(false);
+  useEffect(() => { setOsImageFailed(false); }, [osPending]);
   // Synchronous reentrancy lock for the auto-confirm path. osPendingRef/osMultiMatchRef only
   // guard re-entry while a DIALOG is open — but an auto-confirmed scan never opens one, so
   // without this a second gun trigger-pull (or an auto-repeating manual-entry Enter) landing
@@ -425,6 +746,10 @@ export default function ScanOrderPage() {
   const [osManualCode, setOsManualCode] = useState("");
   const [osManualFocused, setOsManualFocused] = useState(false);
   const [osSuggIdx, setOsSuggIdx] = useState(-1);
+  // Empty Box manual entry (a box with no item/barcode to scan) — dialog state.
+  const [showEmptyBox, setShowEmptyBox] = useState(false);
+  const [emptyBoxQty, setEmptyBoxQty] = useState("1");
+  const [emptyBoxNote, setEmptyBoxNote] = useState("");
   const [osRecentScans, setOsRecentScans] = useState<{ barcode: string; name: string; total: number; isExtra: boolean }[]>([]);
   // Barcodes we already added optimistically; WS handler skips the echo for these
   const osRecentScanSentRef = useRef<Set<string>>(new Set());
@@ -442,12 +767,11 @@ export default function ScanOrderPage() {
   // that. Reset on session change. Held in a ref (not state) because every scan already
   // triggers a re-render via the optimistic setQueryData/setOsRecentScans, so the sort re-runs
   // and reads the fresh ref without needing its own state update.
-  const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
-  // Same idea as osScanSeqRef, but keyed by NORMALIZED BARCODE instead of order_scan_items.id
-  // — Master View merges rows across every session/part and keys them by barcode, so the
-  // scan-item ids above don't line up with its rows. Lets the just-scanned product float to
-  // the top of Master View too, including pure extras (which have no CSV row to key off).
-  const osMvScanSeqRef = useRef<{ seq: number; byBarcode: Map<string, number> }>({ seq: 0, byBarcode: new Map() });
+  // byId keys the Scan tab (rows are CSV items with a real id); byBarcode keys Master View,
+  // whose rows are merged across files and so have no id of their own.
+  const osScanSeqRef = useRef<{ seq: number; byId: Map<number, number>; byBarcode: Map<string, number> }>(
+    { seq: 0, byId: new Map(), byBarcode: new Map() },
+  );
   useEffect(() => { osPendingRef.current = osPending; }, [osPending]);
   useEffect(() => { osMultiMatchRef.current = osMultiMatch; }, [osMultiMatch]);
   // Clearing the STV is meant for "the active session actually switched" (new CSV = probably
@@ -459,9 +783,15 @@ export default function ScanOrderPage() {
     const id = activeOrderScanSession?.id ?? null;
     const prev = osPrevSessionIdRef.current;
     osPrevSessionIdRef.current = id;
-    if (prev !== null && id !== null && prev !== id) setOsSelectedStv("");
-    osScanSeqRef.current = { seq: 0, byId: new Map() };
-    osMvScanSeqRef.current = { seq: 0, byBarcode: new Map() };
+    if (prev !== null && id !== null && prev !== id) {
+      setOsSelectedStv("");
+      // A genuinely new active order loaded — snap Part Order's date browse back to following
+      // it, so switching orders doesn't leave the operator stranded looking at whatever other
+      // date they'd browsed to under the previous order.
+      setCsvDate("");
+      setCsvExpId(null);
+    }
+    osScanSeqRef.current = { seq: 0, byId: new Map(), byBarcode: new Map() };
   }, [activeOrderScanSession?.id]);
 
   const osItemsQuery = useQuery<OsScanItem[]>({
@@ -517,39 +847,38 @@ export default function ScanOrderPage() {
     refetchIntervalInBackground: false,
   });
 
-  // ── Manage Scans (admin-only "void a mistaken scan") — new, additive feature ──
-  type OsScanEventRow = {
-    id: number; barcode: string; itemName: string | null; pallets: number | null;
-    looseQty: number | null; totalQty: number | null; isExtra: boolean | null;
-    scannedByName: string | null; scannedAt: string | null;
-    voided: boolean | null; voidedAt: string | null; voidReason: string | null;
-  };
-  const [osVoidTarget, setOsVoidTarget] = useState<OsScanEventRow | null>(null);
-  const [osVoidReason, setOsVoidReason] = useState("");
-  // Recent / Manage / Extra used to be three separately-stacked panels — consolidated into
-  // one tabbed list (same pattern as the Scan / Master View / Separate CSVs tabs) so mobile
-  // and desktop share one compact component instead of an ever-growing vertical stack.
-  const [osInfoTab, setOsInfoTab] = useState<"manage" | "extra">("extra");
-  const osEventsQuery = useQuery<OsScanEventRow[]>({
-    queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "events"],
+  // ── Empty Box: running count/list + log + undo ───────────────────────────────
+  const osEmptyBoxesQuery = useQuery<{ count: number; totalQty: number; entries: any[] }>({
+    queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "empty-boxes"],
     queryFn: () =>
-      apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/events`).then((r) => r.json()),
-    enabled: !!activeOrderScanSession && canCompletePart,
-    refetchInterval: wsConnected ? 30000 : 8000,
-    refetchIntervalInBackground: false,
+      apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/empty-boxes`).then((r) => r.json()),
+    enabled: !!activeOrderScanSession,
   });
-  const osVoidMutation = useMutation({
-    mutationFn: (payload: { id: number; reason: string }) =>
-      apiRequest("POST", `/api/order-scan/events/${payload.id}/void`, { reason: payload.reason }).then((r) => r.json()),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "events"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "extras"] });
-      setOsVoidTarget(null);
-      setOsVoidReason("");
-      toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
+  const emptyBoxKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "empty-boxes"] as const;
+
+  const osEmptyBoxMutation = useMutation({
+    mutationFn: (payload: { quantity: number; note: string | null }) =>
+      apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/empty-box`, payload).then((r) => r.json()),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: emptyBoxKey });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+      setShowEmptyBox(false);
+      setEmptyBoxQty("1");
+      setEmptyBoxNote("");
+      toast({ title: "Empty box logged", description: `${data?.totalQty ?? 0} empty box(es) recorded for this order.` });
     },
-    onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Failed to log empty box", description: err?.message, variant: "destructive" }),
+  });
+
+  const osEmptyBoxUndoMutation = useMutation({
+    mutationFn: (entryId: number) =>
+      apiRequest("POST", `/api/order-scan/empty-box/${entryId}/undo`).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: emptyBoxKey });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+      toast({ title: "Empty box removed" });
+    },
+    onError: (err: any) => toast({ title: "Failed to remove empty box", description: err?.message, variant: "destructive" }),
   });
 
   const osSuggestions = useMemo(() => {
@@ -573,11 +902,15 @@ export default function ScanOrderPage() {
 
   // Drop a remembered STV that doesn't belong to this plant's list (e.g. it was picked while
   // scanning a different plant, then restored from localStorage here). Only runs once the
-  // list has actually loaded, so a slow fetch never wipes a valid pick.
+  // list has actually loaded, so a slow fetch never wipes a valid pick. Also defaults the
+  // selection to the first STV in the list when nothing is picked yet (fresh session, or just
+  // cleared by the check above) — scanning is blocked until an STV is chosen anyway (see
+  // handleOsBarcode), so pre-selecting the first one saves that manual pick every time.
   useEffect(() => {
     const stvs = osStvsQuery.data;
     if (!stvs || stvs.length === 0) return;
-    if (osSelectedStv && !stvs.includes(osSelectedStv)) setOsSelectedStv("");
+    if (osSelectedStv && !stvs.includes(osSelectedStv)) { setOsSelectedStv(""); return; }
+    if (!osSelectedStv) setOsSelectedStv(stvs[0]);
   }, [osStvsQuery.data, osSelectedStv]);
 
   const osItemsKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] as const;
@@ -599,21 +932,14 @@ export default function ScanOrderPage() {
       // bump — otherwise they wouldn't reorder-to-top until the server round-trip landed.
       const matched = scanCtx?.matchedItem ?? previousPending?.matchedItem;
       // Stamp this scan's sequence so the item floats to the very top of the list — for ANY
-      // scan on a real CSV row (partial, completing, or an extra logged onto an already-full
-      // row), not just completing ones. A "not in order" extra has no matched row, so nothing
-      // to reorder.
+      // scan on a real CSV row, no status check: partial, completing, or an extra logged onto
+      // an already-received row all float it to the top the same way. A "not in order" extra
+      // has no matched row, so nothing to reorder.
       if (matched) {
         const s = osScanSeqRef.current;
         s.seq += 1;
         s.byId.set(matched.id, s.seq);
-      }
-      // Master View's own recency stamp — keyed by barcode so it works for merged rows across
-      // parts, and unlike the id-keyed one above it also covers a "not in order" extra (which
-      // has no matched row but DOES show as a row in Master View).
-      {
-        const mv = osMvScanSeqRef.current;
-        mv.seq += 1;
-        mv.byBarcode.set(normalize(payload.barcode), mv.seq);
+        if (matched.barcode) s.byBarcode.set(normalize(matched.barcode), s.seq);
       }
       if (matched && !payload.isExtra) {
         // payload.qty is the authoritative box count — pallets/looseQty here are only a
@@ -727,49 +1053,17 @@ export default function ScanOrderPage() {
   // products table (with the same fallback chain) and is what actually gets stored, so a
   // mismatch here only affects what's shown before confirming, never the recorded data.
   const _computePlantPalletSize = (firstMatch: OsScanItem | null, invProduct: Product | null): number => {
-    const plantLower = (activeOrderScanSession?.plant ?? "").toLowerCase();
-    let size = firstMatch?.itemsPerPallet ?? 1;
+    const state = getPlantState(activeOrderScanSession?.plant ?? "");
+    // firstMatch.itemsPerPallet is a server-resolved snapshot (same GJ/MP-PLT-or-expectedQty
+    // rule — see resolvePalletSizeOrQty in order-scan.ts); a fresh invProduct lookup here only
+    // overrides it when GJ/MP PLT is genuinely defined, so a just-edited Product Master value
+    // is reflected before the next server round-trip re-resolves and stores it.
+    let size = firstMatch?.itemsPerPallet || firstMatch?.expectedQty || 1;
     if (invProduct) {
-      let fromInv = 0;
-      if (plantLower.includes("valsad") || plantLower.includes("val")) {
-        fromInv = Number(invProduct.valPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-      } else if (plantLower.includes("indore") || plantLower.includes("ind")) {
-        fromInv = Number(invProduct.indPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-      } else {
-        fromInv = Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-      }
-      // Last resort: parse *NNN from the product name (e.g. "16GM*192 ..." → 192), same
-      // fallback the old classic-scan flow used, for products with no pallet columns set.
-      if (fromInv === 0 && invProduct.name) {
-        const m = String(invProduct.name).match(/\*(\d{1,5})/);
-        if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) fromInv = n; }
-      }
+      const fromInv = getStatePalletSize(invProduct, state);
       if (fromInv > 0) size = fromInv;
     }
     return Math.max(1, size || 1);
-  };
-
-  // Same fallback chain as _computePlantPalletSize, but for Master View items (which have
-  // no OsScanItem/session-scoped itemsPerPallet snapshot to fall back on) — and returns 0
-  // rather than clamping to 1 when nothing is configured, so the UI can tell "no pallet
-  // data" apart from "genuinely 1 per pallet" (matching how OsScanItem.itemsPerPallet==0
-  // is already treated elsewhere in this file).
-  const _resolveMvPalletSize = (invProduct: Product | null, plant: string): number => {
-    if (!invProduct) return 0;
-    const plantLower = (plant ?? "").toLowerCase();
-    let fromInv = 0;
-    if (plantLower.includes("valsad") || plantLower.includes("val")) {
-      fromInv = Number(invProduct.valPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-    } else if (plantLower.includes("indore") || plantLower.includes("ind")) {
-      fromInv = Number(invProduct.indPlt) || Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-    } else {
-      fromInv = Number(invProduct.itemsPerPallet) || Number(invProduct.pallets) || 0;
-    }
-    if (fromInv === 0 && invProduct.name) {
-      const m = String(invProduct.name).match(/\*(\d{1,5})/);
-      if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) fromInv = n; }
-    }
-    return fromInv;
   };
 
   const _defaultScanQty = (match: OsScanItem | null, plantPalletSize: number): number => {
@@ -852,7 +1146,13 @@ export default function ScanOrderPage() {
     setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize });
   };
 
-  const handleOsBarcode = (barcode: string) => {
+  const handleOsBarcode = (rawBarcode: string) => {
+    // Trimmed once, right at the funnel both the barcode gun and camera scanner feed into —
+    // normalize() below already trims for internal matching, but the RAW value is what gets
+    // held in state and eventually sent to the server, and a stray leading/trailing space
+    // there becomes a permanently different barcode as far as product_plant_stock is concerned
+    // (it's keyed on the literal string), silently splitting stock into an orphaned row.
+    const barcode = rawBarcode.trim();
     if (osPendingRef.current || osMultiMatchRef.current || osScanLockRef.current) return;
     // STV (when the plant has any configured) is picked once up front via the persistent
     // selector above the scanner, not per scan — see osSelectedStv's own comment. Scanning
@@ -993,12 +1293,19 @@ export default function ScanOrderPage() {
   // which covers both this manual path and the automatic one with the same banner.
   const [showForceComplete, setShowForceComplete] = useState(false);
 
-  // Shows a prominent "Part Complete" banner for 10s whenever a part finishes — whether via
-  // this manual button, Auto Complete firing mid-scan, or the stale-part sweep after a new
-  // CSV upload. Driven entirely by the WS 'part-completed' message (see the WS effect below)
-  // so all three trigger paths are handled uniformly, without needing separate client logic
-  // for "I just clicked Complete" vs "the server completed something on its own."
-  const [osPartCompleteBanner, setOsPartCompleteBanner] = useState<{ csvFileName: string; partIndex: number } | null>(null);
+  // Shows a big, hard-to-miss "Part Complete" popup for 14s whenever a part finishes —
+  // whether via this manual button, Auto Complete firing mid-scan, or the stale-part sweep
+  // after a new CSV upload. Driven entirely by the WS 'part-completed' message (see the WS
+  // effect below) so all three trigger paths are handled uniformly, without needing separate
+  // client logic for "I just clicked Complete" vs "the server completed something on its own."
+  // Also carries what CSV/part the plant switched TO (nextCsvFileName/nextPartIndex), so the
+  // same popup answers "what just finished" AND "what am I scanning now" in one glance —
+  // the two things that matter most the instant the active CSV changes underneath you.
+  const [osPartCompleteBanner, setOsPartCompleteBanner] = useState<{
+    kind: 'completed' | 'reopened';
+    csvFileName: string; partIndex: number;
+    nextCsvFileName: string | null; nextPartIndex: number | null;
+  } | null>(null);
   const osPartCompleteBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const osCompleteMutation = useMutation({
@@ -1066,8 +1373,52 @@ export default function ScanOrderPage() {
 
           if (data.type === 'part-completed') {
             if (osPartCompleteBannerTimerRef.current) clearTimeout(osPartCompleteBannerTimerRef.current);
-            setOsPartCompleteBanner({ csvFileName: data.csvFileName, partIndex: data.partIndex });
-            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 10000);
+            setOsPartCompleteBanner({
+              kind: 'completed',
+              csvFileName: data.csvFileName, partIndex: data.partIndex,
+              nextCsvFileName: data.nextCsvFileName ?? null, nextPartIndex: data.nextPartIndex ?? null,
+            });
+            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 14000);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
+          if (data.type === 'session-reopened') {
+            // An admin undid an accidental Complete — the plant's active session just
+            // changed back underneath whoever's looking at this page, same as a normal
+            // CSV switch, so it deserves the same big, impossible-to-miss treatment.
+            if (osPartCompleteBannerTimerRef.current) clearTimeout(osPartCompleteBannerTimerRef.current);
+            setOsPartCompleteBanner({
+              kind: 'reopened',
+              csvFileName: data.csvFileName, partIndex: data.partIndex,
+              nextCsvFileName: null, nextPartIndex: null,
+            });
+            osPartCompleteBannerTimerRef.current = setTimeout(() => setOsPartCompleteBanner(null), 14000);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
+          if (data.type === 'empty-box') {
+            // Another device logged/undid an empty box against this session — refresh the
+            // running count + list and Master View's reconciliation figure.
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions", data.sessionId, "empty-boxes"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+            return;
+          }
+          if (data.type === 'session-deleted') {
+            // Admin deleted the CSV we're actively scanning against (delete-with-rollback).
+            // Nothing else auto-activates until a corrected CSV is uploaded for this plant/
+            // date, at which point the active-session polls below will pick it up on their
+            // own — no explicit navigation needed, this component already renders a "no
+            // active session" fallback whenever activeOrderScanSession is null.
+            toast({
+              title: "Session removed",
+              description: "This CSV was deleted by an admin. If a corrected CSV is uploaded for the same plant/date, it will appear here automatically.",
+              variant: "destructive",
+            });
+            setOsSelectedSessionId(null);
+            queryClient.invalidateQueries({ queryKey: ["/api/order-scan/notification"] });
             queryClient.invalidateQueries({ queryKey: ["/api/order-scan/active-sessions"] });
             queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
             return;
@@ -1160,21 +1511,21 @@ export default function ScanOrderPage() {
   });
 
   const csvSessQuery = useQuery<{ sessions: ImpSession[]; total: number }>({
-    queryKey: ["/api/order-import/sessions", "scan-page", csvDate, csvPlant],
+    queryKey: ["/api/order-import/sessions", "scan-page", csvEffDate, csvEffPlant],
     queryFn: () => {
       const p = new URLSearchParams({ page: "1", pageSize: "100" });
-      if (csvDate)  p.set("date",  csvDate);
-      if (csvPlant) p.set("plant", csvPlant);
+      if (csvEffDate)  p.set("date",  csvEffDate);
+      if (csvEffPlant) p.set("plant", csvEffPlant);
       return apiRequest("GET", `/api/order-import/sessions?${p}`).then((r) => r.json());
     },
-    enabled: osTab === "separate-csvs",
+    enabled: osTab === "separate-csvs" && !!csvEffDate,
     staleTime: 0,
     refetchOnMount: true,
     refetchInterval: wsConnected ? 30000 : 8000,
     refetchIntervalInBackground: false,
   });
 
-  // Separate allocation query — always uses csvDate/csvPlant so it matches the sessions list
+  // Separate allocation query — always uses mvDate/mvPlant so it matches the sessions list
 const csvItemsQuery2 = useQuery<ImpItem[]>({
     queryKey: ["/api/order-import/items", csvExpId, "scan-page"],
     queryFn: () => apiRequest("GET", `/api/order-import/sessions/${csvExpId}/items`).then((r) => r.json()),
@@ -1196,6 +1547,17 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     });
     return map;
   }, [products]);
+
+  // Pallet-count cell: qty ÷ items-per-pallet, or a muted 0.00 when not applicable. Shared by
+  // Part Order's CSV Items table. Looks up the item's own GJ/MP PLT in Product Master (NOT the
+  // CSV's own Pallets/expectedPallets column, and not "Packets"/itemsPerPallet) — falling back
+  // to treating the item as exactly one pallet sized to its own quantity when no PLT is defined.
+  const impItemsPerPallet = (i: { barcode: string | null; quantity: number | null }): number => {
+    const qty = i.quantity ?? 0;
+    const invProduct = i.barcode ? productLookup.get(normalize(i.barcode)) ?? null : null;
+    const defined = invProduct ? getStatePalletSize(invProduct, getPlantState(csvEffPlant)) : 0;
+    return defined > 0 ? defined : Math.max(1, qty || 1);
+  };
 
   // ── Barcode gun (HID keyboard-wedge) support ─────────────────────────────
   useEffect(() => {
@@ -1302,12 +1664,235 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     return () => { window.removeEventListener("keydown", handleKeyDown, true); clearFlush(); };
   }, [activeOrderScanSession]);
 
+  // ── Master View item history drill-down (click a row → see every raw scan for it) ────────
+  // Declared here — BEFORE the early loading-state return below — so these hooks always run on
+  // every render regardless of orderScanNotifLoading (a hook after a conditional return only
+  // fires on some renders, which is exactly what triggered the
+  // "Rendered more hooks than during the previous render" crash).
+  // Void rights mirror the server's own rule exactly (order-scan.ts's void route: requires
+  // Write Access to BOTH "scan-order" and "scan-history", chained as two requirePageWrite
+  // middlewares) — a user with only one of the two would otherwise see a clickable Void
+  // button that 403s on click.
+  const canVoidScan = isAdminOrSuperUser || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"));
+
+  type MvHistoryEvent = {
+    id: number; sessionId: number; barcode: string; itemName: string | null;
+    pallets: number | null; totalQty: number; isExtra: boolean;
+    scannedByName: string | null; scannedAt: string;
+    voided: boolean | null; voidedAt: string | null; voidReason: string | null;
+    orderName: string; partIndex: number | null;
+  };
+  // Item-history drill-down lives on the SCAN tab: click an item to expand its arrival history
+  // below the row. (Was previously on Master View; moved here so Master View is view-only.)
+  const [osHistoryItem, setOsHistoryItem] = useState<OsScanItem | null>(null);
+  // Collapse any expanded item history when the operator leaves the Scan tab.
+  useEffect(() => {
+    if (osTab !== "scan") setOsHistoryItem(null);
+  }, [osTab]);
+  // Click anywhere outside the search box/expanded row and it closes on its own — no separate
+  // cancel needed. Desktop and mobile each render their own markup for this tab (one hidden via
+  // CSS, not unmounted), so each gets its own ref/hook instance — see useOutsideClick's comment.
+  const closeMvSearch = useCallback(() => { setMvSearchOpen(false); setMvSearch(""); }, []);
+  const closeOsHistory = useCallback(() => setOsHistoryItem(null), []);
+  const mvSearchDesktopRef = useOutsideClick(mvSearchOpen, closeMvSearch);
+  const mvSearchMobileRef = useOutsideClick(mvSearchOpen, closeMvSearch);
+  const osExpandDesktopRef = useOutsideClick(osHistoryItem !== null, closeOsHistory);
+  const osExpandMobileRef = useOutsideClick(osHistoryItem !== null, closeOsHistory);
+  // Same click-outside-closes treatment for the Scan tab's own search toggle.
+  const closeOsSearch = useCallback(() => { setOsSearchOpen(false); setOsSearch(""); }, []);
+  const osSearchDesktopRef = useOutsideClick(osSearchOpen, closeOsSearch);
+  const osSearchMobileRef = useOutsideClick(osSearchOpen, closeOsSearch);
+  const [mvVoidTarget, setMvVoidTarget] = useState<MvHistoryEvent | null>(null);
+  const [mvVoidReason, setMvVoidReason] = useState("");
+  // Every session/part currently loaded into this Master View — the history drill-down spans
+  // all of them (not just one file), matching what "history of this item in this order" means.
+  const mvSessionIds = (mvQuery.data?.files ?? []).map((f) => f.sessionId);
+  const mvHistoryQuery = useQuery<{ items: MvHistoryEvent[] }>({
+    queryKey: ["/api/order-import/master-view/item-history", osHistoryItem?.barcode, osGroupSessionIds.join(",")],
+    queryFn: () =>
+      apiRequest(
+        "GET",
+        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(osHistoryItem!.barcode!)}&sessionIds=${osGroupSessionIds.join(",")}`,
+      ).then((r) => r.json()),
+    enabled: !!osHistoryItem?.barcode && osGroupSessionIds.length > 0,
+  });
+  const mvVoidMutation = useMutation({
+    mutationFn: (payload: { id: number; reason: string }) =>
+      apiRequest("POST", `/api/order-scan/events/${payload.id}/void`, { reason: payload.reason }).then((r) => r.json()),
+    onSuccess: () => {
+      // Same order_scan_events table Scan History reads from — voiding here is already visible
+      // there with no extra sync step; invalidate every cache that could show this event so the
+      // page reflects it live (no manual refresh). The "/api/order-scan/sessions" prefix covers
+      // the Scan tab's items list, group credits, extras, etc. — refreshing the qty/status the
+      // voided scan affected.
+      queryClient.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      setMvVoidTarget(null);
+      setMvVoidReason("");
+      toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
+    },
+    onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
+  });
+
+  // Stable per-row id for the item-history expansion — barcode is already the merge/dedup key
+  // (see allMvItems above), so it's unique on its own; "empty-box" covers the one synthetic
+  // row that has barcode: null.
+  const mvRowKey = (item: MvMergedItem) => item.barcode ?? "empty-box";
+
+  // Inline history panel — same content whether it renders as a DataTable expanded row
+  // (desktop) or a plain <tr> below the clicked row (mobile custom table). Reads mvHistoryItem/
+  // mvHistoryQuery, so it only has real content once an item's name has been clicked.
+  const mvHistoryPanel = (
+    // Sticky + width-capped so this stays fully visible without its own horizontal scroll —
+    // it renders inside a <td colSpan> of a much wider table (which itself scrolls sideways),
+    // so a plain 100%-width block here would inherit that full width. "sticky left:0" pins it
+    // to the visible left edge of whatever ancestor is actually scrolled; capping the width
+    // well under any realistic viewport keeps the whole thing on-screen at that position.
+    <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
+      {mvHistoryQuery.isLoading ? (
+        <div className="flex justify-center py-6">
+          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+        </div>
+      ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
+        <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
+      ) : (
+        <div className="max-h-72 overflow-y-auto border border-gray-200">
+          <table className="w-full table-fixed border-collapse text-xs">
+            <thead>
+              <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0 z-10">
+                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-7">#</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-[122px]">Date &amp; Time</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2">Scanned By</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2">Order / Part</th>
+                <th className="font-semibold text-center border-r border-gray-200 px-2 py-2 w-14">Qty</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-16">Status</th>
+                {canVoidScan && <th className="font-semibold text-right px-2 py-2 w-14">Action</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {mvHistoryQuery.data!.items.map((ev, idx) => {
+                const isOdd = idx % 2 !== 0;
+                return (
+                  <tr
+                    key={ev.id}
+                    className={`border-b border-gray-100 transition-colors ${ev.voided ? "opacity-60" : "hover:bg-gray-50"} ${isOdd ? "bg-slate-50" : "bg-white"}`}
+                  >
+                    <td className="px-2 py-2 text-gray-400 font-mono border-r border-gray-100">{idx + 1}</td>
+                    <td className="px-2 py-2 text-gray-800 truncate border-r border-gray-100">
+                      {format(new Date(ev.scannedAt), "MMM d · h:mm a")}
+                    </td>
+                    <td className="px-2 py-2 text-gray-600 truncate border-r border-gray-100">{ev.scannedByName ?? "—"}</td>
+                    <td className="px-2 py-2 text-gray-600 truncate border-r border-gray-100">
+                      {stripCsvExt(ev.orderName)}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
+                    </td>
+                    <td className="px-2 py-2 text-center border-r border-gray-100">
+                      <span className={`inline-flex items-center justify-center rounded-full text-[11px] font-bold px-2 py-0.5 ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
+                        {ev.isExtra ? "+" : ""}{ev.totalQty}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-[11px] border-r border-gray-100 truncate">
+                      {ev.voided ? (
+                        <span className="font-medium text-red-500" title={ev.voidReason ?? undefined}>Voided</span>
+                      ) : ev.isExtra ? (
+                        <span className="font-semibold uppercase text-amber-700">Extra</span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    {canVoidScan && (
+                      <td className="px-2 py-2 text-right">
+                        {!ev.voided && (
+                          <Button
+                            size="sm" variant="ghost"
+                            className="h-6 px-2 text-[11px] text-red-600 hover:bg-red-50 hover:text-red-700"
+                            onClick={() => setMvVoidTarget(ev)}
+                          >
+                            Void
+                          </Button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
+  // Mobile counterpart to mvHistoryPanel above — the dense 6/7-column table doesn't fit a
+  // phone screen (even table-fixed squeezes every column illegibly), so this renders the same
+  // mvHistoryQuery data as a stacked card per scan event instead.
+  const mvHistoryPanelMobile = (
+    <div className="w-full bg-gray-50 p-3">
+      {mvHistoryQuery.isLoading ? (
+        <div className="flex justify-center py-6">
+          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+        </div>
+      ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
+        <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
+      ) : (
+        <div className="max-h-72 space-y-2 overflow-y-auto">
+          {mvHistoryQuery.data!.items.map((ev) => (
+            <div
+              key={ev.id}
+              className={`rounded-md border border-gray-200 bg-white p-2.5 ${ev.voided ? "opacity-60" : ""}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-gray-800">
+                  {format(new Date(ev.scannedAt), "MMM d · h:mm a")}
+                </span>
+                <span className={`inline-flex items-center justify-center rounded-full text-[11px] font-bold px-2 py-0.5 shrink-0 ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
+                  {ev.isExtra ? "+" : ""}{ev.totalQty}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-gray-600">{ev.scannedByName ?? "—"}</p>
+              <p className="text-xs text-gray-400">
+                {stripCsvExt(ev.orderName)}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
+              </p>
+              {(ev.voided || ev.isExtra || canVoidScan) && (
+                <div className="mt-1.5 flex items-center justify-between">
+                  {ev.voided ? (
+                    <span className="text-[11px] font-medium text-red-500" title={ev.voidReason ?? undefined}>Voided</span>
+                  ) : ev.isExtra ? (
+                    <span className="text-[11px] font-semibold uppercase text-amber-700">Extra</span>
+                  ) : <span />}
+                  {canVoidScan && !ev.voided && (
+                    <Button
+                      size="sm" variant="ghost"
+                      className="h-6 px-2 text-[11px] text-red-600 hover:bg-red-50 hover:text-red-700"
+                      onClick={() => setMvVoidTarget(ev)}
+                    >
+                      Void
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   // ─── Views ────────────────────────────────────────────────────────────────
 
   // Don't show the plain dashboard for a split second before we actually know whether
   // an order-scan session is active — without this, a refresh always flashes the
   // dashboard first (since the notification query hasn't resolved yet) and then jumps
   // to the scan view once it loads a moment later.
+  // Drag-to-reorder for each of this page's three tables, each remembering its own arrangement.
+  // Declared ABOVE the early return below: every hook has to run on every render, and this
+  // component bails out to a spinner while the notification query resolves.
+  const [osColumnOrder, setOsColumnOrder] = useColumnOrder("scanOrder:osColumnOrder");
+  const [mvColumnOrder, setMvColumnOrder] = useColumnOrder("scanOrder:mvColumnOrder");
+  const [csvColumnOrder, setCsvColumnOrder] = useColumnOrder("scanOrder:csvColumnOrder");
+
   if (orderScanNotifLoading) {
     return (
       <div className="flex-1 flex items-center justify-center bg-gray-50">
@@ -1333,11 +1918,15 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         let g = groups.get(key);
         if (!g) {
           const invProduct = productLookup.get(normalize(item.barcode ?? item.itemName ?? "")) ?? null;
+          // Only the GJ/MP-PLT-defined size (0 if not defined) — the expected-qty fallback
+          // needs this item's FINAL summed quantity across every contributing file, which
+          // isn't known until the accumulation loop below finishes, so that fallback is
+          // applied in one pass over `merged` further down instead of here.
           g = {
             barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
             quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
-            itemsPerPallet: _resolveMvPalletSize(invProduct, mvPlant),
-            _files: [], _isExtra: true,
+            itemsPerPallet: invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0,
+            _files: [], _isExtra: true, _lastScannedAt: null,
           };
           groups.set(key, g);
         }
@@ -1355,39 +1944,505 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         // another file's CSV that same day is not really extra once merged — only
         // flag it Extra if every contributing row was an extra (no real CSV row anywhere).
         if (!item.isExtra) g._isExtra = false;
+        // Latest touch across every contributing part — server-side, so it's correct even
+        // right after a reload or when the scan happened on a different device/kiosk.
+        if (item.lastScannedAt && (!g._lastScannedAt || new Date(item.lastScannedAt) > new Date(g._lastScannedAt))) {
+          g._lastScannedAt = item.lastScannedAt;
+        }
       });
     });
-    return Array.from(groups.values());
+    const merged = Array.from(groups.values());
+    // No GJ/MP PLT was defined for these — now that every file's contribution has been
+    // summed into g.quantity, treat each as exactly one pallet sized to its own total.
+    merged.forEach((g) => { if (!(g.itemsPerPallet > 0)) g.itemsPerPallet = Math.max(1, g.quantity || 1); });
+    // Append ONE distinct "Empty Box" entry summing every file's empty boxes for this view —
+    // a separate labeled row, never mixed into order quantity/scanned/extra.
+    const ebQty = mvData.files.reduce((s, f) => s + (f.emptyBoxTotalQty ?? 0), 0);
+    const ebCount = mvData.files.reduce((s, f) => s + (f.emptyBoxCount ?? 0), 0);
+    if (ebQty > 0) {
+      merged.push({
+        barcode: null, itemName: "Empty Box", sapCode: null,
+        quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
+        itemsPerPallet: 0, _files: [], _isExtra: false,
+        _isEmptyBox: true, _emptyBoxCount: ebCount, _emptyBoxQty: ebQty, _lastScannedAt: null,
+      });
+    }
+    return merged;
   })();
-  const filtMvItems = (mvSearch
-    ? allMvItems.filter((i) =>
-        [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
-      )
-    : allMvItems
-  ).slice().sort((a, b) => {
-    // Whatever was scanned most recently THIS page-load floats to the very top, mirroring the
-    // Scan tab's behavior so the operator can see what they just scanned without hunting for
-    // it. Everything not scanned this session has seq 0 and keeps its original merge order
-    // (Array.prototype.sort is stable, so equal keys don't get shuffled).
-    const seq = osMvScanSeqRef.current.byBarcode;
+  // Recently-scanned items float to the top — and crucially the SAME order is visible to every
+  // user/device, not just this browser. Two tiers:
+  //   1. Items I scanned this session sort first, newest local scan on top (instant feedback via
+  //      the client seq map, before the server round-trip lands).
+  //   2. Everything else falls back to the server's shared lastScannedAt — so a scan on ANY other
+  //      device also floats that item up here once it refetches. Two server timestamps compare
+  //      safely against each other (same IST-as-UTC convention); we never mix the optimistic
+  //      client value in, because any item I scanned is already handled by tier 1.
+  // Same rule + same barcode-keyed maps as the Scan tab, so both tables show the same order. A
+  // stable sort (return 0 for untouched pairs) leaves never-scanned rows exactly where they were.
+  const mvRecencySort = (a: MvMergedItem, b: MvMergedItem) => {
+    const seq = osScanSeqRef.current.byBarcode;
     const aSeq = seq.get(normalize(a.barcode)) ?? 0;
     const bSeq = seq.get(normalize(b.barcode)) ?? 0;
-    return bSeq - aSeq;
+    if (aSeq !== bSeq) return bSeq - aSeq;
+    const aT = a._lastScannedAt ? new Date(a._lastScannedAt).getTime() : 0;
+    const bT = b._lastScannedAt ? new Date(b._lastScannedAt).getTime() : 0;
+    if (aT !== bT) return bT - aT;
+    return 0;
+  };
+  const filtMvItems = mvSearch
+    ? allMvItems
+        .filter((i) =>
+          [i.barcode, i.itemName, i.sapCode, ...i._files].some((v) => v?.toLowerCase().includes(mvSearch.toLowerCase()))
+        )
+        .slice()
+        .sort(mvRecencySort)
+    : allMvItems.slice().sort(mvRecencySort);
+
+  // The existing Eye toggle drives the Files column's visibility.
+  const mvVisibleColumnIds = new Set(
+    [
+      "state", "itemName", "barcode",
+      "expQty", "remainQty", "doneQty", "extraQty",
+      "expPlt", "remainPlt", "donePlt", "extraPlt",
+      "status",
+      ...(mvShowFiles ? ["files"] : []),
+    ],
+  );
+
+  // Master View row state — drives both the status column and the row tint.
+  const mvRowState = (item: MvMergedItem) => {
+    const exp = item.quantity ?? 0;
+    const extra = item.extraQty ?? 0;
+    // Done is the full physical count for this item — order-matched portion plus any extra —
+    // not just the order-matched portion. E.g. expected 10, 10 scanned regular + 10 extra
+    // shows Done: 20 (Extra Qty still separately shows 10 alongside it).
+    const done = item.scannedQty ?? 0;
+    const isExtraOnly = item._isExtra;
+    const isDone = done >= exp && exp > 0;
+    const isPartial = done > 0 && !isDone && !isExtraOnly;
+    return {
+      exp,
+      done,
+      extra,
+      ipp: item.itemsPerPallet ?? 0,
+      remain: Math.max(0, exp - done),
+      isExtraOnly,
+      isDone,
+      isPartial,
+      // Any nonzero scanned qty — used for the aggregate "how many received" counts/filters
+      // below, which count a partially-scanned item as received even though its own badge
+      // still reads "Partial" (that distinction stays visible per-row).
+      isReceived: done > 0,
+    };
+  };
+  // Aggregate "how many done" for the mobile blue header — mirrors osDoneCount's role for the
+  // Scan tab, just computed from Master View's own per-row state instead. Counts fully-received
+  // AND partially-received rows (any nonzero qty) plus extra-only rows — an item with SOME qty
+  // in belongs in the "received" tally even while its own row still shows "Partial".
+  const mvDoneCount = allMvItems.filter((i) => !i._isEmptyBox && (mvRowState(i).isReceived || mvRowState(i).isExtraOnly)).length;
+
+  // Same totals-box filter the Scan tab uses, so clicking Done/Remaining/Extra narrows Master View
+  // to those rows too. Declared after mvRowState because it calls it.
+  const mvVisible = !osStatFilter
+    ? filtMvItems
+    : filtMvItems.filter((i) => {
+        const { done, remain, extra } = mvRowState(i);
+        // "Done" counts any item with SOME qty received — including a Partial row, whose own
+        // badge still reads "Partial" but which still belongs in this tally. A partial item can
+        // also still show up under "Remaining" at the same time, since it has qty left too.
+        if (osStatFilter === "done") return done > 0;
+        if (osStatFilter === "remaining") return remain > 0;
+        return extra > 0;
+      });
+
+  // Totals for Master View's mobile card list and rotated/portrait table. Empty-box entries carry
+  // no order quantity and render as a full-width note rather than a data row, so they contribute
+  // nothing here.
+  const mvKioskTotals = sumKioskTotals(mvVisible, (item) => {
+    if (item._isEmptyBox) return { exp: 0, done: 0, remain: 0, extra: 0, ipp: 0 };
+    const exp = item.quantity ?? 0;
+    const done = item.scannedQty ?? 0;
+    return {
+      exp,
+      done,
+      remain: Math.max(0, exp - done),
+      extra: item.extraQty ?? 0,
+      ipp: item.itemsPerPallet ?? 0,
+    };
   });
+
+  const mvColumns: DataTableColumn<MvMergedItem>[] = [
+    {
+      id: "state",
+      header: "",
+      width: 40,
+      align: "center",
+      hideable: false,
+      render: (item) => {
+        if (item._isEmptyBox) return <Package className="mx-auto h-4 w-4 text-orange-500" />;
+        const { isExtraOnly, isDone, isPartial } = mvRowState(item);
+        return isExtraOnly ? <AlertTriangle className="mx-auto h-4 w-4 text-orange-500" />
+          : isDone ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
+          : isPartial ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
+          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+      },
+    },
+    {
+      id: "itemName",
+      header: "Item Name",
+      width: 220,
+      sortable: true,
+      accessor: (i) => i.itemName,
+      cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
+      // Master View is view-only — no click-to-expand history here (moved to the Scan tab).
+      render: (i) =>
+        i._isEmptyBox ? (
+          <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-800">
+            Empty Box · {i._emptyBoxQty} box{i._emptyBoxQty === 1 ? "" : "es"}
+            {i._emptyBoxCount ? ` (${i._emptyBoxCount})` : ""}
+          </span>
+        ) : (
+          <span>{i.itemName ?? "—"}</span>
+        ),
+    },
+    {
+      id: "barcode",
+      header: "Barcode / SAP",
+      width: 140,
+      sortable: true,
+      accessor: (i) => i.barcode,
+      // Barcodes are digits but they're identifiers, not quantities — never sum them into the
+      // totals row.
+      totalable: false,
+      cellClassName: "font-mono text-gray-500",
+      render: (i) => (
+        <>
+          <span className="block">{i.barcode ?? <span className="text-gray-300">—</span>}</span>
+          {i.sapCode && <span className="block text-[10px] text-gray-400">SAP: {i.sapCode}</span>}
+        </>
+      ),
+    },
+    {
+      id: "files",
+      header: "Files",
+      width: 130,
+      isHiddenByDefault: true,
+      cellClassName: "text-gray-400 truncate",
+      render: (i) => (
+        <span title={i._files.map(stripCsvExt).join(", ")}>
+          {i._files.length > 1 ? `${i._files.length} files` : stripCsvExt(i._files[0])}
+        </span>
+      ),
+    },
+    // Mirrors the Scan tab's CSV Items table: all Qty columns (Exp → Remain → Done → Extra),
+    // then the matching Plt columns in the same order.
+    {
+      id: "expQty",
+      header: "Exp Qty",
+      width: 80,
+      align: "right",
+      sortable: true,
+      accessor: (i) => i.quantity ?? 0,
+      cellClassName: "text-gray-600 font-medium tabular-nums",
+      render: (i) => mvRowState(i).exp || "—",
+    },
+    {
+      id: "remainQty",
+      header: "Remain Qty",
+      width: 100,
+      align: "right",
+      sortable: true,
+      accessor: (i) => mvRowState(i).remain,
+      cellClassName: "tabular-nums font-bold",
+      render: (i) => {
+        const { remain } = mvRowState(i);
+        return remain > 0 ? <span className="text-[#001d6e]">{remain}</span> : <span className="text-gray-300">0</span>;
+      },
+    },
+    {
+      id: "doneQty",
+      header: "Received Qty",
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (i) => mvRowState(i).done,
+      cellClassName: "tabular-nums font-bold",
+      render: (i) => {
+        const { done, isExtraOnly, isDone, isPartial } = mvRowState(i);
+        return (
+          <span className={isExtraOnly ? "text-orange-700" : isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>
+            {done}
+          </span>
+        );
+      },
+    },
+    {
+      id: "extraQty",
+      header: "Extra Qty",
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (i) => mvRowState(i).extra,
+      cellClassName: "tabular-nums font-semibold",
+      render: (i) => {
+        const { extra } = mvRowState(i);
+        return extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>;
+      },
+    },
+    {
+      id: "expPlt",
+      header: "Exp Plt",
+      width: 80,
+      align: "right",
+      cellClassName: "tabular-nums text-gray-500",
+      total: (rows) => pltTotal(rows, (i) => { const { exp, ipp } = mvRowState(i); return { qty: exp, ipp }; }),
+      render: (i) => {
+        const { exp, ipp } = mvRowState(i);
+        return pltCell(exp, ipp, "text-gray-500");
+      },
+    },
+    {
+      id: "remainPlt",
+      header: "Remain Plt",
+      width: 100,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => { const { remain, ipp } = mvRowState(i); return { qty: remain, ipp }; }),
+      render: (i) => {
+        const { remain, ipp } = mvRowState(i);
+        return pltCell(remain, ipp, "text-purple-600");
+      },
+    },
+    {
+      id: "donePlt",
+      header: "Received Plt",
+      width: 90,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => { const { done, ipp } = mvRowState(i); return { qty: done, ipp }; }),
+      render: (i) => {
+        const { done, ipp } = mvRowState(i);
+        return pltCell(done, ipp, "text-[#001d6e]");
+      },
+    },
+    {
+      id: "extraPlt",
+      header: "Extra Plt",
+      width: 90,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => { const { extra, ipp } = mvRowState(i); return { qty: extra, ipp }; }),
+      render: (i) => {
+        const { extra, ipp } = mvRowState(i);
+        return pltCell(extra, ipp, "text-amber-600");
+      },
+    },
+    {
+      id: "status",
+      header: "Status",
+      width: 100,
+      align: "center",
+      render: (i) => {
+        const { isExtraOnly, isDone, isPartial } = mvRowState(i);
+        return (
+          <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+            isExtraOnly ? "bg-orange-100 text-orange-700"
+            : isDone ? "bg-emerald-100 text-emerald-700"
+            : isPartial ? "bg-amber-100 text-amber-700"
+            : "bg-gray-100 text-gray-500"}`}>
+            {isExtraOnly ? "Extra" : isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+          </span>
+        );
+      },
+    },
+  ];
   const csvSessions = csvSessQuery.data?.sessions ?? [];
   const csvImpItems = csvItemsQuery2.data ?? [];
+  // Whatever was scanned most recently floats to the top, regardless of complete/partial/
+  // pending status — same behavior as the Scan tab's own item list. Part Order re-fetches
+  // fresh on each expand rather than tracking a live client-side scan sequence, so recency
+  // here comes from the server's lastScannedAt timestamp instead; items never scanned sort
+  // last, in their original (CSV row) order.
+  const csvItemsSorted = csvImpItems.slice().sort((a, b) => {
+    const aT = a.lastScannedAt ? new Date(a.lastScannedAt).getTime() : 0;
+    const bT = b.lastScannedAt ? new Date(b.lastScannedAt).getTime() : 0;
+    if (aT !== bT) return bT - aT;
+    return a.id - b.id;
+  });
   const filtCsvItems = csvSearch
-    ? csvImpItems.filter((i) =>
+    ? csvItemsSorted.filter((i) =>
         [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(csvSearch.toLowerCase()))
       )
-    : csvImpItems;
+    : csvItemsSorted;
+  // Totals for Part Order's mobile card list and its rotated/portrait table. Taken over the rows
+  // actually on screen (filtCsvItems, not every imported row) so a search narrows the total along
+  // with the list — matching what the desktop table's own totals row does.
+  const csvTotals = sumKioskTotals(filtCsvItems, (i) => {
+    const exp = i.quantity ?? 0;
+    return {
+      exp,
+      // Received = full physical count (order-matched + extra) — same convention as the
+      // doneQty/donePlt columns above and the Scan tab's osRowState.doneQty.
+      done: (i.scannedQty ?? 0) + (i.extraQty ?? 0),
+      remain: Math.max(0, exp - (i.scannedQty ?? 0)),
+      extra: i.extraQty ?? 0,
+      ipp: impItemsPerPallet(i),
+    };
+  });
+
+  // Part Order (Separate CSVs) columns — mirrors the Scan/Master View column layout
+  // (Item, Barcode/SAP, Exp/Remain/Received Qty, Status) so all three tabs read as one system.
+  const csvColumns: DataTableColumn<ImpItem>[] = [
+    {
+      id: "itemName",
+      header: "Item Name",
+      sortable: true,
+      accessor: (i) => i.itemName,
+      cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
+      render: (item) => item.itemName ?? "—",
+    },
+    {
+      id: "barcode",
+      header: "Barcode / SAP",
+      width: 140,
+      sortable: true,
+      accessor: (i) => i.barcode,
+      // Identifier, not a quantity — kept out of the totals row.
+      totalable: false,
+      cellClassName: "font-mono text-gray-500",
+      render: (item) => (
+        <>
+          <span className="block">{item.barcode ?? <span className="text-gray-300">—</span>}</span>
+          {item.sapCode && <span className="block text-[10px] text-gray-400">SAP: {item.sapCode}</span>}
+        </>
+      ),
+    },
+    {
+      id: "expQty",
+      header: "Exp Qty",
+      width: 80,
+      align: "right",
+      sortable: true,
+      accessor: (i) => i.quantity ?? 0,
+      cellClassName: "text-gray-600 font-medium tabular-nums",
+      render: (i) => i.quantity ?? "—",
+    },
+    {
+      id: "remainQty",
+      header: "Remain Qty",
+      width: 100,
+      align: "right",
+      sortable: true,
+      accessor: (i) => Math.max(0, (i.quantity ?? 0) - (i.scannedQty ?? 0)),
+      cellClassName: "tabular-nums font-bold",
+      render: (item) => {
+        const rem = Math.max(0, (item.quantity ?? 0) - (item.scannedQty ?? 0));
+        return rem > 0 ? <span className="text-[#001d6e]">{rem}</span> : <span className="text-gray-300">0</span>;
+      },
+    },
+    {
+      id: "doneQty",
+      header: "Received Qty",
+      width: 90,
+      align: "right",
+      sortable: true,
+      // Received = the full physical count (order-matched scannedQty PLUS extra) — same
+      // convention as the Scan tab's osRowState.doneQty and Master View's mvRowState.done.
+      // Status/isDone below still gates on scannedQty alone (order fulfillment), unaffected.
+      accessor: (i) => (i.scannedQty ?? 0) + (i.extraQty ?? 0),
+      cellClassName: "tabular-nums font-bold",
+      render: (item) => {
+        const exp = item.quantity ?? 0;
+        const scanned = item.scannedQty ?? 0;
+        const done = scanned + (item.extraQty ?? 0);
+        const isDone = scanned >= exp && exp > 0;
+        const isPartial = scanned > 0 && !isDone;
+        return <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>;
+      },
+    },
+    {
+      id: "extraQty",
+      header: "Extra Qty",
+      width: 90,
+      align: "right",
+      sortable: true,
+      accessor: (i) => i.extraQty ?? 0,
+      cellClassName: "tabular-nums font-semibold",
+      render: (item) => {
+        const extra = item.extraQty ?? 0;
+        return extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>;
+      },
+    },
+    // Pallet columns, in the same Exp → Remain → Received → Extra order as the Qty block above —
+    // matching the Scan and Master View tables, which read as one system with this one.
+    {
+      id: "expPlt",
+      header: "Exp Plt",
+      width: 80,
+      align: "right",
+      cellClassName: "tabular-nums text-gray-500",
+      total: (rows) => pltTotal(rows, (i) => ({ qty: i.quantity ?? 0, ipp: impItemsPerPallet(i) })),
+      render: (i) => pltCell(i.quantity ?? 0, impItemsPerPallet(i), "text-gray-500"),
+    },
+    {
+      id: "remainPlt",
+      header: "Remain Plt",
+      width: 100,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) =>
+        pltTotal(rows, (i) => ({
+          qty: Math.max(0, (i.quantity ?? 0) - (i.scannedQty ?? 0)),
+          ipp: impItemsPerPallet(i),
+        })),
+      render: (i) =>
+        pltCell(Math.max(0, (i.quantity ?? 0) - (i.scannedQty ?? 0)), impItemsPerPallet(i), "text-purple-600"),
+    },
+    {
+      id: "donePlt",
+      header: "Received Plt",
+      width: 90,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => ({ qty: (i.scannedQty ?? 0) + (i.extraQty ?? 0), ipp: impItemsPerPallet(i) })),
+      render: (i) => pltCell((i.scannedQty ?? 0) + (i.extraQty ?? 0), impItemsPerPallet(i), "text-[#001d6e]"),
+    },
+    {
+      id: "extraPlt",
+      header: "Extra Plt",
+      width: 90,
+      align: "right",
+      cellClassName: "tabular-nums font-semibold",
+      total: (rows) => pltTotal(rows, (i) => ({ qty: i.extraQty ?? 0, ipp: impItemsPerPallet(i) })),
+      render: (i) => pltCell(i.extraQty ?? 0, impItemsPerPallet(i), "text-amber-600"),
+    },
+    {
+      id: "status",
+      header: "Status",
+      width: 90,
+      align: "center",
+      render: (item) => {
+        const exp = item.quantity ?? 0;
+        const done = item.scannedQty ?? 0;
+        const isDone = done >= exp && exp > 0;
+        const isPartial = done > 0 && !isDone;
+        return (
+          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+            isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+          }`}>
+            {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+          </span>
+        );
+      },
+    },
+  ];
 
   function downloadMvCsv() {
     if (!mvData) return;
     const headers = ["#", "Item Name", "Barcode", "SAP Code", "Expected Qty", "Scanned Qty", "Remaining", "Pallets", "Status", "Source Files"];
     const rows = allMvItems.map((item, idx) => {
       const remain = Math.max(0, (item.quantity ?? 0) - (item.scannedQty ?? 0));
-      const status = item._isExtra ? "Extra" : item.scannedQty >= item.quantity && item.quantity > 0 ? "Done" : item.scannedQty > 0 ? "Partial" : "Pending";
+      const status = item._isExtra ? "Extra" : item.scannedQty >= item.quantity && item.quantity > 0 ? "Received" : item.scannedQty > 0 ? "Partial" : "Pending";
       return [
         idx + 1, item.itemName ?? "", item.barcode ?? "", item.sapCode ?? "",
         item.quantity ?? 0, item.scannedQty ?? 0, remain, item.expectedPallets ?? "", status, item._files.join(" | "),
@@ -1413,34 +2468,27 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         )
       : osItems
     ).slice().sort((a, b) => {
-      // PRIMARY: whatever was scanned most recently THIS session floats to the very top —
-      // every scan bumps osScanSeqRef in onMutate, so the item just scanned always wins
-      // position 1 (a monotonic client counter, immune to the optimistic-vs-server timestamp
-      // skew that a lastScannedAt comparison suffers from). Items not scanned this session have
-      // seq 0 and fall through to the ordering below.
-      const seq = osScanSeqRef.current.byId;
-      const aSeq = seq.get(a.id) ?? 0;
-      const bSeq = seq.get(b.id) ?? 0;
+      // Same two-tier recency rule as Master View (see mvRecencySort), keyed by BARCODE so both
+      // tables show the same order: (1) items I scanned this session float first (instant, via
+      // the client seq map); (2) everything else falls back to the server's shared lastScannedAt
+      // so a scan on ANY device also floats the item up for everyone. Two server timestamps
+      // compare safely; my own scanned items never reach tier 2, so the optimistic client value
+      // (different tz convention) is never mixed in. Stable for never-scanned rows (return 0).
+      const seq = osScanSeqRef.current.byBarcode;
+      const aSeq = seq.get(normalize(a.barcode ?? "")) ?? 0;
+      const bSeq = seq.get(normalize(b.barcode ?? "")) ?? 0;
       if (aSeq !== bSeq) return bSeq - aSeq;
-      // SECONDARY: for items only scanned in a PRIOR page-load (all carry the server's own
-      // timestamp convention, so they're mutually consistent), most-recent first. Guard against
-      // an unparseable value (NaN) so it cleanly falls through to the status/id tiebreakers.
-      const parseAt = (v: string | null) => { const t = v ? new Date(v).getTime() : 0; return Number.isNaN(t) ? 0 : t; };
-      const aScannedAt = parseAt(a.lastScannedAt);
-      const bScannedAt = parseAt(b.lastScannedAt);
-      if (aScannedAt !== bScannedAt) return bScannedAt - aScannedAt;
-      const rank = (s: string) => s === "complete" ? 0 : s === "partial" ? 1 : 2;
-      const diff = rank(a.status) - rank(b.status);
-      if (diff !== 0) return diff;
-      // Within same status group keep original order (by id)
-      return a.id - b.id;
+      const aT = a.lastScannedAt ? new Date(a.lastScannedAt).getTime() : 0;
+      const bT = b.lastScannedAt ? new Date(b.lastScannedAt).getTime() : 0;
+      if (aT !== bT) return bT - aT;
+      return 0;
     });
-    // An item counts as done when its scanned qty PLUS any cross-part credit reaches
-    // expected — so a line fully covered by an earlier part's extra shows as done here too.
+    // Counts toward the "received" tally once scanned qty PLUS any cross-part credit is above
+    // zero — a partially-scanned line (short of expected) still counts here even though its
+    // own row badge shows "Partial", same as a line fully covered by a credit.
     const osIsItemDone = (i: OsScanItem) => {
       const creditQty = osCreditByBarcode.get(normalize(i.barcode))?.creditedQty ?? 0;
-      const exp = i.expectedQty ?? 0;
-      return exp > 0 && (i.totalScannedQty ?? 0) + creditQty >= exp;
+      return (i.totalScannedQty ?? 0) + creditQty > 0;
     };
     const osDoneCount = osItems.filter(osIsItemDone).length;
     const osTotalCount = osItems.length;
@@ -1450,6 +2498,256 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const extraByBarcode = new Map(
       (osExtrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.totalQty ?? 0]),
     );
+
+    // Per-row derived values shared by the CSV Items columns and the row tint.
+    // Credit from an earlier part's extra counts toward this part's Received and reduces
+    // Remain. Extra reflects real over-scan on THIS part (extras are separate events, not
+    // folded into totalScannedQty, which stays capped at expectedQty) — but IS folded into
+    // Received/doneQty below so Received always reads as the full physical count, same as
+    // Master View.
+    const osRowState = (item: OsScanItem) => {
+      const credit = osCreditByBarcode.get(normalize(item.barcode));
+      const exp = item.expectedQty ?? 0;
+      const effScanned = (item.totalScannedQty ?? 0) + (credit?.creditedQty ?? 0);
+      const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+      const done = exp > 0 && effScanned >= exp;
+      return {
+        credit,
+        exp,
+        // Received = the full physical count for this item — order-matched portion (capped at
+        // expected, plus any cross-part credit) PLUS extra — same convention as Master View's
+        // "done" (see mvRowState above). E.g. expected 100, 100 scanned regular + 10 extra
+        // shows Received: 110 (Extra Qty still separately shows 10 alongside it).
+        doneQty: effScanned + extra,
+        rem: Math.max(0, exp - effScanned),
+        extra,
+        ipp: item.itemsPerPallet ?? 0,
+        done,
+        partial: !done && effScanned > 0,
+      };
+    };
+
+    // Totals-box filter, applied after osRowState exists: Done = fully scanned, Remaining = still
+    // owed, Extra = over-scanned. Runs last so it narrows the already-searched, already-sorted list.
+    const osVisible = !osStatFilter
+      ? osFiltered
+      : osFiltered.filter((i) => {
+          const { doneQty, rem, extra } = osRowState(i);
+          // "Done" now means "has any Received qty" — a partial item can also still show
+          // under "Remaining" if it has qty left, same change as Master View's mvVisible.
+          if (osStatFilter === "done") return doneQty > 0;
+          if (osStatFilter === "remaining") return rem > 0;
+          return extra > 0;
+        });
+
+    // Totals for the mobile card list and the rotated/portrait table below. Deliberately built
+    // from the same expressions those rows print (cross-part credit folded into Received, extra
+    // as real over-scan on this part) rather than from osRowState, so each column's figures and
+    // its total are derived identically.
+    const osKioskTotals = sumKioskTotals(osVisible, (item) => {
+      const exp = item.expectedQty ?? 0;
+      const effScanned = (item.totalScannedQty ?? 0) + (osCreditByBarcode.get(normalize(item.barcode))?.creditedQty ?? 0);
+      const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+      return {
+        exp,
+        done: effScanned + extra,
+        remain: Math.max(0, exp - effScanned),
+        extra,
+        ipp: item.itemsPerPallet ?? 0,
+      };
+    });
+
+    const osColumns: DataTableColumn<OsScanItem>[] = [
+      {
+        id: "state",
+        header: "",
+        width: 40,
+        align: "center",
+        hideable: false,
+        render: (item) => {
+          const { done, partial } = osRowState(item);
+          return done ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
+            : partial ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
+            : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+        },
+      },
+      {
+        id: "itemName",
+        header: "Item",
+        width: 240,
+        sortable: true,
+        accessor: (i) => i.itemName,
+        cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
+        // Clicking the item NAME toggles the inline arrival-history panel below this row — see
+        // the DataTable's renderExpandedRow prop.
+        render: (item) => {
+          const { credit } = osRowState(item);
+          const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
+          return (
+            <>
+              <button
+                type="button"
+                disabled={!item.barcode}
+                // Stop the trigger's pointerdown reaching the outside-click handler, which would
+                // otherwise close-then-the-click-reopens (leaving it stuck open).
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => setOsHistoryItem((cur) => (cur && cur.id === item.id ? null : item))}
+                className={`block text-left underline decoration-dotted underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e] disabled:no-underline disabled:hover:text-inherit ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
+              >
+                {item.itemName ?? "—"}
+              </button>
+              {credit && (
+                <span
+                  className="block truncate text-[10px] font-normal text-purple-600"
+                  title={credit.sources.map((s) => `${s.qty} from ${s.fromCsvFileName}`).join(", ")}
+                >
+                  ✓ {credit.creditedQty} counted from earlier part
+                </span>
+              )}
+            </>
+          );
+        },
+      },
+      {
+        id: "barcode",
+        header: "Barcode / SAP",
+        width: 140,
+        sortable: true,
+        accessor: (i) => i.barcode,
+        // Identifier, not a quantity — kept out of the totals row.
+        totalable: false,
+        cellClassName: "font-mono text-gray-500",
+        render: (item) => (
+          <>
+            <span className="block">{item.barcode ?? <span className="text-gray-300">—</span>}</span>
+            {item.sapCode && <span className="block text-[10px] text-gray-400">SAP: {item.sapCode}</span>}
+          </>
+        ),
+      },
+      // All Qty columns first (Exp → Remain → Done → Extra), then the matching Plt columns
+      // in the same order, so the two unit groups read as separate blocks.
+      {
+        id: "expQty",
+        header: "Exp Qty",
+        width: 80,
+        align: "right",
+        sortable: true,
+        accessor: (i) => i.expectedQty ?? 0,
+        cellClassName: "text-gray-600 font-medium tabular-nums",
+        render: (i) => i.expectedQty,
+      },
+      {
+        id: "remainQty",
+        header: "Remain Qty",
+        width: 100,
+        align: "right",
+        sortable: true,
+        accessor: (i) => osRowState(i).rem,
+        cellClassName: "tabular-nums font-bold",
+        render: (i) => {
+          const { rem } = osRowState(i);
+          return rem > 0 ? <span className="text-[#001d6e]">{rem}</span> : <span className="text-gray-300">0</span>;
+        },
+      },
+      {
+        id: "doneQty",
+        header: "Received Qty",
+        width: 90,
+        align: "right",
+        sortable: true,
+        accessor: (i) => osRowState(i).doneQty,
+        cellClassName: "tabular-nums font-bold",
+        render: (item) => {
+          const { doneQty, done, partial } = osRowState(item);
+          return (
+            <span
+              className={done ? "text-emerald-700" : partial ? "text-amber-700" : "text-gray-400"}
+              title={`${item.scannedPallets ?? 0} plt + ${item.scannedLooseQty ?? 0} loose`}
+            >
+              {doneQty}
+            </span>
+          );
+        },
+      },
+      {
+        id: "extraQty",
+        header: "Extra Qty",
+        width: 90,
+        align: "right",
+        sortable: true,
+        accessor: (i) => osRowState(i).extra,
+        cellClassName: "tabular-nums font-semibold",
+        render: (i) => {
+          const { extra } = osRowState(i);
+          return extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>;
+        },
+      },
+      {
+        id: "expPlt",
+        header: "Exp Plt",
+        width: 80,
+        align: "right",
+        cellClassName: "tabular-nums text-gray-500",
+        total: (rows) => pltTotal(rows, (i) => { const { exp, ipp } = osRowState(i); return { qty: exp, ipp }; }),
+        render: (i) => {
+          const { exp, ipp } = osRowState(i);
+          return pltCell(exp, ipp, "text-gray-500");
+        },
+      },
+      {
+        id: "remainPlt",
+        header: "Remain Plt",
+        width: 100,
+        align: "right",
+        cellClassName: "tabular-nums font-semibold",
+        total: (rows) => pltTotal(rows, (i) => { const { rem, ipp } = osRowState(i); return { qty: rem, ipp }; }),
+        render: (i) => {
+          const { rem, ipp } = osRowState(i);
+          return pltCell(rem, ipp, "text-purple-600");
+        },
+      },
+      {
+        id: "donePlt",
+        header: "Received Plt",
+        width: 90,
+        align: "right",
+        cellClassName: "tabular-nums font-semibold",
+        total: (rows) => pltTotal(rows, (i) => { const { doneQty, ipp } = osRowState(i); return { qty: doneQty, ipp }; }),
+        render: (i) => {
+          const { doneQty, ipp } = osRowState(i);
+          return pltCell(doneQty, ipp, "text-[#001d6e]");
+        },
+      },
+      {
+        id: "extraPlt",
+        header: "Extra Plt",
+        width: 90,
+        align: "right",
+        cellClassName: "tabular-nums font-semibold",
+        total: (rows) => pltTotal(rows, (i) => { const { extra, ipp } = osRowState(i); return { qty: extra, ipp }; }),
+        render: (i) => {
+          const { extra, ipp } = osRowState(i);
+          return pltCell(extra, ipp, "text-amber-600");
+        },
+      },
+      {
+        id: "status",
+        header: "Status",
+        width: 90,
+        align: "center",
+        render: (i) => {
+          const { done, partial } = osRowState(i);
+          return (
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+              done ? "bg-emerald-100 text-emerald-700"
+              : partial ? "bg-amber-100 text-amber-700"
+              : "bg-gray-100 text-gray-500"}`}>
+              {done ? "Received" : partial ? "Partial" : "Pending"}
+            </span>
+          );
+        },
+      },
+    ];
     // Resolves items-per-pallet for ANY barcode — first from this session's own CSV items
     // (already live-resolved server-side, see the /items endpoint), falling back to a live
     // inventory lookup for barcodes that aren't on the CSV at all (genuine "not in order" extras).
@@ -1493,7 +2791,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     });
 
     // Computed the same way every Master View row already displays its own pallet figures
-    // (quantity / itemsPerPallet — see the "Exp Plt"/"Done Plt"/etc. table cells and the
+    // (quantity / itemsPerPallet — see the "Exp Plt"/"Received Plt"/etc. table cells and the
     // mobile list below) rather than the CSV's raw "Expected Pallets" column, which has no
     // guaranteed relationship to itemsPerPallet and previously made this total disagree
     // with what every row underneath it actually shows.
@@ -1524,7 +2822,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     const displayTotals = osTab === "master-view" ? mvTotals : osTotals;
     const stvs = osStvsQuery.data ?? [];
-    // Use plant-specific pallet size from inventory (valPlt/indPlt) as the multiplier
+    // Use state-specific pallet size from inventory (gjPlt/mpPlt) as the multiplier
     const plt = osPending?.plantPalletSize ?? osPending?.matchedItem?.itemsPerPallet ?? 1;
     const NO_STV = "__none__";
     // True when the CSV item exists but is already fully scanned — extra boxes coming in
@@ -1533,114 +2831,71 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       : false;
     const osResolvedImageName = osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name;
 
-    // Manage Scans (admin-only) / Extra Items, unified into one tabbed list — built once
-    // here and reused as-is in both the mobile and desktop layouts below.
-    // "Manage" tab is hidden from the UI for now (backend void endpoint/queries are left
-    // untouched — a teammate is actively working on the void feature) — only ever show Extra.
-    const osInfoOptions: { key: "manage" | "extra"; label: string; count: number }[] = [
-      { key: "extra", label: "Extra", count: (osExtrasQuery.data ?? []).length },
-    ];
-    const activeInfoTab = osInfoTab === "manage" && !canCompletePart ? "extra" : osInfoTab;
-    const sideInfoPanel = (
-      <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
-        <div className="flex items-center border-b bg-gray-50">
-          <div className="flex flex-1">
-            {osInfoOptions.map((opt) => (
-              <button
-                key={opt.key}
-                onClick={() => setOsInfoTab(opt.key)}
-                className={`flex-1 px-3 py-2 text-xs font-semibold transition-colors ${
-                  activeInfoTab === opt.key ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-100"
-                }`}
-              >
-                {opt.label}{opt.count > 0 ? ` (${opt.count})` : ""}
-              </button>
-            ))}
-          </div>
-          {osRotated && <ScrollNudgeButtons targetRef={osManageExtraScrollRef} className="px-2 text-gray-500" />}
-        </div>
-        <div ref={osManageExtraScrollRef} className={`max-h-[420px] divide-y divide-gray-100 ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
-          {activeInfoTab === "manage" && canCompletePart && (
-            (osEventsQuery.data ?? []).length > 0 ? (osEventsQuery.data ?? []).map((e) => (
-              <div key={e.id} className={`flex items-center gap-3 px-4 py-2.5 text-xs ${e.voided ? "opacity-50" : ""}`}>
-                <ScanLine className={`h-4 w-4 shrink-0 ${e.voided ? "text-gray-300" : e.isExtra ? "text-amber-500" : "text-emerald-500"}`} />
-                <div className="min-w-0 flex-1">
-                  <p className={`truncate font-medium text-gray-800 ${e.voided ? "line-through" : ""}`}>
-                    {e.itemName ?? e.barcode}
-                  </p>
-                  <p className="text-[10px] text-gray-400">
-                    {e.scannedByName ?? "—"}
-                    {e.voided && <span className="ml-1 font-semibold text-red-500">Voided</span>}
-                  </p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="font-bold text-gray-700">
-                    {e.totalQty ?? 0}{e.isExtra ? <span className="ml-1 text-amber-600">(extra)</span> : ""}
-                  </p>
-                </div>
-                {!e.voided && (
-                  <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 shrink-0"
-                    onClick={() => setOsVoidTarget(e)}>
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-              </div>
-            )) : <p className="py-8 text-center text-xs text-gray-400">No scans to manage.</p>
-          )}
-          {activeInfoTab === "extra" && (
-            (osExtrasQuery.data ?? []).length > 0 ? (osExtrasQuery.data ?? []).map((e, i) => {
-              const eIpp = ippForBarcode(e.barcode);
-              return (
-                <div key={i} className={`flex items-center gap-3 px-4 py-2.5 text-xs ${i % 2 === 0 ? "bg-white" : "bg-slate-50"}`}>
-                  <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium text-gray-900 truncate">{e.itemName ?? e.barcode}</p>
-                    <p className="text-[11px] text-gray-400 font-mono">{e.barcode}</p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <p className="font-bold text-amber-600">{e.totalQty} units</p>
-                    <p className="text-[11px] text-gray-400">
-                      {e.scanCount} scan{e.scanCount !== 1 ? "s" : ""}
-                      {eIpp > 0 && <span className="text-purple-500"> · {(e.totalQty / eIpp).toFixed(2)} plt</span>}
-                    </p>
-                  </div>
-                </div>
-              );
-            }) : <p className="py-8 text-center text-xs text-gray-400">No extra scans.</p>
-          )}
-        </div>
-      </div>
-    );
 
     return (
-      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:p-4 lg:p-6 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:px-4 sm:pb-4 sm:pt-2 lg:px-6 lg:pb-6 lg:pt-3 ${kioskRotateClass}`}>
         <RotateToggleButton />
         {osRotated && (
-          <div className="fixed bottom-4 left-4 z-[60] rounded-full bg-[#001d6e] px-2 py-1.5 text-white shadow-lg">
-            <ScrollNudgeButtons targetRef={osTabBodyScrollRef} />
+          <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
+            <ScrollNudgeButtons targetRef={osTabBodyScrollRef} amount={360} large />
           </div>
         )}
 
-        {/* ── "Part Complete" banner — fires for every way a part can finish (manual Complete
-            button, Auto Complete mid-scan, or the stale-part sweep after a new upload), driven
-            by the WS 'part-completed' message. Fixed/centered so it's visible regardless of
-            which tab or viewport is showing; auto-dismisses after 10s, or on click. ── */}
+        {/* ── Big "Part Complete" / "Reopened" popup — fires for every way a part can finish
+            (manual Complete button, Auto Complete mid-scan, the stale-part sweep after a new
+            upload) or get reopened (admin undoing an accidental Complete), driven by the WS
+            'part-completed' / 'session-reopened' messages. Deliberately large and dimmed behind
+            (not a slim corner toast) so a CSV switching underneath an operator is impossible to
+            miss — click anywhere to dismiss early, otherwise auto-dismisses after 14s. When the
+            active CSV also changed (nextCsvFileName), that's shown in the same popup so "what
+            just finished" and "what am I scanning now" land in one glance. ── */}
         {osPartCompleteBanner && (
           <div
-            className="fixed inset-x-0 top-3 z-[100] flex justify-center px-3 pointer-events-none"
+            className="fixed inset-0 z-[110] flex items-start justify-center bg-black/50 px-4 pt-10 sm:pt-16 animate-in fade-in cursor-pointer"
             role="status"
+            onClick={() => setOsPartCompleteBanner(null)}
           >
-            <button
-              type="button"
-              onClick={() => setOsPartCompleteBanner(null)}
-              className="pointer-events-auto flex items-center gap-2.5 rounded-full bg-emerald-600 pl-3 pr-4 py-2.5 text-white shadow-lg ring-1 ring-emerald-700/30 animate-in fade-in slide-in-from-top-2"
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className={`w-full max-w-lg cursor-default overflow-hidden rounded-2xl shadow-2xl ring-1 ring-black/10 animate-in fade-in zoom-in-95 slide-in-from-top-4 ${
+                osPartCompleteBanner.kind === "reopened" ? "bg-amber-600" : "bg-emerald-600"
+              }`}
             >
-              <CheckCircle2 className="h-5 w-5 shrink-0" />
-              <span className="text-sm font-semibold">
-                Part {osPartCompleteBanner.partIndex} Complete
-                <span className="ml-1.5 font-normal opacity-90">— {stripCsvExt(osPartCompleteBanner.csvFileName)}</span>
-              </span>
-            </button>
+              <div className="flex items-start gap-4 p-6 text-white">
+                {osPartCompleteBanner.kind === "reopened" ? (
+                  <Undo2 className="h-10 w-10 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="h-10 w-10 shrink-0" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="text-2xl font-bold leading-tight">
+                    {osPartCompleteBanner.kind === "reopened"
+                      ? `Part ${osPartCompleteBanner.partIndex} Reopened`
+                      : `Part ${osPartCompleteBanner.partIndex} Complete`}
+                  </p>
+                  <p className="mt-1 break-words text-base font-medium opacity-90">
+                    {stripCsvExt(osPartCompleteBanner.csvFileName)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOsPartCompleteBanner(null)}
+                  className="shrink-0 rounded-full p-1 text-white/80 hover:bg-white/10 hover:text-white"
+                  aria-label="Dismiss"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              {osPartCompleteBanner.nextCsvFileName && (
+                <div className="border-t border-white/20 bg-black/10 px-6 py-3 text-white">
+                  <p className="text-xs font-semibold uppercase tracking-wide opacity-75">Now scanning</p>
+                  <p className="mt-0.5 break-words text-lg font-bold">
+                    Part {osPartCompleteBanner.nextPartIndex ?? "?"}
+                    <span className="ml-1.5 font-normal opacity-90">— {stripCsvExt(osPartCompleteBanner.nextCsvFileName)}</span>
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1650,28 +2905,28 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             needed. Rapid scans replace it and reset the 5s timer (see showAutoScanFeedback). ── */}
         {osAutoScanFeedback && (
           <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-4 pointer-events-none" role="status">
-            {/* Width matches the confirm dialog exactly (w-[calc(100%-2rem)] max-w-md
-                sm:max-w-xl). The dialog's height is content-driven (notices + button row), so
+            {/* Width matches the confirm dialog exactly (w-[calc(100%-2rem)] max-w-2xl
+                sm:max-w-3xl). The dialog's height is content-driven (notices + button row), so
                 min-h here approximates it — without it this card would sit noticeably shorter,
                 since it has no footer buttons. */}
-            <div className="w-[calc(100%-2rem)] max-w-md sm:max-w-xl min-h-[15rem] flex flex-col rounded-lg bg-white p-6 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2">
-              <div className="flex items-center gap-2 text-emerald-700">
-                <Zap className="h-5 w-5 shrink-0" />
-                <span className="text-lg font-semibold">Auto scanned</span>
+            <div className="w-[calc(100%-2rem)] max-w-2xl sm:max-w-3xl min-h-[20rem] flex flex-col bg-white p-8 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2">
+              <div className="flex items-center gap-2.5 text-emerald-700">
+                <Zap className="h-7 w-7 shrink-0" />
+                <span className="text-2xl font-semibold">Auto scanned</span>
               </div>
-              <div className="flex flex-1 gap-3 items-start pt-2">
+              <div className="flex flex-1 gap-5 items-start pt-4">
                 <img
                   src={`/api/products/image-by-name?name=${encodeURIComponent(osAutoScanFeedback.name)}`}
                   alt=""
-                  className="h-40 w-40 shrink-0 object-contain rounded-md bg-gray-50 border border-gray-100"
+                  className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
                   onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
                 />
-                <div className="flex-1 min-w-0 text-sm">
-                  <p className="font-semibold text-gray-900 break-words">{osAutoScanFeedback.name}</p>
-                  <p className="mt-0.5 font-mono text-xs text-gray-400 break-all">
+                <div className="flex-1 min-w-0 text-lg">
+                  <p className="font-semibold text-gray-900 break-words text-xl">{osAutoScanFeedback.name}</p>
+                  <p className="mt-1.5 font-mono text-base text-gray-400 break-all">
                     {osAutoScanFeedback.barcode}{osAutoScanFeedback.sapCode && ` · SAP: ${osAutoScanFeedback.sapCode}`}
                   </p>
-                  <p className="mt-2 text-base">
+                  <p className="mt-4 text-2xl">
                     <span className="font-bold text-emerald-600">+{osAutoScanFeedback.scannedQty}</span>
                     <span className="text-gray-500"> scanned</span>
                     {osAutoScanFeedback.remaining > 0 && (
@@ -1681,33 +2936,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
               </div>
             </div>
-          </div>
-        )}
-
-        {/* ── Plant switcher — only appears when 2+ plants have a simultaneously active
-            session (e.g. Valsad + Indore both scanning at once). New/additive: for a
-            single active session, or non-admin users, this renders nothing and the page
-            behaves exactly as before. ── */}
-        {(osActiveSessions?.length ?? 0) > 1 && (
-          <div className="flex flex-wrap items-center gap-1.5 bg-white sm:bg-transparent px-3 py-2 sm:px-0 sm:py-0 sm:mb-3 border-b sm:border-0 border-gray-100">
-            <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wide text-gray-400 mr-1">Active:</span>
-            {(osActiveSessions ?? []).map((s) => (
-              <button
-                key={s.id}
-                onClick={() => {
-                  setOsSelectedSessionId(s.id);
-                  setOsSearch("");
-                  setMvSearch("");
-                }}
-                className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
-                  activeOrderScanSession?.id === s.id
-                    ? "bg-[#001d6e] text-white"
-                    : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                {s.plant}
-              </button>
-            ))}
           </div>
         )}
 
@@ -1723,40 +2951,82 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             whenever osRotated is true — regardless of real viewport width — is what
             actually makes the rotated view usable.
         ════════════════════════════════════════════════════ */}
-        <div className={`flex-col h-full overflow-y-auto ${osRotated ? "flex" : "flex sm:hidden"}`}>
-
+<div className={`flex-col h-full overflow-y-auto ${bigView ? "flex" : "flex lg:hidden"}`}>
           {/* ── Sticky header + scanner ── */}
           <div className="sticky top-0 z-20 bg-white shadow-sm">
 
-            {/* Session info row */}
-            <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5">
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-bold text-gray-900 truncate leading-tight">
-                  {stripCsvExt(activeOrderScanSession.csvFileName)}
+            {/* Session info row — bordered sections instead of a loose flex row, so title /
+                complete action / progress read as distinct fields rather than floating text. */}
+            <div className={`flex items-stretch divide-x divide-gray-200 border-b border-gray-300 ${bigView ? "text-sm" : ""}`}>
+              <div className={`flex-1 min-w-0 ${bigView ? "px-4 py-3" : "px-3 py-2"}`}>
+                <p
+                  className={`font-bold text-gray-900 truncate leading-tight ${bigView ? "text-base" : "text-xs"}`}
+                  title={stripCsvExt(activeOrderScanSession.csvFileName)}
+                >
+                  {scanFmtUploadDate(activeOrderScanSession.orderDate)}
                   {(osGroupCreditsQuery.data?.totalParts ?? 0) > 1 && (
-                    <span className="ml-1.5 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
+                    <span className={`ml-1.5 inline-block bg-purple-100 font-semibold text-purple-700 ${bigView ? "px-2 py-0.5 text-xs" : "px-1.5 py-0.5 text-[10px]"}`}>
                       Part {osGroupCreditsQuery.data?.partIndex} of {osGroupCreditsQuery.data?.totalParts}
                     </span>
                   )}
                 </p>
-                <p className="text-[10px] text-gray-500 truncate">
-                  {activeOrderScanSession.plant}
-                  {activeOrderScanSession.importedByName && ` · ${activeOrderScanSession.importedByName}`}
+                <p className={`flex items-center gap-1.5 text-gray-500 truncate ${bigView ? "text-xs mt-0.5" : "text-[10px]"}`}>
+                  {/* Plant-switch dropdown — always shown (replaces the old plant tab strip
+                      above and the plain badge that used to sit here). Lists every plant
+                      with an active scan session right now; picking one switches to it,
+                      same as the old tabs did. Colored from Plant Management, same as
+                      every other PlantBadge in the app. */}
+                  <Select
+                    value={String(activeOrderScanSession.id)}
+                    onValueChange={(v) => {
+                      const picked = osPlantSwitchOptions.find((s) => String(s.id) === v);
+                      selectPlantSession(Number(v), picked?.plant);
+                    }}
+                  >
+                    <SelectTrigger
+                      className="h-5 w-auto gap-1 rounded-full border px-2 py-0 text-[10px] font-semibold shadow-none focus:ring-0 [&>svg]:h-3 [&>svg]:w-3"
+                      style={(() => {
+                        const cfg = getPlantColorCfg(activeOrderScanSession.plant);
+                        return cfg ? { backgroundColor: cfg.bgColor, color: cfg.textColor, borderColor: cfg.borderColor } : undefined;
+                      })()}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {osPlantSwitchOptions.map((s) => {
+                        const cfg = getPlantColorCfg(s.plant);
+                        return (
+                          <SelectItem key={s.id} value={String(s.id)}>
+                            <span className="flex items-center gap-1.5">
+                              <span
+                                className="h-2 w-2 shrink-0 rounded-full border"
+                                style={cfg ? { backgroundColor: cfg.bgColor, borderColor: cfg.borderColor } : undefined}
+                              />
+                              {s.plant}
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
+                    </SelectContent>
+                  </Select>
+                  {activeOrderScanSession.importedByName && <span>· {activeOrderScanSession.importedByName}</span>}
                 </p>
               </div>
               {canCompletePart && (
-                <Button size="sm" className="h-7 px-2.5 text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white shrink-0" onClick={() => setShowForceComplete(true)}>
-                  Complete
-                </Button>
+                <div className={`flex items-center justify-center shrink-0 ${bigView ? "px-4" : "px-2"}`}>
+                  <Button size="sm" className={`bg-emerald-600 hover:bg-emerald-700 text-white shrink-0 ${bigView ? "h-9 px-4 text-sm" : "h-7 px-2.5 text-[11px]"}`} onClick={() => setShowForceComplete(true)}>
+                    Complete
+                  </Button>
+                </div>
               )}
-              <div className="shrink-0 text-right">
-                <p className="text-xs font-bold text-[#001d6e]">{osDoneCount}/{osTotalCount}</p>
-                <p className="text-[10px] text-gray-400">{osPct}%</p>
+              <div className={`shrink-0 text-right flex flex-col justify-center ${bigView ? "px-4 py-3" : "px-3 py-2"}`}>
+                <p className={`font-bold text-[#001d6e] ${bigView ? "text-base" : "text-xs"}`}>{osDoneCount}/{osTotalCount}</p>
+                <p className={`text-gray-400 ${bigView ? "text-xs" : "text-[10px]"}`}>{osPct}%</p>
               </div>
             </div>
 
             {/* Full-width progress bar */}
-            <Progress value={osPct} className="h-1.5 rounded-none" />
+            <Progress value={osPct} className={`rounded-xl ${bigView ? "h-2" : "h-1.5"}`} />
 
             {/* Scanner section — hidden on Separate CSVs (no scanning happens there) */}
             {osTab !== "separate-csvs" && (
@@ -1765,29 +3035,30 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <p className="flex items-center gap-1.5 text-[11px] text-gray-400"><Plug className="h-3 w-3" />Barcode gun: plug in and scan</p>
 
               {/* Camera / Manual tabs */}
-              <div className="flex rounded-xl overflow-hidden border border-gray-200 bg-white">
+              <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
                 <button
                   onClick={() => setOsScanMode("camera")}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold transition-colors ${
+                  className={`flex-1 flex items-center justify-center gap-1.5 font-semibold transition-colors ${bigView ? "py-3 text-sm" : "py-2 text-xs"} ${
                     osScanMode === "camera" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"
                   }`}
                 >
-                  <Camera className="h-3.5 w-3.5" /> Camera
+                  <Camera className={bigView ? "h-4 w-4" : "h-3.5 w-3.5"} /> Camera
                 </button>
-                <div className="w-px bg-gray-200" />
                 <button
                   onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold transition-colors ${
+                  className={`flex-1 flex items-center justify-center gap-1.5 font-semibold transition-colors ${bigView ? "py-3 text-sm" : "py-2 text-xs"} ${
                     osScanMode === "manual" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"
                   }`}
                 >
-                  <Keyboard className="h-3.5 w-3.5" /> Manual
+                  <Keyboard className={bigView ? "h-4 w-4" : "h-3.5 w-3.5"} /> Manual
                 </button>
               </div>
 
-              {/* Main STV selector — sets the default for the next scan confirmation too */}
+              {/* Main STV selector — sets the default for the next scan confirmation too.
+                  Bolder fill + explicit label so it reads as an active selector, not muted text. */}
               {stvs.length > 0 && (
-                <div className="flex items-center">
+                <div className="flex items-center gap-2">
+                  <span className={`shrink-0 font-semibold uppercase tracking-wide text-gray-400 ${bigView ? "text-xs" : "text-[10px]"}`}>STV</span>
                   <Select
                     value={osSelectedStv || NO_STV}
                     onValueChange={(v) => {
@@ -1795,7 +3066,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       setOsSelectedStv(nextValue);
                     }}
                   >
-                    <SelectTrigger className="h-6 w-40 text-xs justify-center text-center border-[#001d6e]/30 text-[#001d6e]">
+                    <SelectTrigger className={`rounded-xl justify-center text-center font-semibold border-2 ${
+                      osSelectedStv ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-500"
+                    } ${bigView ? "h-11 w-56 text-base" : "h-8 w-44 text-sm"}`}>
                       <SelectValue placeholder="Select STV…" />
                     </SelectTrigger>
                     {/* Radix portals this dropdown to document.body, outside the .kiosk-rotate-90
@@ -1805,7 +3078,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         one), so adding our rotation directly here composes cleanly with no
                         conflict. origin-top-left matches Radix's actual side="bottom" align="start"
                         anchor for this trigger, keeping the dropdown attached to the same corner. */}
-                    <SelectContent className={osRotated ? "origin-top-left rotate-90" : undefined}>
+                    <SelectContent className={osRotated ? `origin-top-left ${osPortalRotate}` : undefined}>
                       <SelectItem value={NO_STV}>— Select STV —</SelectItem>
                       {stvs.map((s) => (
                         <SelectItem key={s} value={s}>{s}</SelectItem>
@@ -1819,7 +3092,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   STV list hadn't been set up). */}
               {!osStvsQuery.isLoading && stvs.length === 0 && (
                 <div className="flex items-center">
-                  <span className="rounded border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+                  <span className="rounded-xl border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
                     No STV — create one in Plant Settings
                   </span>
                 </div>
@@ -1833,6 +3106,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   /* Responsive height: 50% of viewport width, clamped 190–250px */
                   height: "clamp(190px, 50vw, 250px)",
                   borderRadius: "16px",
+                  overflow: "hidden",
                 }}
               >
                 <video
@@ -1954,11 +3228,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }}
                       placeholder="Type item name or barcode…"
                       disabled={!!osPending}
-                      className="font-mono text-sm h-10 w-full"
+                      className={`font-mono w-full rounded-xl border-gray-300 ${bigView ? "text-lg h-14" : "text-sm h-10"}`}
                       autoFocus
                     />
                     {osManualFocused && osSuggestions.length > 0 && (
-                      <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                      <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-xl border border-gray-300 bg-white shadow-lg overflow-hidden">
                         {osSuggestions.map((item, idx) => (
                           <button
                             key={item.id}
@@ -1988,93 +3262,124 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       }
                       setOsManualCode(""); setOsSuggIdx(-1);
                     }}
-                    className="bg-[#001d6e] hover:bg-[#00154b] text-white h-10 w-10 shrink-0 p-0"
+                    className={`bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 p-0 rounded-xl ${bigView ? "h-14 w-14" : "h-10 w-10"}`}
                   >
-                    <ScanLine className="h-4 w-4" />
+                    <ScanLine className={bigView ? "h-6 w-6" : "h-4 w-4"} />
                   </Button>
                 </div>
               )}
+
+              {/* ── Empty Box — log a box with no item/barcode, alongside Gun Mode. Separate
+                  from a product scan: no CSV lookup, doesn't count toward order qty. ── */}
+              <div className="flex items-center gap-2 mt-2">
+                <Button
+                  variant="outline"
+                  disabled={!activeOrderScanSession || activeOrderScanSession.scanStatus === "completed" || !!osPending || !canScanWrite}
+                  onClick={() => { setEmptyBoxQty("1"); setEmptyBoxNote(""); setShowEmptyBox(true); }}
+                  className="flex-1 h-9 rounded-full text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                >
+                  <Package className="h-4 w-4 mr-1.5" /> Empty Box
+                </Button>
+                {(osEmptyBoxesQuery.data?.totalQty ?? 0) > 0 && (
+                  <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1 shrink-0">
+                    {osEmptyBoxesQuery.data!.totalQty} empty
+                  </span>
+                )}
+              </div>
             </div>
             )}
           </div>
 
-          {/* ── Scrollable content below sticky scanner ── */}
-          <div ref={osTabBodyScrollRef} className={`flex-1 px-4 py-3 space-y-3 ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
+          {/* ── Scrollable content below sticky scanner ──
+              When rotated, min-h-0 is load-bearing: a flex item defaults to min-height:auto, so
+              this box grew to fit the whole item list rather than clipping it. Having no overflow
+              of its own, it had nothing to scroll — which is why the ▲▼ nudge buttons (they call
+              scrollBy on this element) did nothing and the rows below the fold were unreachable.
+              Bounding it makes those buttons work, and overflow-y-auto + kiosk-scroll adds a wide,
+              always-visible bar beside them.
+              min-h-0 is applied ONLY when rotated: it is safe there because .kiosk-rotate-90 sets
+              a definite height (100vw) for h-full to resolve against. On a naturally-portrait
+              phone the ancestor height can be content-derived, where a 0 min-height would let this
+              flex item collapse to nothing and swallow the list — so that case keeps the plain
+              overflow-y-auto it uses at every other width. */}
+          <div
+            ref={osTabBodyScrollRef}
+            className={`flex-1 px-4 py-3 space-y-3 ${osRotated ? "min-h-0 overflow-y-auto kiosk-scroll" : "overflow-y-auto"}`}
+          >
 
-            {/* ── Tab strip — scanner above stays put across tabs ── */}
-            <div className="flex flex-wrap gap-1.5">
+            {/* ── Tab strip — one joined, bordered segmented control (business style) instead of
+                separate floating rounded pills. Scanner above stays put across tabs. ── */}
+            <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
               {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => setOsTab(t)}
-                  className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors ${
+                  className={`flex flex-1 items-center justify-center font-medium transition-colors ${
+                    bigView ? "gap-2 px-4 py-3 text-base" : "gap-1.5 px-3 py-2 text-xs"
+                  } ${
                     osTab === t
                       ? "bg-[#001d6e] text-white"
-                      : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                      : "text-gray-600 hover:bg-gray-50"
                   }`}
                 >
-                  {t === "scan" ? <ScanLine className="h-3.5 w-3.5" /> : t === "master-view" ? <Layers className="h-3.5 w-3.5" /> : <FileSpreadsheet className="h-3.5 w-3.5" />}
+                  {t === "scan"
+                    ? <ScanLine className={bigView ? "h-5 w-5" : "h-3.5 w-3.5"} />
+                    : t === "master-view" ? <Layers className={bigView ? "h-5 w-5" : "h-3.5 w-3.5"} />
+                    : <FileSpreadsheet className={bigView ? "h-5 w-5" : "h-3.5 w-3.5"} />}
                   {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Part Order"}
                 </button>
               ))}
             </div>
 
-            {/* ── Order totals — persistent across Scan / Master View, hidden on Separate CSVs ── */}
+            {/* ── Order totals — persistent across Scan / Master View, hidden on Separate CSVs ──
+                One unified bordered strip with internal dividers (business/report style),
+                instead of four separate floating rounded+shadowed cards. */}
             {osTab !== "separate-csvs" && (
-            <div className="grid grid-cols-4 gap-2">
-              <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
-                <p className="text-[10px] uppercase tracking-wide text-gray-400">Total</p>
-                <p className="text-xl font-bold text-gray-900">{displayTotals.expected}</p>
-                <p className="text-sm font-bold text-gray-600">{displayTotals.palletsExpected.toFixed(2)} plt</p>
-              </div>
-              <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
-                <p className="text-[10px] uppercase tracking-wide text-gray-400">Received</p>
-                <p className="text-xl font-bold text-green-600">{displayTotals.done}</p>
-                <p className="text-sm font-bold text-green-600">{displayTotals.palletsDone.toFixed(2)} plt</p>
-              </div>
-              <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
-                <p className="text-[10px] uppercase tracking-wide text-gray-400">Remaining</p>
-                <p className="text-xl font-bold text-red-600">{displayTotals.remaining}</p>
-                <p className="text-sm font-bold text-red-600">{
-                  displayTotals.palletsRemaining.toFixed(2)} plt</p>
-              </div>
-              <div className="rounded-lg border bg-white px-2 py-2 text-center shadow-sm">
-                <p className="text-[10px] uppercase tracking-wide text-gray-400">Extra</p>
-                <p className={`text-xl font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{displayTotals.extra}</p>
-                <p className="text-sm font-bold text-gray-600">{displayTotals.palletsExtra.toFixed(2)} plt</p>
-              </div>
+            <div className={`grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white ${bigView ? "text-base" : ""}`}>
+              {([
+                { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
+                { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
+                { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, text: "text-red-600" },
+                { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+              ] as const).map((s) => {
+                const isActive = osStatFilter === s.key;
+                return (
+                  <button
+                    key={s.label}
+                    type="button"
+                    onClick={() => setOsStatFilter(isActive ? "" : (s.key as typeof osStatFilter))}
+                    aria-pressed={isActive}
+                    title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                    className={`text-center transition-colors ${bigView ? "px-2 py-3" : "px-2 py-2"} ${
+                      isActive ? "bg-[#001d6e]/[0.06] ring-1 ring-inset ring-[#001d6e]/30" : "hover:bg-gray-50"
+                    }`}
+                  >
+                    <p className={`uppercase tracking-wide text-gray-400 ${bigView ? "text-[11px]" : "text-[10px]"}`}>{s.label}</p>
+                    <p className={`font-bold ${s.text} ${bigView ? "text-xl" : "text-lg"}`}>{s.value}</p>
+                    <p className={`font-bold ${s.text} ${bigView ? "text-lg" : "text-base"}`}>{s.plt.toFixed(2)} plt</p>
+                  </button>
+                );
+              })}
             </div>
             )}
 
             {osTab === "scan" && (
               <>
-            {/* Items list */}
-            <div className="bg-white rounded-xl border overflow-hidden">
-              {/* List header */}
-              <div className="flex items-center justify-between px-4 py-2.5 border-b bg-[#001d6e]">
-                <p className="text-xs font-semibold text-white">CSV Items</p>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-blue-200">{osDoneCount}/{osTotalCount} done</span>
-                  {osRotated && <ScrollNudgeButtons targetRef={osCsvListScrollRef} className="text-white" />}
-                  <button
-                    onClick={() => setOsSearchOpen((v) => !v)}
-                    className="text-white/80 hover:text-white"
-                  >
-                    {osSearchOpen ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
-                  </button>
-                </div>
-              </div>
-
-              {/* Search — collapsed until the search button above is tapped */}
-              {osSearchOpen && (
-                <div className="px-3 py-2.5 border-b">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+            {/* Items list — matches Master View's mobile treatment: card list on a phone,
+                the detailed table only for the rotated/kiosk view. */}
+            <div className="bg-white border border-gray-300 overflow-hidden rounded-xl">
+              {/* List header — navy bar, same treatment as Master View's mobile header. Search
+                  replaces the row's content in place (rather than wrapping onto an extra line
+                  below), and there's no explicit close button — click outside to hide it. */}
+              <div ref={osSearchMobileRef} className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
+                {osSearchOpen ? (
+                  <div className="relative w-full">
+                    <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                     <Input
                       value={osSearch}
                       onChange={(e) => setOsSearch(e.target.value)}
                       placeholder="Search items…"
-                      className="pl-8 h-9 text-sm"
+                      className="h-9 rounded-md border-gray-200 bg-gray-50 pl-8 text-sm focus-visible:ring-1 focus-visible:ring-[#001d6e]/30 focus-visible:ring-offset-0"
                       autoFocus
                     />
                     {osSearch && (
@@ -2083,8 +3388,24 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </button>
                     )}
                   </div>
-                </div>
-              )}
+                ) : (
+                  <>
+                    <div className="text-white">
+                      <p className="text-sm font-bold leading-tight">{osTotalCount} items</p>
+                      <p className="text-xs text-blue-200">{osDoneCount} received</p>
+                    </div>
+                    <div className="ml-auto flex items-center gap-2">
+                      <button
+                        onClick={() => setOsSearchOpen(true)}
+                        title="Search items"
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/25 bg-white/10 text-white hover:bg-white/20"
+                      >
+                        <Search className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
 
               {/* Rows */}
               {osItemsQuery.isLoading ? (
@@ -2092,198 +3413,515 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
               ) : (
-                <div ref={osCsvListScrollRef} className={`divide-y max-h-[420px] ${osRotated ? "overflow-hidden" : "overflow-y-auto"}`}>
-                  {osFiltered.map((item) => {
-                    const credit    = osCreditByBarcode.get(normalize(item.barcode));
-                    const creditQty = credit?.creditedQty ?? 0;
-                    // The credit from an earlier part's extra counts toward this part's
-                    // progress: it adds to "done" and subtracts from "left". Real over-scan
-                    // (extra) on THIS part is unaffected by the credit.
-                    const effScanned = (item.totalScannedQty ?? 0) + creditQty;
-                    const exp        = item.expectedQty ?? 0;
-                    const scanned    = Math.min(effScanned, exp);
-                    const remaining  = Math.max(0, exp - effScanned);
-                    const extra      = Math.max(0, (item.totalScannedQty ?? 0) - exp);
-                    const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
-                    return (
-                      <div key={item.id} className={`flex items-center gap-3 px-4 py-3 ${
-                        effStatus === "complete" ? "bg-green-50/60" :
-                        effStatus === "partial"  ? "bg-amber-50/50" : ""
-                      }`}>
-                        <span className="shrink-0">
-                          {effStatus === "complete"
-                            ? <CheckCircle2 className="h-5 w-5 text-green-500" />
-                            : effStatus === "partial"
-                            ? <ScanLine className="h-5 w-5 text-amber-500" />
-                            : <span className="inline-block h-5 w-5 rounded-full border-2 border-gray-300" />}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-gray-900 leading-snug line-clamp-2">{item.itemName ?? "—"}</p>
-                          <p className="text-[10px] text-gray-400 font-mono truncate max-w-full">
-                            {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
-                          </p>
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
-                            <span className="text-xs text-gray-500">
-                              <span className="font-bold text-green-600">{scanned}</span>/{exp}
-                              {(item.itemsPerPallet ?? 0) > 0 && (
-                                <span className="text-sm font-bold text-gray-600"> ({(exp / (item.itemsPerPallet ?? 1)).toFixed(2)} plt)</span>
+                <>
+                  {/* This is the narrow-screen fallback: fields stack as labeled lines instead
+                      of table columns. It hides — i.e. the table below takes over — once EITHER
+                      the viewport reaches 480px wide OR the device is physically turned to
+                      landscape, whichever comes first. The landscape check matters on its own
+                      because a phone rotated sideways should always get the table (same as the
+                      rotated kiosk view), even if its landscape width happens to still be under
+                      480px on a smaller device. Pure CSS (width + orientation media queries) —
+                      no JS tracking needed. */}
+                  {!osRotated && (
+                    <div className="min-[480px]:hidden landscape:hidden">
+                      {osVisible.length === 0 ? (
+                        <p className="py-10 text-center text-sm text-gray-400">
+                          {osItems.length === 0 ? "Loading items…" : "No items match."}
+                        </p>
+                      ) : osVisible.map((item) => {
+                        const credit    = osCreditByBarcode.get(normalize(item.barcode));
+                        const creditQty = credit?.creditedQty ?? 0;
+                        const effScanned = (item.totalScannedQty ?? 0) + creditQty;
+                        const exp        = item.expectedQty ?? 0;
+                        const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+                        // Received = full physical count (order-matched + credit, plus extra) —
+                        // matches Master View's convention. See osRowState's comment above.
+                        const scanned    = effScanned + extra;
+                        const remaining  = Math.max(0, exp - effScanned);
+                        const ipp        = item.itemsPerPallet ?? 0;
+                        const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
+                        const expPlt     = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
+                        const remainPlt  = ipp > 0 ? (remaining / ipp).toFixed(2) : "0.00";
+                        return (
+                          <div key={item.id} className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                            effStatus === "complete" ? "bg-emerald-50/40" : effStatus === "partial" ? "bg-amber-50/30" : undefined
+                          }`}>
+                            <span className="mt-0.5 shrink-0">
+                              {effStatus === "complete" ? (
+                                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
+                                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                                </span>
+                              ) : (
+                                <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
+                                  effStatus === "partial" ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                                }`}>
+                                  <Scan className="h-3.5 w-3.5" />
+                                </span>
                               )}
                             </span>
-                            {remaining > 0 && (
-                              <span className="text-xs font-semibold text-red-600">
-                                {remaining} left
-                                {(item.itemsPerPallet ?? 0) > 0 && (
-                                  <span className="text-sm font-bold text-red-600"> (≈{(remaining / (item.itemsPerPallet ?? 1)).toFixed(2)} plt)</span>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[15px] font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
+                              <p className="mt-0.5 font-mono text-xs text-gray-400">
+                                {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                              </p>
+                              {credit && (
+                                <p className="mt-0.5 text-xs text-purple-600" title={credit.sources.map((s) => `${s.qty} from ${s.fromCsvFileName}`).join(", ")}>
+                                  ✓ {credit.creditedQty} counted from an earlier part
+                                </p>
+                              )}
+                              <p className="mt-1.5 text-sm leading-snug">
+                                <span className="font-bold text-gray-900">{scanned}</span>
+                                <span className="text-gray-400">/{exp}</span>{" "}
+                                <span className="text-gray-400">({expPlt} plt)</span>
+                                {remaining > 0 && (
+                                  <>
+                                    <span className="text-gray-300"> · </span>
+                                    <span className="font-semibold text-[#001d6e]">{remaining} left</span>{" "}
+                                    <span className="text-purple-500">(≈{remainPlt} plt)</span>
+                                  </>
                                 )}
+                                {extra > 0 && (
+                                  <>
+                                    <span className="text-gray-300"> · </span>
+                                    <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                  </>
+                                )}
+                              </p>
+                            </div>
+                            <span className="shrink-0">
+                              <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
+                                effStatus === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                              }`}>
+                                {effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
                               </span>
-                            )}
-                            {extra > 0 && (
-                              <span className="text-xs font-semibold text-amber-600">+{extra} extra</span>
-                            )}
-                            {scanned > 0 && (item.itemsPerPallet ?? 0) > 0 && (
-                              <span className="text-sm font-bold text-green-600">{(scanned / (item.itemsPerPallet ?? 1)).toFixed(2)} plt</span>
-                            )}
+                            </span>
                           </div>
-                          {credit && (
-                            <p className="text-[11px] text-purple-600 mt-0.5" title={credit.sources.map((s) => `${s.qty} from ${s.fromCsvFileName}`).join(", ")}>
-                              ✓ {credit.creditedQty} counted from an earlier part
-                            </p>
-                          )}
+                        );
+                      })}
+                      {/* Card lists get the same closing totals as the tables — the numbers
+                          shouldn't disappear just because the screen is narrow. */}
+                      {osVisible.length > 0 && (
+                        <div className={`flex items-center justify-between gap-3 px-4 py-3 text-sm ${KIOSK_TOTALS_ROW}`}>
+                          <span>Total</span>
+                          <span className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
+                            <span>{osKioskTotals.done}/{osKioskTotals.exp}</span>
+                            <span className="text-gray-500">({osKioskTotals.expPlt.toFixed(2)} plt)</span>
+                            {osKioskTotals.remain > 0 && <span>{osKioskTotals.remain} left</span>}
+                            {osKioskTotals.extra > 0 && <span className="text-amber-600">+{osKioskTotals.extra} extra</span>}
+                          </span>
                         </div>
-                        <span className="shrink-0">
-                          {effStatus === "complete"
-                            ? <span className="rounded-full bg-green-100 px-2 py-0.5 text-[11px] font-semibold text-green-700">Done</span>
-                            : effStatus === "partial"
-                            ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">Partial</span>
-                            : <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-500">Pending</span>}
-                        </span>
-                      </div>
-                    );
-                  })}
-                  {osFiltered.length === 0 && (
-                    <p className="py-10 text-center text-sm text-gray-400">
-                      {osItems.length === 0 ? "Loading items…" : "No items match."}
-                    </p>
+                      )}
+                    </div>
                   )}
-                </div>
+                  {/* 480px and up, landscape orientation, and always when rotated: the table.
+                      Matches Master View's table treatment exactly. In kiosk/portrait mode it
+                      scrolls inside its own bounded frame (kioskTableBoxClass) so the header and
+                      totals row stay put; at other widths it just flows in the page and the
+                      page-level nudge/scroll handles it. */}
+                  <div className={kioskTableBoxClass}>
+                  <table className="min-w-[640px] w-full border-collapse text-base">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+                        <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Received</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
+                        <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Extra</th>
+                        <th className="font-semibold text-center px-4 py-2.5">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {osVisible.map((item) => {
+                        const credit    = osCreditByBarcode.get(normalize(item.barcode));
+                        const creditQty = credit?.creditedQty ?? 0;
+                        // The credit from an earlier part's extra counts toward this part's
+                        // progress: it adds to "done" and subtracts from "left". Real over-scan
+                        // (extra) on THIS part is unaffected by the credit, but IS folded into
+                        // Received below (full physical count) — same convention as Master View.
+                        const effScanned = (item.totalScannedQty ?? 0) + creditQty;
+                        const exp        = item.expectedQty ?? 0;
+                        const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+                        const scanned    = effScanned + extra;
+                        const remaining  = Math.max(0, exp - effScanned);
+                        const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
+                        const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
+                        // Pallet figure under each qty (qty ÷ items-per-pallet), same as Master View.
+                        const ipp = item.itemsPerPallet ?? 0;
+                        const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
+                        return (
+                          <Fragment key={item.id}>
+                          <tr className={`border-b border-gray-200 ${
+                            effStatus === "complete" ? "bg-emerald-50/40" :
+                            effStatus === "partial"  ? "bg-amber-50/30" : undefined
+                          }`}>
+                            <td className="border-r border-gray-200 min-w-[180px] max-w-[320px] px-4 py-2.5">
+                              {/* Item name opens the arrival-history dropdown below the row. */}
+                              <button
+                                type="button"
+                                disabled={!item.barcode}
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onClick={() => setOsHistoryItem((cur) => (cur && cur.id === item.id ? null : item))}
+                                className={`text-left font-medium text-gray-900 whitespace-normal break-words leading-snug underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
+                              >
+                                {item.itemName ?? "—"}
+                              </button>
+                              <p className="text-gray-400 font-mono whitespace-normal break-words">
+                                {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                              </p>
+                              {credit && (
+                                <p className="text-purple-600 mt-0.5" title={credit.sources.map((s) => `${s.qty} from ${s.fromCsvFileName}`).join(", ")}>
+                                  ✓ {credit.creditedQty} counted from an earlier part
+                                </p>
+                              )}
+                            </td>
+                            <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
+                              <span className="block text-lg">{exp || "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(exp)} plt</span>
+                            </td>
+                            <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
+                              <span className="block text-lg">{scanned}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(scanned)} plt</span>
+                            </td>
+                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
+                              <span className="block text-lg">{remaining || "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(remaining)} plt</span>
+                            </td>
+                            <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
+                              <span className="block text-lg">{extra > 0 ? `+${extra}` : "—"}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
+                            </td>
+                            <td className="text-center px-4 py-2.5">
+                              <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
+                                effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
+                                effStatus === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                              }`}>
+                                {effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
+                              </span>
+                            </td>
+                          </tr>
+                          {isOpen && (
+                            <tr>
+                              <td colSpan={6} className="p-0 border-b border-gray-200">
+                                <div ref={osExpandMobileRef}>{mvHistoryPanelMobile}</div>
+                              </td>
+                            </tr>
+                          )}
+                          </Fragment>
+                        );
+                      })}
+                      {osVisible.length === 0 && (
+                        <tr><td colSpan={6} className="py-10 text-center text-gray-400">
+                          {osItems.length === 0 ? "Loading items…" : "No items match."}
+                        </td></tr>
+                      )}
+                      {/* Closing totals — the kiosk/portrait counterpart to the shared
+                          DataTable's totals row, pinned to the bottom of the scroll frame the
+                          same way (only in bigView, where that frame exists). */}
+                      {osVisible.length > 0 && (
+                        <tr className={KIOSK_TOTALS_ROW}>
+                          <td className={`border-r border-gray-200 px-4 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`}>Total</td>
+                          {([
+                            ["exp", "expPlt"], ["done", "donePlt"], ["remain", "remainPlt"], ["extra", "extraPlt"],
+                          ] as const).map(([qtyKey, pltKey]) => (
+                            <td key={qtyKey} className={`text-right tabular-nums border-r border-gray-200 px-3 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`}>
+                              <span className="block text-lg">{osKioskTotals[qtyKey].toLocaleString()}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{osKioskTotals[pltKey].toFixed(2)} plt</span>
+                            </td>
+                          ))}
+                          <td className={`px-4 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`} />
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                  </div>
+                </>
               )}
             </div>
-
-            {/* Manage / Extra — pinned to the bottom, below the CSV Items list */}
-            {sideInfoPanel}
-
               </>
             )}
 
             {/* ── Master View Tab (mobile) ── */}
             {osTab === "master-view" && (
               <div className="space-y-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">
-                    {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
-                  </span>
-                  <button
-                    onClick={() => setMvShowFiles((v) => !v)}
-                    title={mvShowFiles ? "Hide file names" : "Show file names"}
-                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 shadow-sm hover:bg-gray-50"
-                  >
-                    {mvShowFiles ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                  </button>
-                  {allMvItems.length > 0 && (
-                    <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
-                      <Download className="h-3.5 w-3.5" /> Export
-                    </button>
-                  )}
-                </div>
-                <div className="relative">
-                  <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                  <Input
-                    value={mvSearch}
-                    onChange={(e) => setMvSearch(e.target.value)}
-                    placeholder="Search items…"
-                    className="pl-8 h-9 text-sm bg-white"
-                  />
-                  {mvSearch && (
-                    <button className="absolute right-2.5 top-2.5" onClick={() => setMvSearch("")}>
-                      <X className="h-4 w-4 text-gray-400" />
-                    </button>
-                  )}
-                </div>
                 {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
                 {mvData && (
-                  <div className="bg-white rounded-xl border overflow-hidden">
-                    <div className="flex items-center justify-between px-4 py-2.5 border-b bg-[#001d6e]">
-                      <p className="text-xs font-semibold text-white">Merged Items</p>
-                      <span className="text-xs text-blue-200">{filtMvItems.length} of {allMvItems.length}</span>
+                  <div className="bg-white border border-gray-300 overflow-hidden rounded-xl">
+                    {/* Navy header — same treatment as the Scan tab's mobile header. Search
+                        replaces the row's content in place (rather than wrapping onto an extra
+                        line below), and there's no explicit close button — click outside to
+                        hide it (see mvSearchMobileRef/useOutsideClick). */}
+                    <div ref={mvSearchMobileRef} className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
+                      {mvSearchOpen ? (
+                        <div className="relative w-full">
+                          <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                          <Input
+                            value={mvSearch}
+                            onChange={(e) => setMvSearch(e.target.value)}
+                            placeholder="Search items…"
+                            className="h-9 rounded-md border-gray-200 bg-gray-50 pl-8 text-sm focus-visible:ring-1 focus-visible:ring-[#001d6e]/30 focus-visible:ring-offset-0"
+                            autoFocus
+                          />
+                          {mvSearch && (
+                            <button className="absolute right-2.5 top-2.5" onClick={() => setMvSearch("")}>
+                              <X className="h-4 w-4 text-gray-400" />
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="text-white">
+                            <p className="text-xl font-bold leading-tight">Items</p>
+                            <p className="text-xs text-blue-200">{mvDoneCount} out of {allMvItems.length} received</p>
+                          </div>
+                          <div className="ml-auto flex items-center gap-2">
+                            {allMvItems.length > 0 && (
+                              <button
+                                onClick={downloadMvCsv}
+                                className="inline-flex items-center gap-1.5 rounded-md border border-white/25 bg-white/10 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/20"
+                              >
+                                <Download className="h-3.5 w-3.5" /> Export
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setMvSearchOpen(true)}
+                              title="Search items"
+                              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/25 bg-white/10 text-white hover:bg-white/20"
+                            >
+                              <Search className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </>
+                      )}
                     </div>
-                    <div className="divide-y">
-                      {filtMvItems.length === 0 ? (
-                        <p className="py-10 text-center text-sm text-gray-400">No items found</p>
-                      ) : filtMvItems.map((item, idx) => {
-                        const exp = item.quantity ?? 0;
-                        const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
-                        const remain = Math.max(0, exp - done);
-                        const extra = item.extraQty ?? 0;
-                        const ipp = item.itemsPerPallet ?? 0;
-                        const isExtraOnly = item._isExtra;
-                        const isDone = done >= exp && exp > 0;
-                        const isPartial = done > 0 && !isDone && !isExtraOnly;
-                        return (
-                          <div key={idx} className={`flex items-center gap-3 px-4 py-3 ${
-                            isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-green-50/60" : isPartial ? "bg-amber-50/50" : ""
-                          }`}>
-                            <span className="shrink-0">
-                              {isExtraOnly
-                                ? <AlertTriangle className="h-5 w-5 text-orange-500" />
-                                : isDone
-                                ? <CheckCircle2 className="h-5 w-5 text-green-500" />
-                                : isPartial
-                                ? <ScanLine className="h-5 w-5 text-amber-500" />
-                                : <span className="inline-block h-5 w-5 rounded-full border-2 border-gray-300" />}
-                            </span>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium text-gray-900 leading-snug">{item.itemName ?? "—"}</p>
-                              <p className="text-[11px] text-gray-400 font-mono truncate">
-                                {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
-                              </p>
-                              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
-                                <span className="text-xs text-gray-500">
-                                  <span className="font-bold text-gray-800">{done}</span>/{exp || "—"}
-                                  {ipp > 0 && (
-                                    <span className="text-gray-400"> ({(exp / ipp).toFixed(2)} plt)</span>
-                                  )}
+
+                    {/* Below 480px, or when the device is physically turned to landscape,
+                        stacked fields instead of table columns — same as the Scan tab's mobile
+                        table above. Master View is view-only, so no click-to-expand history
+                        here (that's Scan-tab-only). */}
+                    {!osRotated && (
+                      <div className="min-[480px]:hidden landscape:hidden">
+                        {mvVisible.length === 0 ? (
+                          <p className="py-10 text-center text-sm text-gray-400">No items found</p>
+                        ) : mvVisible.map((item, idx) => {
+                          if (item._isEmptyBox) {
+                            return (
+                              <div key={idx} className="flex items-center gap-3 border-b border-gray-100 px-4 py-3 bg-orange-50/60">
+                                <span className="shrink-0"><Package className="h-5 w-5 text-orange-500" /></span>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-sm font-medium text-orange-900 leading-snug">Empty Box</p>
+                                  <p className="text-[11px] text-orange-600/80">
+                                    {item._emptyBoxQty} box{item._emptyBoxQty === 1 ? "" : "es"} logged
+                                    {item._emptyBoxCount ? ` · ${item._emptyBoxCount} entr${item._emptyBoxCount === 1 ? "y" : "ies"}` : ""} · not counted as stock
+                                  </p>
+                                </div>
+                                <span className="shrink-0">
+                                  <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-700">Empty Box</span>
                                 </span>
-                                {remain > 0 && (
-                                  <span className="text-xs font-semibold text-[#001d6e]">
-                                    {remain} left
-                                    {ipp > 0 && <span className="text-purple-600"> (≈{(remain / ipp).toFixed(2)} plt)</span>}
-                                  </span>
-                                )}
-                                {extra > 0 && (
-                                  <span className="text-xs font-semibold text-amber-600">
-                                    +{extra} extra{ipp > 0 && ` (${(extra / ipp).toFixed(2)} plt)`}
-                                  </span>
-                                )}
-                                {mvShowFiles && item._files.length > 0 && (
-                                  <span className="text-[11px] text-gray-400" title={item._files.map(stripCsvExt).join(", ")}>
-                                    {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0])}
-                                  </span>
-                                )}
                               </div>
-                            </div>
-                            <span className="shrink-0">
-                              <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                                isExtraOnly ? "bg-orange-100 text-orange-700" :
-                                isDone       ? "bg-green-100 text-green-700" :
-                                isPartial    ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
-                              }`}>
-                                {isExtraOnly ? "Extra" : isDone ? "Done" : isPartial ? "Partial" : "Pending"}
+                            );
+                          }
+                          const exp = item.quantity ?? 0;
+                          const done = item.scannedQty ?? 0;
+                          const remain = Math.max(0, exp - done);
+                          const extra = item.extraQty ?? 0;
+                          const ipp = item.itemsPerPallet ?? 0;
+                          const isExtraOnly = item._isExtra;
+                          const isDone = done >= exp && exp > 0;
+                          const isPartial = done > 0 && !isDone && !isExtraOnly;
+                          const expPlt = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
+                          const remainPlt = ipp > 0 ? (remain / ipp).toFixed(2) : "0.00";
+                          return (
+                            <div key={idx} className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                              isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                            }`}>
+                              <span className="mt-0.5 shrink-0">
+                                {isDone ? (
+                                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
+                                    <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                                  </span>
+                                ) : (
+                                  <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
+                                    isExtraOnly ? "border-orange-300 text-orange-500" : isPartial ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                                  }`}>
+                                    <Scan className="h-3.5 w-3.5" />
+                                  </span>
+                                )}
                               </span>
+                              <div className="min-w-0 flex-1">
+                                <p className="text-[15px] font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
+                                <p className="mt-0.5 font-mono text-xs text-gray-400">
+                                  {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                                </p>
+                                {mvShowFiles && item._files.length > 0 && (
+                                  <p className="mt-0.5 text-[11px] text-gray-400" title={item._files.map(stripCsvExt).join(", ")}>
+                                    {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
+                                  </p>
+                                )}
+                                <p className="mt-1.5 text-sm leading-snug">
+                                  <span className="font-bold text-gray-900">{done}</span>
+                                  <span className="text-gray-400">/{exp}</span>{" "}
+                                  <span className="text-gray-400">({expPlt} plt)</span>
+                                  {remain > 0 && (
+                                    <>
+                                      <span className="text-gray-300"> · </span>
+                                      <span className="font-semibold text-[#001d6e]">{remain} left</span>{" "}
+                                      <span className="text-purple-500">(≈{remainPlt} plt)</span>
+                                    </>
+                                  )}
+                                  {extra > 0 && (
+                                    <>
+                                      <span className="text-gray-300"> · </span>
+                                      <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                    </>
+                                  )}
+                                </p>
+                              </div>
+                              <span className="shrink-0">
+                                <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                  isExtraOnly ? "bg-orange-100 text-orange-700" :
+                                  isDone       ? "bg-emerald-100 text-emerald-700" :
+                                  isPartial    ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                                }`}>
+                                  {isExtraOnly ? "Extra" : isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+                                </span>
+                              </span>
+                            </div>
+                          );
+                        })}
+                        {mvVisible.length > 0 && (
+                          <div className={`flex items-center justify-between gap-3 px-4 py-3 text-sm ${KIOSK_TOTALS_ROW}`}>
+                            <span>Total</span>
+                            <span className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
+                              <span>{mvKioskTotals.done}/{mvKioskTotals.exp}</span>
+                              <span className="text-gray-500">({mvKioskTotals.expPlt.toFixed(2)} plt)</span>
+                              {mvKioskTotals.remain > 0 && <span>{mvKioskTotals.remain} left</span>}
+                              {mvKioskTotals.extra > 0 && <span className="text-amber-600">+{mvKioskTotals.extra} extra</span>}
                             </span>
                           </div>
-                        );
-                      })}
-                    </div>
+                        )}
+                      </div>
+                    )}
+                    <div className={kioskTableBoxClass}>
+                      <table className="min-w-[640px] w-full border-collapse text-base">
+                          <thead>
+                            {/* sticky top-0 to match the Scan tab's table — it holds inside the
+                                kiosk scroll frame the same way the totals row holds at the bottom. */}
+                            <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+                              <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
+                              {mvShowFiles && <th className="font-semibold border-r border-gray-300 px-3 py-2.5">File</th>}
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Received</th>
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
+                              <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Extra</th>
+                              <th className="font-semibold text-center px-4 py-2.5">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {mvVisible.length === 0 ? (
+                              <tr><td colSpan={mvShowFiles ? 7 : 6} className="py-10 text-center text-gray-400">No items found</td></tr>
+                            ) : mvVisible.map((item, idx) => {
+                          if (item._isEmptyBox) {
+                            return (
+                              <tr key={idx} className="bg-orange-50/60">
+                                <td colSpan={mvShowFiles ? 7 : 6} className="px-4 py-3">
+                                  <div className="flex items-center gap-3">
+                                    <span className="shrink-0"><Package className="h-5 w-5 text-orange-500" /></span>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium text-orange-900 leading-snug">Empty Box</p>
+                                      <p className="text-[11px] text-orange-600/80">
+                                        {item._emptyBoxQty} box{item._emptyBoxQty === 1 ? "" : "es"} logged
+                                        {item._emptyBoxCount ? ` · ${item._emptyBoxCount} entr${item._emptyBoxCount === 1 ? "y" : "ies"}` : ""} · not counted as stock
+                                      </p>
+                                    </div>
+                                    <span className="shrink-0">
+                                      <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-700">Empty Box</span>
+                                    </span>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          }
+                              const exp = item.quantity ?? 0;
+                              // Done is the full physical count (order + extra), matching mvRowState.
+                              const done = item.scannedQty ?? 0;
+                              const remain = Math.max(0, exp - done);
+                              const extra = item.extraQty ?? 0;
+                              const ipp = item.itemsPerPallet ?? 0;
+                              // Pallet figure shown under each qty (qty ÷ items-per-pallet). A muted
+                              // 0.00 when there's no qty or no configured pallet size.
+                              const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
+                              const isExtraOnly = item._isExtra;
+                              const isDone = done >= exp && exp > 0;
+                              const isPartial = done > 0 && !isDone && !isExtraOnly;
+                              return (
+                                <Fragment key={idx}>
+                                <tr
+                                  className={`border-b border-gray-200 ${
+                                    isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                                  }`}
+                                >
+                                  <td className="border-r border-gray-200 min-w-[180px] max-w-[320px] px-4 py-2.5">
+                                    {/* Master View is view-only — no click-to-expand history. */}
+                                    <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug">
+                                      {item.itemName ?? "—"}
+                                    </p>
+                                    <p className="text-gray-400 font-mono whitespace-normal break-words">
+                                      {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                                    </p>
+                                  </td>
+                                  {mvShowFiles && (
+                                    <td className="text-gray-400 truncate max-w-[100px] border-r border-gray-200 px-3 py-2.5" title={item._files.map(stripCsvExt).join(", ")}>
+                                      {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
+                                    </td>
+                                  )}
+                                  <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
+                                    <span className="block text-lg">{exp || "—"}</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{plt(exp)} plt</span>
+                                  </td>
+                                  <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
+                                    <span className="block text-lg">{done}</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{plt(done)} plt</span>
+                                  </td>
+                                  <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
+                                    <span className="block text-lg">{remain || "—"}</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{plt(remain)} plt</span>
+                                  </td>
+                                  <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
+                                    <span className="block text-lg">{extra > 0 ? `+${extra}` : "—"}</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
+                                  </td>
+                                  <td className="text-center px-4 py-2.5">
+                                    <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
+                                      isExtraOnly ? "bg-orange-100 text-orange-700" :
+                                      isDone       ? "bg-emerald-100 text-emerald-700" :
+                                      isPartial    ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                                    }`}>
+                                      {isExtraOnly ? "Extra" : isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+                                    </span>
+                                  </td>
+                                </tr>
+                                </Fragment>
+                              );
+                            })}
+                            {mvVisible.length > 0 && (
+                              <tr className={KIOSK_TOTALS_ROW}>
+                                <td className={`border-r border-gray-200 px-4 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`}>Total</td>
+                                {mvShowFiles && <td className={`border-r border-gray-200 px-3 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`} />}
+                                {([
+                                  ["exp", "expPlt"], ["done", "donePlt"], ["remain", "remainPlt"], ["extra", "extraPlt"],
+                                ] as const).map(([qtyKey, pltKey]) => (
+                                  <td key={qtyKey} className={`text-right tabular-nums border-r border-gray-200 px-3 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`}>
+                                    <span className="block text-lg">{mvKioskTotals[qtyKey].toLocaleString()}</span>
+                                    <span className="block text-sm font-extrabold text-gray-500">{mvKioskTotals[pltKey].toFixed(2)} plt</span>
+                                  </td>
+                                ))}
+                                <td className={`px-4 py-2.5 ${bigView ? KIOSK_TOTALS_CELL_PINNED : ""}`} />
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                   </div>
                 )}
                 {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400 py-4 text-center">No active session — load a CSV to see its Master View.</p>}
@@ -2294,29 +3932,45 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <input type="date" value={csvDate} onChange={(e) => setCsvDate(e.target.value)}
-                    className="rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
-                  <input type="text" value={csvPlant} onChange={(e) => setCsvPlant(e.target.value)} placeholder="Plant (optional)"
-                    className="rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-28" />
+                  <Input
+                    type="date"
+                    value={csvEffDate}
+                    onChange={(e) => { setCsvDate(e.target.value); setCsvExpId(null); setCsvSearch(""); }}
+                    className="h-8 w-[136px] text-xs"
+                  />
+                  {!csvEffPlant && (
+                    <span className="border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-600 shadow-sm">No active session</span>
+                  )}
+                  {csvBrowsingOtherDate && (
+                    <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-[#001d6e]" onClick={resetCsvBrowse}>
+                      Back to current order
+                    </Button>
+                  )}
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading files…</p>}
-                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400 py-4 text-center">No uploaded files for this date/plant.</p>}
+                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400 py-4 text-center">No CSVs found for this date{csvEffPlant ? ` / ${csvEffPlant}` : ""}.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
-                    <div key={sess.id} className="rounded-xl border bg-white shadow-sm overflow-hidden">
-                      <button className="flex w-full items-center justify-between px-3 py-2.5 hover:bg-gray-50 transition-colors"
+                    <div key={sess.id} className="border bg-white shadow-sm overflow-hidden">
+                      <button className="flex w-full items-start justify-between gap-2 px-3 py-2.5 hover:bg-gray-50 transition-colors"
                         onClick={() => { if (csvExpId === sess.id) { setCsvExpId(null); setCsvSearch(""); } else { setCsvExpId(sess.id); setCsvSearch(""); } }}>
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <Layers className="h-4 w-4 text-gray-400 shrink-0" />
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <Layers className="h-4 w-4 text-gray-400 shrink-0 mt-0.5" />
                           <div className="text-left min-w-0">
-                            <p className="text-sm font-medium text-gray-900 truncate">{stripCsvExt(sess.csvFileName)}</p>
-                            <p className="text-[11px] text-gray-400">
-                              {sess.plant && <span className="mr-1.5">Plant: {sess.plant}</span>}
-                              {sess.rowCount} rows · {scanFmtIST(sess.createdAt)}
-                            </p>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <p className="text-sm font-semibold text-gray-900 truncate">{stripCsvExt(sess.csvFileName)}</p>
+                              {sess.plant && <PlantBadge plant={sess.plant} />}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-gray-400">
+                              <span className="font-semibold text-gray-600">{sess.rowCount} rows</span>
+                              <span className="font-semibold text-gray-600">{sess.totalQty} qty · {sess.totalPallets.toFixed(2)} plt</span>
+                              <span>By {sess.importedByName ?? "Unknown"}</span>
+                              <span>Order date: {scanFmtOrderDate(sess.orderDate)}</span>
+                              <span>Uploaded: {scanFmtIST(sess.createdAt)}</span>
+                            </div>
                           </div>
                         </div>
-                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
+                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 mt-0.5 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
                       </button>
                       {csvExpId === sess.id && (
                         <div className="border-t">
@@ -2324,44 +3978,174 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             <div className="relative">
                               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
                               <input value={csvSearch} onChange={(e) => setCsvSearch(e.target.value)} placeholder="Search…"
-                                className="w-full rounded-md border border-gray-200 bg-white pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
+                                className="w-full border border-gray-200 bg-white pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
                               {csvSearch && <button onClick={() => setCsvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3 w-3 text-gray-400" /></button>}
                             </div>
                           </div>
                           {csvItemsQuery2.isFetching && <p className="px-3 py-4 text-sm text-gray-400 animate-pulse text-center">Loading items…</p>}
+                          {/* Structured table (business style): square corners, grid borders, full
+                              item names — matching the Scan/Master View tables, so all three tabs
+                              read as one system. */}
                           {!csvItemsQuery2.isFetching && (
-                            <div className="divide-y">
-                              {filtCsvItems.length === 0 ? (
-                                <p className="py-8 text-center text-sm text-gray-400">No items</p>
-                              ) : filtCsvItems.map((item) => {
-                                const exp = item.quantity ?? 0;
-                                const done = item.scannedQty ?? 0;
-                                const remain = Math.max(0, exp - done);
-                                const isDone = done >= exp && exp > 0;
-                                const isPartial = done > 0 && !isDone;
-                                return (
-                                  <div key={item.id} className={`flex items-center gap-3 px-3 py-2.5 ${
-                                    isDone ? "bg-green-50/60" : isPartial ? "bg-amber-50/50" : ""
-                                  }`}>
-                                    <span className="shrink-0">
-                                      {isDone
-                                        ? <CheckCircle2 className="h-4 w-4 text-green-500" />
-                                        : isPartial
-                                        ? <ScanLine className="h-4 w-4 text-amber-500" />
-                                        : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
+                            bigView ? (
+                              <div className={kioskTableBoxClass}>
+                                <table className="min-w-[640px] w-full border-collapse text-sm">
+                                  <thead>
+                                    <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+                                      <th className="font-semibold border-r border-gray-300 px-4 py-2.5">Item</th>
+                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Exp</th>
+                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Received</th>
+                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Left</th>
+                                      <th className="font-semibold text-right border-r border-gray-300 px-3 py-2.5">Extra</th>
+                                      <th className="font-semibold text-center px-4 py-2.5">Status</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {filtCsvItems.length === 0 ? (
+                                      <tr><td colSpan={6} className="py-10 text-center text-gray-400">No items</td></tr>
+                                    ) : filtCsvItems.map((item) => {
+                                      const exp = item.quantity ?? 0;
+                                      const done = item.scannedQty ?? 0;
+                                      const remain = Math.max(0, exp - done);
+                                      const extra = item.extraQty ?? 0;
+                                      const isDone = done >= exp && exp > 0;
+                                      const isPartial = done > 0 && !isDone;
+                                      // Pallet figure under each qty, same as the Scan and Master
+                                      // View tables.
+                                      const ipp = impItemsPerPallet(item);
+                                      const plt = (q: number) => (q > 0 && ipp > 0 ? (q / ipp).toFixed(2) : "0.00");
+                                      return (
+                                        <tr key={item.id} className={`border-b border-gray-200 ${
+                                          isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                                        }`}>
+                                          <td className="border-r border-gray-200 min-w-[180px] max-w-[320px] px-4 py-2.5">
+                                            <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug">{item.itemName ?? "—"}</p>
+                                            <p className="text-gray-400 font-mono whitespace-normal break-words">
+                                              {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                                            </p>
+                                          </td>
+                                          <td className="text-right tabular-nums text-gray-600 border-r border-gray-200 px-3 py-2.5">
+                                            <span className="block">{exp || "—"}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{plt(exp)} plt</span>
+                                          </td>
+                                          <td className="text-right tabular-nums font-semibold text-gray-900 border-r border-gray-200 px-3 py-2.5">
+                                            <span className="block">{done}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{plt(done)} plt</span>
+                                          </td>
+                                          <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${remain > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
+                                            <span className="block">{remain || "—"}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{plt(remain)} plt</span>
+                                          </td>
+                                          <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
+                                            <span className="block">{extra > 0 ? `+${extra}` : "—"}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{plt(extra)} plt</span>
+                                          </td>
+                                          <td className="text-center px-4 py-2.5">
+                                            <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
+                                              isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                                            }`}>
+                                              {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+                                            </span>
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                    {filtCsvItems.length > 0 && (
+                                      <tr className={KIOSK_TOTALS_ROW}>
+                                        <td className={`border-r border-gray-200 px-4 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}>Total</td>
+                                        {([
+                                          ["exp", "expPlt"], ["done", "donePlt"], ["remain", "remainPlt"], ["extra", "extraPlt"],
+                                        ] as const).map(([qtyKey, pltKey]) => (
+                                          <td key={qtyKey} className={`text-right tabular-nums border-r border-gray-200 px-3 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}>
+                                            <span className="block">{csvTotals[qtyKey].toLocaleString()}</span>
+                                            <span className="block text-xs font-extrabold text-gray-500">{csvTotals[pltKey].toFixed(2)} plt</span>
+                                          </td>
+                                        ))}
+                                        <td className={`px-4 py-2.5 ${KIOSK_TOTALS_CELL_PINNED}`}></td>
+                                      </tr>
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              /* Card list — matches the Scan/Master View mobile treatment. */
+                              <div>
+                                {filtCsvItems.length === 0 ? (
+                                  <p className="py-10 text-center text-sm text-gray-400">No items</p>
+                                ) : filtCsvItems.map((item) => {
+                                  const exp = item.quantity ?? 0;
+                                  const done = item.scannedQty ?? 0;
+                                  const remain = Math.max(0, exp - done);
+                                  const extra = item.extraQty ?? 0;
+                                  const isDone = done >= exp && exp > 0;
+                                  const isPartial = done > 0 && !isDone;
+                                  const ipp = impItemsPerPallet(item);
+                                  const expPlt = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
+                                  const remainPlt = ipp > 0 ? (remain / ipp).toFixed(2) : "0.00";
+                                  return (
+                                    <div key={item.id} className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                                      isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined
+                                    }`}>
+                                      <span className="mt-0.5 shrink-0">
+                                        {isDone ? (
+                                          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
+                                            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                                          </span>
+                                        ) : (
+                                          <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
+                                            isPartial ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                                          }`}>
+                                            <Scan className="h-3.5 w-3.5" />
+                                          </span>
+                                        )}
+                                      </span>
+                                      <div className="min-w-0 flex-1">
+                                        <p className="text-[15px] font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
+                                        <p className="mt-0.5 font-mono text-xs text-gray-400">
+                                          {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                                        </p>
+                                        <p className="mt-1.5 text-sm leading-snug">
+                                          <span className="font-bold text-gray-900">{done}</span>
+                                          <span className="text-gray-400">/{exp}</span>{" "}
+                                          <span className="text-gray-400">({expPlt} plt)</span>
+                                          {remain > 0 && (
+                                            <>
+                                              <span className="text-gray-300"> · </span>
+                                              <span className="font-semibold text-[#001d6e]">{remain} left</span>{" "}
+                                              <span className="text-purple-500">(≈{remainPlt} plt)</span>
+                                            </>
+                                          )}
+                                          {extra > 0 && (
+                                            <>
+                                              <span className="text-gray-300"> · </span>
+                                              <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                            </>
+                                          )}
+                                        </p>
+                                      </div>
+                                      <span className="shrink-0">
+                                        <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                          isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                                        }`}>
+                                          {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+                                        </span>
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                                {filtCsvItems.length > 0 && (
+                                  <div className={`flex items-center justify-between gap-3 px-4 py-3 text-sm ${KIOSK_TOTALS_ROW}`}>
+                                    <span>Total</span>
+                                    <span className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
+                                      <span>{csvTotals.done}/{csvTotals.exp}</span>
+                                      <span className="text-gray-500">({csvTotals.expPlt.toFixed(2)} plt)</span>
+                                      {csvTotals.remain > 0 && <span>{csvTotals.remain} left</span>}
+                                      {csvTotals.extra > 0 && <span className="text-amber-600">+{csvTotals.extra} extra</span>}
                                     </span>
-                                    <div className="flex-1 min-w-0">
-                                      <p className="text-xs font-medium text-gray-900 truncate">{item.itemName ?? "—"}</p>
-                                      <p className="text-[11px] text-gray-400 font-mono truncate">{item.barcode ?? "—"}</p>
-                                    </div>
-                                    <div className="text-right shrink-0 text-xs">
-                                      <p className="font-bold text-gray-800">{done}/{exp || "—"}</p>
-                                      {remain > 0 && <p className="text-[#001d6e] font-semibold">{remain} left</p>}
-                                    </div>
                                   </div>
-                                );
-                              })}
-                            </div>
+                                )}
+                              </div>
+                            )
                           )}
                         </div>
                       )}
@@ -2373,38 +4157,79 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
         </div>
 
-        {/* ══════════════════════════════════════════════════
-            DESKTOP LAYOUT  (hidden on mobile, or when rotated — see MOBILE LAYOUT note above)
-        ════════════════════════════════════════════════════ */}
-        <div className={osRotated ? "hidden" : "hidden sm:block"}>
-          <div className="mx-auto max-w-7xl space-y-4">
+        {/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */}
+      <div className={bigView ? "hidden" : "hidden lg:block"}>        
+          <div className="mx-auto max-w-7xl space-y-3">
 
             {/* Header row */}
-            <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400">
-                  <Zap className="h-4 w-4 text-white" />
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center bg-amber-400">
+                  <Scan className="h-4 w-4 text-white" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-sm font-bold text-gray-900 leading-tight truncate max-w-xs lg:max-w-sm">
-                    {stripCsvExt(activeOrderScanSession.csvFileName)}
+                  {/* Order Date (what the CSV was uploaded FOR) rather than the CSV file name —
+                      operators identify a session by the order it belongs to, not the raw upload
+                      timestamp. The file name is still available as the tooltip. */}
+                  <p
+                    className="text-sm font-bold text-gray-900 leading-tight truncate max-w-xs lg:max-w-sm"
+                    title={stripCsvExt(activeOrderScanSession.csvFileName)}
+                  >
+                    {scanFmtUploadDate(activeOrderScanSession.orderDate)}
                     {(osGroupCreditsQuery.data?.totalParts ?? 0) > 1 && (
                       <span className="ml-1.5 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
                         Part {osGroupCreditsQuery.data?.partIndex} of {osGroupCreditsQuery.data?.totalParts}
                       </span>
                     )}
                   </p>
-                  <p className="text-xs text-gray-500 truncate">
-                    {activeOrderScanSession.plant}
-                    {activeOrderScanSession.importedByName && ` · loaded by ${activeOrderScanSession.importedByName}`}
+                  <p className="mt-1.5 flex items-center gap-1.5 text-xs text-gray-500 truncate">
+                    {/* Plant-switch dropdown — always shown (replaces the old plant tab strip
+                        above and the plain badge that used to sit here). Lists every plant
+                        with an active scan session right now; picking one switches to it,
+                        same as the old tabs did. Colored from Plant Management, same as
+                        every other PlantBadge in the app. */}
+                    <Select
+                      value={String(activeOrderScanSession.id)}
+                      onValueChange={(v) => {
+                        const picked = osPlantSwitchOptions.find((s) => String(s.id) === v);
+                        selectPlantSession(Number(v), picked?.plant);
+                      }}
+                    >
+                      <SelectTrigger
+                        className="h-6 w-auto gap-1 rounded-full border px-2.5 py-0 text-xs font-semibold shadow-none focus:ring-0 [&>svg]:h-3.5 [&>svg]:w-3.5"
+                        style={(() => {
+                          const cfg = getPlantColorCfg(activeOrderScanSession.plant);
+                          return cfg ? { backgroundColor: cfg.bgColor, color: cfg.textColor, borderColor: cfg.borderColor } : undefined;
+                        })()}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {osPlantSwitchOptions.map((s) => {
+                          const cfg = getPlantColorCfg(s.plant);
+                          return (
+                            <SelectItem key={s.id} value={String(s.id)}>
+                              <span className="flex items-center gap-1.5">
+                                <span
+                                  className="h-2 w-2 shrink-0 rounded-full border"
+                                  style={cfg ? { backgroundColor: cfg.bgColor, borderColor: cfg.borderColor } : undefined}
+                                />
+                                {s.plant}
+                              </span>
+                            </SelectItem>
+                          );
+                        })}
+                      </SelectContent>
+                    </Select>
+                    {activeOrderScanSession.importedByName && <span>· loaded by {activeOrderScanSession.importedByName}</span>}
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <Progress value={osPct} className="w-28 h-2" />
-                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} done</span>
+                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{osDoneCount}/{osTotalCount} received</span>
                 {canCompletePart && (
-                  <Button size="sm" className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
+                  <Button size="sm" className="h-8 px-3 rounded-full text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => setShowForceComplete(true)}>
                     Complete
                   </Button>
                 )}
@@ -2412,409 +4237,174 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             </div>
 
             {/* ── Tab strip ── */}
-            <div className="flex flex-wrap gap-1.5">
-              {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setOsTab(t)}
-                  className={`flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
-                    osTab === t
-                      ? "bg-[#001d6e] text-white"
-                      : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-                  }`}
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex flex-wrap gap-1.5">
+                {(["master-view", "scan", "separate-csvs"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setOsTab(t)}
+                    className={`flex items-center gap-1.5 rounded-xl px-4 py-1.5 text-sm font-medium transition-colors ${
+                      osTab === t
+                        ? "bg-[#001d6e] text-white"
+                        : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {t === "scan" ? <ScanLine className="h-4 w-4" /> : t === "master-view" ? <Layers className="h-4 w-4" /> : <FileSpreadsheet className="h-4 w-4" />}
+                    {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Part Order"}
+                  </button>
+                ))}
+              </div>
+              {/* STV — sits on the right of the tab strip, so it's visible no matter which tab
+                  (Master View / Scan / Part Order) is active, instead of only inside one tab. */}
+              {stvs.length > 0 ? (
+                <Select
+                  value={osSelectedStv || NO_STV}
+                  onValueChange={(v) => setOsSelectedStv(v === NO_STV ? "" : v)}
                 >
-                  {t === "scan" ? <ScanLine className="h-4 w-4" /> : t === "master-view" ? <Layers className="h-4 w-4" /> : <FileSpreadsheet className="h-4 w-4" />}
-                  {t === "scan" ? "Scan" : t === "master-view" ? "Master View" : "Part Order"}
-                </button>
-              ))}
+                  <SelectTrigger
+                    className={`h-7 w-full max-w-[9rem] justify-center rounded-full text-center text-xs font-semibold sm:w-36 ${
+                      osSelectedStv
+                        ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
+                        : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+                    }`}
+                  >
+                    <SelectValue placeholder="Select STV…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                    {stvs.map((s) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : !osStvsQuery.isLoading && (
+                <span className="border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
+                  No STV — create one in Plant Settings
+                </span>
+              )}
             </div>
 
-            {/* ── Order totals — persistent across Scan / Master View, hidden on Separate CSVs ── */}
+            {/* ── Order totals — persistent across Scan / Master View, hidden on Separate CSVs ──
+                Two resizable columns on lg+: the --totals-col variable drives the split so the
+                drag handle can change it without Tailwind needing a static class. Below lg the
+                columns stack and the handle is hidden. */}
             {osTab !== "separate-csvs" && (
-            <div className="grid grid-cols-4 gap-3">
-              <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Total</p>
-                <p className="text-2xl font-bold text-gray-900">{displayTotals.expected}</p>
-                <p className="text-sm font-bold text-gray-600">{displayTotals.palletsExpected.toFixed(2)} plt</p>
-              </div>
-              <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Received Qty</p>
-                <p className="text-2xl font-bold text-green-600">{displayTotals.done}</p>
-                <p className="text-sm font-bold text-green-600">{displayTotals.palletsDone.toFixed(2)} plt</p>
-              </div>
-              <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Remaining</p>
-                <p className="text-2xl font-bold text-red-600">{displayTotals.remaining}</p>
-                <p className="text-sm font-bold text-red-600">{displayTotals.palletsRemaining.toFixed(2)} plt</p>
-              </div>
-              <div className="rounded-xl border bg-white px-4 py-3 text-center shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-gray-400">Extra</p>
-                <p className={`text-2xl font-bold ${displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{displayTotals.extra}</p>
-                <p className="text-sm font-bold text-gray-600">{displayTotals.palletsExtra.toFixed(2)} plt</p>
-              </div>
-            </div>
-            )}
-
-            <div className="space-y-4">
-            <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
-
-              {/* Left column: CSV Items table (Scan tab) or Master View (Master View tab).
-                  The scanner panel on the right is shared/persistent across both tabs so the
-                  camera never remounts (and drops its stream) when switching between them. */}
-              <div className="order-2 lg:order-1 space-y-4 min-w-0">
-              {osTab === "scan" && (
-                <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-                  {/* Header bar */}
-                  <div className="flex items-center justify-between px-4 py-3 border-b">
-                    <h3 className="text-sm font-semibold text-gray-900">CSV Items</h3>
-                    <span className="text-xs text-gray-400">{osDoneCount} / {osTotalCount} done</span>
-                  </div>
-
-                  {/* Search */}
-                  <div className="px-4 py-2.5 border-b bg-gray-50/50">
-                    <div className="relative">
-                      <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                      <Input
-                        value={osSearch}
-                        onChange={(e) => setOsSearch(e.target.value)}
-                        placeholder="Search by name or barcode…"
-                        className="pl-8 h-8 text-sm bg-white"
-                      />
-                      {osSearch && (
-                        <button className="absolute right-2 top-2" onClick={() => setOsSearch("")}>
-                          <X className="h-4 w-4 text-gray-400" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Table */}
-                  {osItemsQuery.isLoading ? (
-                    <div className="flex justify-center py-10">
-                      <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto overflow-y-auto max-h-[560px]">
-                      <table className="w-full text-xs border-collapse">
-                        <thead className="sticky top-0 z-10">
-                          <tr className="bg-[#001d6e]">
-                            <th className="px-3 py-3 w-9" />
-                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white min-w-[260px]">Item</th>
-                            <th className="px-3 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-white">Barcode / SAP</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Exp Qty</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Exp Plt</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Received Qty</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Received Plt</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Remain Qty</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Remain Plt</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Extra Qty</th>
-                            <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wide text-white">Extra Plt</th>
-                            <th className="px-3 py-3 text-center text-[11px] font-semibold uppercase tracking-wide text-white">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {osFiltered.map((item, idx) => {
-                            const credit = osCreditByBarcode.get(normalize(item.barcode));
-                            const creditQty = credit?.creditedQty ?? 0;
-                            // Credit from an earlier part's extra counts toward this part's
-                            // Done and reduces Remain; Extra reflects real over-scan on THIS part.
-                            const exp = item.expectedQty ?? 0;
-                            const effScanned = (item.totalScannedQty ?? 0) + creditQty;
-                            const doneQty = Math.min(effScanned, exp);
-                            const rem = Math.max(0, exp - effScanned);
-                            // Extra scans are recorded as separate events, not folded into
-                            // totalScannedQty (which is capped at expectedQty) — so the real
-                            // extra amount for this item has to come from the extras data.
-                            const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
-                            const done = exp > 0 && effScanned >= exp;
-                            const partial = !done && effScanned > 0;
-                            const rowBg = done
-                              ? "bg-emerald-50/40"
-                              : partial
-                              ? "bg-amber-50/30"
-                              : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
-                            return (
-                              <tr key={item.id} className={`${rowBg} border-b border-gray-100 transition-colors hover:bg-slate-100/60`}>
-                                <td className="px-3 py-3 text-center">
-                                  {done
-                                    ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
-                                    : partial
-                                    ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
-                                    : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
-                                </td>
-                                <td className="px-3 py-3 font-medium text-gray-900 max-w-[280px]">
-                                  <span className="block whitespace-normal break-words">{item.itemName ?? "—"}</span>
-                                  {credit && (
-                                    <span
-                                      className="block truncate text-[10px] font-normal text-purple-600"
-                                      title={credit.sources.map((s) => `${s.qty} from ${s.fromCsvFileName}`).join(", ")}
-                                    >
-                                      ✓ {credit.creditedQty} counted from earlier part
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="px-3 py-3 font-mono text-gray-500">
-                                  <span className="block">{item.barcode ?? <span className="text-gray-300">—</span>}</span>
-                                  {item.sapCode && (
-                                    <span className="block text-[10px] text-gray-400">SAP: {item.sapCode}</span>
-                                  )}
-                                </td>
-                                <td className="px-3 py-3 text-right text-gray-600 font-medium tabular-nums">
-                                  {item.expectedQty}
-                                </td>
-                                <td className="px-3 py-3 text-right tabular-nums text-base font-bold text-gray-600">
-                                  {(item.itemsPerPallet ?? 0) > 0
-                                    ? (exp / (item.itemsPerPallet ?? 1)).toFixed(2)
-                                    : <span className="text-gray-300">0.00</span>}
-                                </td>
-                                <td className="px-3 py-3 text-right tabular-nums font-bold">
-                                  <span
-                                    className="text-green-600"
-                                    title={`${item.scannedPallets ?? 0} plt + ${item.scannedLooseQty ?? 0} loose`}
-                                  >
-                                    {doneQty}
-                                  </span>
-                                </td>
-                                <td className="px-3 py-3 text-right tabular-nums text-base font-bold">
-                                  {doneQty > 0 && (item.itemsPerPallet ?? 0) > 0
-                                    ? <span className="text-green-600">{(doneQty / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
-                                    : <span className="text-gray-300">0.00</span>}
-                                </td>
-                                <td className="px-3 py-3 text-right tabular-nums font-bold">
-                                  {rem > 0
-                                    ? <span className="text-red-600">{rem}</span>
-                                    : <span className="text-gray-300">0</span>}
-                                </td>
-                                <td className="px-3 py-3 text-right tabular-nums text-base font-bold">
-                                  {rem > 0 && (item.itemsPerPallet ?? 0) > 0
-                                    ? <span className="text-red-600">{(rem / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
-                                    : <span className="text-gray-300">0.00</span>}
-                                </td>
-                                <td className="px-3 py-3 text-right tabular-nums font-semibold">
-                                  {extra > 0
-                                    ? <span className="text-amber-600">+{extra}</span>
-                                    : <span className="text-gray-300">0</span>}
-                                </td>
-                                <td className="px-3 py-3 text-right tabular-nums text-base font-bold">
-                                  {extra > 0 && (item.itemsPerPallet ?? 0) > 0
-                                    ? <span className="text-amber-600">{(extra / (item.itemsPerPallet ?? 1)).toFixed(2)}</span>
-                                    : <span className="text-gray-300">0.00</span>}
-                                </td>
-                                <td className="px-3 py-3 text-center">
-                                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                                    done    ? "bg-emerald-100 text-emerald-700" :
-                                    partial ? "bg-amber-100 text-amber-700" :
-                                              "bg-gray-100 text-gray-500"
-                                  }`}>
-                                    {done ? "Done" : partial ? "Partial" : "Pending"}
-                                  </span>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                      {osFiltered.length === 0 && !osItemsQuery.isLoading && (
-                        <p className="py-10 text-center text-sm text-gray-400">
-                          {osItems.length === 0 ? "Loading items…" : "No items match the search."}
-                        </p>
-                      )}
-                    </div>
-                  )}
+            <div
+              ref={totalsRowRef}
+              style={{ "--totals-col": `${totalsPct}%` } as React.CSSProperties}
+              className="grid items-start gap-3 lg:grid-cols-[var(--totals-col)_0.75rem_minmax(0,1fr)] lg:gap-0"
+            >
+              {/* Totals live in one card rather than four free-floating boxes, so the block reads as
+                  a single unit. items-start on the row keeps this card at its natural height rather
+                  than stretching to match the taller scanner column. */}
+              <div className="flex min-w-0 flex-col gap-3">
+              <div className="flex flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
+                <div className="flex items-baseline justify-between">
+                  <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
+                  <p className="text-sm font-medium text-gray-400">
+                    {displayTotals.expected > 0
+                      ? `${Math.round((displayTotals.done / displayTotals.expected) * 100)}% complete`
+                      : "—"}
+                  </p>
                 </div>
-              )}
-              {osTab === "master-view" && (
-                <div className="space-y-4">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <span className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">
-                      {mvPlant ? <><span className="font-semibold text-[#001d6e]">{mvPlant}</span> · {mvDate}</> : "No active session"}
-                    </span>
-                    <div className="relative flex-1 min-w-48">
-                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
-                      <input value={mvSearch} onChange={(e) => setMvSearch(e.target.value)} placeholder="Search items…"
-                        className="w-full rounded-md border border-gray-200 bg-white pl-8 pr-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
-                      {mvSearch && <button onClick={() => setMvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3.5 w-3.5 text-gray-400 hover:text-gray-600" /></button>}
-                    </div>
-                    <button
-                      onClick={() => setMvShowFiles((v) => !v)}
-                      title={mvShowFiles ? "Hide file names" : "Show file names"}
-                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 shadow-sm hover:bg-gray-50"
-                    >
-                      {mvShowFiles ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                    </button>
-                    {allMvItems.length > 0 && (
-                      <button onClick={downloadMvCsv} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Export CSV
+
+                {/* All four totals on one line; they stack 2×2 only on narrow screens. */}
+                {/* Each box filters the items table to its own rows; clicking the active one clears
+                    the filter. Total is the "show everything" box, so it doubles as Clear. */}
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {([
+                    { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                    { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                    { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
+                    { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-orange-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                  ] as const).map((s) => {
+                    const isActive = osStatFilter === s.key;
+                    return (
+                      <button
+                        key={s.label}
+                        type="button"
+                        onClick={() => setOsStatFilter(isActive ? "" : s.key)}
+                        aria-pressed={isActive}
+                        title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                        className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                          isActive
+                            ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
+                            : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                        }`}
+                      >
+                        <div className="flex items-center justify-center gap-1.5">
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                        </div>
+                        <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                        <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
                       </button>
-                    )}
-                  </div>
-                  {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
-                  {mvData && (
-                    <>
-                      {mvShowFiles && (
-                      <div className="flex flex-wrap gap-2">
-                        {mvData.files.map((f) => (
-                          <span key={f.sessionId} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600">
-                            <Layers className="h-3 w-3 text-gray-400" />
-                            {stripCsvExt(f.csvFileName)} <span className="text-gray-400">· {f.rowCount ?? f.items.length} rows</span>
-                          </span>
-                        ))}
-                      </div>
-                      )}
-                      <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-                        <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
-                          <h3 className="text-sm font-semibold text-gray-900">Merged Items</h3>
-                          <span className="text-xs text-gray-400">{filtMvItems.length} of {allMvItems.length}</span>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-xs sm:text-sm">
-                            <thead>
-                              <tr className="bg-[#001d6e]">
-                                <th className="px-3 py-2 w-8" />
-                                <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
-                                <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode / SAP</th>
-                                {mvShowFiles && <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Files</th>}
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp Qty</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp Plt</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Received Qty</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Received Plt</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain Qty</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain Plt</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Extra Qty</th>
-                                <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Extra Plt</th>
-                                <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {filtMvItems.length === 0 ? (
-                                <tr><td colSpan={mvShowFiles ? 12 : 11} className="px-3 py-6 text-center text-gray-400">No items found</td></tr>
-                              ) : filtMvItems.map((item, idx) => {
-                                const exp  = item.quantity ?? 0;
-                                const done = Math.max(0, (item.scannedQty ?? 0) - (item.extraQty ?? 0));
-                                const remain = Math.max(0, exp - done);
-                                const extra = item.extraQty ?? 0;
-                                const ipp = item.itemsPerPallet ?? 0;
-                                const isExtraOnly = item._isExtra;
-                                const isDone = done >= exp && exp > 0;
-                                const isPartial = done > 0 && !isDone && !isExtraOnly;
-                                const rowBg = isExtraOnly ? "bg-orange-50/40" : isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
-                                return (
-                                  <tr key={idx} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
-                                    <td className="px-3 py-2 text-center">
-                                      {isExtraOnly
-                                        ? <AlertTriangle className="h-4 w-4 text-orange-500 mx-auto" />
-                                        : isDone
-                                        ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
-                                        : isPartial
-                                        ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
-                                        : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
-                                    </td>
-                                    <td className="px-3 py-2 font-medium text-gray-900 min-w-[200px]"><span className="block whitespace-normal break-words">{item.itemName ?? "—"}</span></td>
-                                    <td className="px-3 py-2 font-mono text-gray-500">
-                                      <span className="block">{item.barcode ?? "—"}</span>
-                                      {item.sapCode && <span className="block text-[10px] text-gray-400">SAP: {item.sapCode}</span>}
-                                    </td>
-                                    {mvShowFiles && (
-                                      <td className="px-3 py-2 text-xs text-gray-400 max-w-[130px] truncate" title={item._files.map(stripCsvExt).join(", ")}>
-                                        {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0])}
-                                      </td>
-                                    )}
-                                    <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
-                                    <td className="px-3 py-2 text-right tabular-nums text-gray-500">
-                                      {ipp > 0 ? (exp / ipp).toFixed(2) : <span className="text-gray-300">0.00</span>}
-                                    </td>
-                                    <td className="px-3 py-2 text-right tabular-nums font-bold">
-                                      <span className={isExtraOnly ? "text-orange-700" : isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
-                                    </td>
-                                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
-                                      {done > 0 && ipp > 0 ? <span className="text-[#001d6e]">{(done / ipp).toFixed(2)}</span> : <span className="text-gray-300">0.00</span>}
-                                    </td>
-                                    <td className="px-3 py-2 text-right tabular-nums font-bold">
-                                      <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
-                                    </td>
-                                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
-                                      {remain > 0 && ipp > 0 ? <span className="text-purple-600">{(remain / ipp).toFixed(2)}</span> : <span className="text-gray-300">0.00</span>}
-                                    </td>
-                                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
-                                      {extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>}
-                                    </td>
-                                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
-                                      {extra > 0 && ipp > 0 ? <span className="text-amber-600">{(extra / ipp).toFixed(2)}</span> : <span className="text-gray-300">0.00</span>}
-                                    </td>
-                                    <td className="px-3 py-2 text-center">
-                                      <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isExtraOnly ? "bg-orange-100 text-orange-700" : isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
-                                        {isExtraOnly ? "Extra" : isDone ? "Done" : isPartial ? "Partial" : "Pending"}
-                                      </span>
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </>
-                  )}
-                  {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
+                    );
+                  })}
                 </div>
-              )}
+
+                <div className="space-y-1">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                      style={{ width: `${displayTotals.expected > 0 ? Math.min(100, (displayTotals.done / displayTotals.expected) * 100) : 0}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[10px] font-medium text-gray-400">
+                    <span>{displayTotals.done} received</span>
+                    <span>{displayTotals.remaining} remaining</span>
+                  </div>
+                </div>
+              </div>
               </div>
 
-              {/* Scanner panel — persistent across Scan / Master View tabs so the camera keeps running when
-                  switching between them; hidden on Separate CSVs (no scanning happens there) */}
-              {osTab !== "separate-csvs" && (
-              <div className="order-1 lg:order-2 space-y-3">
-                <p className="flex items-center gap-1.5 text-[11px] text-gray-400"><Plug className="h-3 w-3" />Barcode gun: plug in and scan</p>
-                <div className="flex gap-2">
-                  <Button size="sm"
+              {/* Drag handle — sits in the 0.75rem gutter column and trades width between the two
+                  cards. Keyboard-accessible via arrow keys since a pointer drag isn't reachable
+                  without a mouse. */}
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize totals and scanner columns"
+                aria-valuenow={Math.round(totalsPct)}
+                aria-valuemin={OS_TOTALS_PCT_MIN}
+                aria-valuemax={OS_TOTALS_PCT_MAX}
+                tabIndex={0}
+                onPointerDown={startTotalsResize}
+                onDoubleClick={() => setTotalsPct(60)}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowLeft") { e.preventDefault(); setTotalsPct((p) => Math.max(OS_TOTALS_PCT_MIN, p - 2)); }
+                  if (e.key === "ArrowRight") { e.preventDefault(); setTotalsPct((p) => Math.min(OS_TOTALS_PCT_MAX, p + 2)); }
+                }}
+                title="Drag to resize · double-click to reset"
+                className="group hidden cursor-col-resize touch-none select-none items-center justify-center rounded focus:outline-none focus:ring-2 focus:ring-[#001d6e]/40 lg:flex"
+              >
+                <span className="h-10 w-[3px] rounded-full bg-gray-200 transition-colors group-hover:bg-[#001d6e]" />
+              </div>
+
+              {/* Scanner controls sit beside the totals: STV picker, then the mode buttons under it.
+                  Padding/gaps match the Order Totals card (p-2.5/gap-1.5) so the two cards read as
+                  the same height and the items table can start higher on screen. */}
+              <div className="flex flex-col gap-1 rounded-xl border bg-white p-2 shadow-sm">
+                {/* Equal-width halves via grid-cols-2; both share one height so they read as a pair. */}
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
                     variant={osScanMode === "camera" ? "default" : "outline"}
-                    className={`flex-1 h-8 text-xs ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    title="Camera"
+                    className={`h-7 w-full rounded-full text-xs font-semibold ${osScanMode === "camera" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
                     onClick={() => setOsScanMode("camera")}>
-                    <Camera className="mr-1.5 h-3.5 w-3.5" /> Camera
+                    <Camera className="mr-1.5 h-4 w-4" /> Camera
                   </Button>
-                  <Button size="sm"
+                  <Button
                     variant={osScanMode === "manual" ? "default" : "outline"}
-                    className={`flex-1 h-8 text-xs ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
+                    title="Manual — or plug in a barcode gun and scan"
+                    className={`h-7 w-full rounded-full text-xs font-semibold ${osScanMode === "manual" ? "bg-[#001d6e] hover:bg-[#00154b] text-white" : ""}`}
                     onClick={() => { stopOsCamera(); setOsScanMode("manual"); }}>
-                    <Keyboard className="mr-1.5 h-3.5 w-3.5" /> Manual
+                    <Keyboard className="mr-1.5 h-4 w-4" /> Manual
                   </Button>
                 </div>
-
-                {/* Main STV selector — sets the default for the next scan confirmation too */}
-                {stvs.length > 0 && (
-                  <div className="flex items-center">
-                    <Select
-                      value={osSelectedStv || NO_STV}
-                      onValueChange={(v) => {
-                        const nextValue = v === NO_STV ? "" : v;
-                        setOsSelectedStv(nextValue);
-                      }}
-                    >
-                      <SelectTrigger className="h-6 flex-1 text-xs justify-center text-center border-[#001d6e]/30 text-[#001d6e]">
-                        <SelectValue placeholder="Select STV…" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value={NO_STV}>— Select STV —</SelectItem>
-                        {stvs.map((s) => (
-                          <SelectItem key={s} value={s}>{s}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-                {/* See the matching note on the other layout: surface "no STVs configured"
-                    rather than rendering nothing at all. */}
-                {!osStvsQuery.isLoading && stvs.length === 0 && (
-                  <div className="flex items-center">
-                    <span className="w-full rounded border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-center text-[11px] text-amber-700">
-                      No STV — create one in Plant Settings
-                    </span>
-                  </div>
-                )}
-
                 {/* Camera card — always in DOM so ref stays set; hidden via display:none when not in camera mode */}
                 <Card className="rounded-xl shadow-sm" style={{ display: osScanMode === "camera" ? "block" : "none", overflow: "hidden", isolation: "isolate" }}>
-                  <div className="relative bg-black" style={{ height: "230px" }}>
+                  <div className="relative bg-black" style={{ height: "150px" }}>
                     <video
                       ref={osVideoDesktopRef}
                       autoPlay
@@ -2837,7 +4427,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     )}
                     {osScanMode === "camera" && osCameraReady && (
                       <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                        <div className="h-16 w-48 rounded border-2 border-white/70" />
+                        <div className="h-16 w-48 border-2 border-white/70" />
                       </div>
                     )}
                   </div>
@@ -2851,8 +4441,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
                 {osScanMode === "manual" && (
                   <Card className="rounded-xl shadow-sm">
-                    <CardContent className="p-4 space-y-2">
-                      <Label className="text-sm font-medium">Enter item name or barcode</Label>
+                    <CardContent className="p-2 space-y-1">
+                      <Label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Enter item name or barcode</Label>
                       <div className="relative flex gap-2">
                         <div className="relative flex-1 min-w-0">
                           <Input
@@ -2879,11 +4469,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             }}
                             placeholder="Type item name or barcode…"
                             disabled={!!osPending}
-                            className="font-mono text-xs h-8 w-full"
+                            className="font-mono text-xs h-7 w-full rounded-full"
                             autoFocus
                           />
                           {osManualFocused && osSuggestions.length > 0 && (
-                            <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                            <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
                               {osSuggestions.map((item, idx) => (
                                 <button
                                   key={item.id}
@@ -2909,7 +4499,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             }
                             setOsManualCode(""); setOsSuggIdx(-1);
                           }}
-                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 h-8 w-8 p-0">
+                          className="bg-[#001d6e] hover:bg-[#00154b] text-white shrink-0 h-7 w-7 p-0 rounded-full">
                           <ScanLine className="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -2917,105 +4507,318 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   </Card>
                 )}
 
-                {sideInfoPanel}
+                {/* ── Empty Box — log a box with no item/barcode, alongside Gun Mode. Separate
+                    from a product scan: no CSV lookup, doesn't count toward order qty. ── */}
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    disabled={!activeOrderScanSession || activeOrderScanSession.scanStatus === "completed" || !!osPending || !canScanWrite}
+                    onClick={() => { setEmptyBoxQty("1"); setEmptyBoxNote(""); setShowEmptyBox(true); }}
+                    className="flex-1 h-7 rounded-full text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                  >
+                    <Package className="h-4 w-4 mr-1.5" /> Empty Box
+                  </Button>
+                  {(osEmptyBoxesQuery.data?.totalQty ?? 0) > 0 && (
+                    <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1 shrink-0">
+                      {osEmptyBoxesQuery.data!.totalQty} empty
+                    </span>
+                  )}
+                </div>
               </div>
-              )}
             </div>
+            )}
 
-            </div>
+            <div className="space-y-4">
+              {osTab === "scan" && (
+                <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                  {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline. */}
+                  <div ref={osSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                    <span className="text-xs font-medium text-gray-500">{osDoneCount} / {osTotalCount} received</span>
+                    {/* No explicit close — clicking outside (osSearchDesktopRef) hides it. */}
+                    <button
+                      onClick={() => setOsSearchOpen(true)}
+                      title="Search items"
+                      className={`ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
+                        osSearchOpen
+                          ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                          : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                      }`}
+                    >
+                      <Search className="h-3.5 w-3.5" />
+                    </button>
+                    {osSearchOpen && (
+                      <div className="relative w-full sm:w-64">
+                        <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                        <input
+                          value={osSearch}
+                          onChange={(e) => setOsSearch(e.target.value)}
+                          placeholder="Search by name or barcode…"
+                          autoFocus
+                          className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                        />
+                        {osSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setOsSearch("")}
+                            className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <DataTable<OsScanItem>
+                    className="space-y-0"
+                    containerClassName="rounded-none border-0"
+                    columns={osColumns}
+                    data={osVisible}
+                    getRowId={(item) => String(item.id)}
+                    isLoading={osItemsQuery.isLoading}
+                    loadingLabel="Loading items…"
+                    emptyState="Loading items…"
+                    noResultsState="No items match the search."
+                    hasActiveFilters={!!osSearch}
+                    enableZebraStripes
+                    rowClassName={(item) => {
+                      const { done, partial } = osRowState(item);
+                      return done ? "bg-emerald-50/40" : partial ? "bg-amber-50/30" : undefined;
+                    }}
+                    renderExpandedRow={() => <div ref={osExpandDesktopRef}>{mvHistoryPanel}</div>}
+                    isRowExpandable={(item) => !!item.barcode}
+                    expandedRowId={osHistoryItem ? String(osHistoryItem.id) : null}
+                    sortMode="client"
+                    enableTotalsRow
+                    totalsLabelColumnId="itemName"
+                    columnOrder={osColumnOrder}
+                    onColumnOrderChange={setOsColumnOrder}
+                    enableColumnResizing
+                    isStickyHeader
+                    maxHeight="max(420px, calc(100vh - 340px))"
+                    showMobileSwipeHint
+                    headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+                  />
+                </div>
+              )}
+              {osTab === "master-view" && (
+                <div className="space-y-4">
+                  {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
+                  {mvData && (
+                    <div>
+                      {mvShowFiles && (
+                      <div className="flex flex-wrap gap-2 mb-3">
+                        {mvData.files.map((f) => (
+                          <span key={f.sessionId} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600">
+                            <Layers className="h-3 w-3 text-gray-400" />
+                            {stripCsvExt(f.csvFileName)} <span className="text-gray-400">· {f.rowCount ?? f.items.length} rows</span>
+                          </span>
+                        ))}
+                      </div>
+                      )}
+                      {/* Same card+header treatment as the Scan tab: an item-count on the left,
+                          border-b separating the header from the table, instead of a floating
+                          row above a separately-bordered card. */}
+                      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                        <div ref={mvSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                          <span className="text-xs font-medium text-gray-500">{mvVisible.length} of {allMvItems.length} items</span>
+                          <div className="ml-auto flex items-center gap-2">
+                            {allMvItems.length > 0 && (
+                              <button
+                                onClick={downloadMvCsv}
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                              >
+                                <Download className="h-3.5 w-3.5" /> Export
+                              </button>
+                            )}
+                            {/* No explicit close — clicking outside (mvSearchDesktopRef) hides it. */}
+                            <button
+                              onClick={() => setMvSearchOpen(true)}
+                              title="Search items"
+                              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border shadow-sm ${
+                                mvSearchOpen ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                              }`}
+                            >
+                              <Search className="h-3.5 w-3.5" />
+                            </button>
+                            {mvSearchOpen && (
+                              <div className="relative w-full sm:w-64">
+                                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                                <input
+                                  value={mvSearch}
+                                  onChange={(e) => setMvSearch(e.target.value)}
+                                  placeholder="Search items…"
+                                  autoFocus
+                                  className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                                />
+                                {mvSearch && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setMvSearch("")}
+                                    className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <DataTable<MvMergedItem>
+                          className="space-y-0"
+                          containerClassName="rounded-none border-0"
+                          columns={mvColumns}
+                          data={mvVisible}
+                          getRowId={(item) => mvRowKey(item)}
+                          emptyState="No items found"
+                          noResultsState="No items match your search."
+                          hasActiveFilters={!!mvSearch}
+                          enableZebraStripes
+                          rowClassName={(item) => {
+                            if (item._isEmptyBox) return "bg-orange-50/60";
+                            const { isExtraOnly, isDone, isPartial } = mvRowState(item);
+                            return isExtraOnly ? "bg-orange-50/40"
+                              : isDone ? "bg-emerald-50/40"
+                              : isPartial ? "bg-amber-50/30"
+                              : undefined;
+                          }}
+                          sortMode="client"
+                          enableTotalsRow
+                          totalsLabelColumnId="itemName"
+                          columnOrder={mvColumnOrder}
+                          onColumnOrderChange={setMvColumnOrder}
+                          enableColumnVisibility
+                          columnVisibility={mvVisibleColumnIds}
+                          enableColumnResizing
+                          isStickyHeader
+                          maxHeight="max(420px, calc(100vh - 340px))"
+                          showMobileSwipeHint
+                          headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {!mvQuery.isLoading && !mvData && <p className="text-sm text-gray-400">No active session — load a CSV to see its Master View.</p>}
+                </div>
+              )}
+              </div>
+
 
             {/* ── Separate CSVs Tab (desktop) ── */}
             {osTab === "separate-csvs" && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <input type="date" value={csvDate} onChange={(e) => setCsvDate(e.target.value)}
-                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
-                  <input type="text" value={csvPlant} onChange={(e) => setCsvPlant(e.target.value)} placeholder="Plant (optional)"
-                    className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[#001d6e] w-36" />
+                  <Input
+                    type="date"
+                    value={csvEffDate}
+                    onChange={(e) => { setCsvDate(e.target.value); setCsvExpId(null); setCsvSearch(""); }}
+                    className="h-8 w-[140px] text-xs"
+                  />
+                  {!csvEffPlant && (
+                    <span className="rounded-xl border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 shadow-sm">No active session</span>
+                  )}
+                  {csvBrowsingOtherDate && (
+                    <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-[#001d6e]" onClick={resetCsvBrowse}>
+                      Back to current order
+                    </Button>
+                  )}
                 </div>
                 {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}
-                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No uploaded files for this date/plant.</p>}
+                {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No CSVs found for this date{csvEffPlant ? ` / ${csvEffPlant}` : ""}.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
-                    <div key={sess.id} className="rounded-xl border bg-white shadow-sm overflow-hidden">
-                      <button className="flex w-full items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
+                    <div key={sess.id} className="border bg-white shadow-sm overflow-hidden">
+                      <button className="flex w-full items-start justify-between gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
                         onClick={() => { if (csvExpId === sess.id) { setCsvExpId(null); setCsvSearch(""); } else { setCsvExpId(sess.id); setCsvSearch(""); } }}>
-                        <div className="flex items-center gap-3 min-w-0">
-                          <Layers className="h-4 w-4 text-gray-400 shrink-0" />
+                        <div className="flex items-start gap-3 min-w-0">
+                          <Layers className="h-4 w-4 text-gray-400 shrink-0 mt-0.5" />
                           <div className="text-left min-w-0">
-                            <p className="text-sm font-medium text-gray-900 truncate">{stripCsvExt(sess.csvFileName)}</p>
-                            <p className="text-xs text-gray-400">
-                              {sess.plant && <span className="mr-2">Plant: {sess.plant}</span>}
-                              {sess.rowCount} rows · {sess.importedByName ?? "Unknown"} · {scanFmtIST(sess.createdAt)}
-                            </p>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-semibold text-gray-900 truncate">{stripCsvExt(sess.csvFileName)}</p>
+                              {sess.plant && <PlantBadge plant={sess.plant} />}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-400">
+                              <span className="font-semibold text-gray-600">{sess.rowCount} rows</span>
+                              <span className="font-semibold text-gray-600">{sess.totalQty} qty · {sess.totalPallets.toFixed(2)} plt</span>
+                              <span>By {sess.importedByName ?? "Unknown"}</span>
+                              <span>Order date: {scanFmtOrderDate(sess.orderDate)}</span>
+                              <span>Uploaded: {scanFmtIST(sess.createdAt)}</span>
+                            </div>
                           </div>
                         </div>
-                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
+                        <ChevronDown className={`h-4 w-4 text-gray-400 shrink-0 mt-0.5 transition-transform ${csvExpId === sess.id ? "rotate-180" : ""}`} />
                       </button>
                       {csvExpId === sess.id && (
-                        <div className="border-t">
-                          <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b">
-                            <div className="relative flex-1 max-w-xs">
-                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
-                              <input value={csvSearch} onChange={(e) => setCsvSearch(e.target.value)} placeholder="Search…"
-                                className="w-full rounded-md border border-gray-200 bg-white pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#001d6e]" />
-                              {csvSearch && <button onClick={() => setCsvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3 w-3 text-gray-400" /></button>}
+                        <div className="border-t p-3">
+                          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                            {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline. */}
+                            <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                              <span className="text-xs font-medium text-gray-500">{filtCsvItems.length} of {csvImpItems.length} items</span>
+                              <button
+                                onClick={() => setCsvSearchOpen((v) => { if (v) setCsvSearch(""); return !v; })}
+                                title={csvSearchOpen ? "Close search" : "Search items"}
+                                className={`ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
+                                  csvSearchOpen
+                                    ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                                    : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                                }`}
+                              >
+                                {csvSearchOpen ? <X className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
+                              </button>
+                              {csvSearchOpen && (
+                                <div className="relative w-full sm:w-64">
+                                  <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                                  <input
+                                    value={csvSearch}
+                                    onChange={(e) => setCsvSearch(e.target.value)}
+                                    placeholder="Search items…"
+                                    autoFocus
+                                    className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                                  />
+                                  {csvSearch && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setCsvSearch("")}
+                                      className="absolute right-2 top-2 text-gray-400 hover:text-gray-600"
+                                    >
+                                      <X className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              )}
                             </div>
-                            {csvImpItems.length > 0 && <span className="text-xs text-gray-400">{filtCsvItems.length} of {csvImpItems.length} items</span>}
+                            <DataTable<ImpItem>
+                              className="space-y-0"
+                              containerClassName="rounded-none border-0"
+                              columns={csvColumns}
+                              data={filtCsvItems}
+                              getRowId={(item) => String(item.id)}
+                              isLoading={csvItemsQuery2.isFetching}
+                              loadingLabel="Loading items…"
+                              emptyState="No items"
+                              noResultsState="No items match your search."
+                              hasActiveFilters={!!csvSearch}
+                              enableZebraStripes
+                              rowClassName={(item) => {
+                                const exp = item.quantity ?? 0;
+                                const done = item.scannedQty ?? 0;
+                                const isDone = done >= exp && exp > 0;
+                                const isPartial = done > 0 && !isDone;
+                                return isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : undefined;
+                              }}
+                              sortMode="client"
+                              // Was a hand-written tfoot pinned to the bottom; now the shared
+                              // totals row, so this table matches Scan/Master View/Reports/Overall
+                              // Stock — pinned under the header AND repeated at the end.
+                              enableTotalsRow
+                              columnOrder={csvColumnOrder}
+                              onColumnOrderChange={setCsvColumnOrder}
+                              enableColumnResizing
+                              isStickyHeader
+                              maxHeight="max(420px, calc(100vh - 340px))"
+                              showMobileSwipeHint
+                              headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+                            />
                           </div>
-                          {csvItemsQuery2.isFetching && <p className="px-4 py-4 text-sm text-gray-400 animate-pulse">Loading items…</p>}
-                          {!csvItemsQuery2.isFetching && (
-                            <div className="overflow-x-auto">
-                              <table className="w-full text-xs sm:text-sm">
-                                <thead>
-                                  <tr className="bg-[#001d6e]">
-                                    <th className="px-3 py-2 w-8" />
-                                    <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Item Name</th>
-                                    <th className="px-3 py-2 text-left font-semibold text-white text-[11px] uppercase tracking-wide">Barcode</th>
-                                    <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Exp</th>
-                                    <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Done</th>
-                                    <th className="px-3 py-2 text-right font-semibold text-white text-[11px] uppercase tracking-wide">Remain</th>
-                                    <th className="px-3 py-2 text-center font-semibold text-white text-[11px] uppercase tracking-wide">Status</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {filtCsvItems.length === 0 ? (
-                                    <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No items</td></tr>
-                                  ) : filtCsvItems.map((item, idx) => {
-                                    const exp  = item.quantity ?? 0;
-                                    const done = item.scannedQty ?? 0;
-                                    const remain = Math.max(0, exp - done);
-                                    const isDone = done >= exp && exp > 0;
-                                    const isPartial = done > 0 && !isDone;
-                                    const rowBg = isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : idx % 2 === 0 ? "bg-white" : "bg-slate-50";
-                                    return (
-                                      <tr key={item.id} className={`${rowBg} border-b border-gray-100 hover:bg-slate-100/60`}>
-                                        <td className="px-3 py-2 text-center">
-                                          {isDone ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
-                                            : isPartial ? <ScanLine className="h-4 w-4 text-amber-500 mx-auto" />
-                                            : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />}
-                                        </td>
-                                        <td className="px-3 py-2 font-medium text-gray-900 max-w-[200px]"><span className="block truncate">{item.itemName ?? "—"}</span></td>
-                                        <td className="px-3 py-2 font-mono text-gray-500">{item.barcode ?? "—"}</td>
-                                        <td className="px-3 py-2 text-right text-gray-600 tabular-nums">{exp || "—"}</td>
-                                        <td className="px-3 py-2 text-right tabular-nums font-bold">
-                                          <span className={isDone ? "text-emerald-700" : isPartial ? "text-amber-700" : "text-gray-400"}>{done}</span>
-                                        </td>
-                                        <td className="px-3 py-2 text-right tabular-nums font-bold">
-                                          <span className={remain > 0 ? "text-red-600" : "text-gray-400"}>{remain}</span>
-                                        </td>
-                                        <td className="px-3 py-2 text-center">
-                                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
-                                            {isDone ? "Done" : isPartial ? "Partial" : "Pending"}
-                                          </span>
-                                        </td>
-                                      </tr>
-                                    );
-                                  })}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
                         </div>
                       )}
                     </div>
@@ -3027,9 +4830,131 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
         </div>
 
-        {/* Multi-match selection dialog */}
-        <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) { setOsMultiMatch(null); resetOsConfirmation(); } }}>
+        {/* Empty Box dialog — manual entry (quantity + optional note), plus undo of prior entries.
+            Radix portals this to document.body, outside the .kiosk-rotate-90 subtree (same as the
+            STV SelectContent above), so it doesn't inherit the page rotation on its own — it opens
+            upright and off-axis while everything else is rotated. It's centered (left/top 50% +
+            translate -50%/-50%), not corner-anchored like the Select dropdown, so a plain rotate-90
+            around its own (default, center) transform-origin lines it back up with the rotated
+            page — no origin utility needed here. */}
+        <Dialog open={showEmptyBox} onOpenChange={(o) => { if (!o) setShowEmptyBox(false); }}>
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osPortalRotate}`}>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-amber-700">
+                <Package className="h-5 w-5" /> Log Empty Box
+              </DialogTitle>
+              <DialogDescription className="text-left pt-1">
+                Record a box with no item/barcode to scan. It's logged separately — it doesn't
+                count toward the order quantity and won't affect completion.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-3 py-1">
+              <div className="space-y-1.5">
+                <Label htmlFor="emptyBoxQty" className="text-xs">Quantity</Label>
+                <Input
+                  id="emptyBoxQty"
+                  type="number"
+                  min={1}
+                  value={emptyBoxQty}
+                  onChange={(e) => setEmptyBoxQty(e.target.value)}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="emptyBoxNote" className="text-xs">Note (optional)</Label>
+                <Input
+                  id="emptyBoxNote"
+                  value={emptyBoxNote}
+                  onChange={(e) => setEmptyBoxNote(e.target.value)}
+                  placeholder="e.g. damaged, missing item"
+                  className="h-10"
+                />
+              </div>
+
+              {(osEmptyBoxesQuery.data?.entries?.length ?? 0) > 0 && (
+                <div className="border-t pt-2">
+                  <p className="text-[11px] font-medium text-gray-500 mb-1.5">
+                    Logged this order — {osEmptyBoxesQuery.data!.totalQty} box(es)
+                  </p>
+                  <div className="max-h-40 overflow-y-auto space-y-1">
+                    {osEmptyBoxesQuery.data!.entries.map((en: any) => (
+                      <div key={en.id} className="flex items-center gap-2 text-xs bg-amber-50/60 px-2 py-1.5">
+                        <span className="font-medium text-amber-800 shrink-0">×{en.quantity}</span>
+                        <span className="flex-1 min-w-0 truncate text-gray-600">
+                          {en.note || "No note"}{en.scannedByName ? ` · ${en.scannedByName}` : ""}
+                        </span>
+                        <Button
+                          size="sm" variant="ghost"
+                          className="h-6 px-1.5 text-gray-400 hover:text-red-600 shrink-0"
+                          disabled={osEmptyBoxUndoMutation.isPending}
+                          onClick={() => osEmptyBoxUndoMutation.mutate(en.id)}
+                          title="Undo this empty box"
+                        >
+                          <Undo2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowEmptyBox(false)}>Cancel</Button>
+              <Button
+                className="bg-amber-600 hover:bg-amber-700 text-white"
+                disabled={osEmptyBoxMutation.isPending || !(Number(emptyBoxQty) >= 1) || !canScanWrite}
+                onClick={() => osEmptyBoxMutation.mutate({
+                  quantity: Math.max(1, Math.floor(Number(emptyBoxQty) || 1)),
+                  note: emptyBoxNote.trim() || null,
+                })}
+              >
+                {osEmptyBoxMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Log Empty Box"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Void confirmation — requires a reason, mirroring Scan History's own void dialog.
+            (The history itself is no longer a Dialog — it's the inline expanded row shown
+            directly below the clicked item via mvHistoryPanel/renderExpandedRow.) */}
+        <Dialog open={!!mvVoidTarget} onOpenChange={(o) => { if (!o) { setMvVoidTarget(null); setMvVoidReason(""); } }}>
           <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="text-red-600">Void this scan?</DialogTitle>
+              <DialogDescription>
+                This reverses its stock impact and excludes it from totals — the entry stays visible in history, marked as voided.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-1.5 py-1">
+              <Label htmlFor="mv-void-reason" className="text-xs">Reason</Label>
+              <Input
+                id="mv-void-reason"
+                value={mvVoidReason}
+                onChange={(e) => setMvVoidReason(e.target.value)}
+                placeholder="e.g. scanned wrong item, duplicate scan"
+                autoFocus
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => { setMvVoidTarget(null); setMvVoidReason(""); }}>Cancel</Button>
+              <Button
+                className="bg-red-600 hover:bg-red-700 text-white"
+                disabled={mvVoidMutation.isPending || !mvVoidReason.trim()}
+                onClick={() => mvVoidTarget && mvVoidMutation.mutate({ id: mvVoidTarget.id, reason: mvVoidReason.trim() })}
+              >
+                {mvVoidMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Void Scan"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Multi-match selection dialog — Radix portals this to document.body, outside the
+            .kiosk-rotate-90 subtree, so (like the Empty Box dialog) it needs the rotate class
+            applied manually or it opens upright while the rest of the kiosk screen is rotated. */}
+        <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) { setOsMultiMatch(null); resetOsConfirmation(); } }}>
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osPortalRotate}`}>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
                 <AlertTriangle className="h-5 w-5 text-amber-500" />
@@ -3048,7 +4973,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   <button
                     key={item.id}
                     onClick={() => handleOsMultiMatchSelect(item)}
-                    className={`w-full rounded-lg border-2 px-4 py-3 text-left transition-colors hover:border-[#001d6e] hover:bg-[#001d6e]/5 ${
+                    className={`w-full border-2 px-4 py-3 text-left transition-colors hover:border-[#001d6e] hover:bg-[#001d6e]/5 ${
                       isComplete ? "border-amber-300 bg-amber-50" : "border-gray-200 bg-white"
                     }`}
                   >
@@ -3088,61 +5013,79 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           <div className="fixed inset-0 z-40 pointer-events-none bg-green-400/25" />
         )}
 
-        {/* Scan confirmation dialog */}
+        {/* Scan confirmation dialog. Radix portals it to <body>, outside the .kiosk-rotate-*
+            container, so on a rotated screen it would otherwise appear upright while everything
+            else is turned. The rotate class composes with Radix's centering transform
+            (translate(-50%,-50%)) to turn the whole dialog to match — so it reads correctly on the
+            physical screen (and only looks turned in a normal landscape screenshot).
+            Only a QUARTER turn swaps its on-screen width/height, so only then is it sized against
+            the swapped viewport axes (w/max-w in vh, max-h in vw); a half turn keeps the normal
+            sizing and just flips it. Either way it scrolls so it always fits. */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>
-          <DialogContent className="w-[calc(100%-2rem)] max-w-md sm:max-w-xl">
+          <DialogContent
+            className={`overflow-y-auto rounded-2xl p-0 ${osPortalRotate} ${
+              osQuarterTurn
+                ? "w-[92vh] max-w-[92vh] max-h-[92vw]"
+                : "w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl max-h-[90vh]"}`}
+          >
+            {/* Two columns: full-height product image on the left, all controls on the right.
+                Under rotate-90 (clockwise), CSS-left maps to physical-top — so image-left reads as
+                image-on-top with the details below it on the physical portrait screen. */}
+            <div className="flex flex-col sm:flex-row">
+              {osResolvedImageName && !osImageFailed && (
+                <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
+                  <img
+                    key={osResolvedImageName}
+                    src={`/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`}
+                    alt=""
+                    className="max-h-96 w-full object-contain sm:max-h-full"
+                    onError={() => setOsImageFailed(true)}
+                  />
+                </div>
+              )}
+              <div className="min-w-0 flex-1 p-6">
             <DialogHeader>
-              <DialogTitle className={`flex items-center gap-2 ${
+              <DialogTitle className={`flex items-center gap-2.5 text-2xl ${
                 !osPending?.matchedItem ? "text-red-700"
                 : osItemIsComplete ? "text-amber-700"
                 : "text-[#001d6e]"
               }`}>
                 {!osPending?.matchedItem
-                  ? <><AlertTriangle className="h-5 w-5" /> Not in order</>
+                  ? <><AlertTriangle className="h-7 w-7" /> Not in order</>
                   : osItemIsComplete
-                    ? <><AlertTriangle className="h-5 w-5" /> Extra item</>
-                    : <><CheckCircle2 className="h-5 w-5" /> Match found</>}
+                    ? <><AlertTriangle className="h-7 w-7" /> Extra item</>
+                    : <><CheckCircle2 className="h-7 w-7" /> Match found</>}
               </DialogTitle>
-              <div className="flex gap-3 items-start pt-1">
-                {osResolvedImageName && (
-                  <img
-                    src={`/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`}
-                    alt=""
-                    className="h-24 w-24 shrink-0 object-contain rounded-md bg-gray-50 border border-gray-100"
-                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-                  />
+              <DialogDescription className="text-left space-y-1.5 min-w-0 pt-3">
+                <p className="font-bold text-gray-900 text-2xl leading-snug">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
+                <p className="font-mono text-lg text-gray-400">{osPending?.barcode}</p>
+                {!osPending?.matchedItem && (
+                  <p className="text-lg text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
                 )}
-                <DialogDescription className="text-left space-y-0.5 flex-1 min-w-0">
-                  <p className="font-semibold text-gray-900 text-sm">{osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name ?? osPending?.barcode}</p>
-                  <p className="font-mono text-xs text-gray-400">{osPending?.barcode}</p>
-                  {!osPending?.matchedItem && (
-                    <p className="text-xs text-red-600 mt-1">Not in the CSV — will be logged as extra.</p>
-                  )}
-                  {osItemIsComplete && (
-                    <p className="text-xs text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
-                  )}
-                </DialogDescription>
-              </div>
+                {osItemIsComplete && (
+                  <p className="text-lg text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
+                )}
+              </DialogDescription>
             </DialogHeader>
 
             <div className="space-y-4 py-1">
               {/* Inventory + CSV info */}
               {(osPending?.inventoryProduct || osPending?.matchedItem) && (
-                <div className="rounded-md bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-1">
+                <div className="rounded-xl bg-gray-50 px-4 py-3 text-base text-gray-600 space-y-1.5">
                   {osPending.inventoryProduct?.sapCode && (
                     <p>SAP: <span className="font-mono font-bold text-gray-700">{osPending.inventoryProduct.sapCode}</span></p>
                   )}
                   {osPending.matchedItem && (
-                    <div className={`space-y-0.5 ${osPending.inventoryProduct ? "border-t border-gray-200 pt-1" : ""}`}>
+                    <div className={`space-y-1 ${osPending.inventoryProduct ? "border-t border-gray-200 pt-1.5" : ""}`}>
                       <p>
                         Items per pallet:{" "}
                         <strong>{osPending.plantPalletSize || "—"}</strong>
                         {osPending.plantPalletSize !== (osPending.matchedItem.itemsPerPallet ?? 0) && osPending.matchedItem.itemsPerPallet ? (
                           <span className="text-blue-500 ml-1">
                             ({(() => {
-                              const p = (activeOrderScanSession?.plant ?? "").toLowerCase();
-                              if (p.includes("valsad") || p.includes("val")) return "VAL PLT";
-                              if (p.includes("indore") || p.includes("ind")) return "IND PLT";
+                              const state = getPlantState(activeOrderScanSession?.plant ?? "");
+                              if (state === "GJ") return "GJ PLT";
+                              if (state === "MP") return "MP PLT";
                               return "inventory";
                             })()})
                           </span>
@@ -3173,7 +5116,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       setOsSelectedStv(nextValue);
                     }}
                   >
-                    <SelectTrigger className={`w-full ${!osSelectedStv ? "border-dashed text-gray-400" : ""}`}>
+                    <SelectTrigger className={`w-full rounded-xl ${!osSelectedStv ? "border-dashed text-gray-400" : ""}`}>
                       <SelectValue placeholder="Select STV…" />
                     </SelectTrigger>
                     <SelectContent>
@@ -3186,52 +5129,42 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
               )}
               
-              {/* Qty input — editing boxes recalculates pallets */}
-              <div className="space-y-1">
-                <Label className="text-sm">Qty (boxes)</Label>
-                <Input
-                  data-gun-qty="os"
-                  type="number" min={0}
-                  value={osQty === 0 ? "" : osQty}
-                  onChange={(e) => {
-                    const q = parseInt(e.target.value) || 0;
-                    setOsQty(q);
-                    setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
-                  }}
-                  onBlur={(e) => {
-                    if (!e.target.value || parseInt(e.target.value) < 1) {
-                      setOsQty(1);
-                      setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      handleOsConfirmScan();
-                    }
-                  }}
-                  className="text-center text-3xl font-bold h-14"
-                  autoFocus
-                />
-              </div>
-
-              {/* Pallets input — editing pallets recalculates boxes (2-way conversion) */}
-              {plt > 1 && (
-                <div className="rounded-md bg-[#001d6e]/5 border border-[#001d6e]/20 px-4 py-3 flex items-center justify-between gap-3">
-                  <div className="flex-1">
-                    <Label className="text-xs text-gray-500">Pallets</Label>
-                    <Input
-                      type="number" min={0} step="0.01"
-                      value={osPalletsInput}
-                      onChange={(e) => {
-                        const raw = e.target.value;
-                        setOsPalletsInput(raw);
-                        const p = parseFloat(raw);
-                        if (!isNaN(p) && p >= 0) setOsQty(Math.round(p * plt));
+              {/* Qty (boxes) and Pallets side by side — each with −/+ steppers. Editing either one
+                  recalculates the other (2-way box↔pallet conversion). */}
+              {/* Off-rotation: Qty + Pallets side by side (sm:grid-cols-2). Rotated: keep a single
+                  CSS column — the rotate-90 turns that vertical stack into the side-by-side pair
+                  the kiosk layout expects (a CSS two-column grid would rotate into a stacked pair). */}
+              <div className={`grid gap-3 ${plt > 1 && !osQuarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+                {/* Qty — −/+ step one box at a time. */}
+                <div className="space-y-1">
+                  <Label className="text-sm">Qty (boxes)</Label>
+                  {/* One bordered box holding −, the number, and + together. */}
+                  <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
+                    <Button
+                      type="button" variant="ghost"
+                      className="h-14 w-14 shrink-0 rounded-none border-r border-gray-200 text-3xl font-bold text-gray-500 hover:bg-gray-100"
+                      onClick={() => {
+                        const q = Math.max(1, osQty - 1);
+                        setOsQty(q);
+                        setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
                       }}
-                      onBlur={() => {
-                        if (osPalletsInput === "" || isNaN(parseFloat(osPalletsInput))) {
-                          setOsPalletsInput((osQty / plt).toFixed(2));
+                      aria-label="Decrease quantity"
+                    >
+                      −
+                    </Button>
+                    <Input
+                      data-gun-qty="os"
+                      type="number" min={0}
+                      value={osQty === 0 ? "" : osQty}
+                      onChange={(e) => {
+                        const q = parseInt(e.target.value) || 0;
+                        setOsQty(q);
+                        setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                      }}
+                      onBlur={(e) => {
+                        if (!e.target.value || parseInt(e.target.value) < 1) {
+                          setOsQty(1);
+                          setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
                         }
                       }}
                       onKeyDown={(e) => {
@@ -3240,32 +5173,99 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           handleOsConfirmScan();
                         }
                       }}
-                      className="text-2xl font-bold text-[#001d6e] h-11 bg-white"
+                      className="text-center text-3xl font-bold h-14 flex-1 rounded-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                      autoFocus
                     />
-                  </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-xs text-gray-500">Pallet size</p>
-                    <p className="text-lg font-semibold text-gray-700">{plt} <span className="text-xs font-normal text-gray-400">boxes</span></p>
+                    <Button
+                      type="button" variant="ghost"
+                      className="h-14 w-14 shrink-0 rounded-none border-l border-gray-200 text-3xl font-bold text-gray-500 hover:bg-gray-100"
+                      onClick={() => {
+                        const q = osQty + 1;
+                        setOsQty(q);
+                        setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
+                      }}
+                      aria-label="Increase quantity"
+                    >
+                      +
+                    </Button>
                   </div>
                 </div>
-              )}
+
+                {/* Pallets — −/+ step one full pallet; only shown when a pallet size is configured. */}
+                {plt > 1 && (
+                  <div className="space-y-1">
+                    <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {plt}/pallet</span></Label>
+                    {/* One bordered box holding −, the pallet count, and + together. */}
+                    <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-[#001d6e]/30 bg-white focus-within:border-[#001d6e]">
+                      <Button
+                        type="button" variant="ghost"
+                        className="h-14 w-14 shrink-0 rounded-none border-r border-[#001d6e]/15 text-3xl font-bold text-[#001d6e] hover:bg-[#001d6e]/5"
+                        onClick={() => {
+                          const p = Math.max(0, Math.round(((parseFloat(osPalletsInput) || 0) - 1) * 100) / 100);
+                          setOsPalletsInput(p.toFixed(2));
+                          setOsQty(Math.max(1, Math.round(p * plt)));
+                        }}
+                        aria-label="Decrease pallets"
+                      >
+                        −
+                      </Button>
+                      <Input
+                        type="number" min={0} step="0.01"
+                        value={osPalletsInput}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          setOsPalletsInput(raw);
+                          const p = parseFloat(raw);
+                          if (!isNaN(p) && p >= 0) setOsQty(Math.round(p * plt));
+                        }}
+                        onBlur={() => {
+                          if (osPalletsInput === "" || isNaN(parseFloat(osPalletsInput))) {
+                            setOsPalletsInput((osQty / plt).toFixed(2));
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleOsConfirmScan();
+                          }
+                        }}
+                        className="text-center text-3xl font-bold text-[#001d6e] h-14 flex-1 rounded-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                      />
+                      <Button
+                        type="button" variant="ghost"
+                        className="h-14 w-14 shrink-0 rounded-none border-l border-[#001d6e]/15 text-3xl font-bold text-[#001d6e] hover:bg-[#001d6e]/5"
+                        onClick={() => {
+                          const p = Math.round(((parseFloat(osPalletsInput) || 0) + 1) * 100) / 100;
+                          setOsPalletsInput(p.toFixed(2));
+                          setOsQty(Math.round(p * plt));
+                        }}
+                        aria-label="Increase pallets"
+                      >
+                        +
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             <DialogFooter className="gap-2">
-              <Button variant="outline" onClick={() => { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); }}>
+              <Button variant="outline" className="rounded-xl" onClick={() => { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); }}>
                 Cancel
               </Button>
               <Button
                 onClick={handleOsConfirmScan}
-                disabled={osScanMutation.isPending || (stvs.length > 0 && !osSelectedStv)}
-                className={(!osPending?.matchedItem || osItemIsComplete)
+                disabled={osScanMutation.isPending || (stvs.length > 0 && !osSelectedStv) || !canScanWrite}
+                className={`rounded-xl ${(!osPending?.matchedItem || osItemIsComplete)
                   ? "bg-amber-600 hover:bg-amber-700 text-white"
-                  : "bg-[#001d6e] hover:bg-[#00154b] text-white"}
+                  : "bg-[#001d6e] hover:bg-[#00154b] text-white"}`}
               >
                 {osScanMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {(!osPending?.matchedItem || osItemIsComplete) ? "Log as Extra" : "Confirm Scan"}
               </Button>
             </DialogFooter>
+              </div>
+            </div>
           </DialogContent>
         </Dialog>
 
@@ -3302,51 +5302,18 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </DialogContent>
         </Dialog>
 
-        {/* ── Void scan confirmation (admin-only, Manage Scans panel) — new/additive dialog ── */}
-        <Dialog open={!!osVoidTarget} onOpenChange={(o) => { if (!o) { setOsVoidTarget(null); setOsVoidReason(""); } }}>
-          <DialogContent className="max-w-sm">
-            <DialogHeader>
-              <DialogTitle>Void this scan?</DialogTitle>
-              <DialogDescription className="space-y-1 pt-1">
-                <p>
-                  <span className="font-semibold text-gray-900">{osVoidTarget?.itemName ?? osVoidTarget?.barcode}</span> — {osVoidTarget?.totalQty ?? 0} scanned by {osVoidTarget?.scannedByName ?? "—"}.
-                </p>
-                <p className="text-sm text-gray-500">
-                  This removes it from totals and stock, but the entry stays here marked "Voided" for the record — it is never deleted.
-                </p>
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-1.5">
-              <Label className="text-sm">Reason (optional)</Label>
-              <Input value={osVoidReason} onChange={(e) => setOsVoidReason(e.target.value)} placeholder="e.g. wrong barcode scanned by mistake" />
-            </div>
-            <DialogFooter className="gap-2">
-              <Button variant="outline" onClick={() => { setOsVoidTarget(null); setOsVoidReason(""); }} disabled={osVoidMutation.isPending}>
-                Cancel
-              </Button>
-              <Button
-                onClick={() => { if (osVoidTarget) osVoidMutation.mutate({ id: osVoidTarget.id, reason: osVoidReason }); }}
-                disabled={osVoidMutation.isPending}
-                className="bg-red-600 hover:bg-red-700 text-white"
-              >
-                {osVoidMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Void Scan
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
       </div>
     );
   }
 
   return (
-    <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${osRotated ? "kiosk-rotate-90" : ""}`}>
+    <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${kioskRotateClass}`}>
       <RotateToggleButton />
       <div className="mx-auto max-w-7xl space-y-4">
         <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
 
         {/* Greeting Header */}
-        <div className="rounded-xl bg-gradient-to-r from-[#001d6e] to-[#1a3a9c] px-4 py-3 shadow-md">
+        <div className="bg-gradient-to-r from-[#001d6e] to-[#1a3a9c] px-4 py-3 shadow-md">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className="h-10 w-10 rounded-full bg-white/20 border-2 border-white/40 flex items-center justify-center text-white font-bold text-base shrink-0 select-none">
@@ -3377,7 +5344,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           <div className="space-y-4">
 
             {/* Stats row — horizontal inline cells like reference */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="bg-white shadow-sm border border-gray-100 overflow-hidden">
               <div className="grid grid-cols-3 divide-x divide-gray-100">
                 <div className="flex items-center gap-3 p-5">
                   <div className="h-11 w-11 rounded-full bg-blue-50 flex items-center justify-center shrink-0">
@@ -3417,7 +5384,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             </div>
 
             {/* Scan History Table */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="bg-white shadow-sm border border-gray-200 overflow-hidden">
               {/* Navy header bar — title only */}
               <div className="flex items-center gap-2.5 px-4 sm:px-5 py-3 bg-[#ffff]">
                 <History className="h-4 w-4 text-[#001d6e] shrink-0" />
@@ -3443,7 +5410,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* Table */}
               {(dispatchHistory?.items?.length ?? 0) > 0 && (
                 <div className="overflow-x-auto" style={{ WebkitOverflowScrolling: "touch" }}>
-                  <table className="w-full border-collapse text-xs">
+                  <table className="w-full min-w-[720px] border-collapse text-xs">
                     <thead>
                       <tr className="bg-[#001d6e]">
                         <th className="sticky top-0 bg-[#001d6e] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-white border-r border-[#1a3a9c] w-8">#</th>
@@ -3521,7 +5488,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
         ) : (
           /* ── REGULAR USER: no active order-scan session for their plant right now ── */
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden py-20 text-center">
+          <div className="bg-white shadow-sm border border-gray-100 overflow-hidden py-20 text-center">
             <ScanLine className="h-10 w-10 text-gray-200 mx-auto mb-3" />
             <p className="text-gray-500 font-medium">No active scan session right now</p>
             <p className="text-sm text-gray-400 mt-1">An admin needs to activate a CSV for your plant before you can start scanning.</p>

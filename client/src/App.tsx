@@ -5,9 +5,9 @@ import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
 import Home from "@/pages/Dashboard";
 import ScanOrder from "@/pages/Scanning/Scan";
-import Inventory from "@/pages/Inventory";
+import ScanViewer from "@/pages/ScanViewer";
 import NotionInventory from "@/pages/NotionInventory";
-import Reports from "@/pages/Reports";
+import Reports from "@/pages/Scanning/Reports.tsx";
 import Users from "@/pages/Users";
 import Settings from "@/pages/Settings";
 import Purchases from "@/pages/Purchases";
@@ -23,7 +23,6 @@ import TollVoucher from "./pages/TollVoucher";
 import StockSheets from "./pages/StockSheets";
 import OrderManagement from "./pages/OrderManagement";
 import OrderImport from "./pages/OrderImport";
-import OrderReports from "./pages/OrderReports";
 import MessagesPage from "./pages/MessagesPage";
 import CheckInOutPage from "./pages/CheckInOutPage";
 import Profile from "./pages/Profile";
@@ -238,7 +237,6 @@ function Router() {
     <Layout onLogout={handleLogout}>
       <Switch>
         <Route path="/" component={Home} />
-        <ProtectedRoute path="/inventory" component={Inventory} requireInventoryAccess={true} requiredPage="inventory" />
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} requiredPage="notion-inventory" />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
         <ProtectedRoute path="/load-operations" component={LoadOperations} requiredPage="load-operations" />
@@ -251,13 +249,13 @@ function Router() {
         <ProtectedRoute path="/reports" component={Reports} requiredPage="scan-history" />
         <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
+        <ProtectedRoute path="/scan-viewer" component={ScanViewer} requiredPage="scan-viewer" />
         <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
         <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />
         <ProtectedRoute path="/settings" component={Settings} requiredPage="settings" />
         <ProtectedRoute path="/plant-settings" component={PlantSettings} requiredPage="plant-management" />
         <ProtectedRoute path="/order-management" component={OrderManagement} requiredPage="order-management" />
-        <ProtectedRoute path="/order-import" component={OrderImport} requireOrderManagement={true} requiredPage="order-import" />
-        <ProtectedRoute path="/order-reports" component={OrderReports} requiredPage="order-import" />
+        <ProtectedRoute path="/order-import" component={OrderImport} requiredPage="order-import" />
         <Route path="/messages" component={MessagesPage} />
         <Route path="/inout" component={CheckInOutPage} />
         <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />

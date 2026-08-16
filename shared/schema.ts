@@ -2,12 +2,9 @@ import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique 
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-// db-migration
+
 // ============================================================================
 // USERS
-// Purpose : Employee accounts. Each user has a unique userCode (employee ID)
-//           and authenticates with a numeric PIN.
-// Used by : Login page, all pages that record who performed an action.
 // ============================================================================
 
 export const users = pgTable("users", {
@@ -63,8 +60,12 @@ export const products = pgTable("products", {
   volumeInCuFt: text("volume_in_cu_ft"), // "Vol Master :"
   itemsPerPallet: integer("items_per_pallet").default(0), // "Packets :"
   pallets: integer("pallets").default(0),
-  indPlt: integer("ind_plt"),       // "IND PLT :"
-  valPlt: integer("val_plt"),       // "VAL PLT :"
+  // State-wise pallet size (renamed from the old plant-named indPlt/valPlt — a product's
+  // pallet size is really a per-state fact, not a per-plant one; the plant that scans it just
+  // looks up its own state via plants.state and reads the matching column here). Source Notion
+  // property names are unchanged ("IND PLT :" / "VAL PLT :") — see notionInventorySync.ts.
+  mpPlt: integer("mp_plt"),         // Madhya Pradesh — was "indPlt"/"ind_plt"
+  gjPlt: integer("gj_plt"),         // Gujarat — was "valPlt"/"val_plt"
 
   // ── Stock counters (live totals) ───────────────────────────────────────────
   purchased: integer("purchased").default(0),
@@ -134,7 +135,7 @@ export const insertProductSchema = createInsertSchema(products, {
   notionWiseName: true, brand: true, category: true, saleCategory: true,
   plant: true, type: true, productImage: true, productImageHash: true, notionPageId: true,
   // volume / pallet
-  volumeInCuFt: true, itemsPerPallet: true, pallets: true, indPlt: true, valPlt: true,
+  volumeInCuFt: true, itemsPerPallet: true, pallets: true, mpPlt: true, gjPlt: true,
   // stock
   purchased: true, sold: true, inStock: true,
   // GJ
@@ -626,6 +627,10 @@ export const plants = pgTable("plants", {
   bgColor: text("bg_color").notNull(),
   textColor: text("text_color").notNull(),
   borderColor: text("border_color").notNull(),
+  // Short code for the Indian state this plant is in (e.g. "GJ", "MP") — drives which
+  // per-state column on products (gjPlt/mpPlt) a scan against this plant reads. Nullable so
+  // existing plants aren't broken until an admin fills it in on the Plant Management page.
+  state: text("state"),
   isLockingEnabled: boolean("is_locking_enabled").default(true),      // lock proforma after first print
   isSplitPagesEnabled: boolean("is_split_pages_enabled").default(false), // split print across pages
   // Order Scan: auto-complete a part the instant every item on it is fully scanned, instead
@@ -644,7 +649,7 @@ export const plants = pgTable("plants", {
 });
 
 export const insertPlantSchema = createInsertSchema(plants).pick({
-  name: true, bgColor: true, textColor: true, borderColor: true,
+  name: true, bgColor: true, textColor: true, borderColor: true, state: true,
   isLockingEnabled: true, isSplitPagesEnabled: true, isAutoCompleteEnabled: true,
   isAutoScanEnabled: true,
 });
@@ -779,6 +784,14 @@ export const orderImportSessions = pgTable("order_import_sessions", {
   // Soft-delete: keeps scan_items/scan_events intact so history/reports survive
   isDeleted: boolean("is_deleted").default(false).notNull(),
   deletedAt: timestamp("deleted_at"),
+  deletedByCode: text("deleted_by_code").references(() => users.userCode),
+  // Delete-with-rollback replacement flow: a deleted session's scan history is never
+  // discarded — it waits to be carried forward onto whichever CSV next fills the same
+  // (plant, orderDate) slot. remappedToSessionId/remappedAt are set on THIS (deleted)
+  // session once that happens; replacesSessionId is set on the NEW session, pointing back.
+  remappedToSessionId: integer("remapped_to_session_id"),
+  remappedAt: timestamp("remapped_at"),
+  replacesSessionId: integer("replaces_session_id"),
 });
 
 export const orderImportItems = pgTable("order_import_items", {
@@ -875,6 +888,19 @@ export const orderScanEvents = pgTable("order_scan_events", {
   // set on is_extra=true rows; caps the amount available to credit anything else so the
   // same physical boxes can't be credited twice. 0 for ordinary (non-extra) events.
   creditedQty: integer("credited_qty").default(0),
+  // Marks a row as a SYSTEM-GENERATED credit transfer (written by reconcileCredits in
+  // server/lib/orderGroupReport.ts), not a real physical scan — it never added new stock, it
+  // just reassigns boxes an earlier part's Extra scan already added. Void must skip the stock
+  // reversal for these rows (there's nothing to reverse) and instead give the qty back to the
+  // source event via creditSourceEventId, or it double-removes real stock. Added via a raw
+  // ALTER TABLE migration in server/index.ts, like notionSyncedAt above.
+  isCredit: boolean("is_credit").default(false),
+  creditSourceEventId: integer("credit_source_event_id"),
+  // "Empty Box" manual entry (a box with no item/barcode to scan) reuses THIS table's existing
+  // columns instead of dedicated flags: it's an event with the sentinel barcode 'EMPTY_BOX'
+  // (how every read identifies one — no real numeric SKU collides), its count in total_qty,
+  // is_extra=false and scan_item_id=null (so received/extra/stock totals never see it), and its
+  // item_name holding the label + optional note ('Empty Box' or 'Empty Box: <note>').
 });
 
 export const insertOrderScanItemSchema = createInsertSchema(orderScanItems).pick({
@@ -1070,6 +1096,14 @@ export type ProformaSlipItemBackup = typeof proformaSlipItemsBackup.$inferSelect
 export const productPlantStock = pgTable("product_plant_stock", {
   id: serial("id").primaryKey(),
   barcode: text("barcode").notNull(),
+  // Stable link to the product row, alongside barcode — a product's barcode can be edited in
+  // Notion and synced in (notionInventorySync.ts matches/updates existing products by
+  // notionPageId, not barcode, and overwrites barcode when it differs), which silently orphans
+  // any stock already recorded under the old barcode from a barcode-only join. product_id
+  // survives that rename since it never changes. Nullable/no FK constraint: older rows written
+  // before this column existed won't have it until backfilled, and a product can be deleted
+  // without needing to touch historical stock rows.
+  productId: integer("product_id"),
   plant: text("plant").notNull(),
   inStock: integer("in_stock").default(0).notNull(),
   extraQty: integer("extra_qty").default(0).notNull(),
@@ -1087,10 +1121,13 @@ export const productPlantStock = pgTable("product_plant_stock", {
 export const stockMovements = pgTable("stock_movements", {
   id: serial("id").primaryKey(),
   barcode: text("barcode").notNull(),
+  // Same reasoning as product_plant_stock.productId above — a stable id alongside barcode so a
+  // later barcode edit in Product Master/Notion can't orphan this row's link to its product.
+  productId: integer("product_id"),
   plant: text("plant").notNull(),
   qty: integer("qty").notNull(),                 // +received / −sent (future)
   extraQty: integer("extra_qty").default(0),     // portion of qty that was extra (over-order)
-  type: text("type").notNull(),                  // 'receive' | 'dispatch' | 'adjust'
+  type: text("type").notNull(),                  // 'receive' | 'dispatch' | 'adjust' | 'exchange'
   reason: text("reason"),
   sessionId: integer("session_id"),              // order_import_sessions.id when from a scan completion
   createdByCode: text("created_by_code"),

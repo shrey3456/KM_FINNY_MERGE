@@ -7,6 +7,8 @@ import {
   getPendingReport,
   getSyncStatus,
   getSyncHistory,
+  getAutoApplyEnabled,
+  setAutoApplyEnabled,
   PRODUCT_IMAGE_DIR,
 } from '../services/notionInventorySync';
 import { storage } from '../storage';
@@ -32,10 +34,15 @@ function callerName(req: Request): string {
   return u?.name || u?.username || u?.userCode || 'unknown';
 }
 
-// POST /api/notion-inventory-sync/detect
+// POST /api/notion-inventory-sync/detect  — body: { syncImages?: boolean }
+// syncImages defaults to false ("Sync Notion" — fast, data fields only). The client's "Sync
+// Photos" button is the only caller that passes true; Apply only ever touches images that a
+// syncImages:true run actually queued, so this default never risks Apply silently reverting
+// photos.
 router.post('/notion-inventory-sync/detect', async (req, res) => {
   try {
-    const report = await detectChangesFromNotion(callerName(req));
+    const syncImages = req.body?.syncImages === true;
+    const report = await detectChangesFromNotion(callerName(req), syncImages);
     res.json({ success: true, ...report });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -78,6 +85,28 @@ router.post('/notion-inventory-sync/full-sync', async (req, res) => {
 // GET /api/notion-inventory-sync/status
 router.get('/notion-inventory-sync/status', (_req, res) => {
   res.json(getSyncStatus());
+});
+
+// GET /api/notion-inventory-sync/auto-apply-config
+// Whether the 24-hour scheduled sync is allowed to apply detected changes on its own.
+// Shared across everyone (single server-side setting), not a per-browser preference — mounted
+// under requireAdminRole above, so only admin/super-admin can read or change it.
+router.get('/notion-inventory-sync/auto-apply-config', async (_req, res) => {
+  try {
+    res.json({ enabled: await getAutoApplyEnabled() });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to read auto-apply setting' });
+  }
+});
+
+router.post('/notion-inventory-sync/auto-apply-config', async (req, res) => {
+  try {
+    const enabled = req.body?.enabled === true;
+    await setAutoApplyEnabled(enabled, callerName(req));
+    res.json({ enabled });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to save auto-apply setting' });
+  }
 });
 
 // GET /api/notion-inventory-sync/inspect-properties
@@ -135,7 +164,9 @@ const CSV_HEADER_MAP: Record<string, string> = {
   "Notion Wise Name": "notionWiseName", "Brand": "brand", "Category": "category",
   "Sale Category": "saleCategory", "Plant": "plant", "Type": "type",
   "Product Image": "productImage", "Vol Master": "volumeInCuFt", "Packets": "itemsPerPallet",
-  "IND PLT": "indPlt", "VAL PLT": "valPlt",
+  // CSV header text stays as-is (matches historical exports/imports) — only where the value
+  // lands changed, since pallet size is a per-state fact now (products.mpPlt/gjPlt).
+  "IND PLT": "mpPlt", "VAL PLT": "gjPlt",
   "GJ Sr": "gjSr", "GJ HSN": "gjHsn", "GJ SAP": "gjSap",
   "GJ Sale Rate": "gjSaleRate", "GJ IGST": "gjIgst",
   "GJ-GA PUR": "gjGaPur", "GJ-MH PUR": "gjMhPur", "GJ-NAGAR PUR": "gjNagarPur",
@@ -151,7 +182,7 @@ const CSV_HEADER_MAP: Record<string, string> = {
   "UP Sr": "upSr", "UP HSN": "upHsn", "UP SAP": "upSap",
   "UP Rate": "upRate", "UP IGST": "upIgst", "For UP Order Form": "forUpOrderForm",
 };
-const INTEGER_FIELDS = new Set(["itemsPerPallet", "indPlt", "valPlt"]);
+const INTEGER_FIELDS = new Set(["itemsPerPallet", "mpPlt", "gjPlt"]);
 
 // GET /api/products/image-by-name?name=...
 // Serves a product's locally-cached image (never the raw Notion URL — see

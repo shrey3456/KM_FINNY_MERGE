@@ -7,11 +7,12 @@ export const CONTROLLABLE_PAGES = [
   { key: "expense-voucher", label: "Expense Voucher" },
   { key: "toll-voucher", label: "Toll Voucher" },
   { key: "scan-order", label: "Scan Order" },
+  { key: "scan-viewer", label: "Scan Viewer" },
   { key: "overall-stock", label: "Overall Stock" },
   { key: "scan-history", label: "Scan History" },
   { key: "order-import", label: "Order Management" },
-  { key: "order-reports", label: "Order Reports"},
-  { key: "notion-inventory", label: "Inventory" },
+  { key: "order-import-edit", label: "Edit Order Import CSV" },
+  { key: "notion-inventory", label: "Product Master" },
   { key: "purchases", label: "Purchases" },
   { key: "plant-management", label: "Plant Management" }
 ] as const;

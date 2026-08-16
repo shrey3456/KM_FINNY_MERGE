@@ -52,6 +52,12 @@ async function comparePasswords(supplied: string, stored: string) {
   }
 }
 
+// Populated by setupAuth() below — reused by the WebSocket upgrade handler
+// (server/routes/order-scan.ts) to authenticate a WS connection the same way an HTTP
+// request is authenticated, since the raw upgrade `request` never passes through Express's
+// own app.use(session(...)) middleware chain on its own.
+export let sessionMiddleware: ReturnType<typeof session> | null = null;
+
 export function setupAuth(app: Express) {
   // Detect deployment environment more reliably
   const isProduction = process.env.NODE_ENV === 'production' || 
@@ -95,7 +101,8 @@ export function setupAuth(app: Express) {
   console.log(`Session cookie settings - secure: ${sessionSettings.cookie?.secure}, sameSite: ${sessionSettings.cookie?.sameSite}`);
   
   app.set("trust proxy", 1);
-  app.use(session(sessionSettings));
+  sessionMiddleware = session(sessionSettings);
+  app.use(sessionMiddleware);
   app.use(passport.initialize());
   app.use(passport.session());
 

@@ -8,6 +8,7 @@ import { eq, and, asc, inArray } from 'drizzle-orm';
 
 export type GroupReportEntry = {
   partId: number; sequence: number; csvFileName: string; barcode: string; itemName: string;
+  itemsPerPallet: number;
   expectedQty: number; receivedQty: number; extraQty: number; missingQty: number;
   adjustedTo: { toPartId: number; toCsvFileName: string; qty: number }[];
   adjustedFrom: { fromPartId: number; fromCsvFileName: string; qty: number }[];
@@ -31,7 +32,7 @@ export type GroupReport = {
     totalAdjustments: number; finalStockAdded: number;
     netExtraAfterAdjustment: number; netMissingAfterAdjustment: number;
     allComplete: boolean;
-    productWise: Array<{ barcode: string; itemName: string; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }>;
+    productWise: Array<{ barcode: string; itemName: string; itemsPerPallet: number; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }>;
   };
 };
 
@@ -56,6 +57,17 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
 
   const partIds = parts.map((p) => p.id);
   const importItems = await db.select().from(orderImportItems).where(inArray(orderImportItems.sessionId, partIds));
+
+  // Items-per-pallet per barcode, derived from the CSV rows already loaded above
+  // (quantity ÷ expectedPallets) — so the report can carry a pallet count under each qty
+  // without any product lookup. First non-zero value per barcode wins.
+  const ippByBarcode = new Map<string, number>();
+  for (const item of importItems) {
+    if (!item.barcode || ippByBarcode.has(item.barcode)) continue;
+    const q = item.quantity ?? 0;
+    const ep = item.expectedPallets ?? 0;
+    if (q > 0 && ep > 0) ippByBarcode.set(item.barcode, Math.round(q / ep));
+  }
 
   const { rows: scanItemRows } = await pool.query(
     `SELECT session_id AS "sessionId", barcode, total_scanned_qty AS "totalScannedQty"
@@ -128,6 +140,7 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
       const extra = extraMap.get(key) ?? 0;
       const entry: GroupReportEntry = {
         partId: part.id, sequence: sequenceByPartId.get(part.id) ?? 0, csvFileName: part.csvFileName, barcode, itemName,
+        itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
         expectedQty: expected, receivedQty: received + extra,
         extraQty: extra,
         missingQty: Math.max(0, expected - received),
@@ -139,12 +152,14 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
     }
   }
 
-  // A part's over-scan only becomes available to credit later parts once that part is
-  // COMPLETED — while it's still being scanned the "extra" isn't final (more of its own
-  // boxes may still arrive), so it must not yet be moved onto another part.
-  const completedByPartId = new Map(parts.map((p) => [p.id, p.scanStatus === 'completed']));
-
-  // FIFO netting per barcode: an earlier COMPLETED part's extra offsets a LATER part's missing.
+  // FIFO netting per barcode: an earlier part's extra offsets a LATER part's missing, live —
+  // this is purely a read-time view (nothing here writes to the database), so an in-progress
+  // part's extra is included too, not just an already-completed part's. That's deliberately
+  // different from reconcileCredits (server/lib/orderGroupReport.ts below), which is the
+  // PERMANENT write and still only ever runs once a part is actually marked completed — this
+  // computation just lets Master View / the Scan tab / this report show the same "here's what
+  // it'll net out to" picture live, before that write happens, instead of showing a false
+  // shortfall for stock that already physically arrived.
   for (const entries of entriesByBarcode.values()) {
     entries.sort((a, b) => a.sequence - b.sequence);
     const pool_: { entry: GroupReportEntry; qty: number }[] = [];
@@ -159,7 +174,7 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
         entry.adjustedFrom.push({ fromPartId: src.entry.partId, fromCsvFileName: src.entry.csvFileName, qty: take });
         if (src.qty === 0) pool_.shift();
       }
-      if (entry.extraQty > 0 && completedByPartId.get(entry.partId)) pool_.push({ entry, qty: entry.extraQty });
+      if (entry.extraQty > 0) pool_.push({ entry, qty: entry.extraQty });
     }
   }
 
@@ -195,6 +210,7 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
     .map(([barcode, entries]) => ({
       barcode,
       itemName: entries[0]?.itemName ?? barcode,
+      itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
       totalExpected: entries.reduce((s, e) => s + e.expectedQty, 0),
       totalReceived: entries.reduce((s, e) => s + e.receivedQty, 0),
       totalExtra: entries.reduce((s, e) => s + e.extraQty, 0),
@@ -248,6 +264,14 @@ export async function computePartReport(sessionId: number): Promise<PartReport |
   if (!session) return null;
 
   const importItems = await db.select().from(orderImportItems).where(eq(orderImportItems.sessionId, sessionId));
+  // Items-per-pallet per barcode from the CSV rows (quantity ÷ expectedPallets) — no lookup.
+  const ippByBarcode = new Map<string, number>();
+  for (const item of importItems) {
+    if (!item.barcode || ippByBarcode.has(item.barcode)) continue;
+    const q = item.quantity ?? 0;
+    const ep = item.expectedPallets ?? 0;
+    if (q > 0 && ep > 0) ippByBarcode.set(item.barcode, Math.round(q / ep));
+  }
   const { rows: scanItemRows } = await pool.query(
     `SELECT barcode, total_scanned_qty AS "totalScannedQty" FROM order_scan_items WHERE session_id = $1`,
     [sessionId],
@@ -291,6 +315,7 @@ export async function computePartReport(sessionId: number): Promise<PartReport |
     const missingQty = Math.max(0, expectedQty - received);
     return {
       partId: session.id, sequence: 0, csvFileName: session.csvFileName, barcode, itemName,
+      itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
       expectedQty, receivedQty: received + extraQty, extraQty, missingQty,
       adjustedTo: [], adjustedFrom: [], remainingExtra: extraQty, remainingMissing: missingQty,
     };
@@ -338,42 +363,55 @@ export async function applySessionStock(client: import('pg').PoolClient, session
   const plant: string = guard.rows[0].plant;
 
   // Per-barcode received + extra for this session. Barcodes are numeric here so the raw
-  // string equals its lowercase — MAX(barcode) picks a canonical spelling per group.
+  // string equals its lowercase — MAX(barcode) picks a canonical spelling per group. Grouped
+  // by TRIM()med barcode too — a stray whitespace-padded scan (barcode gun double-fire, a
+  // camera decode glitch) would otherwise group as its OWN barcode and later become a second,
+  // orphaned product_plant_stock row instead of adding to the real one.
   const { rows: received } = await client.query(
-    `SELECT MAX(barcode) AS barcode,
+    `SELECT MAX(TRIM(barcode)) AS barcode,
             SUM(total_qty)::int AS qty,
             COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
      FROM order_scan_events
      WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
-     GROUP BY LOWER(barcode)
+       AND barcode <> 'EMPTY_BOX'
+     GROUP BY LOWER(TRIM(barcode))
      HAVING SUM(total_qty) <> 0`,
     [sessionId],
   );
 
   for (const r of received) {
-    // 1. Global all-plants total (only for barcodes that exist in the catalogue).
-    await client.query(
+    // 1. Global all-plants total (only for barcodes that exist in the catalogue). RETURNING id
+    //    so the same product row's stable id (rather than its barcode, which can be edited in
+    //    Notion later and silently orphan a barcode-only join) is recorded on the stock rows
+    //    below too.
+    const { rows: productRows } = await client.query(
       `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1
-       WHERE LOWER(barcode) = LOWER($2)`,
+       WHERE LOWER(barcode) = LOWER($2)
+       RETURNING id`,
       [r.qty, r.barcode],
     );
+    const productId = productRows[0]?.id ?? null;
 
     // 2. Plant-wise running total (upsert; extras tracked alongside the physical total).
+    // product_id is only ever set from empty/NULL on conflict — an existing row's link to its
+    // product must never be overwritten by a later scan of the same barcode under a different
+    // (possibly stale) product_id.
     await client.query(
-      `INSERT INTO product_plant_stock (barcode, plant, in_stock, extra_qty, updated_at)
-       VALUES ($1, $2, $3, $4, NOW())
+      `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
        ON CONFLICT (barcode, plant) DO UPDATE
          SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
              extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
+             product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
              updated_at = NOW()`,
-      [r.barcode, plant, r.qty, r.extra_qty],
+      [r.barcode, productId, plant, r.qty, r.extra_qty],
     );
 
     // 3. Append-only ledger row (positive = received). Future dispatch inserts negatives.
     await client.query(
-      `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-       VALUES ($1, $2, $3, $4, 'receive', 'Order scan completed', $5, NOW())`,
-      [r.barcode, plant, r.qty, r.extra_qty, sessionId],
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'receive', 'Order scan completed', $6, NOW())`,
+      [r.barcode, productId, plant, r.qty, r.extra_qty, sessionId],
     );
   }
 
@@ -400,28 +438,77 @@ export async function applyLiveScanStock(
   extraQty: number,
   sessionId: number,
 ): Promise<void> {
+  // Trimmed defensively — the /scan endpoint that's the normal caller already trims at its own
+  // boundary, but this is also the exact function whose ON CONFLICT (barcode, plant) upsert
+  // creates a second, orphaned product_plant_stock row for any caller that doesn't.
+  barcode = barcode.trim();
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
 
-  await client.query(
-    `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2)`,
+  const { rows: productRows } = await client.query(
+    `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2) RETURNING id`,
     [totalQty, barcode],
   );
+  const productId = productRows[0]?.id ?? null;
 
   await client.query(
-    `INSERT INTO product_plant_stock (barcode, plant, in_stock, extra_qty, updated_at)
-     VALUES ($1, $2, $3, $4, NOW())
+    `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
+     VALUES ($1, $2, $3, $4, $5, NOW())
      ON CONFLICT (barcode, plant) DO UPDATE
        SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
            extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
+           product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
            updated_at = NOW()`,
-    [barcode, plant, totalQty, extraQty],
+    [barcode, productId, plant, totalQty, extraQty],
   );
 
   await client.query(
-    `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-     VALUES ($1, $2, $3, $4, 'receive', 'Order scan', $5, NOW())`,
-    [barcode, plant, totalQty, extraQty, sessionId],
+    `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, 'receive', 'Order scan', $6, NOW())`,
+    [barcode, productId, plant, totalQty, extraQty, sessionId],
+  );
+}
+
+// Reverses applyLiveScanStock — used when an admin voids a mistaken scan. Subtracts back out
+// exactly what the original scan added; never edits or deletes that original 'receive' row,
+// so stock_movements stays a true append-only audit trail (a logged 'adjust' entry explains
+// the change instead). Clamped at 0 with GREATEST so a data inconsistency elsewhere can't push
+// a plant's stock negative.
+export async function reverseLiveScanStock(
+  client: import('pg').PoolClient,
+  plant: string,
+  barcode: string,
+  orderQty: number,
+  extraQty: number,
+  sessionId: number,
+): Promise<void> {
+  barcode = barcode.trim();
+  const totalQty = orderQty + extraQty;
+  if (totalQty <= 0) return;
+
+  const { rows: productRows } = await client.query(
+    `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2) RETURNING id`,
+    [totalQty, barcode],
+  );
+  const productId = productRows[0]?.id ?? null;
+
+  // Backfills product_id here too when it's still missing on this row (an older row from
+  // before this column existed, or one whose original insert somehow couldn't resolve it) -
+  // free to do opportunistically since this UPDATE already has the barcode/plant to key on.
+  await client.query(
+    `UPDATE product_plant_stock
+     SET in_stock  = GREATEST(0, in_stock  - $1),
+         extra_qty = GREATEST(0, extra_qty - $2),
+         product_id = COALESCE(product_plant_stock.product_id, $5),
+         updated_at = NOW()
+     WHERE LOWER(barcode) = LOWER($3) AND LOWER(plant) = LOWER($4)`,
+    [totalQty, extraQty, barcode, plant, productId],
+  );
+
+  await client.query(
+    `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, 'adjust', 'Voided scan', $6, NOW())`,
+    [barcode, productId, plant, -totalQty, -extraQty, sessionId],
   );
 }
 
@@ -509,9 +596,9 @@ export async function reconcileCredits(
       await client.query(
         `INSERT INTO order_scan_events
            (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-            items_per_pallet, is_extra, scanned_by_name)
-         VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6)`,
-        [part.id, item.id, ev.barcode, ev.item_name, take, `System (credited from Part ${completedPart.partIndex})`],
+            items_per_pallet, is_extra, scanned_by_name, is_credit, credit_source_event_id)
+         VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6,true,$7)`,
+        [part.id, item.id, ev.barcode, ev.item_name, take, `System (credited from Part ${completedPart.partIndex})`, ev.id],
       );
 
       await client.query(

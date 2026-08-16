@@ -54,6 +54,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     queryKey: ["/api/user"],
     queryFn: getQueryFn({ on401: "returnNull" }),
     refetchOnWindowFocus: true,
+    // A permission grant made by an admin while this tab stays open and focused the whole
+    // time would otherwise never reach syncCurrentUserToLocalStorage below — refetchOnWindowFocus
+    // alone only fires on a focus change, not on a continuously-focused tab. This periodic
+    // refetch closes that gap without needing a manual page reload.
+    refetchInterval: 60_000,
     staleTime: 0,
   });
 
@@ -76,6 +81,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       toast({
         title: "Login successful",
         description: `Welcome back to KM Finny, ${user.name || user.username}`,
+        variant: "success",
       });
     },
     onError: (error: Error) => {
@@ -102,6 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       toast({
         title: "Logged out successfully",
         description: "You have been logged out of KM Finny",
+        variant: "success",
       });
     },
     onError: (error: Error) => {

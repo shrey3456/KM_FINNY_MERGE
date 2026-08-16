@@ -9872,7 +9872,7 @@ export default function LoadOperations() {
                   {/* Show entries dropdown */}
                   <div className="flex items-center justify-end gap-1 ml-auto">
                     <span className="text-xs whitespace-nowrap">Show entries:</span>
-                    <select 
+                    <select
                       className="h-6 text-xs border rounded px-1 bg-background"
                       value={entriesLimit}
                       onChange={(e) => setEntriesLimit(Number(e.target.value))}

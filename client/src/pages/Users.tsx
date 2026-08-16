@@ -17,7 +17,7 @@ import {
   Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown,
   UserPlus, UserCog, AlertTriangle, KeyRound, IdCard, ShieldCheck,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { User } from '@shared/schema';
 import {
   Dialog,
@@ -53,9 +53,11 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
+import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
+import { hasPageViewAccess, hasPageWriteAccess } from "@/lib/permissions";
 
-// Solid navy fill, matching the Notion Inventory action buttons.
+// Solid navy fill, matching the Product Master action buttons.
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 const PRIMARY_BTN_CLASS = "bg-[#001d6e] text-white hover:bg-[#001552]";
 
@@ -102,7 +104,7 @@ function DialogBanner({
   return (
     <DialogHeader className={`${bg} space-y-0 px-5 py-4 text-left`}>
       <div className="flex items-center gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/15">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/15">
           <Icon className="h-5 w-5 text-white" />
         </div>
         <div className="min-w-0">
@@ -221,14 +223,34 @@ function MultiSelectField({
 
 const Users = () => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [pageIndex, setPageIndex] = useState(0);
+  // Searching re-cuts the list, so start it from the top rather than leaving you on a page number
+  // that means something different (or nothing at all) against the new set.
+  useEffect(() => { setPageIndex(0); }, [searchTerm]);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<Partial<User> | null>(null);
-  const [pageIndex, setPageIndex] = useState(0);
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(['avatar', 'name', 'username', 'designation', 'role', 'plants', 'actions']),
   );
+
+  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
+  // a rearranged table is working context for this sitting, not a permanent preference. An empty
+  // array means "declared order", which is also what Reset order restores.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("users:columnOrder");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("users:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
+
   const { toast } = useToast();
 
   // Fetch users
@@ -401,7 +423,7 @@ const Users = () => {
 
   const [designations, setDesignations] = useState<string[]>([
     "DIRECTOR", "MANAGER", "ASST. MANAGER", "HEAD", "ASSISTANT", "STAFF",
-    "HELPER", "SUPERVISOR", "STOREKEEPER", "LOADER", "DRIVER"
+    "HELPER", "SUPERVISOR", "STOREKEEPER", "LOADER", "DRIVER", "SCANNER"
   ]);
   const [customDesignation, setCustomDesignation] = useState("");
   const [isAddingDesignation, setIsAddingDesignation] = useState(false);
@@ -426,6 +448,13 @@ const Users = () => {
   const renderFormBody = (form: any, isEdit = false) => {
     const watchedRole = form.watch("role");
     const isAdminRole = watchedRole === "admin" || watchedRole === "super-admin";
+
+    // You can only grant access you have yourself: the Allowed Pages / Write Access dropdowns list
+    // only pages the CURRENT admin can read or write (admins/super-admins pass everything, so they
+    // still see the full list). Keeps a limited manager from handing out pages they can't access.
+    const grantablePages = CONTROLLABLE_PAGES.filter(
+      (p) => hasPageViewAccess(p.key) || hasPageWriteAccess(p.key),
+    );
 
     return (
       <div className="space-y-6">
@@ -465,7 +494,7 @@ const Users = () => {
                   maxLength={4}
                   pattern="[0-9]{4}"
                   inputMode="numeric"
-                  className="w-32 tracking-[0.4em] font-mono"
+                  className={`font-mono tracking-[0.4em] placeholder:tracking-normal placeholder:font-sans ${isEdit ? "w-64" : "w-32"}`}
                   {...field}
                   value={field.value || ''}
                 />
@@ -626,7 +655,7 @@ const Users = () => {
             <FormControl>
               <MultiSelectField
                 label="pages"
-                options={CONTROLLABLE_PAGES}
+                options={grantablePages}
                 selected={field.value ?? []}
                 onChange={(val) => {
                   field.onChange(val);
@@ -650,7 +679,7 @@ const Users = () => {
         {/* Write Access multi-select — subset of Allowed Pages; the rest are read-only for this user */}
         <FormField control={form.control} name="pageWriteAccess" render={({ field }) => {
           const allowed: string[] = form.watch("allowedPages") ?? [];
-          const writableOptions = CONTROLLABLE_PAGES.filter((p) => allowed.includes(p.key));
+          const writableOptions = grantablePages.filter((p) => allowed.includes(p.key));
           return (
             <FormItem>
               <FormLabel>Write Access</FormLabel>
@@ -750,7 +779,7 @@ const Users = () => {
               <span className="text-gray-400">-</span>
             ) : (
               userPlants.map((p: string) => (
-                <Badge key={p} variant="secondary" className="text-[10px]">{p}</Badge>
+                <PlantBadge key={p} plant={p} className="text-[10px]" />
               ))
             )}
           </div>
@@ -759,10 +788,10 @@ const Users = () => {
     },
     {
       id: 'actions',
-      header: '',
+      header: 'Actions',
       width: 90,
-      align: 'right',
-      hideable: false,
+      align: 'left',
+      hideable: false,  
       preventRowClick: true,
       render: (user) => (
         <div className="flex justify-end gap-1">
@@ -792,7 +821,7 @@ const Users = () => {
           <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
               <div className="flex items-center gap-3">
-                <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg bg-[#001d6e] text-white">
+                <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-full bg-[#001d6e] text-white">
                   <UsersIcon className="h-4 w-4 sm:h-5 sm:w-5" />
                 </div>
                 <div>
@@ -808,12 +837,12 @@ const Users = () => {
                 <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
                 <input
                   value={searchTerm}
-                  onChange={(e) => { setSearchTerm(e.target.value); setPageIndex(0); }}
+                  onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder="Search users…"
                   className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
                 />
                 {searchTerm && (
-                  <button onClick={() => { setSearchTerm(''); setPageIndex(0); }} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
+                  <button onClick={() => setSearchTerm('')} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
                     <X className="h-3.5 w-3.5" />
                   </button>
                 )}
@@ -823,6 +852,8 @@ const Users = () => {
             {/* Filters */}
             <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
               <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
                 columns={userColumns}
                 visibleColumnIds={visibleColumnIds}
                 onToggleColumn={(id) =>
@@ -862,6 +893,8 @@ const Users = () => {
               noResultsState="No users found matching your search."
               hasActiveFilters={!!searchTerm}
               sortMode="client"
+              // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box
+              // of its own — matching develop.
               paginationMode="client"
               pageIndex={pageIndex}
               onPageIndexChange={setPageIndex}
@@ -870,6 +903,8 @@ const Users = () => {
               enableColumnResizing
               enableColumnVisibility
               columnVisibility={visibleColumnIds}
+            columnOrder={columnOrder}
+            onColumnOrderChange={setColumnOrder}
               onColumnVisibilityChange={setVisibleColumnIds}
               enableZebraStripes
               showMobileSwipeHint
@@ -948,7 +983,7 @@ const Users = () => {
           />
           <div className="px-5 py-5">
             {currentUser && (
-              <div className="flex items-center gap-3 rounded-lg border border-red-100 bg-red-50/60 p-3">
+              <div className="flex items-center gap-3 rounded-xl border border-red-100 bg-red-50/60 p-3">
                 <Avatar>
                   <AvatarFallback className="bg-red-100 text-red-700">
                     {(currentUser.name || currentUser.username || "").substring(0, 2).toUpperCase()}

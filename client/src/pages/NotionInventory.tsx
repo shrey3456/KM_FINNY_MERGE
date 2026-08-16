@@ -14,6 +14,7 @@ import {
   Download,
   FileDown,
   FileUp,
+  Image as ImageIcon,
   Loader2,
   PackagePlus,
   RefreshCw,
@@ -134,8 +135,8 @@ const productColumns: ProductColumn[] = [
   { key: "productImage",     label: "Product Image" },
   { key: "volumeInCuFt",     label: "Vol Master" },
   { key: "itemsPerPallet",   label: "Packets" },
-  { key: "indPlt",           label: "IND PLT" },
-  { key: "valPlt",           label: "VAL PLT" },
+  { key: "mpPlt",            label: "MP PLT",             tone: "mp" },
+  { key: "gjPlt",            label: "GJ PLT",             tone: "gj" },
   { key: "gjSr",             label: "GJ Sr",              tone: "gj" },
   { key: "gjHsn",            label: "GJ HSN",             tone: "gj" },
   { key: "gjSap",            label: "GJ SAP",             tone: "gj" },
@@ -195,19 +196,40 @@ export default function NotionInventory() {
   const [showReviewDialog, setShowReviewDialog] = useState(false);
   const [showAutoApplyReport, setShowAutoApplyReport] = useState(false);
   const [visibleColumnKeys, setVisibleColumnKeys] = useState<Set<string>>(new Set(ALL_KEYS));
-  const [autoSync, setAutoSync] = useState(() => localStorage.getItem("notionAutoSync") === "true");
+  // Server-persisted (not per-browser) — also gates the 24-hour scheduled sync job, so
+  // everyone sees and controls the same real setting instead of a local-only preference.
+  const autoSyncConfigQuery = useQuery({
+    queryKey: ["/api/notion-inventory-sync/auto-apply-config"],
+    queryFn: async (): Promise<{ enabled: boolean }> => {
+      const response = await apiRequest("GET", "/api/notion-inventory-sync/auto-apply-config");
+      return response.json();
+    },
+    staleTime: 60 * 1000,
+  });
+  const autoSync = autoSyncConfigQuery.data?.enabled ?? false;
+
+  const toggleAutoSyncMutation = useMutation({
+    mutationFn: async (next: boolean) => {
+      const response = await apiRequest("POST", "/api/notion-inventory-sync/auto-apply-config", { enabled: next });
+      return response.json();
+    },
+    onSuccess: async (data: { enabled: boolean }) => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/notion-inventory-sync/auto-apply-config"] });
+      toast({
+        title: data.enabled ? "Auto Sync enabled" : "Auto Sync disabled",
+        description: data.enabled
+          ? "Changes from Notion will be applied automatically — both on manual checks and the 24-hour scheduled sync."
+          : "Changes will be detected and left pending for review, whether checked manually or by the 24-hour scheduled sync.",
+        className: data.enabled ? "bg-emerald-50 border-emerald-200 text-emerald-900" : undefined,
+      });
+    },
+    onError: (error: any) => {
+      toast({ title: "Could not update Auto Sync", description: error.message, variant: "destructive" });
+    },
+  });
 
   function toggleAutoSync() {
-    const next = !autoSync;
-    setAutoSync(next);
-    localStorage.setItem("notionAutoSync", String(next));
-    toast({
-      title: next ? "Auto Sync enabled" : "Auto Sync disabled",
-      description: next
-        ? "Changes from Notion will be applied automatically on each sync."
-        : "You will review changes manually before applying.",
-      className: next ? "bg-emerald-50 border-emerald-200 text-emerald-900" : undefined,
-    });
+    toggleAutoSyncMutation.mutate(!autoSync);
   }
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -292,9 +314,14 @@ export default function NotionInventory() {
     },
   });
 
+  // syncImages=false ("Sync Notion") checks data fields only and is fast; syncImages=true
+  // ("Sync Photos") also downloads/hashes every product image, which is the slow part. Apply
+  // only ever applies image changes that a syncImages:true run actually queued — running
+  // "Sync Notion" after a "Sync Photos" review (without applying) clears any queued photo
+  // changes too, since each detect pass replaces the pending state outright.
   const detectMutation = useMutation({
-    mutationFn: async () => {
-      const response = await apiRequest("POST", "/api/notion-inventory-sync/detect");
+    mutationFn: async (syncImages: boolean) => {
+      const response = await apiRequest("POST", "/api/notion-inventory-sync/detect", { syncImages });
       return response.json();
     },
     onSuccess: async (data) => {
@@ -407,6 +434,35 @@ export default function NotionInventory() {
     [visibleColumnKeys],
   );
 
+  // Operator-adjustable column widths, keyed by column key. Empty until a column is dragged, so
+  // untouched columns keep their natural sizing from productColumns.
+  const [colWidths, setColWidths] = useState<Record<string, number>>({});
+
+  // Width a column should render at: a dragged override, else its declared width, else a default.
+  const getColWidth = (col: ProductColumn) =>
+    colWidths[String(col.key)] ?? col.colWidth ?? (col.key === "name" ? 150 : 100);
+
+  const startColResize = (e: React.MouseEvent, col: ProductColumn) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startWidth = getColWidth(col);
+    const onMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - startX;
+      setColWidths((prev) => ({ ...prev, [String(col.key)]: Math.max(60, startWidth + delta) }));
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
   const filteredProducts = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
     if (!query) return products;
@@ -472,7 +528,7 @@ export default function NotionInventory() {
     <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
       <PageHeader
         icon={Database}
-        title="Notion Inventory"
+        title="Product Master"
         description="Product master synced from Notion into PostgreSQL."
       />
 
@@ -569,10 +625,20 @@ export default function NotionInventory() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {/* 3. Sync Notion */}
-        <Button size="sm" className={BTN} onClick={() => detectMutation.mutate()} disabled={isBusy || !isConfigured}>
-          {detectMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <CloudDownload className="mr-1.5 h-3.5 w-3.5" />}
+        {/* 3. Sync Notion — data fields only, fast. Photos are a separate, deliberate action
+            below so a routine sync never pays the slow per-product image download+hash cost. */}
+        <Button size="sm" className={BTN} onClick={() => detectMutation.mutate(false)} disabled={isBusy || !isConfigured}
+          title="Check Notion for data changes (fast — item name, SAP code, qty, etc). Does not check photos.">
+          {detectMutation.isPending && detectMutation.variables === false ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <CloudDownload className="mr-1.5 h-3.5 w-3.5" />}
           Sync Notion
+        </Button>
+
+        {/* 3b. Sync Photos — on demand only; never runs automatically (not on the 24h job,
+            not bundled into "Sync Notion"). Apply only ever touches images that this queued. */}
+        <Button size="sm" className={BTN} onClick={() => detectMutation.mutate(true)} disabled={isBusy || !isConfigured}
+          title="Check Notion for photo changes. Slower — downloads and hashes every product image.">
+          {detectMutation.isPending && detectMutation.variables === true ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="mr-1.5 h-3.5 w-3.5" />}
+          Sync Photos
         </Button>
 
         {/* 4. Review / Apply */}
@@ -604,10 +670,12 @@ export default function NotionInventory() {
           </Button>
         )}
 
-        {/* Auto Sync toggle */}
+        {/* Auto Sync toggle — server-persisted, also gates the 24-hour scheduled sync */}
         <button
           onClick={toggleAutoSync}
-          className={`h-8 flex items-center gap-2 rounded-md border px-3 text-xs font-semibold transition-all ${
+          disabled={autoSyncConfigQuery.isLoading || toggleAutoSyncMutation.isPending}
+          title="Also controls whether the 24-hour scheduled sync auto-applies changes, not just manual checks"
+          className={`h-8 flex items-center gap-2 rounded-md border px-3 text-xs font-semibold transition-all disabled:opacity-60 ${
             autoSync
               ? "bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700"
               : "bg-white border-gray-200 text-gray-500 hover:bg-gray-50"
@@ -617,7 +685,7 @@ export default function NotionInventory() {
           <span className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${autoSync ? "bg-white/30" : "bg-gray-200"}`}>
             <span className={`absolute h-3 w-3 rounded-full bg-white shadow transition-transform ${autoSync ? "translate-x-3.5" : "translate-x-0.5"}`} />
           </span>
-          Auto Sync
+          Auto Apply
         </button>
 
         <div className="flex-1" />
@@ -779,14 +847,37 @@ export default function NotionInventory() {
                 <tr className="bg-[#001d6e]">
                   {visibleColumns.map((col) => {
                     const isNameCol = col.key === "name";
+                    const dragged = colWidths[String(col.key)];
+                    // Once dragged, the width is pinned exactly; until then keep the original
+                    // min/max behaviour so the layout is unchanged for untouched columns.
                     const mw = isNameCol ? "120px" : col.colWidth ? `${Math.round(col.colWidth * 0.68)}px` : "70px";
                     return (
                       <th
                         key={col.key}
-                        style={{ minWidth: mw, maxWidth: isNameCol ? "150px" : undefined }}
-                        className={`sticky top-0 ${isNameCol ? "left-0 z-20 bg-[#001d6e]" : "z-10 bg-[#001d6e]"} whitespace-nowrap border-r border-[#1a3a9c] px-2 py-2 sm:px-2.5 sm:py-2.5 text-left text-[10px] sm:text-[11px] font-semibold tracking-wide uppercase text-white`}
+                        style={
+                          dragged
+                            ? { width: dragged, minWidth: dragged, maxWidth: dragged }
+                            : { minWidth: mw, maxWidth: isNameCol ? "150px" : undefined }
+                        }
+                        className={`group relative sticky top-0 ${isNameCol ? "left-0 z-20 bg-[#001d6e]" : "z-10 bg-[#001d6e]"} whitespace-nowrap border-r border-[#1a3a9c] px-2 py-2 sm:px-2.5 sm:py-2.5 text-left text-[10px] sm:text-[11px] font-semibold tracking-wide uppercase text-white`}
                       >
                         {col.label}
+                        {/* Drag the right edge to resize; double-click resets this column. */}
+                        <span
+                          onMouseDown={(e) => startColResize(e, col)}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            setColWidths((prev) => {
+                              const next = { ...prev };
+                              delete next[String(col.key)];
+                              return next;
+                            });
+                          }}
+                          title="Drag to resize · double-click to reset"
+                          className="absolute right-0 top-0 z-30 flex h-full w-3 cursor-col-resize touch-none select-none items-center justify-center"
+                        >
+                          <span className="h-1/2 w-[3px] rounded-full bg-transparent transition-colors group-hover:bg-white/60" />
+                        </span>
                       </th>
                     );
                   })}
@@ -817,13 +908,19 @@ export default function NotionInventory() {
                       >
                         {visibleColumns.map((col) => {
                           const isNameCol = col.key === "name";
+                          const dragged = colWidths[String(col.key)];
                           const mw = isNameCol ? "120px" : col.colWidth ? `${Math.round(col.colWidth * 0.68)}px` : "70px";
                           const val = cellValue(product, col.key);
                           const isEmpty = val === "-";
                           return (
                             <td
                               key={`${product.id}-${col.key}`}
-                              style={{ minWidth: mw, maxWidth: isNameCol ? "150px" : "140px" }}
+                              // Must mirror the header's width, or the column won't visibly resize.
+                              style={
+                                dragged
+                                  ? { width: dragged, minWidth: dragged, maxWidth: dragged }
+                                  : { minWidth: mw, maxWidth: isNameCol ? "150px" : "140px" }
+                              }
                               className={`border-r border-b border-gray-200 px-1.5 py-1.5 sm:px-2 sm:py-2 ${
                                 isNameCol
                                   ? `sticky left-0 z-[5] text-[11px] sm:text-xs font-semibold text-[#001d6e] whitespace-normal break-words leading-snug shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${isOdd ? "bg-slate-50" : "bg-white"}`
@@ -920,22 +1017,24 @@ export default function NotionInventory() {
                     </span>
                   </div>
                   {lastApplyReport.changedProducts.map((pc, idx) => (
-                    <div key={pc.productId} className={`px-3 py-2.5 ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
-                      <div className="flex items-start justify-between gap-2 mb-1.5">
-                        <span className="text-xs font-semibold text-[#001d6e] leading-snug">{pc.productName}</span>
-                        <span className="text-[10px] text-gray-400 shrink-0">{pc.barcode || pc.newSr || "—"}</span>
+                    <div key={pc.productId} className={`px-3 py-3 ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-sm font-semibold text-[#001d6e] leading-snug truncate">{pc.productName}</span>
+                        <span className="text-[11px] text-gray-400 shrink-0 font-mono">{pc.barcode || pc.newSr || "—"}</span>
                       </div>
-                      <div className="flex flex-col gap-1">
+                      <div className="rounded-md border border-gray-100 divide-y divide-gray-100 overflow-hidden">
                         {pc.changes.map((ch, i) => (
-                          <div key={i} className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
-                            <span className="font-medium text-gray-500 shrink-0">{ch.label}:</span>
-                            <span className="line-through text-red-400 max-w-[100px] truncate" title={String(ch.oldValue ?? "—")}>
-                              {ch.oldValue != null && ch.oldValue !== "" ? String(ch.oldValue) : "—"}
-                            </span>
-                            <span className="text-gray-300">→</span>
-                            <span className="text-emerald-700 font-semibold max-w-[120px] truncate" title={String(ch.newValue)}>
-                              {String(ch.newValue)}
-                            </span>
+                          <div key={i} className="grid grid-cols-[minmax(70px,auto)_1fr] items-center gap-x-2 px-2.5 py-1.5">
+                            <span className="text-[11px] font-medium text-gray-500">{ch.label}</span>
+                            <div className="flex items-center justify-end gap-1.5 min-w-0 text-right">
+                              <span className="text-[11px] text-red-400 line-through truncate max-w-[45%]" title={String(ch.oldValue ?? "—")}>
+                                {ch.oldValue != null && ch.oldValue !== "" ? String(ch.oldValue) : "—"}
+                              </span>
+                              <span className="text-gray-300 shrink-0">→</span>
+                              <span className="text-[11px] text-emerald-700 font-semibold truncate max-w-[45%]" title={String(ch.newValue)}>
+                                {String(ch.newValue)}
+                              </span>
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -1042,22 +1141,24 @@ export default function NotionInventory() {
                     </span>
                   </div>
                   {reportToShow.changedProducts.map((pc, idx) => (
-                    <div key={pc.productId} className={`px-3 py-2.5 ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
-                      <div className="flex items-start justify-between gap-2 mb-1.5">
-                        <span className="text-xs font-semibold text-[#001d6e] leading-snug">{pc.productName}</span>
-                        <span className="text-[10px] text-gray-400 shrink-0">{pc.barcode || pc.newSr || "—"}</span>
+                    <div key={pc.productId} className={`px-3 py-3 ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-sm font-semibold text-[#001d6e] leading-snug truncate">{pc.productName}</span>
+                        <span className="text-[11px] text-gray-400 shrink-0 font-mono">{pc.barcode || pc.newSr || "—"}</span>
                       </div>
-                      <div className="flex flex-col gap-1">
+                      <div className="rounded-md border border-gray-100 divide-y divide-gray-100 overflow-hidden">
                         {pc.changes.map((ch, i) => (
-                          <div key={i} className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
-                            <span className="font-medium text-gray-500 shrink-0">{ch.label}:</span>
-                            <span className="line-through text-red-500 max-w-[100px] truncate" title={String(ch.oldValue ?? "—")}>
-                              {ch.oldValue != null && ch.oldValue !== "" ? String(ch.oldValue) : "—"}
-                            </span>
-                            <span className="text-gray-300">→</span>
-                            <span className="text-green-700 font-semibold max-w-[120px] truncate" title={String(ch.newValue)}>
-                              {String(ch.newValue)}
-                            </span>
+                          <div key={i} className="grid grid-cols-[minmax(70px,auto)_1fr] items-center gap-x-2 px-2.5 py-1.5">
+                            <span className="text-[11px] font-medium text-gray-500">{ch.label}</span>
+                            <div className="flex items-center justify-end gap-1.5 min-w-0 text-right">
+                              <span className="text-[11px] text-red-500 line-through truncate max-w-[45%]" title={String(ch.oldValue ?? "—")}>
+                                {ch.oldValue != null && ch.oldValue !== "" ? String(ch.oldValue) : "—"}
+                              </span>
+                              <span className="text-gray-300 shrink-0">→</span>
+                              <span className="text-[11px] text-green-700 font-semibold truncate max-w-[45%]" title={String(ch.newValue)}>
+                                {String(ch.newValue)}
+                              </span>
+                            </div>
                           </div>
                         ))}
                       </div>

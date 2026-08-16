@@ -1,5 +1,7 @@
 import React from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { cn } from "@/lib/utils";
+import { apiRequest } from "@/lib/queryClient";
 
 interface PlantBadgeProps {
   plant: string | null | undefined;
@@ -7,36 +9,30 @@ interface PlantBadgeProps {
   onClick?: React.MouseEventHandler<HTMLSpanElement>;
 }
 
+type PlantColor = { name: string; bgColor: string; textColor: string; borderColor: string };
+
 export function PlantBadge({ plant, className, onClick }: PlantBadgeProps) {
+  // Colors come straight from Plant Management (the plants table) — no hardcoded per-name map, so
+  // whatever an admin configures there is exactly what shows here. Shared/cached query key.
+  const { data: plants } = useQuery<PlantColor[]>({
+    queryKey: ['/api/plants'],
+    queryFn: () => apiRequest('GET', '/api/plants').then((r) => r.json()),
+    staleTime: 60_000,
+  });
+
   if (!plant) return <span className="text-muted">N/A</span>;
 
-  // Define colors for each plant
-  const getPlantColors = (plantName: string) => {
-    const upperPlant = plantName.toUpperCase();
-    
-    switch (upperPlant) {
-      case 'VALSAD':
-        return 'bg-green-100 text-green-800 border-green-500';
-      case 'INDORE':
-        return 'bg-amber-100 text-amber-800 border-amber-500';
-      case 'RAJKOT':
-        return 'bg-blue-100 text-blue-800 border-blue-500';
-      case 'BARODA':
-        return 'bg-blue-100 text-blue-800 border-blue-500';
-      case 'LUCKNOW':
-        return 'bg-orange-100 text-orange-800 border-orange-500';
-      default:
-        return 'bg-gray-100 text-gray-800 border-gray-500';
-    }
-  };
+  const cfg = (plants ?? []).find((p) => p.name.toUpperCase() === plant.toUpperCase());
 
   return (
     <span
       className={cn(
         "inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-medium border",
-        getPlantColors(plant),
+        // Neutral fallback only while the plants list is loading or the plant isn't configured.
+        !cfg && "bg-gray-100 text-gray-800 border-gray-500",
         className
       )}
+      style={cfg ? { backgroundColor: cfg.bgColor, color: cfg.textColor, borderColor: cfg.borderColor } : undefined}
       onClick={onClick}
     >
       {plant.toUpperCase()}

@@ -14,6 +14,11 @@ interface TableCardProps {
   onSearchChange?: (value: string) => void;
   searchPlaceholder?: string;
 
+  /** Extra controls rendered beside the title, in the same row as the search box (to its
+   *  left). Use this instead of `filters` when things need to sit next to the title rather
+   *  than wrap onto their own row underneath it. */
+  headerActions?: ReactNode;
+
   /** Filter controls rendered on their own row beneath the title/search. */
   filters?: ReactNode;
 
@@ -25,7 +30,7 @@ interface TableCardProps {
 }
 
 /**
- * The Notion Inventory "Product Master" card: a bordered card whose header holds a
+ * The Product Master card: a bordered card whose header holds a
  * navy icon badge, title + count, a right-aligned search box, and an optional filter
  * row — with the table rendered flush beneath.
  */
@@ -36,6 +41,7 @@ export function TableCard({
   searchValue,
   onSearchChange,
   searchPlaceholder = "Search…",
+  headerActions,
   filters,
   children,
   className,
@@ -58,23 +64,28 @@ export function TableCard({
             </div>
           </div>
 
-          {showSearch && (
-            <div className="relative w-full sm:w-auto sm:shrink-0">
-              <Search className="pointer-events-none absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400" />
-              <input
-                value={searchValue ?? ""}
-                onChange={(e) => onSearchChange?.(e.target.value)}
-                placeholder={searchPlaceholder}
-                className="h-7 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 sm:w-64"
-              />
-              {searchValue && (
-                <button
-                  type="button"
-                  onClick={() => onSearchChange?.("")}
-                  className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+          {(headerActions || showSearch) && (
+            <div className="flex flex-wrap items-center gap-2 sm:shrink-0 sm:justify-end">
+              {headerActions}
+              {showSearch && (
+                <div className="relative w-full sm:w-auto sm:shrink-0">
+                  <Search className="pointer-events-none absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400" />
+                  <input
+                    value={searchValue ?? ""}
+                    onChange={(e) => onSearchChange?.(e.target.value)}
+                    placeholder={searchPlaceholder}
+                    className="h-7 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 sm:w-64"
+                  />
+                  {searchValue && (
+                    <button
+                      type="button"
+                      onClick={() => onSearchChange?.("")}
+                      className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}

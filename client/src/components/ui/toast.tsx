@@ -15,7 +15,10 @@ const ToastViewport = React.forwardRef<
   <ToastPrimitives.Viewport
     ref={ref}
     className={cn(
-      "fixed top-0 z-[100] flex max-h-screen w-full flex-col-reverse p-4 sm:bottom-0 sm:right-0 sm:top-auto sm:flex-col md:max-w-[420px]",
+      // Always top-center — same position on every breakpoint (previously this moved to
+      // bottom-right on sm+; now success/failure/info/warning toasts all surface in one
+      // predictable spot: centered under the top edge of the viewport).
+      "fixed top-0 left-1/2 z-[100] flex max-h-screen w-full max-w-[420px] -translate-x-1/2 flex-col items-center gap-2 p-4",
       className
     )}
     {...props}
@@ -23,14 +26,19 @@ const ToastViewport = React.forwardRef<
 ))
 ToastViewport.displayName = ToastPrimitives.Viewport.displayName
 
+// Color-coded by intent — success (green), destructive/failure (red), info (blue), warning
+// (orange). "default" is treated the same as "info": most toast(...) call sites in the app
+// never pass a variant at all, and those calls are informative status messages, not failures.
 const toastVariants = cva(
-  "group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-md border p-6 pr-8 shadow-lg transition-all data-[swipe=cancel]:translate-x-0 data-[swipe=end]:translate 0 data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-80 data-[state=closed]:slide-out-to-right-full data-[state=open]:slide-in-from-top-full data-[state=open]:sm:slide-in-from-bottom-full",
+  "group pointer-events-auto relative flex w-full items-center justify-between space-x-3 overflow-hidden rounded-md border py-2.5 pl-3.5 pr-7 shadow-lg transition-all data-[swipe=cancel]:translate-x-0 data-[swipe=end]:translate-x-0 data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-80 data-[state=closed]:slide-out-to-top-full data-[state=open]:slide-in-from-top-full",
   {
     variants: {
       variant: {
-        default: "border bg-background text-foreground",
-        destructive:
-          "destructive group border-destructive bg-destructive text-destructive-foreground",
+        default: "border-blue-700 bg-blue-600 text-white",
+        info: "border-blue-700 bg-blue-600 text-white",
+        success: "border-emerald-900 bg-emerald-700 text-white",
+        warning: "border-amber-600 bg-amber-500 text-white",
+        destructive: "destructive group border-red-800 bg-red-600 text-white",
       },
     },
     defaultVariants: {
@@ -43,7 +51,7 @@ const Toast = React.forwardRef<
   React.ElementRef<typeof ToastPrimitives.Root>,
   React.ComponentPropsWithoutRef<typeof ToastPrimitives.Root> &
     VariantProps<typeof toastVariants>
->(({ className, variant, duration = 2000, ...props }, ref) => {
+>(({ className, variant, duration = 5000, ...props }, ref) => {
   return (
     <ToastPrimitives.Root
       ref={ref}
@@ -62,7 +70,9 @@ const ToastAction = React.forwardRef<
   <ToastPrimitives.Action
     ref={ref}
     className={cn(
-      "inline-flex h-8 shrink-0 items-center justify-center rounded-md border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 group-[.destructive]:border-muted/40 group-[.destructive]:hover:border-destructive/30 group-[.destructive]:hover:bg-destructive group-[.destructive]:hover:text-destructive-foreground group-[.destructive]:focus:ring-destructive",
+      // Every variant is now a solid color (green/red/blue/amber) with white text, so the
+      // action button just needs a light/white treatment that works on any of them.
+      "inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-white/40 bg-transparent px-3 text-sm font-medium text-white transition-colors hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-white/60 focus:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
       className
     )}
     {...props}
@@ -77,7 +87,11 @@ const ToastClose = React.forwardRef<
   <ToastPrimitives.Close
     ref={ref}
     className={cn(
-      "absolute right-2 top-2 rounded-md p-1 text-foreground/50 opacity-0 transition-opacity hover:text-foreground focus:opacity-100 focus:outline-none focus:ring-2 group-hover:opacity-100 group-[.destructive]:text-red-300 group-[.destructive]:hover:text-red-50 group-[.destructive]:focus:ring-red-400 group-[.destructive]:focus:ring-offset-red-600",
+      // Always visible (not hidden-until-hover) — this app runs on touch kiosk screens as
+      // much as desktop, and hover never fires on touch, so a hover-reveal close button was
+      // effectively undiscoverable there. Every variant is a solid color background with
+      // white text, so a consistent light/white treatment works across all of them.
+      "absolute right-1.5 top-1.5 rounded-md p-1 text-white/80 transition-opacity hover:text-white focus:outline-none focus:ring-2 focus:ring-white/60",
       className
     )}
     toast-close=""
@@ -94,7 +108,7 @@ const ToastTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <ToastPrimitives.Title
     ref={ref}
-    className={cn("text-sm font-semibold", className)}
+    className={cn("text-sm font-semibold leading-tight", className)}
     {...props}
   />
 ))
@@ -106,7 +120,7 @@ const ToastDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <ToastPrimitives.Description
     ref={ref}
-    className={cn("text-sm opacity-90", className)}
+    className={cn("text-xs leading-tight opacity-90", className)}
     {...props}
   />
 ))

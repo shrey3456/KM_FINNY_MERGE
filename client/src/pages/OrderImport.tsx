@@ -2,18 +2,22 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
-import { getCurrentUserPermissions, hasPageWriteAccess } from "../lib/permissions";
+import { hasPageWriteAccess, hasPageViewAccess } from "../lib/permissions";
 import {
   AlertCircle,
   CheckCircle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  FileBarChart,
   FileUp,
   History,
   Loader2,
+  MoreVertical,
   PackageCheck,
+  Pencil,
   RefreshCw,
+  RotateCcw,
   ScanLine,
   Search,
   StopCircle,
@@ -21,6 +25,9 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import EditCsvDialog from "@/components/modals/EditCsvDialog";
+import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
+import { PlantBadge } from "@/components/PlantBadge";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,6 +42,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -134,12 +147,18 @@ function autoMatch(headers: string[]): Mapping {
 
 type ScanSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
+  // Ordered totals across this CSV's rows — rowCount is only how many LINES it has, which isn't
+  // what "how big is this order" means. Optional: older responses won't carry them.
+  totalQty?: number; totalPallets?: number;
   scanStatus: string; importedByName: string | null; createdAt: string | null;
   // The date this CSV was uploaded FOR (chosen at upload) — distinct from createdAt (when it
   // was uploaded). All date filters/labels on this page use orderDate.
   orderDate: string | null;
   scanActivatedByName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null;
   scanActivatedByCode:string | null;
+  // FIFO batch membership — already returned by /api/order-scan/sessions, just wasn't typed
+  // here until Reports needed to know whether to offer group-level (Final/CSV-wise) reports.
+  receivingSessionId: number | null; partIndex: number | null;
 };
 
 // DB stores timestamps in IST (server local time). The pg driver reads them as UTC
@@ -172,24 +191,25 @@ export default function OrderImport() {
   const [, navigate] = useLocation();
   const { user } = useAuth();
   const role = ((user as any)?.role ?? "").toLowerCase();
-  const department = ((user as any)?.department ?? "").toLowerCase();
-  const userPermissions = getCurrentUserPermissions();
-  let allowedPagesList: string[] = [];
-  try { allowedPagesList = JSON.parse((user as any)?.allowedPages || "[]"); } catch { allowedPagesList = []; }
-  // Write access (below) implies read access, so it's included here too.
-  const isImportRole = ["admin", "super-admin"].includes(role)
-    || department === "billing"
-    || userPermissions.canAccessOrderManagement
-    || allowedPagesList.includes("order-import")
-    || hasPageWriteAccess("order-import");
-  // Separate from page VISIBILITY (isImportRole above) — this controls whether the
-  // currently-visible page's own write actions (Upload, Map & Import, Delete) are enabled.
-  // Admin/super-admin/billing always have write access (unchanged); anyone else needs
-  // admin to have explicitly granted "Order Import" in their Write Access on the
-  // User Management page.
-  const canWriteOrderImport = ["admin", "super-admin"].includes(role)
-    || department === "billing"
-    || hasPageWriteAccess("order-import");
+  const designation = ((user as any)?.designation ?? "").toLowerCase().trim();
+  const isAdminOrSuper = ["admin", "super-admin"].includes(role);
+  // Page visibility and every write action (Upload, Replace CSV, Delete, Load for Scan,
+  // Deactivate, Reopen) now check ONE thing — the "Order Import" permission granted on the
+  // Users page — admin/super-admin bypass, nothing else. No more Billing-department special
+  // case, no more separate "Scan Order" permission requirement for Activate/Deactivate.
+  const isImportRole = isAdminOrSuper || hasPageViewAccess("order-import");
+  const canWriteOrderImport = isAdminOrSuper || hasPageWriteAccess("order-import");
+  const canDeleteOrderImport = canWriteOrderImport;
+  // Complete is its own rule, unrelated to page write access: anyone can complete a part
+  // EXCEPT designations "Loader"/"Helper"/"Driver"/"Scanner" (exact match) — those are
+  // operational roles who shouldn't be the ones deciding to close an order out. Mirrors
+  // Scan.tsx's canCompletePart and the server's requireCompleteAccess exactly.
+  const canCompleteOrder = isAdminOrSuper || !["loader", "helper", "driver", "scanner"].includes(designation);
+  // The Edit (pencil) button on Available/Active rows is gated by its OWN page key —
+  // "order-import-edit" — independent of Order Import's own access above, exactly as it was
+  // when this lived on its own page. hasPageViewAccess just controls whether the button is
+  // shown at all; EditCsvDialog itself further disables its inputs unless hasPageWriteAccess.
+  const canViewCsvEdit = hasPageViewAccess("order-import-edit");
 
   // Form state
   const [plant, setPlant] = useState("");
@@ -221,16 +241,48 @@ export default function OrderImport() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [itemSearch, setItemSearch] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [deletePreview, setDeletePreview] = useState<{
+    scannedItemCount: number; scannedQtyTotal: number; extraQtyTotal: number; stockApplied: boolean;
+  } | null>(null);
+  // Plant/Order Date of the session being deleted — captured when the delete dialog opens
+  // (from the row itself), so that if the admin picks "Delete, I'll re-upload" we can
+  // pre-fill the Upload form with the SAME plant/date and jump straight into the mapping
+  // dialog for the corrected file, instead of leaving them to scroll up and re-enter it.
+  const [deleteTargetInfo, setDeleteTargetInfo] = useState<{ plant: string; orderDate: string } | null>(null);
+  // Set right before programmatically opening the file picker after a "Delete, I'll re-upload".
+  // handleFileChange checks this to skip straight to the mapping dialog for the chosen file,
+  // instead of waiting for a separate "Map & Import" click.
+  const reuploadPendingRef = useRef(false);
   const [deactivateTarget, setDeactivateTarget] = useState<number | null>(null);
   const [completeTarget, setCompleteTarget] = useState<number | null>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
+  // Session id whose "Edit CSV" dialog is open — set from the Edit button on an Available/
+  // Active row, cleared when the dialog closes.
+  const [editSessionId, setEditSessionId] = useState<number | null>(null);
+  // Reports live entirely inside Order Management now — no separate /order-reports page.
+  // Opens the Reports dialog right here so an operator mid-upload/scan-review never leaves
+  // this page just to check a report.
+  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
+  const openReports = (s: { id: number; csvFileName: string; plant: string; receivingSessionId?: number | null; partIndex?: number | null }) => {
+    setReportsSession({
+      id: s.id, csvFileName: s.csvFileName, plant: s.plant,
+      receivingSessionId: s.receivingSessionId, partIndex: s.partIndex,
+    });
+  };
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
+  // A brand-new order's date can be up to 2 days in the past (yesterday, day-before-yesterday)
+  // — matches the server's own allowance in POST /order-import/sessions. Used as both the date
+  // picker's min= and the threshold below for when the past-date existing-order check kicks in.
+  const earliestOrderDateStr = getLocalISODate(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
   const [pageSize, setPageSize] = useState(10);
   const [currentPage, setCurrentPage] = useState(1);
   const [filterDate, setFilterDate] = useState("");
   const [filterPlant, setFilterPlant] = useState("");
+  // Plant tab row under the status tabs. "" = All. Tabs are derived from the sessions actually
+  // present in the current status tab, so they appear and disappear with the data.
+  const [plantTab, setPlantTab] = useState("");
 
   // Load CSV for Scan — plant and date filters (default empty = server last-48h window)
   const [scanPlant, setScanPlant] = useState("");
@@ -282,7 +334,25 @@ export default function OrderImport() {
     refetchIntervalInBackground: true,
     refetchOnMount: true,
     refetchOnWindowFocus: true,
+    // Keep showing the last-known list while a poll/refresh is in flight — without this, some
+    // refetch paths can briefly report no data, which flashes the "Loading…" state instead of
+    // quietly updating the numbers once the new data arrives.
+    placeholderData: (previousData) => previousData,
   });
+
+  // Warns before a brand-new order gets an Order Date more than 2 days in the past (the server
+  // only accepts one that far back when it's a late part joining/reclaiming an existing group
+  // for that exact plant+date — never for a genuinely new one). Only runs once both fields are
+  // filled and the date is actually past the allowance, so it never fires for today, yesterday,
+  // or the day before.
+  const isPastOrderDate = !!orderDate && orderDate < earliestOrderDateStr;
+  const pastDateCheckQuery = useQuery<{ exists: boolean }>({
+    queryKey: ["/api/order-import/sessions/date-check", plant, orderDate],
+    queryFn: async () =>
+      (await apiRequest("GET", `/api/order-import/sessions/date-check?plant=${encodeURIComponent(plant)}&date=${orderDate}`)).json(),
+    enabled: isPastOrderDate && !!plant.trim(),
+  });
+  const isPastDateBlocked = isPastOrderDate && !!plant.trim() && pastDateCheckQuery.data?.exists === false;
 
   const itemsQuery = useQuery<OrderImportItem[]>({
     queryKey: ["/api/order-import/items", expandedId],
@@ -298,7 +368,7 @@ export default function OrderImport() {
     enabled: scanExpandedId !== null,
   });
 
-  const plantsQuery = useQuery<{ name: string }[]>({
+  const plantsQuery = useQuery<{ name: string; bgColor?: string; textColor?: string; borderColor?: string }[]>({
     queryKey: ["/api/plants"],
     queryFn: async () => (await apiRequest("GET", "/api/plants")).json(),
   });
@@ -313,6 +383,9 @@ export default function OrderImport() {
     refetchIntervalInBackground: true,
     refetchOnMount: true,
     refetchOnWindowFocus: true,
+    // Same as sessionsQuery above — keeps Available/Active/Completed showing their last-known
+    // rows through every background poll instead of flashing a loading state.
+    placeholderData: (previousData) => previousData,
   });
 
   // Active session — uses /active endpoint which has NO date filter whatsoever,
@@ -327,6 +400,7 @@ export default function OrderImport() {
     refetchIntervalInBackground: true,
     refetchOnMount: true,
     refetchOnWindowFocus: true,
+    placeholderData: (previousData) => previousData,
   });
 
   // ── WebSocket: real-time sync ──────────────────────────────────────────────
@@ -467,8 +541,19 @@ export default function OrderImport() {
         );
 
         qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions"], (old) =>
-          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: data.session.scanStatus ?? "available", importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), orderDate: data.session.orderDate ?? orderDate ?? null, scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null }, ...old] : [],
+          old ? [{ id: data.session.id, plant: data.session.plant, csvFileName: data.session.csvFileName, rowCount: data.rowCount, scanStatus: data.session.scanStatus ?? "available", importedByName: (user as any)?.name ?? null, createdAt: data.session.createdAt ?? new Date().toISOString(), orderDate: data.session.orderDate ?? orderDate ?? null, scanActivatedByName: null, scanActivatedAt: null, scanCompletedAt: null, scanActivatedByCode: null, receivingSessionId: data.session.receivingSessionId ?? null, partIndex: data.session.partIndex ?? null }, ...old] : [],
         );
+      }
+
+      if (data.replacesSessionId) {
+        const carried = data.remapSummary?.itemsCarriedForward ?? 0;
+        toast({
+          title: "Linked as replacement",
+          description: carried > 0
+            ? `${carried} previously scanned item(s) were carried forward from the deleted CSV.`
+            : `Replaces the deleted CSV for this plant/date — no prior scans to carry forward.`,
+          className: "bg-green-50 border-green-200 text-green-900",
+        });
       }
 
       toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
@@ -542,11 +627,26 @@ export default function OrderImport() {
     onSettled: () => refetchAllSessionQueries(),
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: async (id: number) => {
-      await apiRequest("DELETE", `/api/order-import/sessions/${id}`);
+  // Fetches the scanned-item/stock counts shown in the delete confirmation dialog, so the
+  // admin knows how much will be reversed before confirming. Falls back to opening the
+  // dialog with generic copy if the preview call itself fails.
+  const deletePreviewMutation = useMutation({
+    mutationFn: async (id: number) =>
+      (await apiRequest("GET", `/api/order-import/sessions/${id}/delete-preview`)).json(),
+    onSuccess: (data, id) => {
+      setDeletePreview(data);
+      setDeleteTarget(id);
     },
-    onMutate: async (id) => {
+    onError: (_err: any, id) => {
+      setDeletePreview(null);
+      setDeleteTarget(id);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async ({ id, mode }: { id: number; mode: "replace" | "discard" }) =>
+      (await apiRequest("DELETE", `/api/order-import/sessions/${id}?mode=${mode}`)).json(),
+    onMutate: async ({ id }: { id: number; mode: "replace" | "discard" }) => {
       await Promise.all([
         qc.cancelQueries({ queryKey: ["/api/order-import/sessions"] }),
         qc.cancelQueries({ queryKey: ["/api/order-scan/sessions"] }),
@@ -558,6 +658,7 @@ export default function OrderImport() {
       const previousActive       = qc.getQueryData<ScanSession | null>(["/api/order-scan/active"]);
       const previousNotif        = qc.getQueryData(["/api/order-scan/notification"]);
       setDeleteTarget(null);
+      setDeletePreview(null);
       if (expandedId === id)     setExpandedId(null);
       if (scanExpandedId === id) setScanExpandedId(null);
       patchImportSessions((rows) => rows.filter((s) => s.id !== id));
@@ -584,6 +685,20 @@ export default function OrderImport() {
           qc.setQueryData(["/api/order-scan/notification"], context.previousNotif);
       }
       toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+    onSuccess: (data) => {
+      if (!(data?.scannedItemCount > 0)) return;
+      if (data.mode === "discard") {
+        toast({
+          title: "CSV removed",
+          description: `${data.scannedItemCount} scanned item(s) reverted${data.stockReversed?.length ? " and stock rolled back" : ""}. Your next upload for this plant/date will be treated as a new file.`,
+        });
+      } else {
+        toast({
+          title: "CSV deleted",
+          description: `${data.scannedItemCount} scanned item(s) held. Upload the corrected CSV for this plant/date and these scans will be carried forward automatically.`,
+        });
+      }
     },
     onSettled: () => refetchAllSessionQueries(),
   });
@@ -675,6 +790,21 @@ export default function OrderImport() {
     onSettled: () => refetchAllSessionQueries(),
   });
 
+  // Undo an accidental Complete click. Server enforces the real rule (only the most recently
+  // completed session per plant is eligible) — the button is also only ever shown for that one
+  // session (see lastCompletedIdByPlant below), so a 400 here should be rare, not the normal path.
+  const reopenMutation = useMutation({
+    mutationFn: async (id: number) =>
+      (await apiRequest("POST", `/api/order-scan/sessions/${id}/reopen`)).json(),
+    onSuccess: () => {
+      toast({ title: "Session reopened", description: "Scanning can continue on it now.", className: "bg-green-50 border-green-200 text-green-900" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Reopen failed", description: err.message, variant: "destructive" });
+    },
+    onSettled: () => refetchAllSessionQueries(),
+  });
+
   if (!isImportRole) {
     return (
       <main className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
@@ -761,7 +891,10 @@ export default function OrderImport() {
         return col && col !== SKIP ? (row[col] ?? "") : "";
       };
       return {
-        barcode:         get("barcode") || null,
+        // Trimmed — an Excel-exported CSV can pad a barcode cell to a fixed width with
+        // whitespace, and this value becomes the literal key product_plant_stock upserts
+        // against later; an untrimmed one silently splits stock into a second, orphaned row.
+        barcode:         get("barcode").trim() || null,
         itemName:        get("itemName") || null,
         sapCode:         get("sapCode") || null,
         quantity:        parseInt(get("quantity")) || 0,
@@ -785,6 +918,17 @@ export default function OrderImport() {
     setSelectedFiles(files);
     setLastImport(null);
     e.target.value = "";
+
+    // Reupload flow: plant/orderDate were already filled in when the file picker was popped
+    // open, so skip the separate "Map & Import" click and go straight to the mapping dialog.
+    if (reuploadPendingRef.current) {
+      reuploadPendingRef.current = false;
+      uploadQueueRef.current = files;
+      uploadIdxRef.current = 0;
+      uploadCollectedRef.current = { sessionIds: [], fileNames: [], failed: [], totalRows: 0, groupId: null };
+      setUploadProgress({ current: 1, total: files.length });
+      parseAndOpen(files[0]);
+    }
   }
 
   // Start the sequential Map & Import queue: opens the mapping dialog for the first file;
@@ -802,6 +946,14 @@ export default function OrderImport() {
     }
     if (selectedFiles.length === 0) {
       toast({ title: "Select a CSV file first", variant: "destructive" });
+      return;
+    }
+    if (isPastDateBlocked) {
+      toast({
+        title: "This Order Date is in the past",
+        description: `No existing order for ${plant} on ${orderDate} — a brand-new order can't use a past date. Pick today or later, or the correct existing date for a late part.`,
+        variant: "destructive",
+      });
       return;
     }
     uploadQueueRef.current = selectedFiles;
@@ -882,6 +1034,13 @@ export default function OrderImport() {
 
   const sessions        = sessionsQuery.data?.sessions  ?? [];
   const totalSessions   = sessionsQuery.data?.total     ?? 0;
+  // History is server-paged and its total reflects whatever plant filter is applied, so remember
+  // the unfiltered figure and show that on the tab badge — matching the other three, which ignore
+  // the plant row too.
+  const [historyTotalAll, setHistoryTotalAll] = useState(0);
+  useEffect(() => {
+    if (!filterPlant) setHistoryTotalAll(totalSessions);
+  }, [filterPlant, totalSessions]);
   const totalPages      = sessionsQuery.data?.totalPages ?? 1;
   const safePage        = currentPage;
 
@@ -895,6 +1054,8 @@ export default function OrderImport() {
     : allItems;
 
   const plantOptions = (plantsQuery.data ?? []).filter((p) => p.name && p.name.trim() !== "");
+  // Plant colors from Plant Management, keyed by upper-cased name, for the plant tab pills.
+  const plantColorByName = new Map(plantOptions.map((p) => [p.name.toUpperCase(), p]));
 
   const _allScanSessions = scanSessionsQuery.data ?? [];
 
@@ -914,21 +1075,86 @@ export default function OrderImport() {
   const availableScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "available" &&
     (!scanPlant    || (s.plant ?? "").toLowerCase() === scanPlant.toLowerCase()) &&
+    (!plantTab     || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!scanDate     || (s.orderDate ?? "").slice(0, 10) === scanDate)
   );
   const activeScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "active" &&
     (!activePlant  || (s.plant ?? "").toLowerCase() === activePlant.toLowerCase()) &&
+    (!plantTab     || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!activeDate   || (s.orderDate ?? "").slice(0, 10) === activeDate)
   );
   const completedScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "completed" &&
     (!completedPlant || (s.plant ?? "").toLowerCase() === completedPlant.toLowerCase()) &&
+    (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!completedDate  || (s.orderDate ?? "").slice(0, 10) === completedDate)
   );
+  // Reopen is only ever offered for the SINGLE most-recently-completed session per plant —
+  // computed over every completed session (unfiltered by the tab's own plant/date pickers,
+  // same as activePlantsSet above), so the button stays correct regardless of what's filtered
+  // into view. The server enforces the same rule independently; this just keeps the button
+  // from ever being shown where it would immediately 400.
+  const lastCompletedIdByPlant = new Map<string, { id: number; completedAt: string }>();
+  for (const s of _allScanSessions) {
+    if (s.scanStatus !== "completed" || !s.scanCompletedAt) continue;
+    const key = (s.plant ?? "").toLowerCase();
+    const cur = lastCompletedIdByPlant.get(key);
+    if (!cur || s.scanCompletedAt > cur.completedAt || (s.scanCompletedAt === cur.completedAt && s.id > cur.id)) {
+      lastCompletedIdByPlant.set(key, { id: s.id, completedAt: s.scanCompletedAt });
+    }
+  }
+  // Tab badge counts deliberately ignore the plant row, so each status always advertises its full
+  // total. Without this, picking a plant on one tab silently shrinks every other tab's count and
+  // you lose sight of what's waiting elsewhere. The per-tab date filters still apply.
+  const countByStatus = (status: string, date: string) =>
+    _allScanSessions.filter((s) =>
+      s.scanStatus === status && (!date || (s.orderDate ?? "").slice(0, 10) === date),
+    ).length;
+  const availableCount = countByStatus("available", scanDate);
+  const activeCount    = countByStatus("active", activeDate);
+  const completedCount = countByStatus("completed", completedDate);
+
   const activeId = activeSessionQuery.data?.id ?? null;
 
   const [activeTab, setActiveTab] = useState<"available" | "active" | "completed" | "history">("available");
+
+  // Plant tabs come from the sessions in the current status tab (ignoring the plant selection
+  // itself, so picking a plant never empties the row). History pages server-side, so it falls back
+  // to every known session. A plant appears only once it actually has sessions.
+  const plantTabSource = _allScanSessions.filter((s) =>
+    activeTab === "history" ? true : s.scanStatus === activeTab,
+  );
+  const plantTabs = Array.from(
+    // Show EVERY configured plant as a tab (from Plant Management), not only ones that happen to
+    // have sessions in this status — plus any plant seen on a session or currently selected, to be
+    // safe against a session whose plant was later removed from the list.
+    new Set(
+      [
+        ...plantOptions.map((p) => p.name.trim()),
+        ...plantTabSource.map((s) => (s.plant ?? "").trim()),
+        plantTab.trim(),
+      ].filter(Boolean),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+
+  // Switching status tabs always resets the plant row back to All, so each tab opens showing
+  // everything rather than inheriting a plant picked on a previous tab.
+  const selectStatusTab = (key: "available" | "active" | "completed" | "history") => {
+    setActiveTab(key);
+    setPlantTab("");
+    setFilterPlant("");
+    setCurrentPage(1);
+  };
+
+  // Setting filterPlant too keeps the server-paged History query — and therefore the History tab's
+  // count — on the same plant as the client-side tabs, so every status count reflects the
+  // selected plant rather than only the tab you happen to be looking at.
+  const selectPlantTab = (name: string) => {
+    setPlantTab(name);
+    setFilterPlant(name);
+    setCurrentPage(1);
+  };
 
   return (
     <main className="flex-1 overflow-y-auto bg-gray-50">
@@ -937,11 +1163,11 @@ export default function OrderImport() {
         {/* ── Page Header ── */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#001d6e] text-white">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#001d6e] text-white shadow-sm">
               <FileUp className="h-6 w-6" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-gray-900">Order Import</h1>
+              <h1 className="text-2xl font-bold text-[#001d6e]">Order Import</h1>
               <p className="text-sm text-gray-500">Upload a CSV, map columns, and manage scan sessions</p>
             </div>
           </div>
@@ -953,7 +1179,7 @@ export default function OrderImport() {
               </span>
             </div>
             <button
-              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               onClick={() => sessionsQuery.refetch()}
               disabled={sessionsQuery.isFetching}
             >
@@ -964,55 +1190,62 @@ export default function OrderImport() {
         </div>
 
         {/* ── Upload Card ── */}
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="flex items-center gap-2 border-b border-gray-100 px-5 py-4">
+        <div className="border border-gray-200 bg-white shadow-sm">
+          <div className="flex items-center gap-2 border-b border-gray-100 px-6 py-4">
             <Upload className="h-5 w-5 text-[#001d6e]" />
             <h2 className="text-base font-semibold text-gray-900">Upload CSV</h2>
           </div>
-          <div className="p-5 space-y-4">
-            {/* Desktop layout */}
-            <div className="hidden sm:flex flex-wrap items-end gap-3">
+          <div className="p-6 space-y-4">
+            {/* Desktop layout — a fixed 12-col grid instead of flex-wrap with ad-hoc min-widths,
+                so the fields always line up the same way regardless of content length. */}
+            <div className="hidden sm:grid sm:grid-cols-12 sm:items-end sm:gap-4">
               {/* Plant */}
-              <div className="grid gap-1 min-w-[130px] flex-1">
-                <Label className="text-xs text-gray-500">Plant</Label>
+              <div className="col-span-3 grid gap-1.5">
+                <Label className="text-xs font-medium text-gray-600">Plant</Label>
                 {plantOptions.length > 0 ? (
                   <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
-                    <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
+                    <SelectTrigger className="h-10 text-sm rounded-full"><SelectValue placeholder="Select…" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="_none_">— Select —</SelectItem>
                       {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 ) : (
-                  <Input className="h-9 text-sm" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
+                  <Input className="h-10 text-sm rounded-full" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
                 )}
               </div>
               {/* Date */}
-              <div className="grid gap-1">
-                <Label className="text-xs text-gray-500">Order Date</Label>
-                {/* No min= here on purpose: a past date must stay selectable so a LATE PART can
-                    still be added to an order that already exists for that date. The server
-                    allows exactly that and rejects only brand-new past-dated orders. */}
-                <Input type="date" className="h-9 text-sm w-[150px]" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+              <div className="col-span-2 grid gap-1.5">
+                <Label className="text-xs font-medium text-gray-600">Order Date</Label>
+                {/* min=today: a normal upload here is always a new file for today (or later).
+                    The one legitimate past-date case — replacing a deleted CSV for an order
+                    that already exists — goes through "Delete, I'll re-upload" instead, which
+                    sets orderDate via state and so isn't affected by this min. The
+                    pastDateCheckQuery/isPastDateBlocked warning below stays as a second line of
+                    defense against a manually typed-in past date slipping past the picker. */}
+                <Input type="date" min={earliestOrderDateStr} className={`h-10 text-sm w-full rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                {isPastDateBlocked && (
+                  <p className="text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
+                )}
               </div>
               {/* File */}
-              <div className="grid gap-1 flex-[2] min-w-[180px]">
-                <Label className="text-xs text-gray-500">
+              <div className="col-span-4 grid gap-1.5">
+                <Label className="text-xs font-medium text-gray-600 truncate">
                   CSV File{selectedFiles.length === 1 && <span className="text-green-600 font-medium"> · {selectedFiles[0].name}</span>}
                   {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
                 </Label>
-                <Input ref={fileRef} type="file" accept=".csv" multiple className="h-9 text-sm"
+                <Input ref={fileRef} type="file" accept=".csv" multiple className="h-10 text-sm rounded-full"
                   onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
               {/* Actions */}
-              <div className="flex gap-2 pb-0.5">
-                <Button variant="outline" className="h-9" onClick={clearForm}
+              <div className="col-span-3 flex gap-2">
+                <Button variant="outline" className="h-10 shrink-0 rounded-full" onClick={clearForm}
                   disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
                 </Button>
-                <Button className="h-9 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport}
-                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}>
+                <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-full" onClick={handleImportClick}
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1020,44 +1253,50 @@ export default function OrderImport() {
             </div>
 
             {/* Mobile layout */}
-            <div className="sm:hidden space-y-3">
-              <div className="grid gap-1">
-                <Label className="text-xs text-gray-500 font-medium">
+            <div className="sm:hidden space-y-4">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-medium text-gray-600">
                   CSV File{selectedFiles.length === 1 && <span className="text-green-600 font-medium"> · {selectedFiles[0].name}</span>}
                   {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
                 </Label>
                 <Input ref={fileRef} type="file" accept=".csv" multiple
-                  className="h-11 text-sm file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:font-medium file:bg-[#001d6e]/10 file:text-[#001d6e]"
+                  className="h-11 text-sm file:mr-3 file:py-1 file:px-3 file:border-0 file:text-xs file:font-medium file:bg-[#001d6e]/10 file:text-[#001d6e] rounded-full"
                   onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="grid gap-1">
-                  <Label className="text-xs text-gray-500">Plant</Label>
+              {/* Plant + Date on one row — Date gets a fixed minimum wide enough for the native
+                  picker to render its value (it clips/hides below ~140px), Plant absorbs
+                  whatever width remains instead of splitting evenly. */}
+              <div className="grid grid-cols-[1fr_142px] gap-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-medium text-gray-600">Plant</Label>
                   {plantOptions.length > 0 ? (
                     <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
-                      <SelectTrigger className="h-10 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
+                      <SelectTrigger className="h-11 text-sm rounded-full"><SelectValue placeholder="Select…" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="_none_">— Select —</SelectItem>
                         {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   ) : (
-                    <Input className="h-10 text-sm" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
+                    <Input className="h-11 text-sm rounded-full" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="Plant…" />
                   )}
                 </div>
-                <div className="grid gap-1">
-                  <Label className="text-xs text-gray-500">Order Date</Label>
-                  <Input type="date" className="h-10 text-sm w-full" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-medium text-gray-600">Order Date</Label>
+                  <Input type="date" min={earliestOrderDateStr} className={`h-11 w-full text-sm px-2 rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 </div>
+                {isPastDateBlocked && (
+                  <p className="col-span-2 text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
+                )}
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" className="h-10 px-3 shrink-0" onClick={clearForm}
+                <Button variant="outline" className="h-11 px-3.5 shrink-0 rounded-full" onClick={clearForm}
                   disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
                 </Button>
-                <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white" onClick={handleImportClick}
-                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport}
-                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}>
+                <Button className="h-11 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-full" onClick={handleImportClick}
+                  disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1081,25 +1320,25 @@ export default function OrderImport() {
         </div>
 
         {/* ── Session Manager Tabs ── */}
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="border border-gray-200 bg-white shadow-sm">
           {/* Tab pills header */}
           <div className="border-b border-gray-100 px-5 py-4">
             <div className="flex gap-1 flex-wrap">
               {(
                 [
-                  { key: "available", label: "Available", count: availableScanSessions.length },
-                  { key: "active",    label: "Active",    count: activeScanSessions.length },
-                  { key: "completed", label: "Completed", count: completedScanSessions.length },
-                  { key: "history",   label: "History",   count: totalSessions },
+                  { key: "available", label: "Available", count: availableCount },
+                  { key: "active",    label: "Active",    count: activeCount },
+                  { key: "completed", label: "Completed", count: completedCount },
+                  { key: "history",   label: "History",   count: filterPlant ? historyTotalAll : totalSessions },
                 ] as { key: "available" | "active" | "completed" | "history"; label: string; count: number }[]
               ).map((tab) => (
                 <button
                   key={tab.key}
-                  onClick={() => setActiveTab(tab.key)}
+                  onClick={() => selectStatusTab(tab.key)}
                   className={
                     activeTab === tab.key
-                      ? "bg-[#001d6e] text-white rounded-full px-4 py-1.5 text-sm font-medium"
-                      : "bg-white border border-gray-200 text-gray-600 rounded-full px-4 py-1.5 text-sm font-medium hover:bg-gray-50"
+                      ? "rounded-full bg-[#001d6e] text-white px-4 py-1.5 text-sm font-medium"
+                      : "rounded-full bg-white border border-gray-200 text-gray-600 px-4 py-1.5 text-sm font-medium hover:bg-gray-50"
                   }
                 >
                   {tab.label}
@@ -1113,6 +1352,45 @@ export default function OrderImport() {
                 </button>
               ))}
             </div>
+
+            {/* Plant tabs — built from the sessions present in the tab above, so they track the
+                data rather than a hard-coded list. Shown on all four status tabs. */}
+            {plantTabs.length > 0 && (
+              <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3">
+                <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Plant
+                </span>
+                <button
+                  onClick={() => selectPlantTab("")}
+                  className={
+                    plantTab === ""
+                      ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                      : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  }
+                >
+                  All
+                </button>
+                {plantTabs.map((name) => {
+                  const isSel = plantTab.toLowerCase() === name.toLowerCase();
+                  const c = plantColorByName.get(name.toUpperCase());
+                  return (
+                    <button
+                      key={name}
+                      onClick={() => selectPlantTab(name)}
+                      // Each pill keeps its Plant Management colour whether selected or not; the
+                      // selected one gets a navy ring (same treatment as Overall Stock / Proforma
+                      // Slips) instead of turning solid navy and losing its colour.
+                      style={c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
+                      className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                        c?.bgColor ? "border" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                      } ${isSel ? "ring-2 ring-[#001d6e] ring-offset-1" : ""}`}
+                    >
+                      {name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* ── Tab: Available ── */}
@@ -1120,45 +1398,27 @@ export default function OrderImport() {
             <div>
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                {plantOptions.length > 0 ? (
-                  <Select value={scanPlant || "_all_"} onValueChange={(v) => { setScanPlant(v === "_all_" ? "" : v); setScanExpandedId(null); }}>
-                    <SelectTrigger className="h-8 w-[130px] text-xs">
-                      <SelectValue placeholder="All plants" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_all_">All plants</SelectItem>
-                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input value={scanPlant} onChange={(e) => { setScanPlant(e.target.value); setScanExpandedId(null); }}
-                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
-                )}
                 <Input type="date" value={scanDate} onChange={(e) => { setScanDate(e.target.value); setScanExpandedId(null); }}
-                  className="h-8 w-[140px] text-xs" />
+                  className="h-8 w-[140px] text-xs rounded-full" />
                 {scanDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-full"
                     onClick={() => { setScanDate(todayStr); setScanExpandedId(null); }}>
                     Today
                   </Button>
                 )}
                 {scanDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-full"
                     onClick={() => { setScanDate(""); setScanExpandedId(null); }}>
                     <X className="h-3.5 w-3.5" />
                   </Button>
                 )}
-                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto"
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-full"
                   onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
                   <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
               </div>
               {/* Content */}
-              {/* isLoading (first load), NOT isFetching: this list polls every 2.5–8s, and with
-                  isFetching an empty/filtered result flipped to a spinner on every poll — the
-                  whole panel appeared to reload constantly. Background refetches now update the
-                  data silently and leave the rendered list in place. */}
-              {scanSessionsQuery.isLoading && availableScanSessions.length === 0 ? (
+              {scanSessionsQuery.isFetching && availableScanSessions.length === 0 ? (
                 <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
                 </div>
@@ -1195,44 +1455,67 @@ export default function OrderImport() {
                             <div className="flex-1 min-w-0">
                               <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                               <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                                <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{s.plant}</span>
+                                <PlantBadge plant={s.plant} />
                                 {/* The date this CSV is FOR — what grouping/filters key on. Shown
                                     ahead of the upload timestamp since it's the meaningful one. */}
                                 {s.orderDate && (
-                                  <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
+                                  <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
                                     For {s.orderDate}
                                   </span>
                                 )}
                                 <span className="text-xs text-gray-400" title="Uploaded at">{fmtIST(s.createdAt)}</span>
                                 {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
                                 {plantBusy && (
-                                  <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700" title="Another session is already active for this plant">
+                                  <span className="bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700" title="Another session is already active for this plant">
                                     Plant busy
                                   </span>
                                 )}
                               </div>
                             </div>
                             <div className="flex shrink-0 items-center gap-1.5">
-                              <span className="inline-flex items-center rounded-full bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">
+                              <span className="inline-flex items-center bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]" title={`${s.rowCount} rows`}>
                                 {s.rowCount}
                               </span>
-                              <Button size="sm"
-                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50"
-                                disabled={loadForScanMutation.isPending || plantBusy}
-                                title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
-                                onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
-                                {loadForScanMutation.isPending
-                                  ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                                  : <ScanLine className="h-3 w-3 mr-1" />}
-                                Load
-                              </Button>
-                              <Button size="sm" variant="ghost"
-                                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30"
-                                disabled={!canWriteOrderImport}
-                                title={!canWriteOrderImport ? "You have read-only access to Order Import" : undefined}
-                                onClick={(e) => { e.stopPropagation(); setDeleteTarget(s.id); }}>
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
+                              {/* Ordered quantity next to the row count — the row count says how
+                                  many lines the CSV has, not how much was ordered. */}
+                              {s.totalQty != null && (
+                                <span
+                                  className="inline-flex items-center gap-1 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700 tabular-nums"
+                                  title="Total ordered quantity across this CSV"
+                                >
+                                  {s.totalQty.toLocaleString()} qty
+                                </span>
+                              )}
+                              {canWriteOrderImport && (
+                                <Button size="sm"
+                                  className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-full"
+                                  disabled={loadForScanMutation.isPending || plantBusy}
+                                  title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
+                                  onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
+                                  {loadForScanMutation.isPending
+                                    ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                                    : <ScanLine className="h-3 w-3 mr-1" />}
+                                  Load
+                                </Button>
+                              )}
+                              {canViewCsvEdit && (
+                                <Button size="sm" variant="ghost"
+                                  className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e] rounded-full"
+                                  title="Edit CSV"
+                                  onClick={(e) => { e.stopPropagation(); setEditSessionId(s.id); }}>
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
+                              {canDeleteOrderImport && (
+                                <Button size="sm" variant="ghost"
+                                  className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30 rounded-full"
+                                  disabled={deletePreviewMutation.isPending}
+                                  onClick={(e) => { e.stopPropagation(); setDeleteTargetInfo({ plant: s.plant, orderDate: s.orderDate || todayStr }); deletePreviewMutation.mutate(s.id); }}>
+                                  {deletePreviewMutation.isPending && deletePreviewMutation.variables === s.id
+                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    : <Trash2 className="h-3.5 w-3.5" />}
+                                </Button>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -1242,10 +1525,10 @@ export default function OrderImport() {
                               <div className="relative flex-1">
                                 <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                                 <Input value={scanItemSearch} onChange={(e) => setScanItemSearch(e.target.value)}
-                                  placeholder="Search rows…" className="pl-8 h-9 text-sm" />
+                                  placeholder="Search rows…" className="pl-8 h-9 text-sm rounded-full" />
                               </div>
                               {scanItemSearch && (
-                                <Button size="sm" variant="ghost" className="h-9 w-9 p-0"
+                                <Button size="sm" variant="ghost" className="h-9 w-9 p-0 rounded-full"
                                   onClick={() => setScanItemSearch("")}>
                                   <X className="h-3.5 w-3.5" />
                                 </Button>
@@ -1259,7 +1542,7 @@ export default function OrderImport() {
                                 <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
                               </div>
                             ) : (
-                              <div className="overflow-x-auto rounded-md border">
+                              <div className="overflow-x-auto border">
                                 <table className="w-max min-w-full border-collapse text-xs">
                                   <thead>
                                     <tr>
@@ -1279,6 +1562,19 @@ export default function OrderImport() {
                                         <td className="px-3 py-1.5 text-right">{item.expectedPallets ?? "—"}</td>
                                       </tr>
                                     ))}
+                                    {/* Totals close the table. Over the rows ON SCREEN, so a search
+                                        narrows the total with the list rather than contradicting it. */}
+                                    {scanFiltered.length > 0 && (
+                                      <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                                        <td className="border-r px-3 py-2" colSpan={4}>Total</td>
+                                        <td className="border-r px-3 py-2 text-right tabular-nums">
+                                          {scanFiltered.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                        </td>
+                                        <td className="px-3 py-2 text-right tabular-nums">
+                                          {scanFiltered.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)}
+                                        </td>
+                                      </tr>
+                                    )}
                                   </tbody>
                                 </table>
                               </div>
@@ -1305,17 +1601,17 @@ export default function OrderImport() {
               ) : (
                 <div className="divide-y divide-amber-100">
                   {activeScanSessions.map((s) => (
-                    <div key={s.id} className="bg-amber-50 border border-amber-200 rounded-xl p-4 mx-4 my-3">
-                      <div className="flex items-start gap-3">
+                    <div key={s.id} className="bg-amber-50 border border-amber-200 p-4 mx-4 my-3">
+                      <div className="flex items-center gap-3">
                         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 border border-amber-200">
                           <ScanLine className="h-5 w-5 text-amber-600" />
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="truncate text-sm font-bold text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                            <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 uppercase">{s.plant}</span>
+                            <PlantBadge plant={s.plant} />
                             {s.orderDate && (
-                              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
+                              <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
                                 For {s.orderDate}
                               </span>
                             )}
@@ -1323,51 +1619,52 @@ export default function OrderImport() {
                             {s.importedByName && <span className="text-xs text-gray-500">· {s.importedByName}</span>}
                           </div>
                           {s.scanActivatedByName && (
-                            <p className="mt-1 text-xs text-amber-700 font-medium">
+                            <p className="mt-1 text-xs text-amber-700 font-medium truncate">
                               Scanning by: {s.scanActivatedByName}
                               {s.scanActivatedAt && <span className="font-normal text-gray-400"> · since {fmtIST(s.scanActivatedAt)}</span>}
                             </p>
                           )}
-                          {/* Mobile buttons */}
-                          <div className="mt-3 flex flex-wrap gap-2 sm:hidden">
-                            <Button size="sm" className="h-9 flex-1 text-xs bg-amber-600 hover:bg-amber-700 text-white"
-                              onClick={() => navigate("/scan")}>
-                              <ScanLine className="mr-1.5 h-3.5 w-3.5" /> View Scan
-                            </Button>
-                            <Button size="sm" variant="outline"
-                              className="h-9 flex-1 text-xs text-amber-700 border-amber-200 hover:bg-amber-50"
-                              disabled={deactivateMutation.isPending}
-                              onClick={() => setDeactivateTarget(s.id)}>
-                              <StopCircle className="mr-1 h-3 w-3" /> Deactivate
-                            </Button>
-                            <Button size="sm" variant="outline"
-                              className="h-9 flex-1 text-xs text-green-700 border-green-200 hover:bg-green-50"
-                              disabled={completeMutation.isPending}
-                              onClick={() => setCompleteTarget(s.id)}>
-                              <CheckCircle2 className="mr-1 h-3 w-3" /> Complete
-                            </Button>
-                          </div>
                         </div>
-                        {/* Desktop buttons */}
-                        <div className="hidden sm:flex shrink-0 flex-col items-end gap-1.5">
-                          <Button size="sm" className="h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white"
+                        {/* One primary action + a kebab menu for the rest — same on mobile and
+                            desktop, avoids the old 4-button pileup that wrapped unevenly. */}
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <Button size="sm" className="h-8 px-2.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-full"
                             onClick={() => navigate("/scan")}>
-                            <ScanLine className="mr-1.5 h-3.5 w-3.5" /> View Scan
+                            <ScanLine className="sm:mr-1.5 h-3.5 w-3.5" /> <span className="hidden sm:inline">View Scan</span>
                           </Button>
-                          <div className="flex items-center gap-1">
-                            <Button size="sm" variant="outline"
-                              className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50"
-                              disabled={deactivateMutation.isPending}
-                              onClick={() => setDeactivateTarget(s.id)}>
-                              <StopCircle className="mr-1 h-3 w-3" /> Deactivate
-                            </Button>
-                            <Button size="sm" variant="outline"
-                              className="h-7 px-2 text-xs text-green-700 border-green-200 hover:bg-green-50"
-                              disabled={completeMutation.isPending}
-                              onClick={() => setCompleteTarget(s.id)}>
-                              <CheckCircle2 className="mr-1 h-3 w-3" /> Complete
-                            </Button>
-                          </div>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button size="sm" variant="outline" className="h-8 w-8 p-0 text-gray-500 border-amber-200 hover:bg-amber-100 rounded-full">
+                                <MoreVertical className="h-4 w-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-44 rounded-xl">
+                              {canViewCsvEdit && (
+                                <DropdownMenuItem onClick={() => setEditSessionId(s.id)}>
+                                  <Pencil className="mr-2 h-3.5 w-3.5 text-gray-500" /> Edit CSV
+                                </DropdownMenuItem>
+                              )}
+                              <DropdownMenuItem onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
+                                <FileBarChart className="mr-2 h-3.5 w-3.5 text-gray-500" /> Reports
+                              </DropdownMenuItem>
+                              {canWriteOrderImport && (
+                                <DropdownMenuItem
+                                  disabled={deactivateMutation.isPending}
+                                  onClick={() => setDeactivateTarget(s.id)}
+                                  className="text-amber-700 focus:text-amber-700">
+                                  <StopCircle className="mr-2 h-3.5 w-3.5" /> Deactivate
+                                </DropdownMenuItem>
+                              )}
+                              {canCompleteOrder && (
+                                <DropdownMenuItem
+                                  disabled={completeMutation.isPending}
+                                  onClick={() => setCompleteTarget(s.id)}
+                                  className="text-green-700 focus:text-green-700">
+                                  <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Complete
+                                </DropdownMenuItem>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
                       </div>
                     </div>
@@ -1382,42 +1679,27 @@ export default function OrderImport() {
             <div>
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                {plantOptions.length > 0 ? (
-                  <Select value={completedPlant || "_all_"} onValueChange={(v) => setCompletedPlant(v === "_all_" ? "" : v)}>
-                    <SelectTrigger className="h-8 w-[130px] text-xs">
-                      <SelectValue placeholder="All plants" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_all_">All plants</SelectItem>
-                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input value={completedPlant} onChange={(e) => setCompletedPlant(e.target.value)}
-                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
-                )}
                 <Input type="date" value={completedDate} onChange={(e) => setCompletedDate(e.target.value)}
-                  className="h-8 w-[140px] text-xs" />
+                  className="h-8 w-[140px] text-xs rounded-full" />
                 {completedDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-full"
                     onClick={() => setCompletedDate(todayStr)}>
                     Today
                   </Button>
                 )}
                 {completedDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-full"
                     onClick={() => setCompletedDate("")}>
                     <X className="h-3.5 w-3.5" />
                   </Button>
                 )}
-                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto"
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-full"
                   onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
                   <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
               </div>
               {/* Content */}
-              {/* isLoading not isFetching — same polling-flicker reason as the Available tab. */}
-              {scanSessionsQuery.isLoading && completedScanSessions.length === 0 ? (
+              {scanSessionsQuery.isFetching && completedScanSessions.length === 0 ? (
                 <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-green-600" />
                 </div>
@@ -1435,9 +1717,9 @@ export default function OrderImport() {
                         <div className="flex-1 min-w-0">
                           <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(s.csvFileName)}</p>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                            <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700 uppercase">{s.plant}</span>
+                            <PlantBadge plant={s.plant} />
                             {s.orderDate && (
-                              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
+                              <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
                                 For {s.orderDate}
                               </span>
                             )}
@@ -1447,12 +1729,30 @@ export default function OrderImport() {
                           </div>
                         </div>
                         <div className="flex shrink-0 items-center gap-1.5">
-                          <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
+                          <span className="inline-flex items-center bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
                             {s.rowCount}
                           </span>
                           <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
                             <CheckCircle2 className="h-3 w-3" /> Done
                           </span>
+                          <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-full"
+                            onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
+                            <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
+                          </Button>
+                          {/* Only for the single most-recently-completed session per plant — an
+                              accidental Complete click, not a general "reopen any history" tool. */}
+                          {canWriteOrderImport && lastCompletedIdByPlant.get((s.plant ?? "").toLowerCase())?.id === s.id && (
+                            <Button size="sm" variant="outline"
+                              className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50 rounded-full"
+                              disabled={reopenMutation.isPending}
+                              title="Undo an accidental Complete — continue scanning this session"
+                              onClick={() => reopenMutation.mutate(s.id)}>
+                              {reopenMutation.isPending && reopenMutation.variables === s.id
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" />
+                                : <RotateCcw className="h-3.5 w-3.5 sm:mr-1" />}
+                              <span className="hidden sm:inline">Reopen</span>
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1467,36 +1767,22 @@ export default function OrderImport() {
             <div>
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                {plantOptions.length > 0 ? (
-                  <Select value={filterPlant || "_all_"} onValueChange={(v) => { setFilterPlant(v === "_all_" ? "" : v); setCurrentPage(1); }}>
-                    <SelectTrigger className="h-8 w-[130px] text-xs">
-                      <SelectValue placeholder="All plants" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_all_">All plants</SelectItem>
-                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input value={filterPlant} onChange={(e) => { setFilterPlant(e.target.value); setCurrentPage(1); }}
-                    placeholder="Plant…" className="h-8 w-[110px] text-xs" />
-                )}
                 <Input type="date" value={filterDate} onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
-                  className="h-8 w-[140px] text-xs" />
+                  className="h-8 w-[140px] text-xs rounded-full" />
                 {filterDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-full"
                     onClick={() => { setFilterDate(todayStr); setCurrentPage(1); }}>
                     Today
                   </Button>
                 )}
                 {filterDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
+                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-full"
                     onClick={() => { setFilterDate(""); setCurrentPage(1); }}>
                     <X className="h-3.5 w-3.5" />
                   </Button>
                 )}
                 <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1); }}>
-                  <SelectTrigger className="h-8 w-[65px] text-xs">
+                  <SelectTrigger className="h-8 w-[65px] text-xs rounded-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1505,9 +1791,9 @@ export default function OrderImport() {
                     <SelectItem value="50">50</SelectItem>
                   </SelectContent>
                 </Select>
-                {/* Only on first load — this query polls, so an isFetching spinner blinked every
-                    few seconds and read as the page constantly reloading. */}
-                {sessionsQuery.isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" />}
+                {/* Always mounted (visibility toggled, not presence) so the background poll
+                    never shifts the filter row — a mount/unmount here was the flicker source. */}
+                <Loader2 className={`h-3.5 w-3.5 animate-spin text-gray-400 ${sessionsQuery.isFetching ? "visible" : "invisible"}`} />
               </div>
               {/* Content */}
               {sessionsQuery.isLoading ? (
@@ -1544,11 +1830,11 @@ export default function OrderImport() {
                               <div className="flex-1 min-w-0">
                                 <p className="truncate text-sm font-medium text-gray-900">{stripCsvExt(session.csvFileName)}</p>
                                 <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                                  <span className="rounded bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{session.plant}</span>
+                                  <span className="bg-[#001d6e]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#001d6e] uppercase">{session.plant}</span>
                                   {/* See the note on the other list: Order Date is the meaningful
                                       one (what grouping/filters use); createdAt is just when it landed. */}
                                   {(session as any).orderDate && (
-                                    <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
+                                    <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" title="Order Date — the date this CSV was uploaded for">
                                       For {(session as any).orderDate}
                                     </span>
                                   )}
@@ -1560,16 +1846,26 @@ export default function OrderImport() {
                                     {importerName}
                                   </span>
                                   {(session as any).receivingSessionId && (
-                                    <span className="rounded bg-purple-50 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
+                                    <span className="bg-purple-50 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
                                       Part {(session as any).partIndex ?? "?"}
                                     </span>
                                   )}
                                 </div>
                               </div>
                               <div className="flex shrink-0 items-center gap-1 ml-1">
-                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5">
+                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>
                                   {session.rowCount}
                                 </Badge>
+                                {/* Ordered quantity next to the row count — the row count says how
+                                    many lines the CSV has, not how much was ordered. */}
+                                {(session as any).totalQty != null && (
+                                  <Badge
+                                    className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50 text-xs px-1.5 rounded-xl tabular-nums"
+                                    title="Total ordered quantity across this CSV"
+                                  >
+                                    {Number((session as any).totalQty).toLocaleString()} qty
+                                  </Badge>
+                                )}
                                 {(session as any).scanStatus === "active" && (
                                   <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap">
                                     <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -1586,6 +1882,18 @@ export default function OrderImport() {
                                     Ready
                                   </span>
                                 )}
+                                {((session as any).scanStatus === "completed" || (session as any).scanStatus === "active") && (
+                                  <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-full"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openReports({
+                                        id: session.id, csvFileName: session.csvFileName, plant: session.plant,
+                                        receivingSessionId: (session as any).receivingSessionId, partIndex: (session as any).partIndex,
+                                      });
+                                    }}>
+                                    <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
+                                  </Button>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -1595,10 +1903,10 @@ export default function OrderImport() {
                                 <div className="relative flex-1">
                                   <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
                                   <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)}
-                                    placeholder="Search rows…" className="pl-8 h-9 text-sm" />
+                                    placeholder="Search rows…" className="pl-8 h-9 text-sm rounded-full" />
                                 </div>
                                 {itemSearch && (
-                                  <Button size="sm" variant="ghost" className="h-9 w-9 p-0"
+                                  <Button size="sm" variant="ghost" className="h-9 w-9 p-0 rounded-full"
                                     onClick={() => setItemSearch("")}>
                                     <X className="h-3.5 w-3.5" />
                                   </Button>
@@ -1612,7 +1920,7 @@ export default function OrderImport() {
                                   <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
                                 </div>
                               ) : (
-                                <div className="overflow-x-auto rounded-md border">
+                                <div className="overflow-x-auto border">
                                   <table className="w-max min-w-full border-collapse text-xs">
                                     <thead>
                                       <tr>
@@ -1635,6 +1943,20 @@ export default function OrderImport() {
                                           <td className="px-3 py-1.5">{(item as any).date || "—"}</td>
                                         </tr>
                                       ))}
+                                      {/* Totals close the table. Over the rows ON SCREEN, so a
+                                          search narrows the total with the list. */}
+                                      {filteredItems.length > 0 && (
+                                        <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                                          <td className="border-r px-3 py-2" colSpan={4}>Total</td>
+                                          <td className="border-r px-3 py-2 text-right tabular-nums">
+                                            {filteredItems.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                          </td>
+                                          <td className="border-r px-3 py-2 text-right tabular-nums">
+                                            {filteredItems.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)}
+                                          </td>
+                                          <td className="px-3 py-2" />
+                                        </tr>
+                                      )}
                                     </tbody>
                                   </table>
                                 </div>
@@ -1652,7 +1974,7 @@ export default function OrderImport() {
                         Page {safePage} of {totalPages} · {totalSessions} sessions
                       </span>
                       <div className="flex items-center gap-1">
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs"
+                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-full"
                           disabled={safePage <= 1} onClick={() => setCurrentPage(safePage - 1)}>
                           ← Prev
                         </Button>
@@ -1668,13 +1990,13 @@ export default function OrderImport() {
                             ) : (
                               <Button key={p} size="sm"
                                 variant={p === safePage ? "default" : "outline"}
-                                className={`h-8 w-8 p-0 text-xs ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
+                                className={`h-8 w-8 p-0 text-xs rounded-full ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
                                 onClick={() => setCurrentPage(p as number)}>
                                 {p}
                               </Button>
                             )
                           )}
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs"
+                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-full"
                           disabled={safePage >= totalPages} onClick={() => setCurrentPage(safePage + 1)}>
                           Next →
                         </Button>
@@ -1694,7 +2016,7 @@ export default function OrderImport() {
         open={showMappingDialog}
         onOpenChange={(open) => { if (!open) { setShowMappingDialog(false); } }}
       >
-        <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
+        <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col rounded-xl">
           <DialogHeader>
             <DialogTitle>Map CSV Columns</DialogTitle>
             <DialogDescription>
@@ -1706,19 +2028,19 @@ export default function OrderImport() {
 
           {csvData && (
             <div className="flex flex-col gap-4 overflow-y-auto flex-1 min-h-0 pr-1">
-              <div className="rounded-md border border-blue-100 bg-blue-50 px-4 py-3">
+              <div className="border border-blue-100 bg-blue-50 px-4 py-3">
                 <p className="mb-2 text-xs font-semibold text-blue-700">
                   {csvData.headers.length} columns detected in "{csvData.name}"
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                   {csvData.headers.map((h) => (
-                    <span key={h} className="rounded border border-blue-200 bg-white px-2 py-0.5 text-xs text-blue-800 font-mono">
+                    <span key={h} className="border border-blue-200 bg-white px-2 py-0.5 text-xs text-blue-800 font-mono">
                       {h}
                     </span>
                   ))}
                 </div>
               </div>
-              <div className="rounded-md border bg-gray-50 p-4">
+              <div className="border bg-gray-50 p-4">
                 <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   Map each target field → CSV column
                 </p>
@@ -1726,8 +2048,8 @@ export default function OrderImport() {
                   {TARGET_FIELDS.map((field) => {
                     const matched = mapping[field.key] !== SKIP && mapping[field.key] !== "";
                     return (
-                      <div key={field.key} className="flex items-center gap-3">
-                        <div className="flex w-[140px] shrink-0 items-center gap-1.5">
+                      <div key={field.key} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                        <div className="flex w-full items-center gap-1.5 sm:w-[140px] sm:shrink-0">
                           <span className={`h-2 w-2 rounded-full ${matched ? "bg-green-500" : "bg-gray-300"}`} />
                           <Label className="text-sm">{field.label}</Label>
                         </div>
@@ -1735,7 +2057,7 @@ export default function OrderImport() {
                           value={mapping[field.key] || SKIP}
                           onValueChange={(v) => setMapping((m) => ({ ...m, [field.key]: v }))}
                         >
-                          <SelectTrigger className={`flex-1 h-9 text-sm ${!matched ? "border-dashed text-gray-400" : ""}`}>
+                          <SelectTrigger className={`sm:flex-1 h-9 text-sm rounded-full ${!matched ? "border-dashed text-gray-400" : ""}`}>
                             <SelectValue placeholder="— skip this field —" />
                           </SelectTrigger>
                           <SelectContent>
@@ -1754,7 +2076,7 @@ export default function OrderImport() {
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   Preview — first {Math.min(5, csvData.rows.length)} of {csvData.rows.length} rows
                 </p>
-                <div className="overflow-x-auto rounded-md border">
+                <div className="overflow-x-auto border">
                   <table className="w-max min-w-full border-collapse text-xs">
                     <thead>
                       <tr>
@@ -1797,7 +2119,7 @@ export default function OrderImport() {
             {uploadProgress && (
               <span className="mr-auto self-center text-xs text-gray-500">File {uploadProgress.current} of {uploadProgress.total}</span>
             )}
-            <Button variant="outline"
+            <Button variant="outline" className="rounded-xl"
               onClick={() => {
                 // Cancel aborts the whole queue.
                 setShowMappingDialog(false);
@@ -1810,7 +2132,7 @@ export default function OrderImport() {
             </Button>
             <Button onClick={handleConfirmImport}
               disabled={isBatchImporting || !csvData}
-              className="bg-[#001d6e] hover:bg-[#00154b] text-white">
+              className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl">
               {isBatchImporting ? (
                 <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>
               ) : (
@@ -1823,7 +2145,7 @@ export default function OrderImport() {
 
       {/* ── Deactivate confirmation ── */}
       <AlertDialog open={deactivateTarget !== null} onOpenChange={(open) => { if (!open) setDeactivateTarget(null); }}>
-        <AlertDialogContent>
+        <AlertDialogContent className="rounded-xl">
           <AlertDialogHeader>
             <AlertDialogTitle>Deactivate this session?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -1834,7 +2156,7 @@ export default function OrderImport() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-amber-600 text-white hover:bg-amber-700"
               onClick={() => deactivateTarget !== null && deactivateMutation.mutate(deactivateTarget)}
-              disabled={deactivateMutation.isPending}>
+              disabled={deactivateMutation.isPending || !canWriteOrderImport}>
               {deactivateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Deactivate"}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1843,7 +2165,7 @@ export default function OrderImport() {
 
       {/* ── Complete confirmation ── */}
       <AlertDialog open={completeTarget !== null} onOpenChange={(open) => { if (!open) setCompleteTarget(null); }}>
-        <AlertDialogContent>
+        <AlertDialogContent className="rounded-xl">
           <AlertDialogHeader>
             <AlertDialogTitle>Mark session as completed?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -1854,7 +2176,7 @@ export default function OrderImport() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-green-600 text-white hover:bg-green-700"
               onClick={() => completeTarget !== null && completeMutation.mutate(completeTarget)}
-              disabled={completeMutation.isPending}>
+              disabled={completeMutation.isPending || !canCompleteOrder}>
               {completeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Complete"}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1862,24 +2184,71 @@ export default function OrderImport() {
       </AlertDialog>
 
       {/* ── Delete confirmation ── */}
-      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <AlertDialogContent>
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) { setDeleteTarget(null); setDeletePreview(null); setDeleteTargetInfo(null); } }}>
+        <AlertDialogContent className="rounded-xl">
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete this import session?</AlertDialogTitle>
+            <AlertDialogTitle>Delete this CSV?</AlertDialogTitle>
             <AlertDialogDescription>
-              All rows in this session will be permanently deleted. This cannot be undone.
+              {deletePreview && deletePreview.scannedItemCount > 0 ? (
+                <>
+                  {deletePreview.scannedItemCount} item(s) already scanned against this file
+                  ({deletePreview.scannedQtyTotal} total qty
+                  {deletePreview.extraQtyTotal > 0 ? `, ${deletePreview.extraQtyTotal} extra qty` : ""}
+                  {deletePreview.stockApplied ? ", stock applied" : ""}).
+                  {" "}Will you re-upload a corrected version for this plant/date?
+                  <br /><br />
+                  <b>Yes, I'll re-upload:</b> these scans are held and carried forward automatically onto the corrected CSV.
+                  <br />
+                  <b>No, remove permanently:</b> these scans are reverted{deletePreview.stockApplied ? " and stock is rolled back" : ""}, and your next upload is treated as a brand-new file.
+                </>
+              ) : (
+                <>
+                  Will you re-upload a corrected version for this plant/date?
+                  {" "}Choose <b>re-upload later</b> to keep this slot for the corrected CSV, or
+                  {" "}<b>remove permanently</b> to treat your next upload as a brand-new file.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <AlertDialogCancel className="mt-0">Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-red-600 text-white hover:bg-red-700"
-              onClick={() => deleteTarget !== null && deleteMutation.mutate(deleteTarget)}
+              onClick={() => deleteTarget !== null && deleteMutation.mutate({ id: deleteTarget, mode: "discard" })}
               disabled={deleteMutation.isPending}>
-              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete"}
+              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Remove permanently"}
+            </AlertDialogAction>
+            <AlertDialogAction
+              onClick={() => {
+                if (deleteTarget === null) return;
+                const info = deleteTargetInfo;
+                deleteMutation.mutate(
+                  { id: deleteTarget, mode: "replace" },
+                  {
+                    onSuccess: () => {
+                      if (info) {
+                        setPlant(info.plant);
+                        setOrderDate(info.orderDate);
+                      }
+                      toast({
+                        title: "Pick the corrected CSV",
+                        description: "Plant and Order Date are filled in — choose the file to continue.",
+                      });
+                      reuploadPendingRef.current = true;
+                      fileRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                      fileRef.current?.click();
+                    },
+                  },
+                );
+              }}
+              disabled={deleteMutation.isPending}>
+              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete, I'll re-upload"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <EditCsvDialog sessionId={editSessionId} onClose={() => setEditSessionId(null)} />
+      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} />
     </main>
   );
 }

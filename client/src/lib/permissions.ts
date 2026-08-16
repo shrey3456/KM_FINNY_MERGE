@@ -349,3 +349,21 @@ export function hasPageWriteAccess(pageKey: string): boolean {
     return false;
   }
 }
+
+// View-level counterpart to hasPageWriteAccess — whether pageKey is in the user's allowedPages
+// grant at all (admin/super-admin always pass). Used to decide whether a feature gated by its
+// own page key (independent of whatever page it's surfaced inside) should even be visible —
+// e.g. an "Edit CSV" action embedded in the Order Import page but gated by its own
+// "order-import-edit" grant rather than Order Import's own access.
+export function hasPageViewAccess(pageKey: string): boolean {
+  try {
+    const currentUserStr = localStorage.getItem('currentUser');
+    if (!currentUserStr) return false;
+    const currentUser = JSON.parse(currentUserStr);
+    if (currentUser.role === 'admin' || currentUser.role === 'super-admin') return true;
+    const allowed: string[] = JSON.parse(currentUser.allowedPages || '[]');
+    return allowed.includes(pageKey);
+  } catch {
+    return false;
+  }
+}

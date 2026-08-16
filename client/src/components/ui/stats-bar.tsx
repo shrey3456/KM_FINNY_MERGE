@@ -39,14 +39,16 @@ interface StatsBarProps {
   actions?: ReactNode;
   /** Tiles per row on md+ screens. Defaults to the number of stats (capped at 6). */
   columns?: number;
+  /** Let long captions wrap onto multiple lines instead of truncating with an ellipsis. */
+  wrapLabels?: boolean;
   className?: string;
 }
 
 /**
- * Stats tiles (+ optional action bar) in one bordered card — the Notion Inventory
+ * Stats tiles (+ optional action bar) in one bordered card — the Product Master
  * header treatment, reusable across modules.
  */
-export function StatsBar({ stats, actions, columns, className }: StatsBarProps) {
+export function StatsBar({ stats, actions, columns, wrapLabels, className }: StatsBarProps) {
   const cols = Math.min(columns ?? stats.length, 6);
 
   return (
@@ -84,7 +86,7 @@ export function StatsBar({ stats, actions, columns, className }: StatsBarProps) 
                 >
                   {stat.value}
                 </p>
-                <p className="mt-0.5 truncate text-[10px] font-medium text-gray-500 sm:text-xs">
+                <p className={cn("mt-0.5 text-sm font-medium text-gray-500 sm:text-base", wrapLabels ? "break-words" : "truncate")}>
                   {stat.label}
                 </p>
               </div>

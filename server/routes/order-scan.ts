@@ -1,20 +1,32 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer } from 'http';
+import passport from 'passport';
 import { db, pool } from '../db';
 import {
   orderImportSessions, orderScanItems, orderScanEvents,
   users, plants, plantStvs,
 } from '../../shared/schema';
-import { eq, and, or, desc, asc, gte, sql } from 'drizzle-orm';
+import { eq, and, or, desc, asc, gte, sql, inArray } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
-import { computeGroupReport, resolveGroupId, applyLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
+import { computeGroupReport, resolveGroupId, applyLiveScanStock, reverseLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
 import { requirePageWrite } from '../lib/pageAccess';
+import { sessionMiddleware } from '../auth';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
 function plantEq(filter: string) {
   return sql`LOWER(${orderImportSessions.plant}) = LOWER(${filter})`;
+}
+
+// Case-insensitive plant match against a user's assigned-plants list (already lowercased by
+// getUserPlants) — the multi-plant equivalent of plantEq above. Uses drizzle-orm's inArray
+// (LOWER(plant) IN ($1, $2, ...), each value its own bound parameter) rather than
+// `= ANY(${filters}::text[])` — passing a raw JS array through Drizzle's `sql` template tag
+// does NOT bind it as a single Postgres array parameter the way raw pg.query does; it caused
+// a real "malformed array literal" 500 on every route using it (e.g. GET /order-scan/notification).
+function plantIn(filters: string[]) {
+  return inArray(sql`LOWER(${orderImportSessions.plant})`, filters);
 }
 
 const router = Router();
@@ -48,6 +60,15 @@ function broadcastScanEvent(sessionId: number, payload: object) {
   });
 }
 
+// Tells any device actively scanning against this session (joined via {type:'join',
+// sessionId}) that it was just deleted — see the 'session-deleted' handler in
+// client/src/pages/Scanning/Scan.tsx, which shows a toast and lets the page's normal
+// active-session polling fall back to "no active session" without the scanner needing to
+// hit a scan and get a confusing 404. Called from order-import.ts's DELETE handler.
+export function broadcastSessionDeleted(sessionId: number) {
+  broadcastScanEvent(sessionId, { type: 'session-deleted', sessionId });
+}
+
 export function initOrderScanWs(httpServer: HttpServer) {
   // Use noServer so we manually control which upgrades we handle.
   // This prevents conflicts with Vite HMR, which also listens on the same
@@ -63,8 +84,29 @@ export function initOrderScanWs(httpServer: HttpServer) {
         if (process.env.NODE_ENV === 'production') socket.destroy();
         return;
       }
-      wss.handleUpgrade(request, socket as any, head, (ws) => {
-        wss.emit('connection', ws, request);
+
+      // Require login for this connection — same baseline as every REST route on this page
+      // (requireScanRole: "any logged-in user"). The raw upgrade `request` never passes
+      // through Express's own app.use(session(...)) chain on its own, so it's replayed here
+      // by hand: session → passport.initialize → passport.session, then req.isAuthenticated().
+      // `fakeRes` only needs to survive express-session's internal res.end/getHeader/setHeader
+      // touches — no cookie is ever actually written back through this fake response, since
+      // login already happened over a normal HTTP request before the browser opens this socket.
+      if (!sessionMiddleware) { socket.destroy(); return; }
+      const fakeRes: any = { getHeader: () => undefined, setHeader: () => {}, end: () => {}, writeHead: () => {}, on: () => {} };
+      sessionMiddleware(request as any, fakeRes, () => {
+        passport.initialize()(request as any, fakeRes, () => {
+          passport.session()(request as any, fakeRes, () => {
+            const authedReq = request as any;
+            if (!authedReq.isAuthenticated || !authedReq.isAuthenticated()) {
+              socket.destroy();
+              return;
+            }
+            wss.handleUpgrade(request, socket as any, head, (ws) => {
+              wss.emit('connection', ws, request);
+            });
+          });
+        });
       });
     } catch {
       socket.destroy();
@@ -159,66 +201,79 @@ function requireScanRole(req: Request, res: Response, next: NextFunction) {
   next(); // any logged-in user may access scan routes; plant filtering handles the rest
 }
 
-// Mirrors the client's canCompletePart gate (Scan.tsx) — Complete Part and Manage Scans
-// (void a scan) are restricted to: admin/super-admin, or a user who BOTH has "scan-order"
-// granted via Allowed Pages AND has the Supervisor designation — either alone is not enough.
-function canCompleteOrVoidScan(user: any): boolean {
+// Mirrors the client's canCompletePart gate (Scan.tsx) — anyone can complete a part EXCEPT
+// designations "Loader"/"Helper"/"Driver"/"Scanner" (exact match); admin/super-admin always
+// allowed regardless of designation.
+function canCompletePart(user: any): boolean {
   const role = (user?.role ?? '').toLowerCase().trim();
   if (['admin', 'super-admin'].includes(role)) return true;
   const designation = (user?.designation ?? '').toLowerCase().trim();
-  if (designation !== 'supervisor') return false;
-  let allowedPages: string[] = [];
-  try { allowedPages = JSON.parse(user?.allowedPages || '[]'); } catch { /* default [] */ }
-  return allowedPages.includes('scan-order');
+  return !['loader', 'helper', 'driver', 'scanner'].includes(designation);
 }
 
-function requireCompleteOrVoidAccess(req: Request, res: Response, next: NextFunction) {
+function requireCompleteAccess(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
-  if (!canCompleteOrVoidScan(req.user)) {
-    return res.status(403).json({ message: 'You do not have permission to complete or void scans.' });
+  if (!canCompletePart(req.user)) {
+    return res.status(403).json({ message: 'You do not have permission to complete this part.' });
   }
   next();
 }
 
+const WRITE_ADMIN_ROLES = ['admin', 'super-admin', 'superadmin', 'super_admin', 'super admin'];
+function hasWriteAccess(user: any, pageKey: string): boolean {
+  const role = (user?.role ?? '').toString().toLowerCase();
+  if (WRITE_ADMIN_ROLES.includes(role)) return true;
+  let writable: string[] = [];
+  try { writable = JSON.parse(user?.pageWriteAccess || '[]'); } catch { /* default [] */ }
+  return writable.includes(pageKey);
+}
 
-// Extract plant filter for dispatch users (fully case-insensitive).
-// All inputs are lowercased; DB comparisons use LOWER() via plantEq().
-//   role="Dispatch Valsad"              → "valsad"
-//   role="dispatch", dept="Valsad"      → "valsad"
-//   role="dispatch", dept="Dispatch Valsad" → "valsad"
-//   role="user",     dept="DISPATCH VALSAD" → "valsad"
-//   role="Admin"/"Billing"/"Super-Admin" → null (see all plants)
-// Strip "dispatch" prefix and bracket wrappers: "DISPATCH {VALSAD}" → "valsad"
-function extractPlant(s: string): string {
-  return s.toLowerCase().replace(/^dispatch[\s_-]*/i, '').replace(/[{}\[\]()]/g, '').trim();
+// Void needs Write Access via one of two INDEPENDENT paths, not a single fixed pair:
+//   1. BOTH "scan-order" AND "scan-history" — the original rule, for the Scan/Scan History pages.
+//   2. Just "scan-viewer" alone — the lighter, view-plus-correct-mistakes page that deliberately
+//      does NOT grant any of the heavier Scan Order capabilities (scanning, completing,
+//      activating, etc.), so someone can be trusted to void a mistaken scan without being able
+//      to do anything else there.
+// This is an OR-of-ANDs, which is why it's a dedicated function rather than just chaining
+// requirePageWrite calls (chaining only ever produces AND, never OR).
+function requireVoidAccess(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  const user = req.user as any;
+  const role = (user?.role ?? '').toString().toLowerCase();
+  if (WRITE_ADMIN_ROLES.includes(role)) return next();
+  const viaScanPages = hasWriteAccess(user, 'scan-order') && hasWriteAccess(user, 'scan-history');
+  const viaViewer = hasWriteAccess(user, 'scan-viewer');
+  if (viaScanPages || viaViewer) return next();
+  return res.status(403).json({ message: 'Write access required' });
 }
 
 const ADMIN_ROLES = ['admin', 'super-admin', 'billing'];
-const NON_PLANT_WORDS = new Set(['admin', 'super-admin', 'billing', 'user', 'dispatch', 'read', 'write', 'it', 'management', '']);
 
-export function getPlantFilter(user: any): string | null {
-  const role = (user?.role ?? '').toLowerCase().trim();
-  const dept = (user?.department ?? '').toLowerCase().trim();
-
-  // Admin roles see all plants — no filter
-  if (ADMIN_ROLES.includes(role)) return null;
-
-  // Any user: try to extract plant from department first, fall back to role
-  const fromDept = extractPlant(dept);
-  if (fromDept && !NON_PLANT_WORDS.has(fromDept)) return fromDept;
-
-  const fromRole = extractPlant(role);
-  if (fromRole && !NON_PLANT_WORDS.has(fromRole)) return fromRole;
-
-  return null;
+// Shared by every read-only /order-scan/sessions/:id/* route below: loads the session's
+// plant and checks it against the caller's own assigned plants (getUserPlants). The list
+// endpoints (/sessions, /active, /notification, /active-sessions) already filter by plant,
+// but these per-ID detail routes previously trusted whatever id was requested — a plant-
+// scoped user who already knows/guesses an id for a DIFFERENT plant could read its detail
+// data. Sends the 404/403 response itself and returns null so the caller just does
+// `if (!plant) return;`; returns the plant string when access is allowed.
+async function checkSessionPlantOrRespond(req: Request, res: Response, sessionId: number): Promise<string | null> {
+  const { rows } = await pool.query('SELECT plant FROM order_import_sessions WHERE id = $1', [sessionId]);
+  if (!rows[0]) { res.status(404).json({ message: 'Session not found' }); return null; }
+  const plant = rows[0].plant as string;
+  const userPlants = getUserPlants(req.user);
+  if (userPlants !== null && !userPlants.includes((plant ?? '').toLowerCase())) {
+    res.status(403).json({ message: 'Access denied for this plant' });
+    return null;
+  }
+  return plant;
 }
 
-// Which plant names a user may view, for plant-scoped pages (Overall Stock, Scan History).
-// Returns null for admin/super-admin/billing → "see ALL plants, no filter". Otherwise returns
-// the user's assigned plants from the Users page (users.plants JSON array), lowercased. Falls
-// back to the department-derived single plant (getPlantFilter) when no plants are assigned yet,
-// so existing dispatch users keep working before anyone edits their plant list. An empty array
-// (non-admin with nothing resolvable) means "see nothing" — safer than accidentally showing all.
+// Which plant names a user may view/act on — the single source of truth for plant access
+// across every page (Scan, Order Management, Overall Stock, Scan History). Returns null for
+// admin/super-admin/billing → "see ALL plants, no filter". Otherwise returns EXACTLY the
+// user's assigned plants from the Users page (users.plants JSON array), lowercased — no
+// fallback to guessing a plant from department/role text (e.g. "Dispatch Valsad") anymore.
+// An empty array (nothing assigned) means "see/do nothing" — fail closed, not fail open.
 export function getUserPlants(user: any): string[] | null {
   const role = (user?.role ?? '').toLowerCase().trim();
   if (ADMIN_ROLES.includes(role)) return null; // all plants
@@ -228,37 +283,47 @@ export function getUserPlants(user: any): string[] | null {
     const raw = user?.plants;
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (Array.isArray(parsed)) assigned = parsed.map((p) => String(p).toLowerCase().trim()).filter(Boolean);
-  } catch { /* fall through to department fallback */ }
+  } catch { /* default [] */ }
 
-  if (assigned.length > 0) return assigned;
-
-  const fallback = getPlantFilter(user); // department/role-derived single plant
-  return fallback ? [fallback.toLowerCase()] : [];
+  return assigned;
 }
 
-// Pick correct pallet size based on plant
-function getPalletSize(product: any, plant: string): number {
-  const p = (plant ?? '').toUpperCase();
-  if (p.includes('VAL')) return Number(product.valPlt) || Number(product.itemsPerPallet) || 0;
-  if (p.includes('IND')) return Number(product.indPlt) || Number(product.itemsPerPallet) || 0;
-  return Number(product.itemsPerPallet) || 0;
+// Pick correct pallet size based on the plant's STATE (products.gjPlt/mpPlt) — the ONLY
+// source of a "defined" pallet size. Deliberately does NOT fall back to itemsPerPallet
+// ("Packets" in the Product Master UI) or the generic "pallets" column — those are a
+// different concept from a real pallet size and are no longer treated as equivalent to one.
+function getPalletSize(product: any, state: string | null): number {
+  const s = (state ?? '').toUpperCase();
+  if (s === 'GJ') return Number(product.gjPlt) || 0;
+  if (s === 'MP') return Number(product.mpPlt) || 0;
+  return 0;
 }
 
-// Full pallet-size fallback chain, shared by session population and the scan handler:
-// plant-specific val_plt/ind_plt → generic items_per_pallet → generic pallets column →
-// parse *NNN from the product name (e.g. "16GM*192 ..." → 192). Same chain the old
-// classic-scan flow used, so pallet math never silently falls back to 1.
-function resolveFullPalletSize(
-  product: { itemsPerPallet?: number | null; valPlt?: number | null; indPlt?: number | null; pallets?: number | null; name?: string | null },
-  plant: string,
+// Two cases only: if GJ PLT/MP PLT is defined for this product/state, use it. If not, the
+// item is treated as exactly ONE pallet sized to its own expected quantity (whatever qty is
+// being converted at this call site — CSV expected qty, live order qty, etc.) rather than
+// silently defaulting to 1-unit-per-pallet or guessing from the product name.
+function resolvePalletSizeOrQty(
+  product: { gjPlt?: number | null; mpPlt?: number | null } | null,
+  state: string | null,
+  expectedQty: number,
 ): number {
-  let size = getPalletSize(product, plant);
-  if (size === 0) size = Number(product.pallets ?? 0);
-  if (size === 0 && product.name) {
-    const m = String(product.name).match(/\*(\d{1,5})/);
-    if (m) { const n = parseInt(m[1], 10); if (Number.isFinite(n) && n > 1) size = n; }
-  }
-  return size;
+  const defined = product ? getPalletSize(product, state) : 0;
+  if (defined > 0) return defined;
+  return Math.max(1, Math.round(expectedQty) || 1);
+}
+
+// Resolves a plant name to its Indian-state short code (plants.state, e.g. "GJ"/"MP") — pallet
+// size lives per-state on products (gjPlt/mpPlt), not per-plant, so every pallet-size lookup
+// needs this first. One query per call site (the plant doesn't change per-row), not per item.
+async function getPlantStateCode(client: any, plantName: string): Promise<string | null> {
+  if (!plantName) return null;
+  const { rows } = await client.query(
+    `SELECT state FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+    [plantName],
+  );
+  const state = rows[0]?.state;
+  return state ? String(state).trim().toUpperCase() : null;
 }
 
 // Seeds order_scan_items from order_import_items (with product/pallet lookups) for a
@@ -268,39 +333,46 @@ function resolveFullPalletSize(
 // "active" flip anymore. Safe to call from an already-open client/transaction (pass one in)
 // or standalone (a pool client is grabbed and released internally).
 async function seedSessionItemsWithClient(client: any, id: number, plant: string): Promise<void> {
+  // Per-item idempotency (not all-or-nothing): a session can already have SOME scan items
+  // seeded here — a delete-with-rollback replacement (see remapDeletedSessionScans) moves a
+  // deleted session's scan items onto this one BEFORE seeding, for barcodes with prior scan
+  // history. Only the remaining CSV rows still need fresh scan items.
   const existingResult = await client.query(
-    'SELECT id FROM order_scan_items WHERE session_id = $1 LIMIT 1',
+    'SELECT order_import_item_id AS "orderImportItemId" FROM order_scan_items WHERE session_id = $1 AND order_import_item_id IS NOT NULL',
     [id],
   );
-  if (existingResult.rows.length > 0) return;
+  const alreadySeededItemIds = new Set(existingResult.rows.map((r: any) => r.orderImportItemId));
 
   const importItemsResult = await client.query(
     'SELECT * FROM order_import_items WHERE session_id = $1',
     [id],
   );
-  const importItems = importItemsResult.rows;
+  const importItems = importItemsResult.rows.filter((i: any) => !alreadySeededItemIds.has(i.id));
   if (importItems.length === 0) return;
 
+  const state = await getPlantStateCode(client, plant);
   const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
   const productMap = new Map<string, any>();
+  // Normalized (trim + lowercase) on both sides, same as every other product lookup in this
+  // app — an exact match here would silently miss a product whenever the two barcodes differ
+  // only by case or incidental whitespace (a CSV cell padded from an Excel export, etc.).
+  const normKey = (b: string) => b.trim().toLowerCase();
   if (barcodes.length > 0) {
     const prodResult = await client.query(
-      `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
-       FROM products WHERE barcode = ANY($1)`,
-      [barcodes],
+      `SELECT barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
+       FROM products WHERE LOWER(TRIM(barcode)) = ANY($1)`,
+      [barcodes.map(normKey)],
     );
-    prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
+    prodResult.rows.forEach((p: any) => productMap.set(normKey(p.barcode), p));
   }
 
   const vals: any[] = [];
   const placeholders: string[] = [];
   let pi = 1;
   for (const item of importItems) {
-    const prod = item.barcode ? productMap.get(item.barcode) : null;
-    const prodObj = prod
-      ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
-      : null;
-    const palletSize = prodObj ? resolveFullPalletSize(prodObj, plant) : 0;
+    const prod = item.barcode ? productMap.get(normKey(item.barcode)) : null;
+    const prodObj = prod ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt } : null;
+    const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
     vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
     placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
     pi += 7;
@@ -392,10 +464,12 @@ export async function seedAndActivateSession(id: number, userCode: string | null
 // ordered by partIndex — so an unrelated 'available' session for the same plant can never
 // jump the queue. Otherwise fall back to plant-wide behaviour. Either way, only proceed if
 // nothing else in that scope is already active (avoid stealing an active lock).
-async function autoActivateNextInScope(
+export type ActivatedNext = { id: number; csvFileName: string; partIndex: number | null };
+
+export async function autoActivateNextInScope(
   completed: { id: number; plant: string; receivingSessionId: number | null; csvFileName: string },
   userCode: string | null,
-): Promise<number | null> {
+): Promise<ActivatedNext | null> {
   // Only one session may be active per plant, so check plant-wide (not just within the group)
   // before promoting anything — otherwise we'd try to activate while another order is mid-scan.
   const activeForPlant = await db.select({ id: orderImportSessions.id })
@@ -455,7 +529,7 @@ async function autoActivateNextInScope(
     return null;
   }
   console.log(`[order-scan] auto-activated next session ${next.id} (${next.csvFileName}) after completing ${completed.id}`);
-  return next.id;
+  return { id: next.id, csvFileName: next.csvFileName, partIndex: next.partIndex };
 }
 
 // Auto Complete's derived-completion check only ever runs inside a /scan request, when a
@@ -504,7 +578,6 @@ export async function sweepStaleCompletions(groupId: number, plant: string, user
     if (!rowCount) continue;
 
     console.log(`[order-scan] sweep auto-completed stale part ${s.id} (${s.csvFileName}) after it lost 'last part' status`);
-    broadcastScanEvent(s.id, { type: 'part-completed', csvFileName: s.csvFileName, partIndex: s.partIndex });
 
     // Make any "already covered by an earlier part" credit real now that this part is
     // actually completed — same reasoning as the manual /complete endpoint.
@@ -520,10 +593,17 @@ export async function sweepStaleCompletions(groupId: number, plant: string, user
       creditClient.release();
     }
 
-    await autoActivateNextInScope(
+    const activated = await autoActivateNextInScope(
       { id: s.id, plant: s.plant, receivingSessionId: groupId, csvFileName: s.csvFileName },
       userCode,
     );
+    broadcastScanEvent(s.id, {
+      type: 'part-completed',
+      csvFileName: s.csvFileName,
+      partIndex: s.partIndex,
+      nextCsvFileName: activated?.csvFileName ?? null,
+      nextPartIndex: activated?.partIndex ?? null,
+    });
   }
 }
 
@@ -542,14 +622,14 @@ router.get('/order-scan/sessions/:id/ws-status', (req: Request, res: Response) =
 // Scanner users: returns their plant's active session only.
 router.get('/order-scan/notification', async (req: Request, res: Response) => {
   try {
-    const plantFilter = getPlantFilter(req.user);
+    const userPlants = getUserPlants(req.user);
     const importedBy  = alias(users, 'imported_by');
 
     const conditions: any[] = [
       eq(orderImportSessions.scanStatus, 'active'),
       eq(orderImportSessions.isDeleted, false),
     ];
-    if (plantFilter) conditions.push(plantEq(plantFilter));
+    if (userPlants !== null) conditions.push(plantIn(userPlants));
 
     const [session] = await db
       .select({
@@ -562,6 +642,8 @@ router.get('/order-scan/notification', async (req: Request, res: Response) => {
         // Master View scopes by the ACTIVE session's order date (not the upload day), so the
         // client needs it here — see mvDate in Scan.tsx.
         orderDate: orderImportSessions.orderDate,
+        // Upload timestamp — the Scan header shows this in place of the CSV file name.
+        createdAt: orderImportSessions.createdAt,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex: orderImportSessions.partIndex,
       })
@@ -582,19 +664,19 @@ router.get('/order-scan/notification', async (req: Request, res: Response) => {
 // user can see, not just the most-recently-activated one. Admin/billing (no plant
 // filter) can have simultaneously active sessions across different plants (e.g.
 // Valsad and Indore scanning at once) — this lets them switch between all of them
-// instead of only ever seeing whichever one is "on top". Dispatch/non-admin users
-// are still plant-scoped, so this returns the same 0-or-1 sessions they already see
-// via /notification — no behavior change for them.
+// instead of only ever seeing whichever one is "on top". A non-admin user assigned to
+// more than one plant on the Users page can now also see more than one active session
+// here — one per plant they're assigned to.
 router.get('/order-scan/active-sessions', async (req: Request, res: Response) => {
   try {
-    const plantFilter = getPlantFilter(req.user);
+    const userPlants = getUserPlants(req.user);
     const importedBy  = alias(users, 'imported_by');
 
     const conditions: any[] = [
       eq(orderImportSessions.scanStatus, 'active'),
       eq(orderImportSessions.isDeleted, false),
     ];
-    if (plantFilter) conditions.push(plantEq(plantFilter));
+    if (userPlants !== null) conditions.push(plantIn(userPlants));
 
     const sessions = await db
       .select({
@@ -607,6 +689,8 @@ router.get('/order-scan/active-sessions', async (req: Request, res: Response) =>
         // Master View scopes by the ACTIVE session's order date (not the upload day), so the
         // client needs it here — see mvDate in Scan.tsx.
         orderDate: orderImportSessions.orderDate,
+        // Upload timestamp — the Scan header shows this in place of the CSV file name.
+        createdAt: orderImportSessions.createdAt,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex: orderImportSessions.partIndex,
       })
@@ -621,17 +705,17 @@ router.get('/order-scan/active-sessions', async (req: Request, res: Response) =>
   }
 });
 
-// ── GET /api/order-scan/whoami — returns what plant the server sees for this user ──
+// ── GET /api/order-scan/whoami — returns what plants the server sees for this user ──
 router.get('/order-scan/whoami', (req: Request, res: Response) => {
-  const plant = getPlantFilter(req.user);
-  res.json({ role: (req.user as any)?.role, department: (req.user as any)?.department, plantFilter: plant });
+  const plants = getUserPlants(req.user);
+  res.json({ role: (req.user as any)?.role, department: (req.user as any)?.department, plants });
 });
 
 // ── GET /api/order-scan/active ───────────────────────────────────────────────
-// Returns the currently active session for the user's plant (or null).
+// Returns the currently active session for the user's plant(s) (or null).
 router.get('/order-scan/active', async (req: Request, res: Response) => {
   try {
-    const plantFilter = getPlantFilter(req.user);
+    const userPlants = getUserPlants(req.user);
     const importedBy  = alias(users, 'imported_by');
     const activatedBy = alias(users, 'activated_by');
 
@@ -639,7 +723,7 @@ router.get('/order-scan/active', async (req: Request, res: Response) => {
       eq(orderImportSessions.scanStatus, 'active'),
       eq(orderImportSessions.isDeleted, false),
     ];
-    if (plantFilter) conditions.push(plantEq(plantFilter));
+    if (userPlants !== null) conditions.push(plantIn(userPlants));
 
     const [session] = await db
       .select({
@@ -673,7 +757,21 @@ router.get('/order-scan/active', async (req: Request, res: Response) => {
 // Returns the list of STV codes configured for a given plant.
 router.get('/order-scan/stvs', async (req: Request, res: Response) => {
   try {
-    const plantName = String(req.query.plant ?? '').trim();
+    // A plant-restricted user may only request one of THEIR assigned plants — not trust the
+    // query string outright, which would let them fetch another plant's STV list. Admin (null)
+    // passes through whatever was requested. A restricted user with no ?plant= given defaults
+    // to their one assigned plant when they have exactly one; with 0 or 2+, they must specify.
+    const userPlants = getUserPlants(req.user);
+    const requested = String(req.query.plant ?? '').trim().toLowerCase();
+    let plantName: string;
+    if (userPlants === null) {
+      plantName = requested;
+    } else if (requested) {
+      if (!userPlants.includes(requested)) return res.status(403).json({ message: 'Access denied for this plant' });
+      plantName = requested;
+    } else {
+      plantName = userPlants.length === 1 ? userPlants[0] : '';
+    }
     if (!plantName) return res.json([]);
 
     const [plant] = await db.select().from(plants)
@@ -697,17 +795,36 @@ router.get('/order-scan/stvs', async (req: Request, res: Response) => {
 // ?date=YYYY-MM-DD filters to that day; defaults to today's sessions (last 48 h).
 router.get('/order-scan/sessions', async (req: Request, res: Response) => {
   try {
-    const userPlantFilter = getPlantFilter(req.user);
+    const userPlants = getUserPlants(req.user);
 
-    // Admin/billing can filter by plant via query param; dispatch uses their own plant
-    const queryPlant = req.query.plant ? String(req.query.plant).trim() : null;
-    const plantFilter = userPlantFilter ?? (queryPlant || null);
+    // Admin/billing (userPlants null) can filter by plant via query param, unrestricted
+    // otherwise. A restricted user is always confined to their assigned plants; ?plant= may
+    // narrow that down to just ONE of their plants if it's actually one of theirs, otherwise
+    // it's ignored and every plant they're assigned to is returned.
+    const queryPlant = req.query.plant ? String(req.query.plant).trim().toLowerCase() : null;
+    let plantCondition: any = null;
+    if (userPlants === null) {
+      if (queryPlant) plantCondition = plantEq(queryPlant);
+    } else {
+      const scoped = queryPlant && userPlants.includes(queryPlant) ? [queryPlant] : userPlants;
+      plantCondition = plantIn(scoped);
+    }
 
     // Date filter: compare the stored timestamp's date directly (server local time),
     // consistent with how order-import.ts filters. No timezone conversion needed.
+    // With no explicit ?date=, "recent" means uploaded in the last 48h OR completed in the
+    // last 48h — not just uploaded. A CSV can sit as 'active'/'available' for weeks (exempt
+    // from this window below via its own OR branch) while it's worked through as backlog; the
+    // moment it's marked 'completed' it loses that exemption, so without also checking
+    // scanCompletedAt here it would vanish from Available/Active/Completed the instant it
+    // finished, just because its original upload date was long past 48h ago.
+    const RECENT_WINDOW_MS = 48 * 60 * 60 * 1000;
     const dateCondition = req.query.date
       ? sql`${orderImportSessions.createdAt}::date = ${String(req.query.date)}::date`
-      : gte(orderImportSessions.createdAt, new Date(Date.now() - 48 * 60 * 60 * 1000));
+      : or(
+          gte(orderImportSessions.createdAt, new Date(Date.now() - RECENT_WINDOW_MS)),
+          gte(orderImportSessions.scanCompletedAt, new Date(Date.now() - RECENT_WINDOW_MS)),
+        );
 
     const statusFilter = req.query.status ? String(req.query.status).trim() : null;
 
@@ -733,6 +850,18 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
         scanCompletedAt:      orderImportSessions.scanCompletedAt,
         receivingSessionId:   orderImportSessions.receivingSessionId,
         partIndex:            orderImportSessions.partIndex,
+        // Ordered totals across this CSV's rows. rowCount alone says how many LINES the file has,
+        // which isn't what anyone means by "how big is this order" — these let the Order Import
+        // tabs show the quantity without expanding every session to add it up. Mirrors the same
+        // two columns on GET /order-import/sessions, which feeds the History tab.
+        totalQty: sql<number>`(
+          SELECT COALESCE(SUM(oii.quantity), 0)::int
+          FROM order_import_items oii WHERE oii.session_id = ${orderImportSessions.id}
+        )`,
+        totalPallets: sql<number>`(
+          SELECT COALESCE(SUM(oii.expected_pallets), 0)::float
+          FROM order_import_items oii WHERE oii.session_id = ${orderImportSessions.id}
+        )`,
       })
       .from(orderImportSessions)
       .leftJoin(importedBy,  eq(orderImportSessions.importedByCode,      importedBy.userCode))
@@ -752,7 +881,7 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
             eq(orderImportSessions.scanStatus, 'active'),
             eq(orderImportSessions.scanStatus, 'available'),
           ),
-          ...(plantFilter ? [plantEq(plantFilter)] : []),
+          ...(plantCondition ? [plantCondition] : []),
           ...(statusFilter ? [eq(orderImportSessions.scanStatus, statusFilter)] : []),
         ),
       )
@@ -766,8 +895,10 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
 
 // ── POST /api/order-scan/sessions/:id/activate ───────────────────────────────
 // Activates a session for scanning. Pre-populates orderScanItems from import items.
-// Only one active session per plant at a time.
-router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+// Only one active session per plant at a time. This is an Order Management page action
+// ("Load for Scan"), so it's gated by Write Access to "order-import" — not "scan-order",
+// which is reserved for the actual barcode-scanning actions on the Scan page itself.
+router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 
@@ -791,14 +922,23 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
       return res.status(409).json({ message: 'Session already completed' });
     }
 
+    // Plant ownership — a user restricted to specific plants (getUserPlants returns a non-
+    // null array) may only activate sessions belonging to one of THOSE plants. Admin/super-
+    // admin/billing (null = unrestricted) act on any plant, same as everywhere else on this page.
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes(session.plant.toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     // Plant-scoped advisory lock — closes a real race the row lock above does NOT: two
     // DIFFERENT sessions for the SAME plant being activated at the same instant lock two
     // different rows, so neither blocks the other, and both could read the conflict-check
     // below as "nothing active yet" before either commits. This serializes all /activate
     // calls for one plant so the second one always sees the first's committed row. Held for
-    // the transaction; released automatically on COMMIT/ROLLBACK.
-    const plantFilter = getPlantFilter(req.user);
-    const lockPlant = (plantFilter ?? session.plant).toLowerCase();
+    // the transaction; released automatically on COMMIT/ROLLBACK. Always the SESSION's own
+    // plant (not "the user's plant" — a user can now be assigned to several).
+    const lockPlant = session.plant.toLowerCase();
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockPlant]);
 
     // Check for a conflicting active session on the same plant (exclude deleted sessions)
@@ -806,7 +946,7 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
       `SELECT id, csv_file_name FROM order_import_sessions
        WHERE LOWER(plant) = LOWER($1) AND scan_status = 'active'
          AND is_deleted = false AND id != $2`,
-      [plantFilter ?? session.plant, id],
+      [session.plant, id],
     );
     if (conflictResult.rows[0]) {
       const c = conflictResult.rows[0];
@@ -830,55 +970,55 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
       [userCode, new Date(), id],
     );
 
-    // Pre-populate orderScanItems only if none exist yet.
-    // The lock on the session row above means only one request can reach here
+    // Pre-populate orderScanItems for any CSV rows not already seeded. Per-item idempotency
+    // (not all-or-nothing): a session can already have SOME scan items here — a
+    // delete-with-rollback replacement (see remapDeletedSessionScans) moves a deleted
+    // session's scan items onto this one before activation, for barcodes with prior scan
+    // history. The lock on the session row above means only one request can reach here
     // at a time, so there is no double-insert race.
     const existingResult = await client.query(
-      'SELECT id FROM order_scan_items WHERE session_id = $1 LIMIT 1',
+      'SELECT order_import_item_id AS "orderImportItemId" FROM order_scan_items WHERE session_id = $1 AND order_import_item_id IS NOT NULL',
       [id],
     );
+    const alreadySeededItemIds = new Set(existingResult.rows.map((r: any) => r.orderImportItemId));
 
-    if (existingResult.rows.length === 0) {
-      const importItemsResult = await client.query(
-        'SELECT * FROM order_import_items WHERE session_id = $1',
-        [id],
-      );
-      const importItems = importItemsResult.rows;
+    const importItemsResult = await client.query(
+      'SELECT * FROM order_import_items WHERE session_id = $1',
+      [id],
+    );
+    const importItems = importItemsResult.rows.filter((i: any) => !alreadySeededItemIds.has(i.id));
 
-      if (importItems.length > 0) {
-        const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
-        let productMap = new Map<string, any>();
-        if (barcodes.length > 0) {
-          const prodResult = await client.query(
-            `SELECT barcode, name, items_per_pallet, pallets, val_plt, ind_plt
-             FROM products WHERE barcode = ANY($1)`,
-            [barcodes],
-          );
-          prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
-        }
-
-        const vals: any[] = [];
-        const placeholders: string[] = [];
-        let pi = 1;
-        for (const item of importItems) {
-          const prod = item.barcode ? productMap.get(item.barcode) : null;
-          // Reuse getPalletSize but with snake_case keys from pg driver
-          const prodObj = prod
-            ? { valPlt: prod.val_plt, indPlt: prod.ind_plt, itemsPerPallet: prod.items_per_pallet, pallets: prod.pallets, name: prod.name }
-            : null;
-          const palletSize = prodObj ? resolveFullPalletSize(prodObj, session.plant) : 0;
-          vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
-          placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
-          pi += 7;
-        }
-
-        await client.query(
-          `INSERT INTO order_scan_items
-             (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
-           VALUES ${placeholders.join(',')}`,
-          vals,
+    if (importItems.length > 0) {
+      const state = await getPlantStateCode(client, session.plant);
+      const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
+      let productMap = new Map<string, any>();
+      if (barcodes.length > 0) {
+        const prodResult = await client.query(
+          `SELECT barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
+           FROM products WHERE barcode = ANY($1)`,
+          [barcodes],
         );
+        prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
       }
+
+      const vals: any[] = [];
+      const placeholders: string[] = [];
+      let pi = 1;
+      for (const item of importItems) {
+        const prod = item.barcode ? productMap.get(item.barcode) : null;
+        const prodObj = prod ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt } : null;
+        const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
+        vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
+        placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
+        pi += 7;
+      }
+
+      await client.query(
+        `INSERT INTO order_scan_items
+           (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+         VALUES ${placeholders.join(',')}`,
+        vals,
+      );
     }
 
     await client.query('COMMIT');
@@ -894,10 +1034,21 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('scan-order'),
 
 // ── POST /api/order-scan/sessions/:id/deactivate ─────────────────────────────
 // Releases the active lock without completing — allows another session to go active.
-router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+// Order Management page action — gated by "order-import" write access, same as activate.
+router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('order-import'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    const [session] = await db.select({ plant: orderImportSessions.plant })
+      .from(orderImportSessions)
+      .where(eq(orderImportSessions.id, id));
+    if (!session) return res.status(404).json({ message: 'Session not found' });
+
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((session.plant ?? '').toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     await db.update(orderImportSessions)
       .set({ scanStatus: 'available' })
       .where(eq(orderImportSessions.id, id));
@@ -909,10 +1060,19 @@ router.post('/order-scan/sessions/:id/deactivate', requirePageWrite('scan-order'
 });
 
 // ── POST /api/order-scan/sessions/:id/complete ───────────────────────────────
-router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
+router.post('/order-scan/sessions/:id/complete', requireCompleteAccess, async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    const [ownerCheck] = await db.select({ plant: orderImportSessions.plant })
+      .from(orderImportSessions)
+      .where(eq(orderImportSessions.id, id));
+    if (!ownerCheck) return res.status(404).json({ message: 'Session not found' });
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((ownerCheck.plant ?? '').toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     // Raw pg query (not Drizzle's .update().set()) — Drizzle's timestamp column serializes
     // a JS Date via .toISOString() (UTC) before sending it, while raw pg sends the Date's
     // local (IST) wall-clock value. Every other timestamp write in this file (activate,
@@ -926,13 +1086,6 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, as
       [new Date(), id],
     );
     const completed = completedRows[0];
-    if (completed) {
-      broadcastScanEvent(completed.id, {
-        type: 'part-completed',
-        csvFileName: completed.csvFileName,
-        partIndex: completed.partIndex,
-      });
-    }
 
     // Make any "already covered by an earlier part" credit real (writes to the later part's
     // actual total_scanned_qty/status), instead of leaving it as a display-only number that
@@ -952,9 +1105,22 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, as
       }
     }
 
-    const nextSessionId = completed
+    const next = completed
       ? await autoActivateNextInScope(completed, (req.user as any)?.userCode ?? null)
       : null;
+
+    // Broadcast AFTER auto-activation resolves so the "big" completion popup on the Scan
+    // page can say what's next in the same message, instead of a bare "Part X Complete"
+    // that leaves the operator wondering what just got loaded in front of them.
+    if (completed) {
+      broadcastScanEvent(completed.id, {
+        type: 'part-completed',
+        csvFileName: completed.csvFileName,
+        partIndex: completed.partIndex,
+        nextCsvFileName: next?.csvFileName ?? null,
+        nextPartIndex: next?.partIndex ?? null,
+      });
+    }
 
     // Stock is no longer applied here. Every scan now applies its own stock delta
     // immediately (see applyLiveScanStock in the /scan handler above), so by the time a
@@ -964,10 +1130,113 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteOrVoidAccess, as
     // applySessionStock is kept as a standalone reconciliation tool (not called from any
     // route) for manually fixing stock drift if it's ever needed, not as part of this flow.
 
-    res.json({ success: true, nextSessionId });
+    res.json({ success: true, nextSessionId: next?.id ?? null });
     broadcastOrderImportUpdate();
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Complete failed' });
+  }
+});
+
+// ── POST /api/order-scan/sessions/:id/reopen ─────────────────────────────────
+// Undoes an accidental "Complete" click. Deliberately narrow: only the MOST RECENTLY
+// completed session for that plant is eligible — reopening an older completed CSV would let
+// scanning resume out of FIFO order against history that later parts/credits already treated
+// as final (reconcileCredits may have already handed this part's leftover extras to a LATER
+// part — reopening doesn't touch that, it only lets more scanning happen here). If completing
+// this session auto-activated a next one, that session is demoted back to 'available' so this
+// one can retake the 'active' slot — but only if the auto-activated session has no scans of
+// its own yet; if it does, the admin needs to deal with that session directly instead of
+// having it silently pushed aside. Order Management page action — gated by "order-import"
+// write access (not the Complete designation-blocklist rule; Reopen is the undo of an Order
+// Management click, not a scanning-floor decision).
+router.post('/order-scan/sessions/:id/reopen', requirePageWrite('order-import'), async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: sessRows } = await client.query(
+      `SELECT id, plant, scan_status AS "scanStatus", scan_completed_at AS "scanCompletedAt",
+              csv_file_name AS "csvFileName", part_index AS "partIndex"
+       FROM order_import_sessions WHERE id = $1 AND is_deleted = false FOR UPDATE`,
+      [id],
+    );
+    const session = sessRows[0];
+    if (!session) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Session not found' });
+    }
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((session.plant ?? '').toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+    if (session.scanStatus !== 'completed') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Only a completed session can be reopened.' });
+    }
+
+    // Must be the LAST completed session for this plant — nothing else completed after it.
+    const { rows: laterRows } = await client.query(
+      `SELECT id FROM order_import_sessions
+       WHERE LOWER(plant) = LOWER($1) AND is_deleted = false AND scan_status = 'completed'
+         AND (scan_completed_at > $2 OR (scan_completed_at = $2 AND id > $3))
+       LIMIT 1`,
+      [session.plant, session.scanCompletedAt, id],
+    );
+    if (laterRows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Only the most recently completed session for this plant can be reopened.' });
+    }
+
+    // Whatever auto-activated after this one completed must step aside first.
+    const { rows: activeRows } = await client.query(
+      `SELECT id, csv_file_name AS "csvFileName" FROM order_import_sessions
+       WHERE LOWER(plant) = LOWER($1) AND is_deleted = false AND scan_status = 'active' AND id <> $2
+       FOR UPDATE`,
+      [session.plant, id],
+    );
+    const activeNext = activeRows[0];
+    if (activeNext) {
+      const { rows: scannedRows } = await client.query(
+        `SELECT COUNT(*)::int AS cnt FROM order_scan_items WHERE session_id = $1 AND total_scanned_qty > 0`,
+        [activeNext.id],
+      );
+      if ((scannedRows[0]?.cnt ?? 0) > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          message: `"${activeNext.csvFileName}" is already active and has scans on it — handle that session first, then reopen this one.`,
+        });
+      }
+      await client.query(
+        `UPDATE order_import_sessions
+         SET scan_status = 'available', scan_activated_by_code = NULL, scan_activated_at = NULL
+         WHERE id = $1`,
+        [activeNext.id],
+      );
+    }
+
+    await client.query(
+      `UPDATE order_import_sessions SET scan_status = 'active', scan_completed_at = NULL WHERE id = $1`,
+      [id],
+    );
+
+    await client.query('COMMIT');
+
+    broadcastScanEvent(id, {
+      type: 'session-reopened',
+      csvFileName: session.csvFileName,
+      partIndex: session.partIndex,
+    });
+    broadcastOrderImportUpdate();
+    res.json({ success: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Reopen failed' });
+  } finally {
+    client.release();
   }
 });
 
@@ -976,12 +1245,13 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const items = await db.select().from(orderScanItems)
       .where(eq(orderScanItems.sessionId, id))
       .orderBy(asc(orderScanItems.id));
 
     // items_per_pallet on this row is a one-time snapshot taken when the session was
-    // activated (see resolveFullPalletSize / seedAndActivateSession) — if the product's
+    // activated (see resolvePalletSizeOrQty / seedAndActivateSession) — if the product's
     // pallet config was blank then and got filled in afterward, the stored value stays
     // stale forever for a session that's already active. Re-resolve live here too, same
     // as the scan handler, so every screen reading this endpoint (CSV Items table,
@@ -991,8 +1261,9 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
       const [sessionRow] = await db.select({ plant: orderImportSessions.plant })
         .from(orderImportSessions).where(eq(orderImportSessions.id, id));
       const plant = sessionRow?.plant ?? '';
+      const state = await getPlantStateCode(pool, plant);
       const prodRows = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, name, items_per_pallet, pallets, val_plt, ind_plt
+        `SELECT LOWER(barcode) AS barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
          FROM products WHERE LOWER(barcode) = ANY($1)`,
         [barcodes],
       );
@@ -1000,11 +1271,7 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
       for (const item of items) {
         const p = item.barcode ? productMap.get(item.barcode.toLowerCase()) : null;
         if (!p) continue;
-        const liveIpp = resolveFullPalletSize(
-          { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt, pallets: p.pallets, name: p.name },
-          plant,
-        );
-        if (liveIpp > 0) item.itemsPerPallet = liveIpp;
+        item.itemsPerPallet = resolvePalletSizeOrQty({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state, item.expectedQty ?? 0);
       }
     }
 
@@ -1026,6 +1293,7 @@ router.get('/order-scan/sessions/:id/group-credits', async (req: Request, res: R
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const groupId = await resolveGroupId(id);
     if (!groupId) return res.json({ credits: [], partIndex: null, totalParts: 0 });
 
@@ -1058,6 +1326,7 @@ router.get('/order-scan/sessions/:id/group-session-ids', async (req: Request, re
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const { rows } = await pool.query(
       `SELECT id FROM order_import_sessions
        WHERE is_deleted = false AND (
@@ -1154,6 +1423,20 @@ async function writeScanEvents(
        stv ?? null, userCode, userName],
     );
     events.push(extraEventResult.rows[0]);
+
+    // A pure-extra scan (orderQty === 0, e.g. this item is already fully received) never runs
+    // the order_scan_items UPDATE above, so its last_scanned_at would otherwise go stale even
+    // though a box against it was just scanned. Other devices' and Master View's "most recently
+    // scanned floats to top" ordering reads that column (this device's own tab also has a local
+    // scan-sequence counter, so it isn't affected either way) — without this, the row only
+    // reorders correctly on the device that made the scan, and only until its next reload.
+    if (orderQty === 0 && scanItem) {
+      const touchResult = await client.query(
+        `UPDATE order_scan_items SET last_scanned_at = NOW() WHERE id = $1 RETURNING *`,
+        [scanItem.id],
+      );
+      updatedItem = touchResult.rows[0];
+    }
   }
 
   return { events, updatedItem, orderQty, extraQty };
@@ -1174,24 +1457,41 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
   // send `qty`, they're reconstructed via pallets*itemsPerPallet+looseQty using the
   // CLIENT's idea of itemsPerPallet, which can silently diverge from the server's live-
   // resolved value (see the itemsPerPallet resolution below) and corrupt the box count.
-  const { barcode, qty, pallets = 1, looseQty = 0, stv = null } = req.body as {
+  const { barcode: rawBarcode, qty, pallets = 1, looseQty = 0, stv = null } = req.body as {
     barcode: string; qty?: number; pallets?: number; looseQty?: number; isExtra?: boolean; stv?: string | null;
   };
+  // Trimmed at the boundary — a barcode-gun double-fire or a camera decode can prefix/suffix
+  // stray whitespace, and product_plant_stock keys on the literal string (unique on
+  // barcode+plant), so an untrimmed value doesn't just fail to match a product; it creates a
+  // SEPARATE stock row that silently orphans whatever quantity gets scanned under it.
+  const barcode = typeof rawBarcode === 'string' ? rawBarcode.trim() : rawBarcode;
   if (!barcode) return res.status(400).json({ message: 'barcode is required' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // Verify session exists and hasn't been deleted (no lock needed — session row isn't
+    // mutated here). Rejecting a deleted session closes the window where a scan could land
+    // on a CSV an admin just deleted-with-rollback — see remapDeletedSessionScans, which
+    // reads/moves this session's scan items once a replacement is uploaded; a scan slipping
+    // in after that read would be silently lost.
     const sessResult = await client.query(
-      'SELECT id, plant, receiving_session_id AS "receivingSessionId" FROM order_import_sessions WHERE id = $1',
+      'SELECT id, plant, receiving_session_id AS "receivingSessionId" FROM order_import_sessions WHERE id = $1 AND is_deleted = false',
       [sessionId],
     );
     if (!sessResult.rows[0]) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Session not found' });
+      return res.status(404).json({ message: 'Session not found or has been deleted' });
     }
     const anchorSession = sessResult.rows[0];
+
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((anchorSession.plant ?? '').toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
     const groupId = anchorSession.receivingSessionId ?? anchorSession.id;
 
     // Every part of the same FIFO group is scannable at once — this scan is resolved by
@@ -1247,21 +1547,20 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // against that CSV item would silently keep using the stale 0 forever, recording 1 box =
     // 1 "pallet". Resolving live here means pallet math is always correct regardless of when
     // the product's config was set relative to seeding.
-    let resolvedItemName: string | null = (matchedItem ?? itemRowsBySession.get(frontSession.id))?.item_name ?? null;
-    let resolvedIpp = Number((matchedItem ?? itemRowsBySession.get(frontSession.id))?.items_per_pallet ?? 0);
+    const anchorItem = matchedItem ?? itemRowsBySession.get(frontSession.id);
+    let resolvedItemName: string | null = anchorItem?.item_name ?? null;
+    const anchorExpectedQty = Number(anchorItem?.expected_qty ?? 0);
+    let resolvedIpp = Number(anchorItem?.items_per_pallet ?? 0);
     const prodResult = await client.query(
-      `SELECT name, items_per_pallet, pallets, val_plt, ind_plt
+      `SELECT name, gj_plt, mp_plt
        FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
       [barcode],
     );
     if (prodResult.rows[0]) {
       const p = prodResult.rows[0];
       resolvedItemName = resolvedItemName ?? p.name ?? null;
-      const liveIpp = resolveFullPalletSize(
-        { itemsPerPallet: p.items_per_pallet, valPlt: p.val_plt, indPlt: p.ind_plt, pallets: p.pallets, name: p.name },
-        anchorSession.plant ?? '',
-      );
-      if (liveIpp > 0) resolvedIpp = liveIpp;
+      const state = await getPlantStateCode(client, anchorSession.plant ?? '');
+      resolvedIpp = resolvePalletSizeOrQty({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state, anchorExpectedQty);
     }
     const itemsPerPallet = resolvedIpp;
 
@@ -1365,18 +1664,28 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     for (const sid of newlyCompleted) {
       const s = sessions.find((x: any) => x.id === sid);
       if (!s) continue;
-      broadcastScanEvent(sid, { type: 'part-completed', csvFileName: s.csvFileName, partIndex: s.partIndex });
       const activated = await autoActivateNextInScope(
         { id: sid, plant: s.plant, receivingSessionId: anchorSession.receivingSessionId, csvFileName: s.csvFileName },
         userCode,
       );
+      broadcastScanEvent(sid, {
+        type: 'part-completed',
+        csvFileName: s.csvFileName,
+        partIndex: s.partIndex,
+        nextCsvFileName: activated?.csvFileName ?? null,
+        nextPartIndex: activated?.partIndex ?? null,
+      });
       if (activated) broadcastOrderImportUpdate();
     }
 
     // Broadcast after commit so subscribers always see the committed state — routed to
-    // whichever session(s) each event actually belongs to.
+    // whichever session(s) each event actually belongs to. Not restricted to non-extra events:
+    // a pure-extra scan against an already-received item still touches that item's
+    // last_scanned_at (see writeScanEvents) and other devices need that update too, or the
+    // item only floats to the top of their CSV Items / Master View list on the device that
+    // actually made the scan.
     for (const event of events) {
-      const isForUpdatedItem = updatedItem && event.scan_item_id === updatedItem.id && !event.is_extra;
+      const isForUpdatedItem = updatedItem && event.scan_item_id === updatedItem.id;
       broadcastScanEvent(event.__sessionId, {
         type: 'scan',
         item: isForUpdatedItem ? {
@@ -1414,6 +1723,7 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const { rows } = await pool.query(`
       SELECT
         COALESCE(ose.barcode, '')            AS barcode,
@@ -1424,6 +1734,7 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
         MAX(ose.scanned_by_name)             AS "scannedByName"
       FROM order_scan_events ose
       WHERE ose.session_id = $1 AND ose.is_extra = true AND ose.voided IS NOT TRUE
+        AND ose.barcode <> 'EMPTY_BOX'
       GROUP BY COALESCE(ose.barcode, '')
       ORDER BY MAX(ose.scanned_at) DESC
     `, [id]);
@@ -1439,10 +1750,17 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
+    // Defaults to the 20 most recent, as before. ?limit= raises that for callers that need the
+    // whole part rather than a recent-activity peek — the Scan Viewer's STV filter reads every
+    // event to work out which items went out on which truck, since STV is recorded per event and
+    // appears nowhere on the per-item rows its table is built from. Capped so a bad value can't
+    // ask for an unbounded result set.
+    const limit = Math.max(1, Math.min(5000, parseInt(String(req.query.limit ?? '20'), 10) || 20));
     const events = await db.select().from(orderScanEvents)
       .where(eq(orderScanEvents.sessionId, id))
       .orderBy(desc(orderScanEvents.scannedAt))
-      .limit(20);
+      .limit(limit);
     res.json(events);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch events' });
@@ -1450,14 +1768,25 @@ router.get('/order-scan/sessions/:id/events', async (req: Request, res: Response
 });
 
 // ── POST /api/order-scan/events/:id/void ─────────────────────────────────────
-// Admin-only. Marks a single scan event as a mistake: the row stays in history
-// (never deleted) but its quantity is reversed out of the linked order_scan_items
-// row, mirroring exactly what the original /scan increment did, in reverse. Only
-// allowed while the parent session is still active — once completed, stock has
-// already been finalized from these numbers, so voiding is blocked at that point.
-// This is purely additive: it doesn't touch the /scan endpoint or any other
-// existing read path — everything that already worked keeps working unchanged.
-router.post('/order-scan/events/:id/void', requireCompleteOrVoidAccess, async (req: Request, res: Response) => {
+// Admin, or anyone granted Write Access to BOTH the "scan-order" and "scan-history" pages,
+// OR (independently) Write Access to just "scan-viewer" alone — see requireVoidAccess above
+// for why this needs to be an OR-of-ANDs rather than a simple chained-middleware AND. Marks a
+// single scan event as a mistake:
+// the row stays in history (never deleted) but its quantity is reversed out of the linked
+// order_scan_items row AND out of stock (product_plant_stock / stock_movements /
+// products.in_stock), mirroring exactly what the original /scan increment did, in reverse.
+// Allowed regardless of whether the part has since been completed — a correction needs to
+// be possible after the fact, not just while it's still open. Blocked only if this exact
+// event has already been used as a FIFO credit source for a later part (credited_qty > 0) —
+// voiding it out from under that credit would leave the later part's numbers wrong with
+// nothing pointing at why; that credit would need to be dealt with first — void the later
+// part's own credit-transfer row instead, which IS handled here: see the is_credit branch
+// below, which reimburses this event's credited_qty instead of reversing stock a second time.
+// Voiding a genuine Regular scan also auto-backfills the resulting shortfall from any leftover
+// Extra scanned for the same item on this same part, if one exists (see the block right after
+// the item update below) — so an Extra sitting next to a voided Regular gets put to use instead
+// of just sitting there unused while the item shows short.
+router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
 
@@ -1481,15 +1810,16 @@ router.post('/order-scan/events/:id/void', requireCompleteOrVoidAccess, async (r
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'This scan is already voided' });
     }
+    if (Number(event.credited_qty ?? 0) > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Part of this scan has already been credited to a later part — void that credited entry first.' });
+    }
 
     const sessResult = await client.query(
-      `SELECT scan_status FROM order_import_sessions WHERE id = $1`,
+      `SELECT plant FROM order_import_sessions WHERE id = $1`,
       [event.session_id],
     );
-    if (sessResult.rows[0]?.scan_status === 'completed') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'This part is already completed — stock has been finalized and this scan can no longer be voided.' });
-    }
+    const plant = sessResult.rows[0]?.plant as string | undefined;
 
     let updatedItem: any = null;
     if (event.scan_item_id) {
@@ -1515,7 +1845,179 @@ router.post('/order-scan/events/:id/void', requireCompleteOrVoidAccess, async (r
           [event.pallets, event.loose_qty, newTotal, item.id],
         );
         updatedItem = updateResult.rows[0];
+
+        // Voiding a genuine Regular scan (not an Extra, not a credit-transfer row) can leave
+        // this item short again. If there's leftover, not-yet-used Extra scanned for the same
+        // barcode on this same part, pull it in to cover the gap automatically — oldest first.
+        // Prefer converting the ACTUAL Extra row itself (is_extra: true → false, in place, same
+        // id, same original scanner/timestamp) rather than leaving it alone and writing a new
+        // synthetic row next to it — that's the common case, when a row's whole remaining amount
+        // is used. Only when a row has to be SPLIT (part of it covers this shortfall, part stays
+        // Extra, or part of it was already spoken for by a different part's forward credit) does
+        // a second row get written, for just the split-off portion — the minimum needed to keep
+        // both halves accurate. Either way, voiding this later is already handled by the
+        // is_credit branch below. Total stock on hand doesn't change here — these boxes were
+        // already counted when the Extra was originally scanned — but the "Extra" bucket in
+        // product_plant_stock.extra_qty shrinks by the same amount, since that many boxes are no
+        // longer sitting around uncommitted; they now count toward this order.
+        if (!event.is_extra && !event.is_credit) {
+          let shortfall = Math.max(0, Number(updatedItem.expected_qty ?? 0) - Number(updatedItem.total_scanned_qty ?? 0));
+          if (shortfall > 0) {
+            const { rows: extraEvents } = await client.query(
+              `SELECT id, total_qty, credited_qty
+               FROM order_scan_events
+               WHERE session_id = $1 AND barcode = $2 AND is_extra = true AND voided IS NOT TRUE
+                 AND total_qty > COALESCE(credited_qty, 0)
+               ORDER BY scanned_at ASC, id ASC
+               FOR UPDATE`,
+              [event.session_id, event.barcode],
+            );
+            for (const ex of extraEvents) {
+              if (shortfall <= 0) break;
+              const alreadyCredited = Number(ex.credited_qty ?? 0);
+              const available = Number(ex.total_qty) - alreadyCredited;
+              if (available <= 0) continue;
+              const take = Math.min(available, shortfall);
+              const wholeRowUnclaimed = alreadyCredited === 0 && take === Number(ex.total_qty);
+
+              if (wholeRowUnclaimed) {
+                // This row's entire amount is going toward this shortfall and nothing else has
+                // ever claimed part of it — just flip it, no new row. Scan history then shows
+                // this exact entry as Regular, exactly as it would if it'd been scanned that way
+                // to begin with (same scanner, same timestamp).
+                await client.query(
+                  `UPDATE order_scan_events SET is_extra = false, is_credit = true WHERE id = $1`,
+                  [ex.id],
+                );
+              } else {
+                // Only part of this row is being converted — the rest either stays Extra or was
+                // already claimed elsewhere. Reserve it via credited_qty (never mutate the
+                // original row's total_qty — it stays an accurate record of what was actually
+                // scanned) and write one small linked row for just the converted portion.
+                await client.query(
+                  `UPDATE order_scan_events SET credited_qty = COALESCE(credited_qty, 0) + $1 WHERE id = $2`,
+                  [take, ex.id],
+                );
+                await client.query(
+                  `INSERT INTO order_scan_events
+                     (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+                      items_per_pallet, is_extra, scanned_by_name, is_credit, credit_source_event_id)
+                   VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6,true,$7)`,
+                  [event.session_id, item.id, event.barcode, event.item_name, take, 'System (backfilled from Extra after void)', ex.id],
+                );
+              }
+
+              if (plant) {
+                const { rows: pps } = await client.query(
+                  `UPDATE product_plant_stock
+                   SET extra_qty = GREATEST(0, extra_qty - $1), updated_at = NOW()
+                   WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
+                   RETURNING product_id`,
+                  [take, event.barcode, plant],
+                );
+                await client.query(
+                  `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+                   VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
+                  [event.barcode, pps[0]?.product_id ?? null, plant, -take, 'Extra reclassified to Regular — backfilled a shortfall left by a voided scan', event.session_id],
+                );
+              }
+
+              const backfillResult = await client.query(
+                `UPDATE order_scan_items
+                 SET total_scanned_qty = COALESCE(total_scanned_qty, 0) + $1,
+                     status = CASE
+                       WHEN COALESCE(total_scanned_qty, 0) + $1 >= expected_qty THEN 'complete'
+                       WHEN COALESCE(total_scanned_qty, 0) + $1 > 0             THEN 'partial'
+                       ELSE 'pending'
+                     END,
+                     last_scanned_at = NOW()
+                 WHERE id = $2
+                 RETURNING *`,
+                [take, item.id],
+              );
+              updatedItem = backfillResult.rows[0];
+
+              shortfall -= take;
+            }
+          }
+        }
       }
+    }
+
+    // Undoing a same-part backfill takes two different shapes depending on how it was created
+    // (see the block above). A row that was flipped IN PLACE from Extra to Regular (no separate
+    // credit_source_event_id — this event IS the original Extra event) needs to be un-flipped,
+    // not marked voided: marking it voided would exclude it from BOTH Regular AND active-Extra
+    // tracking, and those boxes would just disappear. Un-flipping puts it back exactly as it
+    // was — active, and counted as Extra again — so this returns early instead of falling
+    // through to the generic "mark voided" step below.
+    if (event.is_credit && !event.credit_source_event_id) {
+      const unflipResult = await client.query(
+        `UPDATE order_scan_events SET is_extra = true, is_credit = false WHERE id = $1 RETURNING *`,
+        [eventId],
+      );
+      if (plant && event.barcode) {
+        const qty = Number(event.total_qty ?? 0);
+        const { rows: pps } = await client.query(
+          `UPDATE product_plant_stock
+           SET extra_qty = extra_qty + $1, updated_at = NOW()
+           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
+           RETURNING product_id`,
+          [qty, event.barcode, plant],
+        );
+        await client.query(
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+           VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
+          [event.barcode, pps[0]?.product_id ?? null, plant, qty, 'Un-did a backfill conversion — restored to Extra', event.session_id],
+        );
+      }
+      await client.query('COMMIT');
+      return res.json({ event: unflipResult.rows[0], updatedItem });
+    }
+
+    // A system-generated credit-transfer row (see reconcileCredits, and the same-part backfill
+    // block above, for the split case) never added new stock — it just reassigned boxes an
+    // earlier Extra scan already added. Reversing stock for it here would remove those boxes a
+    // second time. Instead, give the qty back to the source Extra event so it's available again.
+    if (event.is_credit && event.credit_source_event_id) {
+      const { rows: srcRows } = await client.query(
+        `SELECT session_id, barcode FROM order_scan_events WHERE id = $1 FOR UPDATE`,
+        [event.credit_source_event_id],
+      );
+      const src = srcRows[0];
+
+      await client.query(
+        `UPDATE order_scan_events SET credited_qty = GREATEST(0, COALESCE(credited_qty, 0) - $1) WHERE id = $2`,
+        [Number(event.total_qty ?? 0), event.credit_source_event_id],
+      );
+
+      // Only the same-part backfill (above) pulled this qty out of product_plant_stock's Extra
+      // bucket when it was created — give it back there too, but only in that case. A forward
+      // credit to a LATER part (reconcileCredits) never touched extra_qty in the first place
+      // (same session_id on both sides is what tells these two apart).
+      if (src && plant && Number(src.session_id) === Number(event.session_id)) {
+        const qty = Number(event.total_qty ?? 0);
+        const { rows: pps } = await client.query(
+          `UPDATE product_plant_stock
+           SET extra_qty = extra_qty + $1, updated_at = NOW()
+           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
+           RETURNING product_id`,
+          [qty, src.barcode, plant],
+        );
+        await client.query(
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+           VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
+          [src.barcode, pps[0]?.product_id ?? null, plant, qty, 'Voided a backfill — qty restored to Extra', event.session_id],
+        );
+      }
+    } else if (plant && event.barcode) {
+      const qty = Number(event.total_qty ?? 0);
+      await reverseLiveScanStock(
+        client, plant, event.barcode,
+        event.is_extra ? 0 : qty,
+        event.is_extra ? qty : 0,
+        event.session_id,
+      );
     }
 
     const voidResult = await client.query(
@@ -1533,6 +2035,151 @@ router.post('/order-scan/events/:id/void', requireCompleteOrVoidAccess, async (r
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to void scan' });
   } finally {
     client.release();
+  }
+});
+
+// ── Empty Box (order-scan) ───────────────────────────────────────────────────
+// An "Empty Box" is a box the operator receives with no item/barcode to scan. It's logged as
+// an ordinary order_scan_events row — NOT a separate table and with NO dedicated flag column —
+// identified purely by the reserved sentinel barcode 'EMPTY_BOX' (no real numeric SKU can
+// collide). That keeps it out of every order/extra/stock total for free:
+//   • received qty comes from order_scan_items (an empty box creates none),
+//   • extra qty comes from is_extra=true events (an empty box is is_extra=false),
+//   • stock joins on real product barcodes ('EMPTY_BOX' matches no product/plant-stock row).
+// So it can never trip the quantity-breach popup or falsely complete a part. Its qty lives in
+// total_qty; its optional note lives in item_name as 'Empty Box' or 'Empty Box: <note>'; undo
+// is a soft-void (voided=true).
+const EMPTY_BOX_BARCODE = 'EMPTY_BOX';
+// item_name is 'Empty Box' with no note, or 'Empty Box: <note>' with one. This SQL fragment
+// pulls the note back out (NULL when there's just the bare label). Keep in sync with the label
+// built in the POST handler below.
+const EMPTY_BOX_NOTE_SQL = `CASE WHEN item_name LIKE 'Empty Box: %' THEN SUBSTRING(item_name FROM 12) ELSE NULL END`;
+
+// Running totals of non-voided empty boxes for a session: count = number of entries,
+// totalQty = sum of their quantities. Both power the reconciliation figure in the UI.
+async function getEmptyBoxSummary(sessionId: number) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS "count", COALESCE(SUM(total_qty), 0)::int AS "totalQty"
+     FROM order_scan_events
+     WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+    [sessionId, EMPTY_BOX_BARCODE],
+  );
+  return { count: rows[0]?.count ?? 0, totalQty: rows[0]?.totalQty ?? 0 };
+}
+
+// ── GET /api/order-scan/sessions/:id/empty-boxes ─────────────────────────────
+// List of non-voided empty box entries for a session, plus the running summary.
+router.get('/order-scan/sessions/:id/empty-boxes', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+  try {
+    if (!(await checkSessionPlantOrRespond(req, res, id))) return;
+    const { rows: entries } = await pool.query(
+      `SELECT id, session_id AS "sessionId", total_qty AS quantity, ${EMPTY_BOX_NOTE_SQL} AS note,
+              scanned_by_code AS "scannedByCode", scanned_by_name AS "scannedByName",
+              scanned_at AS "scannedAt"
+       FROM order_scan_events
+       WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE
+       ORDER BY id DESC`,
+      [id, EMPTY_BOX_BARCODE],
+    );
+    res.json({ ...(await getEmptyBoxSummary(id)), entries });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch empty boxes' });
+  }
+});
+
+// ── POST /api/order-scan/sessions/:id/empty-box ──────────────────────────────
+// Log an empty box against a session. No barcode/CSV lookup — a separate action from a
+// product scan. quantity defaults to 1; an optional note is kept for audit. Blocked once
+// the session is completed (its numbers are finalized, same rule as voiding a scan).
+router.post('/order-scan/sessions/:id/empty-box', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+  const rawQty = Number(req.body?.quantity ?? 1);
+  const quantity = Number.isFinite(rawQty) ? Math.max(1, Math.floor(rawQty)) : 1;
+  const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) || null : null;
+  // Note is folded into item_name (no dedicated column): 'Empty Box' or 'Empty Box: <note>'.
+  const itemName = note ? `Empty Box: ${note}` : 'Empty Box';
+  const userCode = (req.user as any)?.userCode ?? null;
+  const userName = (req.user as any)?.name ?? null;
+
+  try {
+    const { rows: sessRows } = await pool.query(
+      `SELECT scan_status AS "scanStatus", plant FROM order_import_sessions WHERE id = $1 AND is_deleted = false`,
+      [id],
+    );
+    if (!sessRows[0]) return res.status(404).json({ message: 'Session not found or has been deleted' });
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((sessRows[0].plant ?? '').toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+    if (sessRows[0].scanStatus === 'completed') {
+      return res.status(400).json({ message: 'This part is already completed — empty boxes can no longer be added.' });
+    }
+
+    // Sentinel barcode + is_extra=false + scan_item_id=null — see the block comment above for
+    // why this keeps empty boxes out of every quantity/stock aggregation.
+    const { rows: inserted } = await pool.query(
+      `INSERT INTO order_scan_events
+         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+          items_per_pallet, is_extra, scanned_by_code, scanned_by_name)
+       VALUES ($1, NULL, $2, $3, 0, $4, $4, 0, false, $5, $6)
+       RETURNING id, session_id AS "sessionId", total_qty AS quantity, ${EMPTY_BOX_NOTE_SQL} AS note,
+                 scanned_by_code AS "scannedByCode", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt"`,
+      [id, EMPTY_BOX_BARCODE, itemName, quantity, userCode, userName],
+    );
+
+    const summary = await getEmptyBoxSummary(id);
+    res.status(201).json({ entry: inserted[0], ...summary });
+
+    broadcastScanEvent(id, { type: 'empty-box', sessionId: id, ...summary });
+    broadcastOrderImportUpdate();
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to log empty box' });
+  }
+});
+
+// ── POST /api/order-scan/empty-box/:id/undo ──────────────────────────────────
+// Undo/remove an empty box marked by mistake. Soft-void (keeps the audit row) so it drops
+// out of counts/reports. Any scan-order writer can undo (it's operator self-correction).
+// Scoped to the sentinel barcode so this can never void a real product scan.
+router.post('/order-scan/empty-box/:id/undo', requirePageWrite('scan-order'), async (req: Request, res: Response) => {
+  const entryId = parseInt(req.params.id);
+  if (isNaN(entryId)) return res.status(400).json({ message: 'Invalid entry ID' });
+  const userCode = (req.user as any)?.userCode ?? null;
+
+  try {
+    const { rows: ownerRows } = await pool.query(
+      `SELECT ois.plant FROM order_scan_events ose
+       JOIN order_import_sessions ois ON ois.id = ose.session_id
+       WHERE ose.id = $1 AND ose.barcode = $2`,
+      [entryId, EMPTY_BOX_BARCODE],
+    );
+    if (!ownerRows[0]) return res.status(404).json({ message: 'Empty box entry not found or already removed' });
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((ownerRows[0].plant ?? '').toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE order_scan_events
+       SET voided = true, voided_by_code = $1, voided_at = NOW()
+       WHERE id = $2 AND barcode = $3 AND voided IS NOT TRUE
+       RETURNING session_id AS "sessionId"`,
+      [userCode, entryId, EMPTY_BOX_BARCODE],
+    );
+    if (!rows[0]) return res.status(404).json({ message: 'Empty box entry not found or already removed' });
+
+    const sessionId = rows[0].sessionId;
+    const summary = await getEmptyBoxSummary(sessionId);
+    res.json({ success: true, sessionId, ...summary });
+
+    broadcastScanEvent(sessionId, { type: 'empty-box', sessionId, ...summary });
+    broadcastOrderImportUpdate();
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to undo empty box' });
   }
 });
 
