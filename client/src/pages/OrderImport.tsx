@@ -1158,7 +1158,7 @@ export default function OrderImport() {
 
   return (
     <main className="flex-1 overflow-y-auto bg-gray-50">
-      <div className="mx-auto max-w-5xl px-4 py-6 space-y-6">
+      <div className="mx-auto w-full max-w-[1800px] px-4 py-6 space-y-6">
 
         {/* ── Page Header ── */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
