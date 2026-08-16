@@ -163,7 +163,7 @@ export default function OrderManagement() {
         </DialogContent>
       </Dialog>
 
-      <div className="mx-auto max-w-7xl space-y-6">
+      <div className="mx-auto w-full max-w-[1800px] space-y-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-md bg-[#001d6e] text-white">

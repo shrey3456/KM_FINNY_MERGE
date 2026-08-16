@@ -810,7 +810,7 @@ const Users = () => {
 
   return (
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-      <div className="max-w-6xl mx-auto">
+      <div className="mx-auto w-full max-w-[1800px]">
         <div className="mb-6">
           <h2 className="text-2xl font-bold">Users</h2>
           <p className="text-gray-600">Manage user accounts and permissions</p>

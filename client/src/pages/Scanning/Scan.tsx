@@ -4159,7 +4159,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
         {/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */}
       <div className={bigView ? "hidden" : "hidden lg:block"}>        
-          <div className="mx-auto max-w-7xl space-y-3">
+          <div className="mx-auto w-full max-w-[1800px] space-y-3">
 
             {/* Header row */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -5309,7 +5309,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   return (
     <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${kioskRotateClass}`}>
       <RotateToggleButton />
-      <div className="mx-auto max-w-7xl space-y-4">
+      <div className="mx-auto w-full max-w-[1800px] space-y-4">
         <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
 
         {/* Greeting Header */}

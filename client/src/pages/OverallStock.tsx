@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Boxes, TrendingUp, ChevronDown, ChevronLeft, PackageX, CalendarDays, Loader2, History, X, Plus, ArrowLeftRight, Search, ListFilter, ShoppingCart, Scale, Pencil } from "lucide-react";
+import { FileDown, LayoutList, Boxes, TrendingUp, ChevronDown, ChevronLeft, PackageX, CalendarDays, Loader2, History, X, Plus, ArrowLeftRight, Search, ListFilter, ShoppingCart, Scale, Pencil, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -454,7 +454,7 @@ export default function OverallStock() {
     to: toDate || undefined,
     extrasOnly: extrasOnly ? "true" : undefined,
   });
-  const { data: stockData } = useQuery<PlantStockResponse>({
+  const { data: stockData, refetch: refetchStock, isFetching: isStockFetching } = useQuery<PlantStockResponse>({
     queryKey: ["/api/scan-sessions/reports/plant-stock", activePlant, activeState, fromDate, toDate, extrasOnly],
     queryFn: () => apiRequest("GET", stockUrl, undefined, false, true),
     refetchInterval: 30000,
@@ -883,7 +883,10 @@ export default function OverallStock() {
       accessor: (row) => row.expectedQty ?? 0,
       total: (rows) => {
         const withVal = rows.filter((r) => r.expectedQty != null);
-        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.expectedQty ?? 0), 0).toLocaleString() : null;
+        if (withVal.length === 0) return null;
+        const qty = withVal.reduce((sum, r) => sum + (r.expectedQty ?? 0), 0);
+        const plt = withVal.reduce((sum, r) => sum + (r.expectedPallets ?? 0), 0);
+        return stackedCell(qty, plt, "text-purple-700");
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
@@ -905,7 +908,10 @@ export default function OverallStock() {
       accessor: (row: PlantStockRow) => row.openingStock ?? 0,
       total: (rows: PlantStockRow[]) => {
         const withVal = rows.filter((r) => r.openingStock != null);
-        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.openingStock ?? 0), 0).toLocaleString() : null;
+        if (withVal.length === 0) return null;
+        const qty = withVal.reduce((sum, r) => sum + (r.openingStock ?? 0), 0);
+        const plt = withVal.reduce((sum, r) => sum + (r.openingPallets ?? 0), 0);
+        return stackedCell(qty, plt, "text-gray-700");
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
@@ -928,7 +934,11 @@ export default function OverallStock() {
       align: "right",
       sortable: true,
       accessor: (row) => row.inStock,
-      total: (rows) => rows.reduce((sum, r) => sum + r.inStock, 0).toLocaleString(),
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + r.inStock, 0);
+        const plt = rows.reduce((sum, r) => sum + (r.pallets ?? 0), 0);
+        return stackedCell(qty, plt, "text-[#001d6e]");
+      },
       headerClassName: headerBorder,
       cellClassName: `font-bold text-[#001d6e] tabular-nums ${cellBorder}`,
       render: (row) => {
@@ -950,7 +960,11 @@ export default function OverallStock() {
       align: "right",
       sortable: true,
       accessor: (row) => row.extraQty,
-      total: (rows) => rows.reduce((sum, r) => sum + r.extraQty, 0).toLocaleString(),
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + r.extraQty, 0);
+        const plt = rows.reduce((sum, r) => sum + (r.extraPallets ?? 0), 0);
+        return qty > 0 ? stackedCell(qty, plt, "text-amber-600") : null;
+      },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) =>
@@ -963,7 +977,13 @@ export default function OverallStock() {
       align: "right",
       sortable: true,
       accessor: (row) => row.saleQty,
-      total: (rows) => rows.reduce((sum, r) => sum + (r.saleQty ?? 0), 0).toLocaleString(),
+      total: (rows) => {
+        const withVal = rows.filter((r) => r.saleQty != null);
+        if (withVal.length === 0) return null;
+        const qty = withVal.reduce((sum, r) => sum + (r.saleQty ?? 0), 0);
+        const plt = withVal.reduce((sum, r) => sum + (r.salePallets ?? 0), 0);
+        return stackedCell(qty, plt, "text-emerald-600");
+      },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) =>
@@ -986,7 +1006,10 @@ export default function OverallStock() {
       accessor: (row: PlantStockRow) => row.closingStock,
       total: (rows: PlantStockRow[]) => {
         const withVal = rows.filter((r) => r.closingStock != null);
-        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.closingStock ?? 0), 0).toLocaleString() : null;
+        if (withVal.length === 0) return null;
+        const qty = withVal.reduce((sum, r) => sum + (r.closingStock ?? 0), 0);
+        const plt = withVal.reduce((sum, r) => sum + (r.closingPallets ?? 0), 0);
+        return stackedCell(qty, plt, qty < 0 ? "text-red-600" : "text-gray-900");
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
@@ -1002,14 +1025,21 @@ export default function OverallStock() {
       },
     } as DataTableColumn<PlantStockRow>] : [{
       id: "remain",
-      header: columnHeader("remain", "Remain"),
+      header: columnHeader("remain", "Remain stock"),
       width: 120,
       align: "right" as const,
       sortable: true,
       accessor: (row: PlantStockRow) => totalStockOf(row),
       total: (rows: PlantStockRow[]) => {
         const withTotal = rows.filter((r) => totalStockOf(r) != null);
-        return withTotal.length > 0 ? withTotal.reduce((sum, r) => sum + (totalStockOf(r) ?? 0), 0).toLocaleString() : null;
+        if (withTotal.length === 0) return null;
+        const qty = withTotal.reduce((sum, r) => sum + (totalStockOf(r) ?? 0), 0);
+        const plt = withTotal.reduce((sum, r) => {
+          const t = totalStockOf(r);
+          const ipp = r.itemsPerPallet ? Number(r.itemsPerPallet) : 0;
+          return sum + (t != null && ipp > 0 ? t / ipp : 0);
+        }, 0);
+        return stackedCell(qty, plt, qty < 0 ? "text-red-600" : "text-gray-900");
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
@@ -1140,7 +1170,7 @@ export default function OverallStock() {
 
   return (
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-      <div className="max-w-7xl mx-auto space-y-4">
+      <div className="mx-auto w-full max-w-[1800px] space-y-4">
         <PageHeader
           icon={LayoutList}
           title="Stock Overview"
@@ -1314,6 +1344,18 @@ export default function OverallStock() {
           className="rounded-xl shadow-none border-gray-300"
           headerActions={
             <>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => refetchStock()}
+                disabled={isStockFetching}
+                title="Refresh"
+                className="h-8 w-8 rounded-md border-gray-300 text-gray-600 hover:bg-gray-50"
+              >
+                <RotateCw className={`h-3.5 w-3.5 ${isStockFetching ? "animate-spin" : ""}`} />
+              </Button>
+
               <CollapsibleSearch
                 value={search}
                 onChange={(v) => setSearch(v)}
@@ -1670,7 +1712,6 @@ export default function OverallStock() {
           }
         >
           <DataTable<PlantStockRow>
-            className="space-y-0"
             containerClassName="rounded-none border-0"
             columns={stockColumns}
             data={displayRows}

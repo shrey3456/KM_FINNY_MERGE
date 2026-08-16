@@ -488,7 +488,7 @@ console.log(length, partyFontPt);
   return (
     <div className="min-h-screen bg-white p-4 md:p-8">
       {/* Header Section */}
-      <div className="max-w-7xl mx-auto mb-6">
+      <div className="mx-auto w-full max-w-[1800px] mb-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             <Receipt className="h-8 w-8 text-[#001d6e]" style={{fill: "#16a34a"}} />
@@ -518,7 +518,7 @@ console.log(length, partyFontPt);
       </div>
 
       {/* Search Section */}
-      <div className="max-w-7xl mx-auto mb-6">
+      <div className="mx-auto w-full max-w-[1800px] mb-6">
         <Card className="shadow-lg">
           <CardContent className="pt-6">
             <div className="space-y-4">
@@ -587,7 +587,7 @@ console.log(length, partyFontPt);
 
       {/* Error / Not Found State */}
       {((tollVoucherData && !tollVoucherData.success) || isError) && (
-        <div className="max-w-7xl mx-auto mt-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <div className="mx-auto w-full max-w-[1800px] mt-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <Card className="border-red-200 shadow-lg bg-white overflow-hidden">
             <div className="h-2 bg-red-500 w-full"></div>
             <CardContent className="p-12 flex flex-col items-center justify-center text-center">
@@ -631,7 +631,7 @@ console.log(length, partyFontPt);
 
       {/* Voucher Display - Landscape */}
       {tollVoucherData && tollVoucherData.success && tollVoucherData.data && (
-        <div className="max-w-7xl mx-auto">
+        <div className="mx-auto w-full max-w-[1800px]">
           {/* Print Button */}
           <div className="mb-4 flex justify-end">
             <Button onClick={handlePrint} data-testid="button-print">
