@@ -883,7 +883,10 @@ export default function OverallStock() {
       accessor: (row) => row.expectedQty ?? 0,
       total: (rows) => {
         const withVal = rows.filter((r) => r.expectedQty != null);
-        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.expectedQty ?? 0), 0).toLocaleString() : null;
+        if (withVal.length === 0) return null;
+        const qty = withVal.reduce((sum, r) => sum + (r.expectedQty ?? 0), 0);
+        const plt = withVal.reduce((sum, r) => sum + (r.expectedPallets ?? 0), 0);
+        return stackedCell(qty, plt, "text-purple-700");
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
@@ -905,7 +908,10 @@ export default function OverallStock() {
       accessor: (row: PlantStockRow) => row.openingStock ?? 0,
       total: (rows: PlantStockRow[]) => {
         const withVal = rows.filter((r) => r.openingStock != null);
-        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.openingStock ?? 0), 0).toLocaleString() : null;
+        if (withVal.length === 0) return null;
+        const qty = withVal.reduce((sum, r) => sum + (r.openingStock ?? 0), 0);
+        const plt = withVal.reduce((sum, r) => sum + (r.openingPallets ?? 0), 0);
+        return stackedCell(qty, plt, "text-gray-700");
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
@@ -928,7 +934,11 @@ export default function OverallStock() {
       align: "right",
       sortable: true,
       accessor: (row) => row.inStock,
-      total: (rows) => rows.reduce((sum, r) => sum + r.inStock, 0).toLocaleString(),
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + r.inStock, 0);
+        const plt = rows.reduce((sum, r) => sum + (r.pallets ?? 0), 0);
+        return stackedCell(qty, plt, "text-[#001d6e]");
+      },
       headerClassName: headerBorder,
       cellClassName: `font-bold text-[#001d6e] tabular-nums ${cellBorder}`,
       render: (row) => {
@@ -950,7 +960,11 @@ export default function OverallStock() {
       align: "right",
       sortable: true,
       accessor: (row) => row.extraQty,
-      total: (rows) => rows.reduce((sum, r) => sum + r.extraQty, 0).toLocaleString(),
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + r.extraQty, 0);
+        const plt = rows.reduce((sum, r) => sum + (r.extraPallets ?? 0), 0);
+        return qty > 0 ? stackedCell(qty, plt, "text-amber-600") : null;
+      },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) =>
@@ -963,7 +977,13 @@ export default function OverallStock() {
       align: "right",
       sortable: true,
       accessor: (row) => row.saleQty,
-      total: (rows) => rows.reduce((sum, r) => sum + (r.saleQty ?? 0), 0).toLocaleString(),
+      total: (rows) => {
+        const withVal = rows.filter((r) => r.saleQty != null);
+        if (withVal.length === 0) return null;
+        const qty = withVal.reduce((sum, r) => sum + (r.saleQty ?? 0), 0);
+        const plt = withVal.reduce((sum, r) => sum + (r.salePallets ?? 0), 0);
+        return stackedCell(qty, plt, "text-emerald-600");
+      },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) =>
@@ -986,7 +1006,10 @@ export default function OverallStock() {
       accessor: (row: PlantStockRow) => row.closingStock,
       total: (rows: PlantStockRow[]) => {
         const withVal = rows.filter((r) => r.closingStock != null);
-        return withVal.length > 0 ? withVal.reduce((sum, r) => sum + (r.closingStock ?? 0), 0).toLocaleString() : null;
+        if (withVal.length === 0) return null;
+        const qty = withVal.reduce((sum, r) => sum + (r.closingStock ?? 0), 0);
+        const plt = withVal.reduce((sum, r) => sum + (r.closingPallets ?? 0), 0);
+        return stackedCell(qty, plt, qty < 0 ? "text-red-600" : "text-gray-900");
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
@@ -1009,7 +1032,14 @@ export default function OverallStock() {
       accessor: (row: PlantStockRow) => totalStockOf(row),
       total: (rows: PlantStockRow[]) => {
         const withTotal = rows.filter((r) => totalStockOf(r) != null);
-        return withTotal.length > 0 ? withTotal.reduce((sum, r) => sum + (totalStockOf(r) ?? 0), 0).toLocaleString() : null;
+        if (withTotal.length === 0) return null;
+        const qty = withTotal.reduce((sum, r) => sum + (totalStockOf(r) ?? 0), 0);
+        const plt = withTotal.reduce((sum, r) => {
+          const t = totalStockOf(r);
+          const ipp = r.itemsPerPallet ? Number(r.itemsPerPallet) : 0;
+          return sum + (t != null && ipp > 0 ? t / ipp : 0);
+        }, 0);
+        return stackedCell(qty, plt, qty < 0 ? "text-red-600" : "text-gray-900");
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
