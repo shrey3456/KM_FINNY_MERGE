@@ -164,7 +164,9 @@ const CSV_HEADER_MAP: Record<string, string> = {
   "Notion Wise Name": "notionWiseName", "Brand": "brand", "Category": "category",
   "Sale Category": "saleCategory", "Plant": "plant", "Type": "type",
   "Product Image": "productImage", "Vol Master": "volumeInCuFt", "Packets": "itemsPerPallet",
-  "IND PLT": "indPlt", "VAL PLT": "valPlt",
+  // CSV header text stays as-is (matches historical exports/imports) — only where the value
+  // lands changed, since pallet size is a per-state fact now (products.mpPlt/gjPlt).
+  "IND PLT": "mpPlt", "VAL PLT": "gjPlt",
   "GJ Sr": "gjSr", "GJ HSN": "gjHsn", "GJ SAP": "gjSap",
   "GJ Sale Rate": "gjSaleRate", "GJ IGST": "gjIgst",
   "GJ-GA PUR": "gjGaPur", "GJ-MH PUR": "gjMhPur", "GJ-NAGAR PUR": "gjNagarPur",
@@ -180,7 +182,7 @@ const CSV_HEADER_MAP: Record<string, string> = {
   "UP Sr": "upSr", "UP HSN": "upHsn", "UP SAP": "upSap",
   "UP Rate": "upRate", "UP IGST": "upIgst", "For UP Order Form": "forUpOrderForm",
 };
-const INTEGER_FIELDS = new Set(["itemsPerPallet", "indPlt", "valPlt"]);
+const INTEGER_FIELDS = new Set(["itemsPerPallet", "mpPlt", "gjPlt"]);
 
 // GET /api/products/image-by-name?name=...
 // Serves a product's locally-cached image (never the raw Notion URL — see

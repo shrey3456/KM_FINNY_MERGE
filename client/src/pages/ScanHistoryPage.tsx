@@ -123,7 +123,7 @@ export default function ScanHistoryPage() {
   return (
     <>
       <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
-        <div className="max-w-6xl mx-auto space-y-5">
+        <div className="mx-auto w-full max-w-[1800px] space-y-5">
           <PageHeader
             icon={History}
             title="Scan History"

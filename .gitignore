@@ -15,4 +15,7 @@ deploy.bat
 server/migrations/
 web.config
 .claude/
-tsconfig.check.json                                                                                                                                                                                                                                                                                                                                                                                                     
+tsconfig.check.json     
+migrations/
+.claudeignore
+backups/

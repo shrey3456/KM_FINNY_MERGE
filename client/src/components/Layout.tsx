@@ -72,8 +72,9 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
         </div>
       )}
       
-      {/* Main content area */}
-      <div className="flex flex-col flex-1 overflow-hidden">
+      {/* Main content area — "sidebar-hidden" (see index.css) lets pages that center themselves
+          with max-w-Nxl reclaim the width the sidebar used to take, instead of leaving it blank. */}
+      <div className={`flex flex-col flex-1 overflow-hidden ${!sidebarVisible ? "sidebar-hidden" : ""}`}>
         {/* Header for desktop with hamburger menu — collapsible on the scan page. */}
         {!hideHeader && (
         <div className="hidden lg:flex items-center w-full bg-white border-b border-gray-200">

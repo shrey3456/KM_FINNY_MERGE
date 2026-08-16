@@ -18,7 +18,7 @@ import autoTable from "jspdf-autotable";
 
 // ─── Types (mirror the server report shapes) ────────────────────────────────
 type GroupReportEntry = {
-  barcode: string; itemName: string; expectedQty: number; receivedQty: number;
+  barcode: string; itemName: string; itemsPerPallet: number; expectedQty: number; receivedQty: number;
   extraQty: number; missingQty: number;
   adjustedTo: { toPartId: number; toCsvFileName: string; qty: number }[];
   adjustedFrom: { fromPartId: number; fromCsvFileName: string; qty: number }[];
@@ -42,7 +42,7 @@ type GroupReport = {
     totalAdjustments: number; finalStockAdded: number;
     netExtraAfterAdjustment: number; netMissingAfterAdjustment: number;
     allComplete: boolean;
-    productWise: { barcode: string; itemName: string; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }[];
+    productWise: { barcode: string; itemName: string; itemsPerPallet: number; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }[];
   };
 };
 type ScanEvent = {
@@ -51,6 +51,10 @@ type ScanEvent = {
   isExtra: boolean | null; stv: string | null;
   scannedByCode: string | null; scannedByName: string | null; scannedAt: string | null;
   partIndex: number | null; csvFileName: string | null;
+  // Voided scans are kept in this list (never dropped — same "kept in history" rule as Scan
+  // History), just clearly marked, so the raw event count here can differ from the Summary
+  // report's Received total (which already excludes voided) without looking unexplained.
+  voided: boolean | null; voidedAt: string | null; voidReason: string | null;
 };
 type ScanActivity = { scope: string; totalEvents: number; events: ScanEvent[] };
 
@@ -86,37 +90,94 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: Row[]) {
 }
 function safe(name: string) { return name.replace(/\.csv$/i, "").replace(/[^\w.-]+/g, "_"); }
 
+// A qty cell that also carries its pallet count on a second line ("40\n1.00 plt"), rendered as
+// two lines in the report view/exports. Plain qty when the pallet size is unknown (ipp <= 0).
+// items-per-pallet comes straight from the server report (derived there from each CSV row's
+// quantity ÷ expectedPallets) — no separate products lookup needed.
+const qtyWithPlt = (qty: number, ipp: number): string =>
+  ipp > 0 ? `${qty}\n${(qty / ipp).toFixed(2)} plt` : String(qty);
+
 function buildPartRows(part: GroupReportPart): Row[] {
+  // Each qty cell also shows its pallet equivalent below (qty ÷ items-per-pallet). The TOTAL row
+  // sums pallets PER-ITEM (each with its own pallet size) so it lines up with the rows above.
   const rows: Row[] = [[
     "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing",
     "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing",
   ]];
-  part.items.forEach((i) => rows.push([
-    i.barcode, i.itemName, i.expectedQty, i.receivedQty, i.extraQty, i.missingQty,
-    i.adjustedTo.reduce((s, a) => s + a.qty, 0), i.adjustedFrom.reduce((s, a) => s + a.qty, 0),
-    i.remainingExtra, i.remainingMissing,
-  ]));
+  const pltSum = { exp: 0, rec: 0, ext: 0, mis: 0, adjTo: 0, adjFrom: 0, netE: 0, netM: 0 };
+  let anyPlt = false;
+  part.items.forEach((i) => {
+    const ipp = i.itemsPerPallet ?? 0;
+    const adjTo = i.adjustedTo.reduce((s, a) => s + a.qty, 0);
+    const adjFrom = i.adjustedFrom.reduce((s, a) => s + a.qty, 0);
+    if (ipp > 0) {
+      anyPlt = true;
+      pltSum.exp += i.expectedQty / ipp; pltSum.rec += i.receivedQty / ipp;
+      pltSum.ext += i.extraQty / ipp; pltSum.mis += i.missingQty / ipp;
+      pltSum.adjTo += adjTo / ipp; pltSum.adjFrom += adjFrom / ipp;
+      pltSum.netE += i.remainingExtra / ipp; pltSum.netM += i.remainingMissing / ipp;
+    }
+    rows.push([
+      i.barcode, i.itemName,
+      qtyWithPlt(i.expectedQty, ipp), qtyWithPlt(i.receivedQty, ipp), qtyWithPlt(i.extraQty, ipp), qtyWithPlt(i.missingQty, ipp),
+      qtyWithPlt(adjTo, ipp), qtyWithPlt(adjFrom, ipp), qtyWithPlt(i.remainingExtra, ipp), qtyWithPlt(i.remainingMissing, ipp),
+    ]);
+  });
   rows.push([]);
-  rows.push(["TOTAL", "", part.summary.totalExpected, part.summary.totalReceived, part.summary.totalExtra, part.summary.totalMissing, part.summary.totalAdjustedTo, part.summary.totalAdjustedFrom, part.summary.netExtraAfterAdjustment, part.summary.netMissingAfterAdjustment]);
+  const s = part.summary;
+  const totalCell = (qty: number, plt: number) => (anyPlt ? `${qty}\n${plt.toFixed(2)} plt` : String(qty));
+  rows.push(["TOTAL", "",
+    totalCell(s.totalExpected, pltSum.exp), totalCell(s.totalReceived, pltSum.rec), totalCell(s.totalExtra, pltSum.ext), totalCell(s.totalMissing, pltSum.mis),
+    totalCell(s.totalAdjustedTo, pltSum.adjTo), totalCell(s.totalAdjustedFrom, pltSum.adjFrom), totalCell(s.netExtraAfterAdjustment, pltSum.netE), totalCell(s.netMissingAfterAdjustment, pltSum.netM),
+  ]);
   return rows;
 }
 
 function buildGroupRows(report: GroupReport, kind: "partwise" | "final"): Row[] {
   if (kind === "partwise") {
+    // Each qty cell also carries its pallet equivalent on a second line (qty ÷ items-per-pallet).
     const rows: Row[] = [["Part", "File", "Status", "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing", "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing"]];
-    report.parts.forEach((p) => p.items.forEach((i) => rows.push([
-      p.partIndex, p.csvFileName, p.scanStatus ?? "", i.barcode, i.itemName,
-      i.expectedQty, i.receivedQty, i.extraQty, i.missingQty,
-      i.adjustedTo.reduce((s, a) => s + a.qty, 0), i.adjustedFrom.reduce((s, a) => s + a.qty, 0),
-      i.remainingExtra, i.remainingMissing,
-    ])));
+    report.parts.forEach((p) => p.items.forEach((i) => {
+      const ipp = i.itemsPerPallet ?? 0;
+      rows.push([
+        p.partIndex, p.csvFileName, p.scanStatus ?? "", i.barcode, i.itemName,
+        qtyWithPlt(i.expectedQty, ipp), qtyWithPlt(i.receivedQty, ipp), qtyWithPlt(i.extraQty, ipp), qtyWithPlt(i.missingQty, ipp),
+        qtyWithPlt(i.adjustedTo.reduce((s, a) => s + a.qty, 0), ipp), qtyWithPlt(i.adjustedFrom.reduce((s, a) => s + a.qty, 0), ipp),
+        qtyWithPlt(i.remainingExtra, ipp), qtyWithPlt(i.remainingMissing, ipp),
+      ]);
+    }));
     return rows;
   }
+  // Final Summary: each qty cell also shows its pallet equivalent on a second line (qty ÷
+  // items-per-pallet). The consolidated TOTAL row sums pallets PER-PRODUCT (each with its own
+  // pallet size) rather than dividing the grand total by one size, so it matches the rows above.
   const rows: Row[] = [["Barcode", "Item Name", "Total Expected", "Total Received", "Total Extra", "Total Missing", "Total Adjusted"]];
-  report.consolidated.productWise.forEach((pw) => rows.push([pw.barcode, pw.itemName, pw.totalExpected, pw.totalReceived, pw.totalExtra, pw.totalMissing, pw.totalAdjusted]));
+  const pltSum = { exp: 0, rec: 0, ext: 0, mis: 0, adj: 0 };
+  let anyPlt = false;
+  report.consolidated.productWise.forEach((pw) => {
+    const ipp = pw.itemsPerPallet ?? 0;
+    if (ipp > 0) {
+      anyPlt = true;
+      pltSum.exp += pw.totalExpected / ipp;
+      pltSum.rec += pw.totalReceived / ipp;
+      pltSum.ext += pw.totalExtra / ipp;
+      pltSum.mis += pw.totalMissing / ipp;
+      pltSum.adj += pw.totalAdjusted / ipp;
+    }
+    rows.push([
+      pw.barcode, pw.itemName,
+      qtyWithPlt(pw.totalExpected, ipp), qtyWithPlt(pw.totalReceived, ipp), qtyWithPlt(pw.totalExtra, ipp),
+      qtyWithPlt(pw.totalMissing, ipp), qtyWithPlt(pw.totalAdjusted, ipp),
+    ]);
+  });
   rows.push([]);
-  rows.push(["CONSOLIDATED", "", report.consolidated.totalExpected, report.consolidated.totalReceived, report.consolidated.totalExtra, report.consolidated.totalMissing, report.consolidated.totalAdjustments]);
-  rows.push(["Final Stock Added", report.consolidated.finalStockAdded, "Net Extra", report.consolidated.netExtraAfterAdjustment, "Net Missing", report.consolidated.netMissingAfterAdjustment, ""]);
+  const c = report.consolidated;
+  const totalCell = (qty: number, plt: number) => (anyPlt ? `${qty}\n${plt.toFixed(2)} plt` : String(qty));
+  rows.push(["CONSOLIDATED", "",
+    totalCell(c.totalExpected, pltSum.exp), totalCell(c.totalReceived, pltSum.rec), totalCell(c.totalExtra, pltSum.ext),
+    totalCell(c.totalMissing, pltSum.mis), totalCell(c.totalAdjustments, pltSum.adj),
+  ]);
+  rows.push(["Final Stock Added", c.finalStockAdded, "Net Extra", c.netExtraAfterAdjustment, "Net Missing", c.netMissingAfterAdjustment, ""]);
   return rows;
 }
 
@@ -124,7 +185,7 @@ function buildActivityRows(data: ScanActivity, scope: "part" | "group"): Row[] {
   const groupCols = scope === "group";
   const header: Row = [
     "#", ...(groupCols ? ["Part", "File"] : []),
-    "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time",
+    "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time", "Void",
   ];
   const rows: Row[] = [header];
   data.events.forEach((e, idx) => rows.push([
@@ -132,6 +193,7 @@ function buildActivityRows(data: ScanActivity, scope: "part" | "group"): Row[] {
     e.scannedByName ?? "", e.scannedByCode ?? "", e.barcode ?? "", e.itemName ?? "",
     e.pallets ?? 0, e.looseQty ?? 0, e.totalQty ?? 0, e.isExtra ? "Extra" : "Regular",
     e.stv ?? "", fmtIST(e.scannedAt),
+    e.voided ? `Voided${e.voidedAt ? ` (${fmtIST(e.voidedAt)})` : ""}${e.voidReason ? ` — ${e.voidReason}` : ""}` : "",
   ]));
   if (data.events.length === 0) rows.push(["No scans recorded"]);
   return rows;
@@ -363,11 +425,28 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
                   id: String(i),
                   header: String(h),
                   width: 140,
-                  align: typeof viewData.rows[1]?.[i] === "number" ? "right" : "left",
+                  // Right-align numeric columns — including the Final Summary's "qty\nN plt"
+                  // two-line cells (strings containing "plt"), which would otherwise read as text.
+                  align: (typeof viewData.rows[1]?.[i] === "number"
+                    || (typeof viewData.rows[1]?.[i] === "string" && String(viewData.rows[1][i]).includes("plt")))
+                    ? "right" : "left",
                   accessor: (row) => row[i],
                   render: (row) => {
                     const cell = row[i];
-                    return cell === "" || cell == null ? <span className="text-gray-300">—</span> : String(cell);
+                    if (cell === "" || cell == null) return <span className="text-gray-300">—</span>;
+                    const s = String(cell);
+                    // Final Summary qty cells carry their pallet count on a second line
+                    // ("40\n1.00 plt") — render both, the plt line smaller/muted below the qty.
+                    if (s.includes("\n")) {
+                      const [qty, plt] = s.split("\n");
+                      return (
+                        <span className="block leading-tight">
+                          <span className="block">{qty}</span>
+                          <span className="block text-[11px] font-medium text-gray-500">{plt}</span>
+                        </span>
+                      );
+                    }
+                    return s;
                   },
                 }))}
                 data={viewData.rows.slice(1).filter((r) => r.length > 0)}
@@ -375,6 +454,11 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
                 rowClassName={(row) =>
                   typeof row[0] === "string" && /^(TOTAL|CONSOLIDATED|Final Stock Added|No scans recorded)$/i.test(String(row[0]))
                     ? "bg-slate-50 font-semibold"
+                    // Activity rows' "Void" column starts with "Voided" when set — grey these
+                    // out so a cancelled scan reads as cancelled at a glance, same treatment
+                    // Scan History gives voided rows, instead of looking like a normal one.
+                    : row.some((c) => typeof c === "string" && c.startsWith("Voided"))
+                    ? "bg-red-50/50 text-gray-400"
                     : undefined
                 }
                 enableZebraStripes

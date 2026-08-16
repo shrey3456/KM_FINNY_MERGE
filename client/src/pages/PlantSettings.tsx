@@ -30,6 +30,10 @@ const plantFormSchema = z.object({
   bgColor: z.string().min(1, "Background color is required"),
   textColor: z.string().min(1, "Text color is required"),
   borderColor: z.string().min(1, "Border color is required"),
+  // Short code for the Indian state this plant is in (e.g. "GJ", "MP") — drives which
+  // per-state pallet-size column on a product (gjPlt/mpPlt) a scan against this plant reads.
+  // Optional so existing plants don't fail validation until an admin fills it in.
+  state: z.string().optional(),
   isLockingEnabled: z.boolean().default(true),
   isSplitPagesEnabled: z.boolean().default(false),
   isAutoCompleteEnabled: z.boolean().default(false),
@@ -121,6 +125,7 @@ export default function PlantSettings() {
       bgColor: "#ffffff",
       textColor: "#000000",
       borderColor: "#cccccc",
+      state: "",
       isLockingEnabled: true,
       isSplitPagesEnabled: false,
       isAutoCompleteEnabled: false,
@@ -432,6 +437,7 @@ export default function PlantSettings() {
       bgColor: plant.bgColor,
       textColor: plant.textColor,
       borderColor: plant.borderColor,
+      state: plant.state ?? "",
       isLockingEnabled: plant.isLockingEnabled !== undefined && plant.isLockingEnabled !== null ? plant.isLockingEnabled : true,
       isSplitPagesEnabled: plant.isSplitPagesEnabled !== undefined && plant.isSplitPagesEnabled !== null ? plant.isSplitPagesEnabled : false,
       isAutoCompleteEnabled: plant.isAutoCompleteEnabled !== undefined && plant.isAutoCompleteEnabled !== null ? plant.isAutoCompleteEnabled : false,
@@ -447,6 +453,7 @@ export default function PlantSettings() {
         bgColor: "#ffffff",
         textColor: "#000000",
         borderColor: "#cccccc",
+        state: "",
         isLockingEnabled: true,
         isSplitPagesEnabled: false,
         isAutoCompleteEnabled: false,
@@ -465,6 +472,7 @@ export default function PlantSettings() {
         bgColor: "#ffffff",
         textColor: "#000000",
         borderColor: "#cccccc",
+        state: "",
         isLockingEnabled: true,
         isSplitPagesEnabled: false,
         isAutoCompleteEnabled: false,
@@ -525,6 +533,20 @@ export default function PlantSettings() {
       accessor: (p) => p.name,
       cellClassName: "font-medium text-gray-900",
       render: (p) => p.name,
+    },
+    {
+      id: "state",
+      header: "State",
+      width: 80,
+      sortable: true,
+      accessor: (p) => p.state ?? "",
+      render: (p) => p.state ? (
+        <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700">
+          {p.state}
+        </span>
+      ) : (
+        <span className="text-xs text-gray-400">—</span>
+      ),
     },
     {
       id: "locking",
@@ -816,19 +838,36 @@ export default function PlantSettings() {
                 <form onSubmit={form.handleSubmit(onSubmit)} className="flex max-h-[calc(90vh-8rem)] flex-col">
                   <div className="space-y-5 overflow-y-auto px-5 py-4">
                     <FormSection icon={Factory} title="Details">
-                      <FormField
-                        control={form.control}
-                        name="name"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel className="text-xs font-medium text-gray-700">Plant Name (ID)</FormLabel>
-                            <FormControl>
-                              <Input placeholder="e.g. VALSAD" className="h-9" {...field} />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <FormField
+                          control={form.control}
+                          name="name"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel className="text-xs font-medium text-gray-700">Plant Name (ID)</FormLabel>
+                              <FormControl>
+                                <Input placeholder="e.g. VALSAD" className="h-9" {...field} />
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                        <FormField
+                          control={form.control}
+                          name="state"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel className="text-xs font-medium text-gray-700">State Code</FormLabel>
+                              <FormControl>
+                                <Input placeholder="e.g. GJ" className="h-9 uppercase" {...field} />
+                              </FormControl>
+                              {/* Drives which per-state pallet-size column (gjPlt/mpPlt) products
+                                  resolve for scans against this plant — see products.mpPlt/gjPlt. */}
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      </div>
                     </FormSection>
 
                     <FormSection icon={Printer} title="Print Behaviour">
@@ -960,7 +999,7 @@ export default function PlantSettings() {
                     <Button
                       type="submit"
                       className="h-9 bg-[#001d6e] text-white hover:bg-[#00154b]"
-                      disabled={createMutation.isPending || updateMutation.isPending}
+                      disabled={createMutation.isPending || updateMutation.isPending || !canWrite}
                     >
                       {editingPlant ? "Update Plant" : "Create Plant"}
                     </Button>
@@ -994,6 +1033,8 @@ export default function PlantSettings() {
             noResultsState="No plants match your search."
             hasActiveFilters={!!plantSearch}
             sortMode="client"
+            // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box of
+            // its own — matching develop.
             paginationMode="client"
             defaultPageSize={10}
             pageSizeOptions={[10, 25, 50, 100]}
@@ -1021,11 +1062,18 @@ export default function PlantSettings() {
             filteredPlants.map((plant: any) => (
               <div key={plant.id} className="p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <div
-                    className="rounded border px-2.5 py-1 text-sm font-bold truncate"
-                    style={{ backgroundColor: plant.bgColor, color: plant.textColor, borderColor: plant.borderColor, borderWidth: "1px" }}
-                  >
-                    {plant.name}
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div
+                      className="rounded border px-2.5 py-1 text-sm font-bold truncate"
+                      style={{ backgroundColor: plant.bgColor, color: plant.textColor, borderColor: plant.borderColor, borderWidth: "1px" }}
+                    >
+                      {plant.name}
+                    </div>
+                    {plant.state && (
+                      <span className="inline-flex shrink-0 items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700">
+                        {plant.state}
+                      </span>
+                    )}
                   </div>
                   <div className="flex shrink-0 gap-1">
                     <Button

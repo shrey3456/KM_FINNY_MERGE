@@ -21,7 +21,6 @@ import { registerBatchRoutes } from "./batch-routes";
 import { registerOrderRoutes } from "./order-routes";
 import proformaApiRoutes from "./routes/proforma-api";
 import {
-  insertProductSchema,
   insertScanHistorySchema,
   scanEntrySchema,
   insertLoadingOperationSchema,
@@ -112,7 +111,7 @@ import orderImportEditRoutes from "./routes/order-import-edit";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
-import { requirePageWrite } from "./lib/pageAccess";
+import { requirePageWrite, requirePageAccess } from "./lib/pageAccess";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -223,6 +222,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Product endpoints
   apiRouter.get("/products", async (req: Request, res: Response) => {
     try {
+      // Shared across many pages/roles (Scan's Edit CSV search, Overall Stock's Exchange
+      // Product tool, Product Master's admin-only table) — a plain login check, not an
+      // admin/page-specific one, since it's genuinely needed by non-admin users too.
+      if (!req.isAuthenticated || !req.isAuthenticated()) {
+        return res.status(401).json({ message: "Not authenticated" });
+      }
       console.log("Received request for products list");
 
       // Check if "all" parameter is present to return all products
@@ -284,111 +289,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json(product);
   });
 
-  apiRouter.post("/products", async (req: Request, res: Response) => {
-    try {
-      const productData = insertProductSchema.parse(req.body);
-      const product = await storage.createProduct(productData);
-      res.status(201).json(product);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        return res.status(400).json({ message: validationError.message });
-      }
-      res.status(400).json({ message: "Invalid product data" });
-    }
-  });
-
-  apiRouter.put("/products/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-
-      // Get the raw data from request body
-      const rawData = { ...req.body };
-
-      // Pre-process the data to ensure proper types
-      const processedData: Record<string, any> = {};
-
-      // Handle each field with appropriate type conversion
-      for (const [key, value] of Object.entries(rawData)) {
-        // Skip undefined values
-        if (value === undefined) continue;
-
-        switch (key) {
-          // Convert numeric string fields to numbers
-          case "purchased":
-          case "sold":
-          case "inStock":
-          case "itemsPerPallet":
-          case "pallets":
-            processedData[key] =
-              typeof value === "string" ? parseInt(value, 10) : value;
-            break;
-
-          // Handle price fields (convert from string if needed)
-          case "purchasePrice":
-          case "sellingPrice":
-            processedData[key] =
-              typeof value === "string" ? value : String(value);
-            break;
-
-          // Convert date fields to ISO strings
-          case "lastUpdated":
-            if (value instanceof Date) {
-              processedData[key] = value.toISOString();
-            } else if (typeof value === "string") {
-              try {
-                processedData[key] = new Date(value).toISOString();
-              } catch (e) {
-                processedData[key] = new Date().toISOString();
-              }
-            } else {
-              processedData[key] = new Date().toISOString();
-            }
-            break;
-
-          // For all other fields, pass through as is
-          default:
-            processedData[key] = value;
-        }
-      }
-
-      // Ensure lastUpdated is present with a current timestamp
-      if (!processedData.lastUpdated) {
-        processedData.lastUpdated = new Date().toISOString();
-      }
-
-      console.log("Processed product data for update:", processedData);
-
-      // Parse the processed data with the schema
-      const productData = insertProductSchema.partial().parse(processedData);
-
-      const updatedProduct = await storage.updateProduct(id, productData);
-
-      if (!updatedProduct) {
-        return res.status(404).json({ message: "Product not found" });
-      }
-
-      res.json(updatedProduct);
-    } catch (error) {
-      console.error("Error updating product:", error);
-      if (error instanceof ZodError) {
-        console.error(
-          "ZodError details:",
-          JSON.stringify(error.format(), null, 2),
-        );
-        const validationError = fromZodError(error);
-        return res.status(400).json({ message: validationError.message });
-      }
-      res
-        .status(400)
-        .json({
-          message:
-            "Invalid product data: " +
-            (error instanceof Error ? error.message : "Unknown error"),
-        });
-    }
-  });
-
   // PATCH endpoint to update individual product inStock value
   apiRouter.patch("/products/:id", async (req: Request, res: Response) => {
     try {
@@ -447,31 +347,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         message: "Failed to update product inStock",
         error: error instanceof Error ? error.message : String(error),
       });
-    }
-  });
-
-  // Delete a specific product by ID
-  apiRouter.delete("/products/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-      const product = await storage.getProduct(id);
-
-      if (!product) {
-        return res.status(404).json({ message: "Product not found" });
-      }
-
-      const success = await storage.deleteProduct(id);
-
-      if (success) {
-        res.json({ message: "Product deleted successfully" });
-      } else {
-        res.status(500).json({ message: "Failed to delete product" });
-      }
-    } catch (error) {
-      console.error("Error deleting product:", error);
-      res
-        .status(500)
-        .json({ message: "An error occurred while deleting the product" });
     }
   });
 
@@ -3313,134 +3188,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  // CSV Import for products
   const upload = multer({ storage: multer.memoryStorage() });
-
-  apiRouter.post(
-    "/products/import-csv",
-    upload.single("file"),
-    async (req: Request, res: Response) => {
-      try {
-        if (!req.file) {
-          return res.status(400).json({ message: "No file uploaded" });
-        }
-
-        const fileBuffer = req.file.buffer;
-        const results: any[] = [];
-
-        // Parse CSV
-        const stream = Readable.from(fileBuffer.toString());
-        stream
-          .pipe(csv())
-          .on("data", (data) => results.push(data))
-          .on("end", async () => {
-            try {
-              console.log("CSV data:", results);
-
-              // Track imported products and errors
-              let successCount = 0;
-              let errorCount = 0;
-              const errorRows: any[] = [];
-              const barcodeMap: Record<string, number> = {}; // To track duplicates
-
-              // Process each row
-              for (const row of results) {
-                try {
-                  // Convert numeric fields
-                  const purchased = row.Purchased
-                    ? parseInt(row.Purchased, 10) || 0
-                    : 0;
-                  const sold = row.Sold ? parseInt(row.Sold, 10) || 0 : 0;
-                  const inStock = row.InStock
-                    ? parseInt(row.InStock, 10) || 0
-                    : 0;
-                  // Try multiple header variants for items-per-pallet and coerce to a positive integer
-                  const rawItemsPerPallet = row.ItemsPerPallet ?? row.ItemsPer_Pallet ?? row['Items Per Pallet'] ?? row.itemsperpallet ?? row.items_per_pallet ?? row['items per pallet'];
-                  let itemsPerPallet = 0;
-                  if (rawItemsPerPallet != null && String(rawItemsPerPallet).trim() !== '') {
-                    const cleaned = String(rawItemsPerPallet).replace(/[^0-9.-]/g, '');
-                    const parsed = Number(cleaned);
-                    itemsPerPallet = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
-                  }
-                  const pallets = row.Pallets
-                    ? parseInt(row.Pallets, 10) || 0
-                    : 0;
-
-                  // Handle duplicate barcodes by adding a unique suffix
-                  let barcode = row.SKU || "";
-                  if (barcode) {
-                    if (barcode in barcodeMap) {
-                      barcodeMap[barcode]++;
-                      barcode = `${barcode}_${barcodeMap[barcode]}`;
-                    } else {
-                      barcodeMap[barcode] = 1;
-                    }
-                  } else {
-                    // For empty barcodes, use the Sr.No. as the barcode
-                    barcode = row["Sr.No."] || `unknown_${Date.now()}`;
-                  }
-
-                  // Create product entry
-                  await storage.createProduct({
-                    name: row.ItemName || "Unnamed Product",
-                    barcode: barcode,
-                    srNo: row["Sr.No."] || "",
-                    itemNo:
-                      row.ItemNo || row["Item No"] || row["Item No."] || "",
-                    category: row.Category || "",
-                    volumeInCuFt:
-                      row.VolumeInCuFt ||
-                      row["Volume In Cu.Ft"] ||
-                      row["Cu.Ft"] ||
-                      row["Volume"] ||
-                      row["Volume (cu ft)"] ||
-                      row["Volume (cu. ft.)"] ||
-                      row["Volume (cu ft.)"] ||
-                      "",
-                    hsnCode: row.HSNCode || "",
-                    sapCode: row.SAPCode || "",
-                    purchased: purchased,
-                    sold: sold,
-                    inStock: inStock,
-                    itemsPerPallet: itemsPerPallet,
-                    pallets: pallets,
-                    purchasePrice: row.PurchasePrice || "",
-                    sellingPrice: row.SellingPrice || "",
-                    description: row.Description || "",
-                    status: "in stock",
-                  });
-
-                  successCount++;
-                } catch (rowError: any) {
-                  console.error("Error processing row:", row, rowError);
-                  errorCount++;
-                  errorRows.push({
-                    row: row,
-                    error: rowError.message || "Unknown error during import",
-                  });
-                }
-              }
-
-              res.status(200).json({
-                message: `Products imported: ${successCount} successful, ${errorCount} failed`,
-                totalCount: results.length,
-                successCount,
-                errorCount,
-                errors: errorRows.slice(0, 10), // Limit error details to first 10
-              });
-            } catch (parseError) {
-              console.error("Error processing CSV:", parseError);
-              res.status(500).json({ message: "Error processing CSV file" });
-            }
-          });
-      } catch (error) {
-        console.error("CSV import error:", error);
-        res
-          .status(500)
-          .json({ message: "An error occurred during CSV import" });
-      }
-    },
-  );
 
   // Admin endpoint: attempt to fix itemsPerPallet for existing products by parsing numbers
   // Call with ?confirm=true to perform updates; otherwise it returns a dry-run report.
@@ -4487,7 +4235,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   apiRouter.get(
     "/proforma-slips/order/:orderNumber",
     async (req: Request, res: Response) => {
+      // Never let a reverse proxy (IIS ARR) or browser cache this — Print Operations refetches
+      // it right after Lock/Unlock to reflect the new state immediately; without this, a GET to
+      // the exact same URL moments later can be served a stale cached response instead of
+      // hitting the server again, so the button never updates until a hard page reload bypasses
+      // the cache by chance. Same fix already applied to order-import.ts/order-scan.ts.
+      res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.set("Pragma", "no-cache");
       try {
+        if (!req.isAuthenticated || !req.isAuthenticated()) {
+          return res.status(401).json({ message: "Not authenticated" });
+        }
         const orderNumber = req.params.orderNumber;
         if (!orderNumber) {
           return res.status(400).json({ message: "Order number is required" });
@@ -4727,6 +4485,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.delete(
     "/proforma-slips/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -4796,6 +4555,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Proforma Slip Items endpoints
   apiRouter.post(
     "/proforma-slips/:slipId/items",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         const slipId = parseInt(req.params.slipId);
@@ -4896,6 +4656,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.put(
     "/proforma-slip-items/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         console.time("updateProformaSlipItem");
@@ -4961,6 +4722,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.delete(
     "/proforma-slip-items/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         console.time("deleteProformaSlipItem");
@@ -5023,6 +4785,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Optimized batch update endpoint for proforma slip items
   apiRouter.post(
     "/proforma-slip-items/batch-update",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       console.log(
         `Batch update request received for ${req.body.items?.length || 0} items`,
@@ -8243,8 +8006,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
+  // Shared across many pages/roles (Proforma Slips' plant picker, Overall Stock, Scan, Order
+  // Import, the PlantBadge display component) — not exclusive to the Plant Management page,
+  // so this is a plain login check, not a "plant-management" page-access check. Locking it to
+  // that specific page (as an earlier pass did) broke every other page's plant dropdown for
+  // any user without that specific grant.
   app.get("/api/plants", async (req, res) => {
     try {
+      if (!req.isAuthenticated || !req.isAuthenticated()) {
+        return res.status(401).json({ message: "Not authenticated" });
+      }
       const allPlants = await storage.getAllPlants(); // You need to ensure this method exists in storage.ts
       res.json(allPlants);
     } catch (error) {
@@ -8253,18 +8024,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Create a new plant
-  app.post("/api/plants", async (req, res) => {
+  app.post("/api/plants", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const data = insertPlantSchema.parse(req.body);
       const newPlant = await storage.createPlant(data); // Ensure this method exists in storage.ts
       res.status(201).json(newPlant);
@@ -8274,18 +8035,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Update a plant
-  app.put("/api/plants/:id", async (req, res) => {
+  app.put("/api/plants/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       const data = insertPlantSchema.parse(req.body);
       const updatedPlant = await storage.updatePlant(id, data); // Ensure this method exists
@@ -8296,18 +8047,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Delete a plant
-  app.delete("/api/plants/:id", async (req, res) => {
+  app.delete("/api/plants/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       await storage.deletePlant(id); // Ensure this method exists
       res.json({ success: true });
@@ -8316,7 +8057,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/plants/:id/stvs", async (req, res) => {
+  app.get("/api/plants/:id/stvs", requirePageAccess("plant-management"), async (req, res) => {
     try {
       const plantId = parseInt(req.params.id);
       if (Number.isNaN(plantId)) {
@@ -8329,18 +8070,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/plants/:id/stvs", async (req, res) => {
+  app.post("/api/plants/:id/stvs", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const plantId = parseInt(req.params.id);
       if (Number.isNaN(plantId)) {
         return res.status(400).json({ message: "Invalid plant id" });
@@ -8362,18 +8093,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.put("/api/plant-stvs/:id", async (req, res) => {
+  app.put("/api/plant-stvs/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       if (Number.isNaN(id)) {
         return res.status(400).json({ message: "Invalid STV id" });
@@ -8392,18 +8113,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.delete("/api/plant-stvs/:id", async (req, res) => {
+  app.delete("/api/plant-stvs/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
-      // write access to Plant Management via pageWriteAccess on the Users page.
-      let plantMgmtWritable: string[] = [];
-      try { plantMgmtWritable = JSON.parse((req as any)?.user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
-      if (!allowedRoles.includes(role) && !plantMgmtWritable.includes("plant-management")) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       if (Number.isNaN(id)) {
         return res.status(400).json({ message: "Invalid STV id" });
@@ -8662,7 +8373,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     };
     // Both the recurring run and the boot-time run are data-fields-only now — photos are
-    // never checked automatically. An admin syncs photos on demand from the Notion Inventory
+    // never checked automatically. An admin syncs photos on demand from the Product Master
     // page's "Sync Photos" button; Apply only ever touches images that a photo sync actually
     // queued, so staying data-only here never risks silently reverting/losing photo changes.
     setInterval(() => runScheduledSync(false), SYNC_INTERVAL_MS);

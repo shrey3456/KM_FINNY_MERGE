@@ -82,8 +82,41 @@ app.use((req, res, next) => {
       ALTER TABLE order_scan_events
       ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0
     `);
+    // Flags a row as a system-generated credit transfer (see reconcileCredits) rather than a
+    // real scan, and points it back at the source Extra event it was transferred from — so
+    // voiding it can skip the stock reversal and give the qty back to the source instead of
+    // double-removing real stock.
+    await pool.query(`
+      ALTER TABLE order_scan_events
+      ADD COLUMN IF NOT EXISTS is_credit BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS credit_source_event_id INTEGER
+    `);
     // (Empty Box entries reuse order_scan_events' existing columns — sentinel barcode
     // 'EMPTY_BOX', count in total_qty, note in item_name — so no schema change is needed.)
+
+    // Short state code (e.g. "GJ", "MP") for the Indian state a plant is in — drives which
+    // per-state pallet-size column on products (gj_plt/mp_plt) a scan against that plant reads.
+    await pool.query(`
+      ALTER TABLE plants
+      ADD COLUMN IF NOT EXISTS state TEXT
+    `);
+    // Pallet size moves from being named after the PLANT (ind_plt/val_plt) to the STATE it's
+    // actually a fact about (gj_plt/mp_plt) — see plants.state above. A plain rename keeps all
+    // existing data; wrapped in a conditional since RENAME COLUMN has no IF EXISTS clause and
+    // this needs to be safe to run again on every server start once already applied.
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'ind_plt')
+           AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'mp_plt') THEN
+          ALTER TABLE products RENAME COLUMN ind_plt TO mp_plt;
+        END IF;
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'val_plt')
+           AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'products' AND column_name = 'gj_plt') THEN
+          ALTER TABLE products RENAME COLUMN val_plt TO gj_plt;
+        END IF;
+      END $$;
+    `);
 
     // Order Date is now mandatory on upload and is what Master View scopes by (it replaced the
     // old created_at/upload-day filter). Rows imported before that change can have a NULL
@@ -126,6 +159,36 @@ app.use((req, res, next) => {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    // product_plant_stock/stock_movements previously linked to a product ONLY by barcode text.
+    // A product's barcode can be edited later (most commonly via the Notion inventory sync,
+    // which matches/updates existing products by their stable Notion page id, not barcode, and
+    // overwrites barcode whenever Notion's value differs) — once that happens, stock recorded
+    // under the old barcode no longer matches any current product row, and Overall Stock falls
+    // back to showing just the bare barcode instead of the item's name/category/etc. product_id
+    // is a stable link alongside barcode that survives a later barcode edit. Backfilled from
+    // each row's CURRENT barcode below — only fixes rows that haven't drifted yet (nothing
+    // remembers what a barcode used to be), but every write from here on populates product_id
+    // directly, so this can't happen again going forward. WHERE product_id IS NULL makes this
+    // safe to run on every server start — a no-op once everything's backfilled.
+    await pool.query(`
+      ALTER TABLE product_plant_stock
+      ADD COLUMN IF NOT EXISTS product_id INTEGER
+    `);
+    await pool.query(`
+      ALTER TABLE stock_movements
+      ADD COLUMN IF NOT EXISTS product_id INTEGER
+    `);
+    await pool.query(`
+      UPDATE product_plant_stock pps SET product_id = p.id
+      FROM products p
+      WHERE pps.product_id IS NULL AND LOWER(p.barcode) = LOWER(pps.barcode)
+    `);
+    await pool.query(`
+      UPDATE stock_movements sm SET product_id = p.id
+      FROM products p
+      WHERE sm.product_id IS NULL AND LOWER(p.barcode) = LOWER(sm.barcode)
+    `);
+
     console.log('Database migrations completed successfully');
 
     // Auto-sync scan history to the configured Notion inventory DB every 30 minutes. No-ops

@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { Client } from '@notionhq/client';
-import { authenticateToken } from '../middleware/authMiddleware'; // Import middleware
-import { requirePageWrite } from '../lib/pageAccess';
+import { requirePageAccess } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -116,7 +115,7 @@ async function queryByVoucherNumber(
 }
 
 // Toll voucher API - Protected
-router.post('/toll-voucher', requirePageWrite('toll-voucher'), async (req, res) => {
+router.post('/toll-voucher', requirePageAccess('toll-voucher'), async (req, res) => {
   try {
     const { orderNumber } = req.body;
     

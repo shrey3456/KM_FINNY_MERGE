@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
-import { getCurrentUserPermissions, hasPageWriteAccess, hasPageViewAccess } from "../lib/permissions";
+import { hasPageWriteAccess, hasPageViewAccess } from "../lib/permissions";
 import {
   AlertCircle,
   CheckCircle,
@@ -17,6 +17,7 @@ import {
   PackageCheck,
   Pencil,
   RefreshCw,
+  RotateCcw,
   ScanLine,
   Search,
   StopCircle,
@@ -146,6 +147,9 @@ function autoMatch(headers: string[]): Mapping {
 
 type ScanSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
+  // Ordered totals across this CSV's rows — rowCount is only how many LINES it has, which isn't
+  // what "how big is this order" means. Optional: older responses won't carry them.
+  totalQty?: number; totalPallets?: number;
   scanStatus: string; importedByName: string | null; createdAt: string | null;
   // The date this CSV was uploaded FOR (chosen at upload) — distinct from createdAt (when it
   // was uploaded). All date filters/labels on this page use orderDate.
@@ -187,30 +191,20 @@ export default function OrderImport() {
   const [, navigate] = useLocation();
   const { user } = useAuth();
   const role = ((user as any)?.role ?? "").toLowerCase();
-  const department = ((user as any)?.department ?? "").toLowerCase();
-  const userPermissions = getCurrentUserPermissions();
-  let allowedPagesList: string[] = [];
-  try { allowedPagesList = JSON.parse((user as any)?.allowedPages || "[]"); } catch { allowedPagesList = []; }
-  // Write access (below) implies read access, so it's included here too.
-  const isImportRole = ["admin", "super-admin"].includes(role)
-    || department === "billing"
-    || userPermissions.canAccessOrderManagement
-    || allowedPagesList.includes("order-import")
-    || hasPageWriteAccess("order-import");
-  // Separate from page VISIBILITY (isImportRole above) — this controls whether the
-  // currently-visible page's own write actions (Upload, Map & Import, Delete) are enabled.
-  // Admin/super-admin/billing always have write access (unchanged); anyone else needs
-  // admin to have explicitly granted "Order Import" in their Write Access on the
-  // User Management page.
-  const canWriteOrderImport = ["admin", "super-admin"].includes(role)
-    || department === "billing"
-    || hasPageWriteAccess("order-import");
-  // Deleting a CSV (with stock/scan rollback) is stricter than general Order Import write
-  // access — the server's DELETE/delete-preview routes require this exact admin/super-admin/
-  // billing set (requireAdmin in server/routes/order-import.ts), NOT hasPageWriteAccess, so a
-  // user only granted "Order Import" write access must not see an enabled delete button that
-  // would just 403.
-  const canDeleteOrderImport =canWriteOrderImport;
+  const designation = ((user as any)?.designation ?? "").toLowerCase().trim();
+  const isAdminOrSuper = ["admin", "super-admin"].includes(role);
+  // Page visibility and every write action (Upload, Replace CSV, Delete, Load for Scan,
+  // Deactivate, Reopen) now check ONE thing — the "Order Import" permission granted on the
+  // Users page — admin/super-admin bypass, nothing else. No more Billing-department special
+  // case, no more separate "Scan Order" permission requirement for Activate/Deactivate.
+  const isImportRole = isAdminOrSuper || hasPageViewAccess("order-import");
+  const canWriteOrderImport = isAdminOrSuper || hasPageWriteAccess("order-import");
+  const canDeleteOrderImport = canWriteOrderImport;
+  // Complete is its own rule, unrelated to page write access: anyone can complete a part
+  // EXCEPT designations "Loader"/"Helper"/"Driver"/"Scanner" (exact match) — those are
+  // operational roles who shouldn't be the ones deciding to close an order out. Mirrors
+  // Scan.tsx's canCompletePart and the server's requireCompleteAccess exactly.
+  const canCompleteOrder = isAdminOrSuper || !["loader", "helper", "driver", "scanner"].includes(designation);
   // The Edit (pencil) button on Available/Active rows is gated by its OWN page key —
   // "order-import-edit" — independent of Order Import's own access above, exactly as it was
   // when this lived on its own page. hasPageViewAccess just controls whether the button is
@@ -278,6 +272,10 @@ export default function OrderImport() {
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
+  // A brand-new order's date can be up to 2 days in the past (yesterday, day-before-yesterday)
+  // — matches the server's own allowance in POST /order-import/sessions. Used as both the date
+  // picker's min= and the threshold below for when the past-date existing-order check kicks in.
+  const earliestOrderDateStr = getLocalISODate(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
   const [pageSize, setPageSize] = useState(10);
   const [currentPage, setCurrentPage] = useState(1);
   const [filterDate, setFilterDate] = useState("");
@@ -342,11 +340,12 @@ export default function OrderImport() {
     placeholderData: (previousData) => previousData,
   });
 
-  // Warns before a brand-new order gets a past Order Date (the server only accepts a past
-  // date when it's a late part joining/reclaiming an existing group for that exact
-  // plant+date — never for a genuinely new one). Only runs once both fields are filled and
-  // the date is actually in the past, so it never fires for the normal today-or-later case.
-  const isPastOrderDate = !!orderDate && orderDate < todayStr;
+  // Warns before a brand-new order gets an Order Date more than 2 days in the past (the server
+  // only accepts one that far back when it's a late part joining/reclaiming an existing group
+  // for that exact plant+date — never for a genuinely new one). Only runs once both fields are
+  // filled and the date is actually past the allowance, so it never fires for today, yesterday,
+  // or the day before.
+  const isPastOrderDate = !!orderDate && orderDate < earliestOrderDateStr;
   const pastDateCheckQuery = useQuery<{ exists: boolean }>({
     queryKey: ["/api/order-import/sessions/date-check", plant, orderDate],
     queryFn: async () =>
@@ -791,6 +790,21 @@ export default function OrderImport() {
     onSettled: () => refetchAllSessionQueries(),
   });
 
+  // Undo an accidental Complete click. Server enforces the real rule (only the most recently
+  // completed session per plant is eligible) — the button is also only ever shown for that one
+  // session (see lastCompletedIdByPlant below), so a 400 here should be rare, not the normal path.
+  const reopenMutation = useMutation({
+    mutationFn: async (id: number) =>
+      (await apiRequest("POST", `/api/order-scan/sessions/${id}/reopen`)).json(),
+    onSuccess: () => {
+      toast({ title: "Session reopened", description: "Scanning can continue on it now.", className: "bg-green-50 border-green-200 text-green-900" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Reopen failed", description: err.message, variant: "destructive" });
+    },
+    onSettled: () => refetchAllSessionQueries(),
+  });
+
   if (!isImportRole) {
     return (
       <main className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
@@ -877,7 +891,10 @@ export default function OrderImport() {
         return col && col !== SKIP ? (row[col] ?? "") : "";
       };
       return {
-        barcode:         get("barcode") || null,
+        // Trimmed — an Excel-exported CSV can pad a barcode cell to a fixed width with
+        // whitespace, and this value becomes the literal key product_plant_stock upserts
+        // against later; an untrimmed one silently splits stock into a second, orphaned row.
+        barcode:         get("barcode").trim() || null,
         itemName:        get("itemName") || null,
         sapCode:         get("sapCode") || null,
         quantity:        parseInt(get("quantity")) || 0,
@@ -1073,6 +1090,20 @@ export default function OrderImport() {
     (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!completedDate  || (s.orderDate ?? "").slice(0, 10) === completedDate)
   );
+  // Reopen is only ever offered for the SINGLE most-recently-completed session per plant —
+  // computed over every completed session (unfiltered by the tab's own plant/date pickers,
+  // same as activePlantsSet above), so the button stays correct regardless of what's filtered
+  // into view. The server enforces the same rule independently; this just keeps the button
+  // from ever being shown where it would immediately 400.
+  const lastCompletedIdByPlant = new Map<string, { id: number; completedAt: string }>();
+  for (const s of _allScanSessions) {
+    if (s.scanStatus !== "completed" || !s.scanCompletedAt) continue;
+    const key = (s.plant ?? "").toLowerCase();
+    const cur = lastCompletedIdByPlant.get(key);
+    if (!cur || s.scanCompletedAt > cur.completedAt || (s.scanCompletedAt === cur.completedAt && s.id > cur.id)) {
+      lastCompletedIdByPlant.set(key, { id: s.id, completedAt: s.scanCompletedAt });
+    }
+  }
   // Tab badge counts deliberately ignore the plant row, so each status always advertises its full
   // total. Without this, picking a plant on one tab silently shrinks every other tab's count and
   // you lose sight of what's waiting elsewhere. The per-tab date filters still apply.
@@ -1127,7 +1158,7 @@ export default function OrderImport() {
 
   return (
     <main className="flex-1 overflow-y-auto bg-gray-50">
-      <div className="mx-auto max-w-5xl px-4 py-6 space-y-6">
+      <div className="mx-auto w-full max-w-[1800px] px-4 py-6 space-y-6">
 
         {/* ── Page Header ── */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1192,7 +1223,7 @@ export default function OrderImport() {
                     sets orderDate via state and so isn't affected by this min. The
                     pastDateCheckQuery/isPastDateBlocked warning below stays as a second line of
                     defense against a manually typed-in past date slipping past the picker. */}
-                <Input type="date" min={todayStr} className={`h-10 text-sm w-full rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                <Input type="date" min={earliestOrderDateStr} className={`h-10 text-sm w-full rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 {isPastDateBlocked && (
                   <p className="text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
                 )}
@@ -1252,7 +1283,7 @@ export default function OrderImport() {
                 </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs font-medium text-gray-600">Order Date</Label>
-                  <Input type="date" min={todayStr} className={`h-11 w-full text-sm px-2 rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                  <Input type="date" min={earliestOrderDateStr} className={`h-11 w-full text-sm px-2 rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 </div>
                 {isPastDateBlocked && (
                   <p className="col-span-2 text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
@@ -1333,8 +1364,8 @@ export default function OrderImport() {
                   onClick={() => selectPlantTab("")}
                   className={
                     plantTab === ""
-                      ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
-                      : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                      ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                      : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
                   }
                 >
                   All
@@ -1346,16 +1377,13 @@ export default function OrderImport() {
                     <button
                       key={name}
                       onClick={() => selectPlantTab(name)}
-                      // Selected: solid navy. Unselected: tinted with the plant's configured colors
-                      // from Plant Management (falls back to a plain grey pill when uncolored).
-                      style={!isSel && c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
-                      className={
-                        isSel
-                          ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-medium text-white"
-                          : c?.bgColor
-                            ? "rounded-full border px-3 py-1 text-xs font-semibold"
-                            : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
-                      }
+                      // Each pill keeps its Plant Management colour whether selected or not; the
+                      // selected one gets a navy ring (same treatment as Overall Stock / Proforma
+                      // Slips) instead of turning solid navy and losing its colour.
+                      style={c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
+                      className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                        c?.bgColor ? "border" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                      } ${isSel ? "ring-2 ring-[#001d6e] ring-offset-1" : ""}`}
                     >
                       {name}
                     </button>
@@ -1445,19 +1473,31 @@ export default function OrderImport() {
                               </div>
                             </div>
                             <div className="flex shrink-0 items-center gap-1.5">
-                              <span className="inline-flex items-center bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">
+                              <span className="inline-flex items-center bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]" title={`${s.rowCount} rows`}>
                                 {s.rowCount}
                               </span>
-                              <Button size="sm"
-                                className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-full"
-                                disabled={loadForScanMutation.isPending || plantBusy}
-                                title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
-                                onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
-                                {loadForScanMutation.isPending
-                                  ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                                  : <ScanLine className="h-3 w-3 mr-1" />}
-                                Load
-                              </Button>
+                              {/* Ordered quantity next to the row count — the row count says how
+                                  many lines the CSV has, not how much was ordered. */}
+                              {s.totalQty != null && (
+                                <span
+                                  className="inline-flex items-center gap-1 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700 tabular-nums"
+                                  title="Total ordered quantity across this CSV"
+                                >
+                                  {s.totalQty.toLocaleString()} qty
+                                </span>
+                              )}
+                              {canWriteOrderImport && (
+                                <Button size="sm"
+                                  className="h-7 px-2 text-xs bg-[#001d6e] hover:bg-[#00154b] text-white disabled:opacity-50 rounded-full"
+                                  disabled={loadForScanMutation.isPending || plantBusy}
+                                  title={plantBusy ? `Another session is already active for ${s.plant} — complete or deactivate it first` : undefined}
+                                  onClick={(e) => { e.stopPropagation(); if (!plantBusy) loadForScanMutation.mutate(s.id); }}>
+                                  {loadForScanMutation.isPending
+                                    ? <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                                    : <ScanLine className="h-3 w-3 mr-1" />}
+                                  Load
+                                </Button>
+                              )}
                               {canViewCsvEdit && (
                                 <Button size="sm" variant="ghost"
                                   className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e] rounded-full"
@@ -1466,15 +1506,16 @@ export default function OrderImport() {
                                   <Pencil className="h-3.5 w-3.5" />
                                 </Button>
                               )}
-                              <Button size="sm" variant="ghost"
-                                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30 rounded-full"
-                                disabled={!canDeleteOrderImport || deletePreviewMutation.isPending}
-                                title={!canDeleteOrderImport ? "Deleting a CSV is restricted to Admin" : undefined}
-                                onClick={(e) => { e.stopPropagation(); setDeleteTargetInfo({ plant: s.plant, orderDate: s.orderDate || todayStr }); deletePreviewMutation.mutate(s.id); }}>
-                                {deletePreviewMutation.isPending && deletePreviewMutation.variables === s.id
-                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                  : <Trash2 className="h-3.5 w-3.5" />}
-                              </Button>
+                              {canDeleteOrderImport && (
+                                <Button size="sm" variant="ghost"
+                                  className="h-7 w-7 p-0 text-gray-400 hover:text-red-600 disabled:opacity-30 rounded-full"
+                                  disabled={deletePreviewMutation.isPending}
+                                  onClick={(e) => { e.stopPropagation(); setDeleteTargetInfo({ plant: s.plant, orderDate: s.orderDate || todayStr }); deletePreviewMutation.mutate(s.id); }}>
+                                  {deletePreviewMutation.isPending && deletePreviewMutation.variables === s.id
+                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    : <Trash2 className="h-3.5 w-3.5" />}
+                                </Button>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -1521,6 +1562,19 @@ export default function OrderImport() {
                                         <td className="px-3 py-1.5 text-right">{item.expectedPallets ?? "—"}</td>
                                       </tr>
                                     ))}
+                                    {/* Totals close the table. Over the rows ON SCREEN, so a search
+                                        narrows the total with the list rather than contradicting it. */}
+                                    {scanFiltered.length > 0 && (
+                                      <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                                        <td className="border-r px-3 py-2" colSpan={4}>Total</td>
+                                        <td className="border-r px-3 py-2 text-right tabular-nums">
+                                          {scanFiltered.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                        </td>
+                                        <td className="px-3 py-2 text-right tabular-nums">
+                                          {scanFiltered.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)}
+                                        </td>
+                                      </tr>
+                                    )}
                                   </tbody>
                                 </table>
                               </div>
@@ -1593,18 +1647,22 @@ export default function OrderImport() {
                               <DropdownMenuItem onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
                                 <FileBarChart className="mr-2 h-3.5 w-3.5 text-gray-500" /> Reports
                               </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={deactivateMutation.isPending}
-                                onClick={() => setDeactivateTarget(s.id)}
-                                className="text-amber-700 focus:text-amber-700">
-                                <StopCircle className="mr-2 h-3.5 w-3.5" /> Deactivate
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={completeMutation.isPending}
-                                onClick={() => setCompleteTarget(s.id)}
-                                className="text-green-700 focus:text-green-700">
-                                <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Complete
-                              </DropdownMenuItem>
+                              {canWriteOrderImport && (
+                                <DropdownMenuItem
+                                  disabled={deactivateMutation.isPending}
+                                  onClick={() => setDeactivateTarget(s.id)}
+                                  className="text-amber-700 focus:text-amber-700">
+                                  <StopCircle className="mr-2 h-3.5 w-3.5" /> Deactivate
+                                </DropdownMenuItem>
+                              )}
+                              {canCompleteOrder && (
+                                <DropdownMenuItem
+                                  disabled={completeMutation.isPending}
+                                  onClick={() => setCompleteTarget(s.id)}
+                                  className="text-green-700 focus:text-green-700">
+                                  <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Complete
+                                </DropdownMenuItem>
+                              )}
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </div>
@@ -1681,6 +1739,20 @@ export default function OrderImport() {
                             onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
                             <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
                           </Button>
+                          {/* Only for the single most-recently-completed session per plant — an
+                              accidental Complete click, not a general "reopen any history" tool. */}
+                          {canWriteOrderImport && lastCompletedIdByPlant.get((s.plant ?? "").toLowerCase())?.id === s.id && (
+                            <Button size="sm" variant="outline"
+                              className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50 rounded-full"
+                              disabled={reopenMutation.isPending}
+                              title="Undo an accidental Complete — continue scanning this session"
+                              onClick={() => reopenMutation.mutate(s.id)}>
+                              {reopenMutation.isPending && reopenMutation.variables === s.id
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" />
+                                : <RotateCcw className="h-3.5 w-3.5 sm:mr-1" />}
+                              <span className="hidden sm:inline">Reopen</span>
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1781,9 +1853,19 @@ export default function OrderImport() {
                                 </div>
                               </div>
                               <div className="flex shrink-0 items-center gap-1 ml-1">
-                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl">
+                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>
                                   {session.rowCount}
                                 </Badge>
+                                {/* Ordered quantity next to the row count — the row count says how
+                                    many lines the CSV has, not how much was ordered. */}
+                                {(session as any).totalQty != null && (
+                                  <Badge
+                                    className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50 text-xs px-1.5 rounded-xl tabular-nums"
+                                    title="Total ordered quantity across this CSV"
+                                  >
+                                    {Number((session as any).totalQty).toLocaleString()} qty
+                                  </Badge>
+                                )}
                                 {(session as any).scanStatus === "active" && (
                                   <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap">
                                     <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -1861,6 +1943,20 @@ export default function OrderImport() {
                                           <td className="px-3 py-1.5">{(item as any).date || "—"}</td>
                                         </tr>
                                       ))}
+                                      {/* Totals close the table. Over the rows ON SCREEN, so a
+                                          search narrows the total with the list. */}
+                                      {filteredItems.length > 0 && (
+                                        <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                                          <td className="border-r px-3 py-2" colSpan={4}>Total</td>
+                                          <td className="border-r px-3 py-2 text-right tabular-nums">
+                                            {filteredItems.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                          </td>
+                                          <td className="border-r px-3 py-2 text-right tabular-nums">
+                                            {filteredItems.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)}
+                                          </td>
+                                          <td className="px-3 py-2" />
+                                        </tr>
+                                      )}
                                     </tbody>
                                   </table>
                                 </div>
@@ -2060,7 +2156,7 @@ export default function OrderImport() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-amber-600 text-white hover:bg-amber-700"
               onClick={() => deactivateTarget !== null && deactivateMutation.mutate(deactivateTarget)}
-              disabled={deactivateMutation.isPending}>
+              disabled={deactivateMutation.isPending || !canWriteOrderImport}>
               {deactivateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Deactivate"}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -2080,7 +2176,7 @@ export default function OrderImport() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-green-600 text-white hover:bg-green-700"
               onClick={() => completeTarget !== null && completeMutation.mutate(completeTarget)}
-              disabled={completeMutation.isPending}>
+              disabled={completeMutation.isPending || !canCompleteOrder}>
               {completeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Complete"}
             </AlertDialogAction>
           </AlertDialogFooter>

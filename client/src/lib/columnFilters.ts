@@ -59,11 +59,22 @@ export type FilterableColumn<T = any> = {
   label: string;
   filterType: FilterType;
   options: FilterOption[];
-  accessor: (row: T) => string | number | null | undefined;
+  /**
+   * The value to match this row on. Return an ARRAY when a row legitimately holds several values
+   * for the column (e.g. every STV an item was scanned under) — the row then matches if any one
+   * of them does. See matchValue.
+   */
+  accessor: (row: T) => string | number | null | undefined | Array<string | number>;
   /** Skip the Values checklist entirely — just the Condition form, no tab switcher. For
    *  high-cardinality numeric columns (e.g. Qty) where "every value that ever occurred" isn't a
    *  useful checklist; typing a number/range is the only sensible way to filter it. */
   disableValues?: boolean;
+  /**
+   * Hide the "Condition" tab, leaving only the Values checklist. For columns where the
+   * contains/greater-than/between operators have no sensible meaning — a fixed set of labels you
+   * either pick or don't, such as an STV.
+   */
+  disableConditions?: boolean;
 };
 
 export type FilterValue = string | [string, string] | string[];
@@ -92,6 +103,14 @@ function dayBucket(cell: unknown): string | null {
 }
 
 function matchValue(cell: unknown, type: FilterType, operator: string, value: FilterValue): boolean {
+  // A cell holding several values (an accessor returning an array — e.g. the STVs one item was
+  // scanned under, where a single item can span more than one truck) matches when ANY of them
+  // does. Without this the whole array would be stringified and compared as one value, so
+  // picking "STV01" would miss every item that also went out on another STV. An empty array
+  // matches nothing, which is what "no values to match" means.
+  if (Array.isArray(cell)) {
+    return cell.some((one) => matchValue(one, type, operator, value));
+  }
   if (operator === "in") {
     const selected = value as string[];
     const raw = type === "date" ? dayBucket(cell) : (cell == null ? null : String(cell));

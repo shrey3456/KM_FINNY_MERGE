@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
 import { ProformaSlipAPIImport } from "@/components/ProformaSlipAPIImport";
@@ -58,7 +58,7 @@ import {
 } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { DataTable, DataTableColumnToggle, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -73,8 +73,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronFirst,
-  ChevronLast,
   Check,
   X,
   Save,
@@ -88,17 +86,19 @@ import {
   Search,
   CheckCircle,
   Calendar as CalendarIcon,
+  CalendarDays,
   FilterX,
   FileText,
   Calculator,
   RefreshCw,
+  ListFilter,
 } from "lucide-react";
 import { format, isWithinInterval, startOfDay, endOfDay, parseISO } from "date-fns";
 import { type ProformaSlip, type ProformaSlipItem, type Product } from "@shared/schema";
 import { PlantBadge } from "@/components/PlantBadge";
-import { SingleDateFilter } from "@/components/SingleDateFilter";
-import { PlantFilter } from "@/components/PlantFilter";
-import { useSingleDateFilter, SingleDateFilterStorage } from "@/hooks/useSingleDateFilter";
+import { ColumnFilterPopoverContent, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
+import { CollapsibleSearch } from "@/components/ui/collapsible-search";
+import { type FilterableColumn, type FilterCondition, conditionSummary, isConditionEmpty, matchAllConditions } from "@/lib/columnFilters";
 
 // Form schema for creating/editing proforma slips
 const proformaSlipFormSchema = z.object({
@@ -116,7 +116,7 @@ const proformaSlipFormSchema = z.object({
 
 type ProformaSlipFormValues = z.infer<typeof proformaSlipFormSchema>;
 
-// Solid navy fill, matching the Notion Inventory action buttons (Import CSV / Export / Sync Notion).
+// Solid navy fill, matching the Product Master action buttons (Import CSV / Export / Sync Notion).
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
 // Extend basic ProformaSlip type to include lock and audit fields loaded from API
@@ -155,6 +155,71 @@ async function lockSlip(orderNumber: string, printedByCode?: string) {
 
 type ProformaSlipItemFormValues = z.infer<typeof proformaSlipItemFormSchema>;
 
+// Filters survive leaving the page and coming back. They live in component state, so navigating
+// away used to drop whatever you had narrowed the table to, and you had to set it all up again.
+//
+// sessionStorage rather than localStorage on purpose: a filter is working context, not a saved
+// preference. Keeping it for the life of the tab matches "I'll go look at something else and come
+// straight back"; keeping it forever would mean opening the app tomorrow to a table that's
+// mysteriously filtered, with no memory of having done it.
+const SLIP_FILTERS_KEY = "proformaSlips:filters";
+
+type SavedSlipFilters = {
+  search?: string;
+  plant?: string;
+  date?: string;
+  conditions?: Record<string, FilterCondition>;
+};
+
+function readSavedSlipFilters(): SavedSlipFilters {
+  try {
+    return JSON.parse(sessionStorage.getItem(SLIP_FILTERS_KEY) ?? "{}") as SavedSlipFilters;
+  } catch {
+    // Corrupt or unreadable (private-mode storage throws) — start clean rather than break the page.
+    return {};
+  }
+}
+
+/**
+ * Which page numbers a pager should offer, given the current page and how many there are — all of
+ * them when they fit, otherwise the first, the last, a window around the current page, and "gap"
+ * where the run is broken. Both indexes are 0-based, matching DataTable's own pageIndex.
+ *
+ * e.g. page 1 of 442 → 1 2 3 … 442, and page 10 → 1 … 9 10 11 … 442.
+ */
+function buildPageList(pageIndex: number, pageCount: number, window = 1): Array<number | "gap"> {
+  // Small enough to list in full — an ellipsis is never narrower than just showing the numbers.
+  const maxWithoutGaps = window * 2 + 5;
+  if (pageCount <= maxWithoutGaps) return Array.from({ length: pageCount }, (_, i) => i);
+
+  const last = pageCount - 1;
+  // Near either end the window would be clipped by the edge, leaving a stubby "1 2 … 442". Extend
+  // it inward instead so the run of numbers stays the same length wherever you are.
+  let from: number;
+  let to: number;
+  if (pageIndex <= window) {
+    from = 1;
+    to = Math.min(last - 1, window * 2);
+  } else if (pageIndex >= last - window) {
+    from = Math.max(1, last - window * 2);
+    to = last - 1;
+  } else {
+    from = pageIndex - window;
+    to = pageIndex + window;
+  }
+
+  const pages: Array<number | "gap"> = [0];
+  // A gap standing in for a single page would take as much room as the page itself, so only use
+  // one where at least two pages are actually being hidden — otherwise show that page.
+  if (from > 2) pages.push("gap");
+  else if (from === 2) pages.push(1);
+  for (let i = from; i <= to; i++) pages.push(i);
+  if (to < last - 2) pages.push("gap");
+  else if (to === last - 2) pages.push(last - 1);
+  pages.push(last);
+  return pages;
+}
+
 export default function ProformaSlips() {
   const [selectedSlip, setSelectedSlip] = useState<ProformaSlip | null>(null);
   const [isNewSlipDialogOpen, setIsNewSlipDialogOpen] = useState(false);
@@ -168,7 +233,7 @@ export default function ProformaSlips() {
   const [slipItems, setSlipItems] = useState<Record<number, ProformaSlipItem[]>>({});
   const [editableSlipData, setEditableSlipData] = useState<Record<number, Partial<ProformaSlipFormValues>>>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [slipSearchQuery, setSlipSearchQuery] = useState('');
+  const [slipSearchQuery, setSlipSearchQuery] = useState(() => readSavedSlipFilters().search ?? '');
   const [filteredProducts, setFilteredProducts] = useState<Product[] | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [selectedSlipIds, setSelectedSlipIds] = useState<number[]>([]);
@@ -181,6 +246,23 @@ export default function ProformaSlips() {
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'actions']),
   );
+
+  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
+  // a rearranged table is working context for this sitting, not a permanent preference. An empty
+  // array means "declared order", which is also what Reset order restores.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("proformaSlips:columnOrder");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("proformaSlips:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
+
   
   // Function to handle sorting by column
   const handleSort = (column: string) => {
@@ -190,10 +272,52 @@ export default function ProformaSlips() {
     }));
   };
   
-  //
-  const { savedDate, isLocked, isInitialized, setLocked } = useSingleDateFilter('proforma-page');
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
-  const [isDateFilterActive, setIsDateFilterActive] = useState(false);
+  // ── Filters — same model as Overall Stock ────────────────────────────────────
+  // Plant is a tab strip (single active plant, "" = All). Date is its own standalone control
+  // (single day "d:YYYY-MM-DD" or range "r:from:to", both editable, plus quick-range presets).
+  // Every other column gets an Excel-style per-column filter via the shared column-filter engine.
+  // Seeded from whatever was left applied last time this page was open — see SLIP_FILTERS_KEY.
+  const [activePlantTab, setActivePlantTab] = useState<string>(() => readSavedSlipFilters().plant ?? "");
+  const [dateValue, setDateValue] = useState<string>(() => readSavedSlipFilters().date ?? "");
+  const [dateOpen, setDateOpen] = useState(false);
+  const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
+  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
+    () => readSavedSlipFilters().conditions ?? {},
+  );
+  const [filterPickerOpen, setFilterPickerOpen] = useState(false);
+  const [filterPickerKey, setFilterPickerKey] = useState("");
+  const [filterPickerSearch, setFilterPickerSearch] = useState("");
+
+  const { from: fromStr, to: toStr } = (() => {
+    if (dateValue.startsWith("d:")) { const d = dateValue.slice(2); return { from: d, to: d }; }
+    if (dateValue.startsWith("r:")) { const [, f, t] = dateValue.split(":"); return { from: f ?? "", to: t ?? "" }; }
+    return { from: "", to: "" };
+  })();
+  const dateIsRange = dateValue.startsWith("r:");
+  const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
+  const datePresetValue = (key: string): string => {
+    const d = new Date();
+    if (key === "today") return `d:${isoOf(d)}`;
+    if (key === "yday") { const y = new Date(d); y.setDate(y.getDate() - 1); return `d:${isoOf(y)}`; }
+    if (key === "week") { const w = new Date(d); w.setDate(w.getDate() - 6); return `r:${isoOf(w)}:${isoOf(d)}`; }
+    if (key === "month") return `r:${isoOf(new Date(d.getFullYear(), d.getMonth(), 1))}:${isoOf(d)}`;
+    return "";
+  };
+  const DATE_PRESETS = [
+    { value: "today", label: "Today" },
+    { value: "yday", label: "Yesterday" },
+    { value: "week", label: "This week" },
+    { value: "month", label: "This month" },
+  ];
+  const describeDate = (v: string) => {
+    if (v.startsWith("d:")) { try { return format(new Date(v.slice(2)), "MMM d, yyyy"); } catch { return v.slice(2); } }
+    if (v.startsWith("r:")) { const [, f, t] = v.split(":"); const fmt = (s: string) => { try { return s ? format(new Date(s), "MMM d") : "…"; } catch { return s || "…"; } }; return `${fmt(f)} → ${fmt(t)}`; }
+    return v;
+  };
+  const setColumnCondition = (columnId: string, condition: FilterCondition) =>
+    setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
+  const clearColumnCondition = (columnId: string) =>
+    setColumnConditions((prev) => { const next = { ...prev }; delete next[columnId]; return next; });
   
   // Fetch fresh user data to ensure permissions are up to date
   const { data: remoteUser } = useQuery<any>({
@@ -224,32 +348,25 @@ export default function ProformaSlips() {
   })();
   
   const currentUserRole = String(currentUserInfo?.role || '').toLowerCase();
-  
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
-  console.log(currentUserRole);
   const userDept = String(currentUserInfo?.department || '').toLowerCase().trim();
   const userDesig = String(currentUserInfo?.designation || '').toLowerCase().trim();
-  
-  const isITDep= ['IT', 'information technology', 'it'].includes(userDept);
-  const ismanagment = ['management', 'manager', 'head', 'director'].includes(userDept);
-  // Department: Billing, Designation: Head (Case insensitive check)
-  const isBillingHead = userDept === 'billing' && userDesig === 'head';
 
   // Write access to Proforma Slips is granted per-page by admin (Allowed Pages /
-  // Write Access on the User Management page) rather than by the old global
-  // read/read-write role string.
+  // Write Access on the User Management page) rather than by department/designation.
   const isReadWriteUser = hasPageWriteAccess("proforma");
   const isread = !hasPageWriteAccess("proforma") && !isAdminOrSuper;
 
-  // Lock/Unlock permissions: Admin, Super-Admin, IT, Management, Billing Head
-  const canLockUnlockSlips = (isAdminOrSuper || isITDep || ismanagment || isBillingHead) && (isReadWriteUser || isAdminOrSuper);
+  // Adding, editing, deleting a slip, and adding/editing/deleting its line items are all
+  // ONE permission — Write Access to "proforma" (or admin/super-admin). No more separate
+  // canAddSlips/canEditSlips (they were always the same check under two different names).
+  const canWriteSlips = isAdminOrSuper || isReadWriteUser;
 
-
-  // Add new slips: Admin, Super-Admin, and Read-Write users
-  const canAddSlips = isAdminOrSuper || isReadWriteUser;
-
-  // Only Admin/Super-Admin can edit and delete slips
-  const canEditSlips = isAdminOrSuper || isReadWriteUser;
+  // Lock/Unlock: admin/super-admin, OR Write Access to BOTH "print-operations" AND
+  // "proforma" — needs both page grants, not just one. No more department/designation
+  // special-casing (IT/Management/Billing-Head are gone — grant Write Access on both of
+  // those page keys instead).
+  const canLockUnlockSlips = isAdminOrSuper || (hasPageWriteAccess('print-operations') && hasPageWriteAccess('proforma'));
 
   console.log('DEBUG PROFORMA PERMISSIONS:', {
     source: remoteUser ? 'remote' : 'local',
@@ -259,68 +376,11 @@ export default function ProformaSlips() {
     isAdminOrSuper,
     isReadWriteUser,
     canLockUnlockSlips,
-    canAddSlips,
-    canEditSlips,
-    isITDep,
-    ismanagment,
-    isBillingHead
+    canWriteSlips,
   });
 
-  
-  // Initialize date filter based on saved filter
-  useEffect(() => {
-    if (isInitialized) {
-      // If we have a saved filter (locked or not), always use it when navigating to this page
-      if (savedDate) {
-        console.log("Using saved date filter:", savedDate, "locked:", isLocked);
-        setSelectedDate(savedDate);
-        setIsDateFilterActive(true);
-      } 
-      // We no longer set today as the default date - require explicit user selection
-      else if (!selectedDate) {
-        console.log("No default date filter applied today");
-        const today = new Date();
-        setSelectedDate(today);
-        setIsDateFilterActive(true);
-      }
-    }
-  }, [isInitialized, isLocked, savedDate]);
-  
-  // When the page is unmounted or date filter changes, save the current filter if it's locked
-  useEffect(() => {
-    if (isInitialized && isLocked && selectedDate) {
-      // Save the current filter to ensure it persists when navigating pages
-      console.log("Saving proforma date filter:", selectedDate);
-      SingleDateFilterStorage.saveDateFilter('proforma-page', selectedDate);
-    }
-  }, [isInitialized, isLocked, selectedDate]);
-  
-  // Extra effect to handle lock changes specifically
-  useEffect(() => {
-    if (isInitialized && isLocked && selectedDate) {
-      // When locking, explicitly save the current date filter again
-      console.log("Locking changed - saving proforma date filter:", selectedDate, "locked:", isLocked);
-      SingleDateFilterStorage.saveDateFilter('proforma-page', selectedDate);
-    }
-  }, [isInitialized, isLocked]);
-  
-  // Cleanup effect to save current filter on page unmount
-  useEffect(() => {
-    return () => {
-      if (isLocked && selectedDate) {
-        console.log("Saving proforma date filter on unmount:", selectedDate);
-        SingleDateFilterStorage.saveDateFilter('proforma-page', selectedDate);
-      }
-    };
-  }, [isLocked, selectedDate]);
-  
-  // Plant filter states
-  const [selectedPlants, setSelectedPlants] = useState<string[]>([]);
+  // Plant tab options (name + configured colors), derived from the loaded slips + Plant Management.
   const [plantOptions, setPlantOptions] = useState<Array<{value: string; label: string; bgColor?: string; textColor?: string; borderColor?: string}>>([]);
-  
-  // Entries limit state - Default to 15 entries
-  const [entriesLimit, setEntriesLimit] = useState<number>(15);
-  
   // Auto-refresh interval in milliseconds (10 seconds for real-time collaboration)
   const AUTO_REFRESH_INTERVAL = 10000;
   
@@ -381,20 +441,16 @@ export default function ProformaSlips() {
   
   // Fetch all proforma slips
   const { data: proformaSlips, isLoading } = useQuery<ProformaSlip[]>({
-    queryKey: ['/api/proforma-slips', selectedDate, isDateFilterActive],
+    queryKey: ['/api/proforma-slips', fromStr, toStr],
     queryFn: async () => {
       // Base URL with high limit (100000) to tell the server we want all proforma slips
       let url = `/api/proforma-slips?limit=100000&_t=${Date.now()}`;
-      
-      // Always include date filter parameters if available
-      if (selectedDate) {
-        const formattedDate = format(selectedDate, 'yyyy-MM-dd');
-        url += `&startOrderDate=${formattedDate}&endOrderDate=${formattedDate}`;
-        console.log(`Proforma slips request with filter: date=${formattedDate}`);
-      } else {
-        console.log('No date filter applied to proforma slips request');
-      }
-      
+      // Date window (from the standalone Date control) narrows the payload server-side; the
+      // client re-filters too (it parses every stored orderDate format), so this is just an
+      // optimization, not the source of truth.
+      if (fromStr) url += `&startOrderDate=${fromStr}`;
+      if (toStr)   url += `&endOrderDate=${toStr}`;
+
       const res = await apiRequest('GET', url);
       lastRefreshTimeRef.current = Date.now();
       return res.json();
@@ -968,123 +1024,137 @@ export default function ProformaSlips() {
     });
   };
   
-  // State for order date filter
-  const [selectedOrderDate, setSelectedOrderDate] = useState<string | null>(null);
-  
-  // Reset date filters
-  const resetDateFilters = () => {
-    setSelectedDate(null);
-    setIsDateFilterActive(false);
-    setSelectedOrderDate(null);
-  };
-  
-  // Filter slips by date range and specific order date
-  useEffect(() => {
-    if (proformaSlips && proformaSlips.length > 0) {
-      const uniquePlants = Array.from(
-        new Set(
-          proformaSlips
-            .filter(slip => slip.plant && slip.plant.trim() !== '')
-            .map(slip => slip.plant)
-        )
-      );
-      
-      const sorted = uniquePlants
-        .filter((plant): plant is string => !!plant) 
-        .sort((a, b) => a.localeCompare(b));
-      
-      const plantOpts = sorted.map(plant => ({
-        value: plant,
-        label: plant
-      }));
-      
-      setPlantOptions(plantOpts);
-    }
+  // Excel-style per-column filters — every column except Plant (tab strip) and Order Date (its
+  // own Date control). Options are the column's own distinct values, same as Overall Stock.
+  const filterableColumns: FilterableColumn<LockedProformaSlip>[] = useMemo(() => {
+    const slips = (proformaSlips ?? []) as LockedProformaSlip[];
+    const textOptions = (pick: (s: LockedProformaSlip) => string | null | undefined) =>
+      Array.from(new Set(slips.map(pick).filter((v): v is string => !!v)))
+        .sort((a, b) => a.localeCompare(b))
+        .map((v) => ({ value: v, label: v }));
+    const numberOptions = (pick: (s: LockedProformaSlip) => number | null | undefined) =>
+      Array.from(new Set(slips.map(pick).filter((v): v is number => v != null)))
+        .sort((a, b) => a - b)
+        .map((v) => ({ value: String(v), label: v.toLocaleString() }));
+    return [
+      { id: "orderNumber", label: "Order No.", filterType: "text", options: textOptions((s) => s.orderNumber), accessor: (s) => s.orderNumber },
+      { id: "partyName", label: "Party Name", filterType: "enum", options: textOptions((s) => s.partyName), accessor: (s) => s.partyName },
+      { id: "totalQuantity", label: "Total Qty", filterType: "number", options: numberOptions((s) => s.totalQuantity), accessor: (s) => s.totalQuantity ?? null },
+      { id: "totalVolume", label: "Total Volume", filterType: "text", options: textOptions((s) => s.totalVolume), accessor: (s) => s.totalVolume },
+      { id: "vehicleNumber", label: "Vehicle No.", filterType: "text", options: textOptions((s) => s.vehicleNumber), accessor: (s) => s.vehicleNumber },
+      { id: "driverName", label: "Driver", filterType: "text", options: textOptions((s) => s.driverName), accessor: (s) => s.driverName },
+    ];
   }, [proformaSlips]);
+
+  const filterPickerOptions = useMemo(() => {
+    // Already-filtered columns are left OUT of this list: "+ Filter" adds a new one, while
+    // changing or removing an existing filter happens in the "Filters (N)" dropdown, which lists
+    // them all and opens each one's builder pre-filled.
+    const q = filterPickerSearch.trim().toLowerCase();
+    return filterableColumns
+      .filter((c) => !columnConditions[c.id])
+      .filter((c) => !q || c.label.toLowerCase().includes(q))
+      .map((c) => ({ key: c.id, label: c.label }));
+  }, [filterableColumns, columnConditions, filterPickerSearch]);
+  const pickedFilterColumn = filterableColumns.find((c) => c.id === filterPickerKey) ?? null;
+
+  // The "Filters (N)" popover doubles as the editor: it lists everything applied, and drilling
+  // into one swaps the list for that filter's own builder (editFilterKey), with a Back link — a
+  // drill-down inside the same popover rather than a popover within a popover.
+  const [editFilterOpen, setEditFilterOpen] = useState(false);
+  const [editFilterKey, setEditFilterKey] = useState("");
+  const editFilterColumn = filterableColumns.find((c) => c.id === editFilterKey) ?? null;
+
+  const columnConditionList = useMemo(() => Object.values(columnConditions), [columnConditions]);
+
+  // Renders a column header's label plus its Excel-style filter icon (for filterable columns).
+  const columnHeader = (id: string, label: string) => {
+    const col = filterableColumns.find((c) => c.id === id);
+    if (!col) return label;
+    return (
+      <span className="inline-flex items-center gap-1">
+        {label}
+        <ColumnHeaderFilterButton
+          column={col}
+          condition={columnConditions[id]}
+          onChange={(c) => setColumnCondition(id, c)}
+          onRemove={() => clearColumnCondition(id)}
+        />
+      </span>
+    );
+  };
+
+  // Slip's order date within the active Date-control window (inclusive), parsing whatever format
+  // it's stored in. yyyy-MM-dd string comparison keeps date ordering correct.
+  const slipInDateRange = (slip: ProformaSlip): boolean => {
+    if (!fromStr && !toStr) return true;
+    const d = parseSlipDate(slip.orderDate);
+    if (!d) return false;
+    const day = isoOf(d);
+    if (fromStr && day < fromStr) return false;
+    if (toStr && day > toStr) return false;
+    return true;
+  };
 
   const getFilteredSlips = () => {
     if (!proformaSlips) return [];
-    
-    // First filter by search query
-    const searchFiltered = proformaSlips.filter(slip => {
-      if (!slipSearchQuery) return true;
-      const searchLower = slipSearchQuery.toLowerCase();
-      return (
-        (slip.orderNumber && slip.orderNumber.toLowerCase().includes(searchLower)) ||
-        (slip.partyName && slip.partyName.toLowerCase().includes(searchLower)) ||
-        (slip.plant && slip.plant.toLowerCase().includes(searchLower)) ||
-        (slip.vehicleNumber && slip.vehicleNumber.toLowerCase().includes(searchLower)) ||
-        (slip.driverName && slip.driverName.toLowerCase().includes(searchLower))
-      );
+    const q = slipSearchQuery.trim().toLowerCase();
+    return (proformaSlips as LockedProformaSlip[]).filter((slip) => {
+      if (q) {
+        const hit = [slip.orderNumber, slip.partyName, slip.plant, slip.vehicleNumber, slip.driverName]
+          .some((v) => v && v.toLowerCase().includes(q));
+        if (!hit) return false;
+      }
+      if (activePlantTab && (slip.plant ?? "").toUpperCase() !== activePlantTab.toUpperCase()) return false;
+      if (!slipInDateRange(slip)) return false;
+      if (!matchAllConditions(slip, columnConditionList, filterableColumns)) return false;
+      return true;
     });
-    
-    // Apply plant filter if any plants are selected
-    const plantFiltered = selectedPlants.length > 0
-      ? searchFiltered.filter(slip => 
-          slip.plant && selectedPlants.includes(slip.plant)
-        )
-      : searchFiltered;
-    
-    // Filter by date if active
-    if (isDateFilterActive && selectedDate) {
-      return plantFiltered.filter(slip => {
-        if (!slip.orderDate) return false;
-        
-        let slipDate: Date;
-        try {
-          if (typeof slip.orderDate === 'string') {
-            if (slip.orderDate.includes('-') && slip.orderDate.split('-')[0].length === 4) {
-              slipDate = new Date(slip.orderDate);
-            } 
-            else if (slip.orderDate.includes('-') && slip.orderDate.split('-').length === 3) {
-              const [day, month, yearShort] = slip.orderDate.split('-').map(Number);
-              const fullYear = yearShort < 50 ? 2000 + yearShort : 1900 + yearShort;
-              slipDate = new Date(fullYear, month - 1, day);
-            } 
-            else if (slip.orderDate.includes('/') && slip.orderDate.split('/').length === 3) {
-              const [day, month, year] = slip.orderDate.split('/').map(Number);
-              const fullYear = year < 100 ? (year < 50 ? 2000 + year : 1900 + year) : year;
-              slipDate = new Date(fullYear, month - 1, day);
-            } 
-            else {
-              slipDate = new Date(slip.orderDate);
-            }
-          } else {
-            slipDate = new Date(slip.orderDate);
-          }
-          
-          return (
-            slipDate.getDate() === selectedDate.getDate() &&
-            slipDate.getMonth() === selectedDate.getMonth() &&
-            slipDate.getFullYear() === selectedDate.getFullYear()
-          );
-        } catch (error) {
-          console.error("Error parsing date:", error, slip.orderDate);
-          return false;
-        }
-      });
-    }
-    
-    return plantFiltered;
   };
   
   // Pagination state variable
   const [currentPage, setCurrentPage] = useState(1);
-  
+  const [entriesLimit, setEntriesLimit] = useState<number>(15);
+
   // Calculate total number of pages based on entries limit
-  const getTotalPages = () => {
-    const filteredLength = getFilteredSlips().length;
-    return Math.ceil(filteredLength / entriesLimit);
-  };
-  
-  // Ensure current page is valid when entries limit changes
+  const getTotalPages = () => Math.ceil(getFilteredSlips().length / entriesLimit);
+
+  // Ensure current page is valid when the entries limit or the filtered set changes — otherwise
+  // shrinking either one can leave you stranded on a page that no longer exists.
   useEffect(() => {
     const totalPages = getTotalPages();
     if (totalPages > 0 && currentPage > totalPages) {
       setCurrentPage(totalPages);
     }
   }, [entriesLimit, getFilteredSlips]);
-  
+
+  // Narrowing the list to a different set of slips restarts it — landing on page 4 of a plant you
+  // just switched to shows a slice of results with no relation to what you were looking at, and
+  // reads as an empty tab whenever the new set is shorter. Covers the plant tabs plus the other
+  // controls that re-cut the list: search, the date range, and the column filters.
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [activePlantTab, slipSearchQuery, dateValue, columnConditionList]);
+
+  // Keep the saved copy in step with whatever is applied right now, so coming back to this page
+  // restores it. The page number itself is deliberately NOT saved — returning to a filtered table
+  // should start at the top of the results, not partway down where you happened to leave off.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        SLIP_FILTERS_KEY,
+        JSON.stringify({
+          search: slipSearchQuery,
+          plant: activePlantTab,
+          date: dateValue,
+          conditions: columnConditions,
+        } satisfies SavedSlipFilters),
+      );
+    } catch {
+      // Storage unavailable (private mode / quota) — the filters just won't outlive the page.
+    }
+  }, [slipSearchQuery, activePlantTab, dateValue, columnConditions]);
+
   // Helper: parse various orderDate formats into a Date (returns null on failure)
   function parseSlipDate(value: any): Date | null {
     try {
@@ -1232,7 +1302,7 @@ export default function ProformaSlips() {
     },
     {
       id: 'orderNumber',
-      header: 'Order No.',
+      header: columnHeader('orderNumber', 'Order No.'),
       sortable: true,
       width: 130,
       render: (slip) => (
@@ -1248,7 +1318,7 @@ export default function ProformaSlips() {
     },
     {
       id: 'partyName',
-      header: 'Party Name',
+      header: columnHeader('partyName', 'Party Name'),
       sortable: true,
       width: 160,
       render: (slip) => slip.partyName,
@@ -1262,7 +1332,7 @@ export default function ProformaSlips() {
     },
     {
       id: 'totalQuantity',
-      header: 'Total Qty',
+      header: columnHeader('totalQuantity', 'Total Qty'),
       sortable: true,
       width: 100,
       align: 'right',
@@ -1270,19 +1340,19 @@ export default function ProformaSlips() {
     },
     {
       id: 'totalVolume',
-      header: 'Total Volume',
+      header: columnHeader('totalVolume', 'Total Volume'),
       width: 110,
       render: (slip) => slip.totalVolume || ' ',
     },
     {
       id: 'vehicleNumber',
-      header: 'Vehicle No.',
+      header: columnHeader('vehicleNumber', 'Vehicle No.'),
       width: 120,
       render: (slip) => slip.vehicleNumber || ' ',
     },
     {
       id: 'driverName',
-      header: 'Driver',
+      header: columnHeader('driverName', 'Driver'),
       width: 120,
       render: (slip) => slip.driverName || ' ',
     },
@@ -1350,7 +1420,7 @@ export default function ProformaSlips() {
               </DropdownMenuItem>
             )}
 
-            {canEditSlips && (
+            {canWriteSlips && (
               <DropdownMenuItem onClick={() => openEditDialog(slip)}>
                 <FileEdit className="mr-2 h-4 w-4" /> Edit Details
               </DropdownMenuItem>
@@ -1359,7 +1429,7 @@ export default function ProformaSlips() {
             <DropdownMenuItem
               onClick={() => toggleRowExpansion(slip)}
             >
-              {canAddSlips ? (
+              {canWriteSlips ? (
                 <>
                   <Edit className="mr-2 h-4 w-4" /> Manage Items
                 </>
@@ -1382,7 +1452,7 @@ export default function ProformaSlips() {
               <FileDown className="mr-2 h-4 w-4" /> Export This Slip
             </DropdownMenuItem>
 
-            {canEditSlips && (
+            {canWriteSlips && (
               <DropdownMenuItem
                 onClick={() => openDeleteDialog(slip)}
                 className="text-destructive focus:text-destructive"
@@ -1424,7 +1494,7 @@ export default function ProformaSlips() {
             <h3 className="text-lg font-medium">Inventory Items</h3>
           </div>
 
-          {canAddSlips && (
+          {canWriteSlips && (
             <div className="rounded-xl border p-4 bg-white">
               <h4 className="text-sm font-semibold mb-2">Add Items to Proforma Slip</h4>
               <div className="relative">
@@ -1549,7 +1619,7 @@ export default function ProformaSlips() {
                       {item.itemName || `Product #${item.productId}`}
                     </TableCell>
                     <TableCell className="text-center">
-                      {canAddSlips ? (
+                      {canWriteSlips ? (
                         <div className="flex items-center justify-center">
                           <Button
                             variant="outline"
@@ -1586,7 +1656,7 @@ export default function ProformaSlips() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {canAddSlips && (
+                      {canWriteSlips && (
                         <div className="flex justify-end gap-2">
                           <Button
                             variant="ghost"
@@ -1607,7 +1677,7 @@ export default function ProformaSlips() {
               {(!slipItems[slip.id] || slipItems[slip.id].length === 0) && (
                 <TableRow>
                   <TableCell colSpan={5} className="h-24 text-center">
-                    {canAddSlips ? "No items in this slip. Use the search bar above to add items." : "No items in this slip."}
+                    {canWriteSlips ? "No items in this slip. Use the search bar above to add items." : "No items in this slip."}
                   </TableCell>
                 </TableRow>
               )}
@@ -1644,44 +1714,46 @@ export default function ProformaSlips() {
     const totalQty = filteredSlips.reduce((sum, slip) => sum + (slip.totalQuantity || 0), 0);
     const uniqueParties = Array.from(new Set(filteredSlips.map((slip) => slip.partyName))).length;
     const uniqueVehicles = Array.from(new Set(filteredSlips.filter((slip) => slip.vehicleNumber).map((slip) => slip.vehicleNumber))).length;
+    // A figure with its unit underneath, rather than "6623 slips" run together on one line — the
+    // number is what's being read, so it carries the weight and the unit stays a quiet caption.
+    const stat = (value: number, unit: string) => (
+      <>
+        <span className="block text-base font-bold leading-tight tabular-nums text-[#001d6e]">
+          {value.toLocaleString()}
+        </span>
+        <span className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500">{unit}</span>
+      </>
+    );
+
     return (
-      <TableFooter className="bg-muted/30">
+      <TableFooter className="bg-transparent">
         {filteredSlips.length > 0 && (
-          <TableRow className="font-medium border-t-2">
-            {canEditSlips && <TableCell></TableCell>}
+          // DATA_TABLE_TOTALS_ROW is the app-wide totals look (faint navy wash, heavier rule on
+          // top, bold dark figures) — shared so this row matches every other table's.
+          <TableRow className={`${DATA_TABLE_TOTALS_ROW} hover:bg-[#f5f6f9]`}>
+            {canWriteSlips && <TableCell className="py-2.5"></TableCell>}
             {visibleCols.map((col) => {
               switch (col.id) {
                 case 'orderDate':
-                  return <TableCell key={col.id} className="font-bold whitespace-nowrap">Total</TableCell>;
-                case 'orderNumber':
-                  return <TableCell key={col.id} className="text-center whitespace-nowrap">{filteredSlips.length} slips</TableCell>;
-                case 'partyName':
-                  return <TableCell key={col.id} className="text-center whitespace-nowrap">{uniqueParties} parties</TableCell>;
-                case 'totalQuantity':
-                  return <TableCell key={col.id} className="text-right font-bold">{totalQty}</TableCell>;
-                case 'vehicleNumber':
-                  return <TableCell key={col.id} className="text-center">{uniqueVehicles}</TableCell>;
-                case 'actions':
                   return (
-                    <TableCell key={col.id}>
-                      <div className="flex items-center justify-end gap-1">
-                        <span className="text-xs whitespace-nowrap">Entries:</span>
-                        <select
-                          className="h-6 text-xs border rounded px-1 bg-background"
-                          value={ctx.pageSize}
-                          onChange={(e) => ctx.setPageSize(Number(e.target.value))}
-                          aria-label="Number of entries to display"
-                        >
-                          <option value={15}>15</option>
-                          <option value={25}>25</option>
-                          <option value={50}>50</option>
-                          <option value={100}>100</option>
-                        </select>
-                      </div>
+                    <TableCell key={col.id} className="whitespace-nowrap py-2.5 text-sm font-bold uppercase tracking-wide text-gray-900">
+                      Total
                     </TableCell>
                   );
+                case 'orderNumber':
+                  return <TableCell key={col.id} className="whitespace-nowrap py-2.5">{stat(filteredSlips.length, "slips")}</TableCell>;
+                case 'partyName':
+                  return <TableCell key={col.id} className="whitespace-nowrap py-2.5">{stat(uniqueParties, "parties")}</TableCell>;
+                case 'totalQuantity':
+                  // Right-aligned to sit under its column's own right-aligned figures.
+                  return <TableCell key={col.id} className="py-2.5 text-right">{stat(totalQty, "qty")}</TableCell>;
+                case 'vehicleNumber':
+                  return <TableCell key={col.id} className="whitespace-nowrap py-2.5">{stat(uniqueVehicles, "vehicles")}</TableCell>;
                 default:
-                  return <TableCell key={col.id}></TableCell>;
+                  // Includes 'actions': the entries-per-page control moved down to the pagination
+                  // row, where it sits with the other paging controls instead of competing with
+                  // the figures for attention.
+                  return <TableCell key={col.id} className="py-2.5"></TableCell>;
               }
             })}
           </TableRow>
@@ -1689,47 +1761,83 @@ export default function ProformaSlips() {
 
         <TableRow>
           <TableCell colSpan={ctx.columnCount} className="text-center py-2">
-            <div className="flex items-center justify-between">
-              <div className="text-sm text-muted-foreground">
-                Showing {ctx.totalRows > 0 ? ctx.pageIndex * ctx.pageSize + 1 : 0} to {Math.min((ctx.pageIndex + 1) * ctx.pageSize, ctx.totalRows)} of {ctx.totalRows} entries
+            {/* Three tracks so the pager sits in the TRUE centre of the row — with a plain
+                justify-between it would only be centred when the left-hand text happened to match
+                the empty right-hand side. The outer tracks share the leftover space evenly. */}
+            <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[1fr_auto_1fr]">
+              <div className="flex items-center gap-3">
+                <div className="text-sm text-muted-foreground">
+                  Showing {ctx.totalRows > 0 ? (ctx.pageIndex * ctx.pageSize + 1).toLocaleString() : 0} to {Math.min((ctx.pageIndex + 1) * ctx.pageSize, ctx.totalRows).toLocaleString()} of {ctx.totalRows.toLocaleString()} entries
+                </div>
+                {/* Rows-per-page — moved out of the totals row so the figures there aren't sharing
+                    space with a control, and so it sits with the paging it actually affects. */}
+                <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                  <span className="whitespace-nowrap">Rows</span>
+                  <select
+                    className="h-7 rounded-md border bg-background px-1.5 text-sm"
+                    value={ctx.pageSize}
+                    onChange={(e) => ctx.setPageSize(Number(e.target.value))}
+                    aria-label="Number of entries to display"
+                  >
+                    <option value={15}>15</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </label>
               </div>
-              <div className="flex items-center space-x-2">
+              {/* Numbered pages rather than a bare "Page 1 of 442": with 442 pages you can now
+                  see where you are, step a page at a time, or jump straight to the last one. */}
+              <nav className="flex items-center justify-center gap-1" aria-label="Pagination">
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => ctx.setPageIndex(0)}
-                  disabled={ctx.pageIndex === 0}
-                >
-                  <ChevronFirst className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
+                  className="h-8 w-8 p-0"
                   onClick={() => ctx.setPageIndex(Math.max(0, ctx.pageIndex - 1))}
                   disabled={ctx.pageIndex === 0}
+                  aria-label="Previous page"
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-sm text-muted-foreground px-2">
-                  Page {ctx.pageIndex + 1} of {ctx.pageCount}
-                </span>
+
+                {buildPageList(ctx.pageIndex, ctx.pageCount).map((p, i) =>
+                  p === "gap" ? (
+                    // Not a button: it stands for pages that aren't offered, so it mustn't look
+                    // clickable. aria-hidden keeps it out of the screen-reader page list.
+                    <span key={`gap-${i}`} aria-hidden className="px-1 text-sm text-muted-foreground select-none">
+                      …
+                    </span>
+                  ) : (
+                    <Button
+                      key={p}
+                      variant={p === ctx.pageIndex ? "default" : "outline"}
+                      size="sm"
+                      className={`h-8 min-w-8 px-2 tabular-nums ${
+                        p === ctx.pageIndex ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""
+                      }`}
+                      onClick={() => ctx.setPageIndex(p)}
+                      aria-label={`Page ${p + 1}`}
+                      aria-current={p === ctx.pageIndex ? "page" : undefined}
+                    >
+                      {p + 1}
+                    </Button>
+                  ),
+                )}
+
                 <Button
                   variant="outline"
                   size="sm"
+                  className="h-8 w-8 p-0"
                   onClick={() => ctx.setPageIndex(Math.min(ctx.pageCount - 1, ctx.pageIndex + 1))}
                   disabled={ctx.pageIndex >= ctx.pageCount - 1}
+                  aria-label="Next page"
                 >
                   <ChevronRight className="h-4 w-4" />
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => ctx.setPageIndex(ctx.pageCount - 1)}
-                  disabled={ctx.pageIndex >= ctx.pageCount - 1}
-                >
-                  <ChevronLast className="h-4 w-4" />
-                </Button>
-              </div>
+              </nav>
+
+              {/* Balances the left-hand track so the pager above lands dead centre. */}
+              <div className="hidden sm:block" />
             </div>
           </TableCell>
         </TableRow>
@@ -1840,7 +1948,7 @@ export default function ProformaSlips() {
           )}
 
           {/* New Slips: available to admins and read-write users */}
-          {canAddSlips && (
+          {canWriteSlips && (
             <Button onClick={() => setIsNewSlipDialogOpen(true)} size="sm">
               <Plus className="mr-2 h-4 w-4" /> New Slip
             </Button>
@@ -1848,8 +1956,41 @@ export default function ProformaSlips() {
         </div>
       </div>
 
-      <Card className="overflow-hidden">
-        {/* Header bar — title + search on top, filters directly beneath (matches Notion Inventory) */}
+      {/* Plant tabs — single-select (All + each plant), coloured per Plant Management. Sits
+          between the page header and the table (same placement as Overall Stock). */}
+      {plantOptions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+          <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Plant</span>
+          <button
+            onClick={() => setActivePlantTab("")}
+            className={
+              activePlantTab === ""
+                ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+            }
+          >
+            All
+          </button>
+          {plantOptions.map((p) => {
+            const isSel = activePlantTab.toUpperCase() === p.value.toUpperCase();
+            return (
+              <button
+                key={p.value}
+                onClick={() => setActivePlantTab(p.value)}
+                style={p.bgColor ? { backgroundColor: p.bgColor, color: p.textColor, borderColor: p.borderColor } : undefined}
+                className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                  p.bgColor ? "border" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                } ${isSel ? "ring-2 ring-[#001d6e] ring-offset-1" : ""}`}
+              >
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <Card className="overflow-hidden rounded-xl border-gray-300 shadow-none">
+        {/* Header bar — title + search on top, filters directly beneath (matches Product Master) */}
         <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div className="flex items-center gap-3">
@@ -1863,45 +2004,199 @@ export default function ProformaSlips() {
                 </div>
               </div>
             </div>
-            <div className="relative w-full sm:w-auto sm:shrink-0">
-              <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
-              <input
-                value={slipSearchQuery}
-                onChange={(e) => setSlipSearchQuery(e.target.value)}
-                placeholder="Search slips by order number or party name…"
-                className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
-              />
-              {slipSearchQuery && (
-                <button onClick={() => setSlipSearchQuery("")} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
-          </div>
 
-          {/* Filters */}
-          <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
-            <SingleDateFilter
-              selectedDate={selectedDate}
-              onDateChange={(date: Date | null) => {
-                setSelectedDate(date);
-                setIsDateFilterActive(!!date);
-                if (date && !isLocked) {
-                  SingleDateFilterStorage.saveDateFilter('proforma-slips', date);
-                }
-              }}
-              isLocked={isLocked}
-              onLockChange={(locked: boolean) => setLocked(locked)}
-              pageKey="proforma-slips"
-              buttonClassName={FILTER_BTN_CLASS}
+            {/* Controls — on the same line as the title, pushed right. Collapsible search first,
+                then Date, + Filter, active filters, and Columns. */}
+            <div className="flex flex-wrap items-center justify-end gap-2">
+            {/* Collapsible search — starts as an icon button, click to reveal the input. */}
+            <CollapsibleSearch
+              value={slipSearchQuery}
+              onChange={setSlipSearchQuery}
+              placeholder="Search slips by order number or party…"
             />
-            <PlantFilter
-              selectedPlants={selectedPlants}
-              onPlantChange={setSelectedPlants}
-              plantOptions={plantOptions}
-              buttonClassName={FILTER_BTN_CLASS}
-            />
+
+            {/* Standalone Date control — single date or from/to range + quick-range presets. */}
+            <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
+              <PopoverTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className={`h-8 gap-1 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                >
+                  <CalendarDays className="h-3.5 w-3.5" />
+                  {dateValue ? describeDate(dateValue) : "Date"}
+                  {dateValue && (
+                    <span
+                      role="button"
+                      aria-label="Clear date"
+                      onClick={(e) => { e.stopPropagation(); setDateValue(""); }}
+                      className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                    >
+                      <X className="h-3 w-3" />
+                    </span>
+                  )}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(["single", "range"] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setDatePickMode(m)}
+                        className={`rounded-md border px-2 py-1 text-xs font-medium ${
+                          datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {m === "single" ? "Single date" : "Date range"}
+                      </button>
+                    ))}
+                  </div>
+                  {datePickMode === "single" ? (
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
+                      <input
+                        type="date"
+                        value={fromStr}
+                        onChange={(e) => { setDateValue(e.target.value ? `d:${e.target.value}` : ""); if (e.target.value) setDateOpen(false); }}
+                        className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                      />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
+                        <input type="date" value={fromStr} max={toStr || undefined} onChange={(e) => setDateValue(`r:${e.target.value}:${toStr}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
+                        <input type="date" value={toStr} min={fromStr || undefined} onChange={(e) => setDateValue(`r:${fromStr}:${e.target.value}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
+                      </div>
+                    </div>
+                  )}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {DATE_PRESETS.map((o) => (
+                        <button
+                          key={o.value}
+                          type="button"
+                          onClick={() => { const v = datePresetValue(o.value); setDateValue(v); setDatePickMode(v.startsWith("r:") ? "range" : "single"); setDateOpen(false); }}
+                          className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {dateValue && (
+                    <div className="flex items-center justify-end pt-1">
+                      <button type="button" onClick={() => { setDateValue(""); setDateOpen(false); }} className="text-[11px] text-red-500 hover:underline">Clear date</button>
+                    </div>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
+
+            {/* + Filter — every column except Plant (tab) and Order Date (Date control). */}
+            <Popover open={filterPickerOpen} onOpenChange={(open) => { setFilterPickerOpen(open); if (!open) { setFilterPickerKey(""); setFilterPickerSearch(""); } }}>
+              <PopoverTrigger asChild>
+                <Button size="sm" variant="outline" className="h-8 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]">
+                  <Plus className="h-3.5 w-3.5" /> Filter
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-64">
+                {filterPickerKey === "" ? (
+                  <div className="space-y-1.5">
+                    <Input className="h-8 text-xs" placeholder="Find a filter…" value={filterPickerSearch} onChange={(e) => setFilterPickerSearch(e.target.value)} autoFocus />
+                    <div className="max-h-56 overflow-y-auto">
+                      {filterPickerOptions.length === 0 ? (
+                        <div className="px-2 py-1.5 text-xs text-gray-400">{filterPickerSearch ? "No matches" : "All filters added"}</div>
+                      ) : (
+                        filterPickerOptions.map((d) => (
+                          <button key={d.key} type="button" onClick={() => setFilterPickerKey(d.key)} className="block w-full rounded px-2 py-1.5 text-left text-xs text-gray-700 hover:bg-[#001d6e]/5 hover:text-[#001d6e]">
+                            {d.label}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : pickedFilterColumn ? (
+                  <div className="space-y-2">
+                    <button type="button" onClick={() => setFilterPickerKey("")} className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600">
+                      <ChevronLeft className="h-3 w-3" /> Back
+                    </button>
+                    <ColumnFilterPopoverContent
+                      column={pickedFilterColumn}
+                      onApply={(c) => { setColumnCondition(pickedFilterColumn.id, c); setFilterPickerOpen(false); setFilterPickerKey(""); }}
+                      onCancel={() => setFilterPickerKey("")}
+                    />
+                  </div>
+                ) : null}
+              </PopoverContent>
+            </Popover>
+
+            {/* Active column filters */}
+            {Object.keys(columnConditions).length > 0 && (
+              <Popover open={editFilterOpen} onOpenChange={(o) => { setEditFilterOpen(o); if (!o) setEditFilterKey(""); }}>
+                <PopoverTrigger asChild>
+                  <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
+                    <ListFilter className="h-3.5 w-3.5 mr-1" /> Filters ({Object.keys(columnConditions).length})
+                  </Button>
+                </PopoverTrigger>
+                {/* One place to see AND change every applied filter. */}
+                <PopoverContent align="start" className="w-72">
+                  {editFilterColumn ? (
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditFilterKey("")}
+                        className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
+                      >
+                        <ChevronLeft className="h-3 w-3" /> Back to filters
+                      </button>
+                      <ColumnFilterPopoverContent
+                        column={editFilterColumn}
+                        initial={columnConditions[editFilterColumn.id]}
+                        onApply={(c) => { setColumnCondition(editFilterColumn.id, c); setEditFilterKey(""); }}
+                        onClear={() => { clearColumnCondition(editFilterColumn.id); setEditFilterKey(""); }}
+                        onCancel={() => setEditFilterKey("")}
+                      />
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between pb-1">
+                        <span className="text-xs font-semibold text-gray-700">Active filters</span>
+                        <button type="button" onClick={() => setColumnConditions({})} className="text-[11px] text-red-500 hover:underline">Clear all</button>
+                      </div>
+                      {Object.entries(columnConditions).map(([columnId, condition]) => (
+                        <div key={columnId} className="flex items-center justify-between gap-2 rounded border border-gray-200">
+                          {/* The summary itself is the edit control — clicking it opens this
+                              filter's builder pre-filled, so it can be changed in place. */}
+                          <button
+                            type="button"
+                            onClick={() => setEditFilterKey(columnId)}
+                            className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left text-xs text-gray-700 hover:text-[#001d6e]"
+                            title="Edit this filter"
+                          >
+                            <Pencil className="h-3 w-3 shrink-0 opacity-40" />
+                            <span className="truncate">{conditionSummary(condition, filterableColumns)}</span>
+                          </button>
+                          <button type="button" onClick={() => clearColumnCondition(columnId)} className="mr-2 shrink-0 text-gray-400 hover:text-red-500" aria-label="Remove filter">
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </PopoverContent>
+              </Popover>
+            )}
+
             <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
               columns={slipColumns}
               visibleColumnIds={visibleColumnIds}
               onToggleColumn={(id) =>
@@ -1917,6 +2212,7 @@ export default function ProformaSlips() {
               }
               buttonClassName={FILTER_BTN_CLASS}
             />
+            </div>
           </div>
         </div>
         <CardContent className="p-0">
@@ -1931,7 +2227,7 @@ export default function ProformaSlips() {
             onRowClick={(slip) => toggleRowExpansion(slip)}
             renderExpandedRow={renderSlipExpandedRow}
             expandedRowId={selectedSlip ? String(selectedSlip.id) : null}
-            enableRowSelection={canEditSlips}
+            enableRowSelection={canWriteSlips}
             selectedRowIds={selectedSlipIds.map(String)}
             onSelectedRowIdsChange={(ids) => setSelectedSlipIds(ids.map(Number))}
             renderFooter={renderSlipFooter}
@@ -1953,6 +2249,8 @@ export default function ProformaSlips() {
             sortMode="external"
             sortState={{ columnId: sortConfig.column, direction: sortConfig.direction }}
             onSortColumnClick={handleSort}
+            // Paginated rather than one long scrolling list, and with no isStickyHeader/maxHeight,
+            // so the table has no inner scroll box of its own — matching develop.
             paginationMode="client"
             pageIndex={currentPage - 1}
             onPageIndexChange={(idx) => setCurrentPage(idx + 1)}
@@ -1962,6 +2260,8 @@ export default function ProformaSlips() {
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}
+            columnOrder={columnOrder}
+            onColumnOrderChange={setColumnOrder}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
             enableZebraStripes
@@ -2055,7 +2355,7 @@ export default function ProformaSlips() {
                                 </SelectItem>
                               ))
                             ) : (
-                              <SelectItem value="" disabled>No plants configured</SelectItem>
+                              <SelectItem value="__none__" disabled>No plants configured</SelectItem>
                             )}
                           </SelectContent>
                         </Select>
@@ -2248,7 +2548,7 @@ export default function ProformaSlips() {
                                 </SelectItem>
                               ))
                             ) : (
-                              <SelectItem value="" disabled>No plants configured</SelectItem>
+                              <SelectItem value="__none__" disabled>No plants configured</SelectItem>
                             )}
                           </SelectContent>
                         </Select>

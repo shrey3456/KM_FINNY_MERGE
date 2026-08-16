@@ -77,7 +77,11 @@ export function ColumnFilterPopoverContent({
   onCancel: () => void;
 }) {
   const [tab, setTab] = useState<"values" | "condition">(
-    column.disableValues ? "condition" : initial ? (initial.operator === "in" ? "values" : "condition") : (initialTab ?? "values"),
+    column.disableValues
+      ? "condition"
+      : column.disableConditions
+        ? "values"
+        : initial ? (initial.operator === "in" ? "values" : "condition") : (initialTab ?? "values"),
   );
   const [selectedValues, setSelectedValues] = useState<string[]>(
     initial?.operator === "in" ? (initial.value as string[]) : [],
@@ -107,7 +111,8 @@ export function ColumnFilterPopoverContent({
 
   return (
     <div className="space-y-3">
-      {!column.disableValues && (
+      {/* The switcher only earns its place when both tabs are actually available. */}
+      {!column.disableValues && !column.disableConditions && (
         <div className="flex divide-x divide-gray-300 rounded-md border border-gray-300 text-xs">
           <button
             type="button"

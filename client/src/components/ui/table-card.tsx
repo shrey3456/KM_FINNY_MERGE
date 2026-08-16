@@ -30,7 +30,7 @@ interface TableCardProps {
 }
 
 /**
- * The Notion Inventory "Product Master" card: a bordered card whose header holds a
+ * The Product Master card: a bordered card whose header holds a
  * navy icon badge, title + count, a right-aligned search box, and an optional filter
  * row — with the table rendered flush beneath.
  */

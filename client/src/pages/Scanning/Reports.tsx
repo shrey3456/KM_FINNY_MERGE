@@ -6,10 +6,11 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   History, X, RefreshCw, FileDown, ChevronDown, ChevronLeft,
-  Loader2, Upload, Trash2, Plus, ListFilter, Filter,
+  Loader2, Upload, Trash2, Plus, ListFilter, Filter, CalendarDays, Pencil,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
+import { hasPageWriteAccess } from "@/lib/permissions";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -56,6 +57,8 @@ type ScanHistoryItem = {
   scannedByName: string | null;
   scannedAt: string;
   orderName: string;
+  orderDate: string | null;
+  srNo: string | null;
   plant: string;
   voided: boolean | null;
   voidedAt: string | null;
@@ -70,15 +73,16 @@ type ScanHistoryResponse = {
   extraCount: number;
   emptyBoxCount?: number;
   scanners: string[];
+  /** Totals-row figures for Qty/Pallets over the whole filtered set, not just the loaded page. */
+  qtyTotal?: number;
+  palletsTotal?: number;
   limit: number;
   offset: number;
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const HISTORY_PAGE_SIZE = 20;
-
-// Solid navy fill, matching Overall Stock / Notion Inventory's filter buttons. Squared off
+// Solid navy fill, matching Overall Stock / Product Master's filter buttons. Squared off
 // (rounded-xl) for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
@@ -86,6 +90,30 @@ const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hove
 // below. "#", Scanned By, Item and Void always stay visible (hideable: false there), so they
 // don't need to be included/excluded here — DataTable adds them back regardless.
 const HISTORY_OPTIONAL_COLUMNS = ["barcode", "order", "plant", "qty", "pallets", "stv", "type", "time"] as const;
+
+// Rows per request. One page per view keeps the load to a single query — see the note on the
+// query below for why this page is paginated rather than loading the whole history.
+const HISTORY_PAGE_SIZE = 20;
+
+// Filters survive leaving the page and coming back — they live in component state, so navigating
+// away used to drop whatever the history had been narrowed to. sessionStorage rather than
+// localStorage: a filter is working context for the current sitting, not a preference that should
+// still be applied when the app is opened fresh tomorrow.
+const HISTORY_FILTERS_KEY = "scanHistory:filters";
+
+type SavedHistoryFilters = {
+  search?: string;
+  activeFilters?: { id: number; field: string; value: string }[];
+  conditions?: Record<string, FilterCondition>;
+};
+
+function readSavedHistoryFilters(): SavedHistoryFilters {
+  try {
+    return JSON.parse(sessionStorage.getItem(HISTORY_FILTERS_KEY) ?? "{}") as SavedHistoryFilters;
+  } catch {
+    return {};
+  }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -198,6 +226,12 @@ const Reports = () => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const isAdmin = ["admin", "super-admin"].includes(((user as any)?.role ?? "").toLowerCase());
+  // Matches the server's actual rule (POST /reports/upload-to-notion: requirePageWrite('scan-history')).
+  const canUploadNotion = isAdmin || hasPageWriteAccess("scan-history");
+  // Matches the server's actual rule (POST /events/:id/void: requirePageWrite chained for BOTH
+  // 'scan-order' and 'scan-history') — a user with only one of the two would otherwise see a
+  // clickable Void button that 403s on click.
+  const canVoidScan = isAdmin || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"));
   const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const voidMutation = useMutation({
@@ -214,16 +248,23 @@ const Reports = () => {
     },
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
+  // Seeded from whatever was left applied last time — see HISTORY_FILTERS_KEY.
+  const [historySearch,  setHistorySearch]  = useState(() => readSavedHistoryFilters().search ?? "");
   const [historyPage,    setHistoryPage]    = useState(1);
-  const [historySearch,  setHistorySearch]  = useState("");
   const [historyExporting, setHistoryExporting] = useState<string | null>(null);
   // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Overall Stock's
   // Date (kept separate from the generic column engine below since each is a simple exact-match
   // server param, not a column/operator/value condition). Plant used to live here too, but is
   // now a regular generic column (see filterableColumns) so it gets the same Values checklist
   // and header icon as Item/Barcode/etc.
-  const [activeFilters, setActiveFilters] = useState<{ id: number; field: string; value: string }[]>([]);
-  const filterIdRef = useRef(0);
+  const [activeFilters, setActiveFilters] = useState<{ id: number; field: string; value: string }[]>(
+    () => readSavedHistoryFilters().activeFilters ?? [],
+  );
+  // Start the id counter past anything restored, so a newly added filter can't collide with one
+  // that came back from storage (ids are the React keys and the remove-by-id handle).
+  const filterIdRef = useRef(
+    (readSavedHistoryFilters().activeFilters ?? []).reduce((max, f) => Math.max(max, f.id), 0),
+  );
   const selectedDate   = activeFilters.find((f) => f.field === "date")?.value ?? "";
   const historyScanner = activeFilters.find((f) => f.field === "scanner")?.value ?? "";
   const historyType    = activeFilters.find((f) => f.field === "type")?.value ?? "";
@@ -242,8 +283,47 @@ const Reports = () => {
     { value: "empty", label: "Empty Box only" },
     { value: "exchange", label: "Exchange only" },
   ];
+
+  // Date filter — same control/encoding as Overall Stock: the stored value is either a single
+  // day ("d:YYYY-MM-DD") or a from–to range ("r:YYYY-MM-DD:YYYY-MM-DD"), both resolving to a
+  // from/to window sent to the server. Presets just compute one of those. Filters scan date
+  // (scannedAt) — "Scan Date" below, to read distinctly from "Order Date" (its own generic
+  // column filter, set only via "+ Filter", not a second standalone control here).
+  const dateValue = selectedDate;
+  const { from: fromDate, to: toDate } = useMemo(() => {
+    if (dateValue.startsWith("d:")) { const day = dateValue.slice(2); return { from: day, to: day }; }
+    if (dateValue.startsWith("r:")) { const [, f, t] = dateValue.split(":"); return { from: f ?? "", to: t ?? "" }; }
+    return { from: "", to: "" };
+  }, [dateValue]);
+  const dateIsRange = dateValue.startsWith("r:");
+  const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
+  const [dateOpen, setDateOpen] = useState(false);
+  const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
+  const datePresetValue = (key: string): string => {
+    const d = new Date();
+    if (key === "today") return `d:${isoOf(d)}`;
+    if (key === "yday") { const y = new Date(d); y.setDate(y.getDate() - 1); return `d:${isoOf(y)}`; }
+    if (key === "week") { const w = new Date(d); w.setDate(w.getDate() - 6); return `r:${isoOf(w)}:${isoOf(d)}`; }
+    if (key === "month") return `r:${isoOf(new Date(d.getFullYear(), d.getMonth(), 1))}:${isoOf(d)}`;
+    return "";
+  };
+  const DATE_PRESETS = [
+    { value: "today", label: "Today" },
+    { value: "yday", label: "Yesterday" },
+    { value: "week", label: "This week" },
+    { value: "month", label: "This month" },
+  ];
+
   const describeSimpleFilter = (field: string, value: string) => {
-    if (field === "date") return `Date: ${format(new Date(value), "MMM d, yyyy")}`;
+    if (field === "date") {
+      if (value.startsWith("d:")) return `Scan Date: ${format(new Date(value.slice(2)), "MMM d, yyyy")}`;
+      if (value.startsWith("r:")) {
+        const [, f, t] = value.split(":");
+        const fmt = (s: string) => (s ? format(new Date(s), "MMM d") : "…");
+        return `Scan Date: ${fmt(f)} → ${fmt(t)}`;
+      }
+      return `Scan Date: ${value}`;
+    }
     if (field === "scanner") return `Scanned By: ${value}`;
     if (field === "type") return `Type: ${TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value}`;
     return value;
@@ -273,9 +353,12 @@ const Reports = () => {
     { id: "pallets", label: "Pallets", filterType: "number", options: [], disableValues: true, accessor: (r) => r.pallets },
     { id: "stv", label: "STV", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
     { id: "time", label: "Time", filterType: "date", options: filterValues.time ?? [], accessor: (r) => r.scannedAt },
+    { id: "orderDate", label: "Order Date", filterType: "date", options: filterValues.orderDate ?? [], accessor: (r) => r.orderDate },
     { id: "plant", label: "Plant", filterType: "enum", options: filterValues.plant ?? [], accessor: (r) => r.plant },
   ], [filterValues]);
-  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>({});
+  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
+    () => readSavedHistoryFilters().conditions ?? {},
+  );
   const setColumnCondition = (columnId: string, condition: FilterCondition) =>
     setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
   const clearColumnCondition = (columnId: string) =>
@@ -284,7 +367,7 @@ const Reports = () => {
       delete next[columnId];
       return next;
     });
-  const columnHeader = (id: string, label: string) => {
+  const columnHeader = (id: string, label: string, initialTab?: "values" | "condition") => {
     const col = filterableColumns.find((c) => c.id === id);
     if (!col) return label;
     return (
@@ -295,6 +378,7 @@ const Reports = () => {
           condition={columnConditions[id]}
           onChange={(c) => setColumnCondition(id, c)}
           onRemove={() => clearColumnCondition(id)}
+          initialTab={initialTab}
         />
       </span>
     );
@@ -310,23 +394,52 @@ const Reports = () => {
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
   const filterPickerOptions = useMemo(() => {
+    // Date is its own standalone control (below), not part of this "+ Filter" list — same split
+    // as Overall Stock.
     const dims = [
-      { key: "date", label: "Date" },
       { key: "scanner", label: "Scanned By" },
       { key: "type", label: "Type" },
       ...filterableColumns.map((c) => ({ key: c.id, label: c.label })),
     ];
     const isActive = (key: string) =>
-      ["date", "scanner", "type"].includes(key)
+      ["scanner", "type"].includes(key)
         ? activeFilters.some((f) => f.field === key)
         : !!columnConditions[key];
+    // Already-filtered columns are left OUT of this list: "+ Filter" adds a new one, while
+    // changing or removing an existing filter happens in the "Filters (N)" dropdown, which lists
+    // them all and opens each one's builder pre-filled.
     const q = filterPickerSearch.trim().toLowerCase();
     return dims.filter((d) => !isActive(d.key) && (!q || d.label.toLowerCase().includes(q)));
   }, [filterableColumns, activeFilters, columnConditions, filterPickerSearch]);
   const pickedFilterColumn = filterableColumns.find((c) => c.id === filterPickerKey) ?? null;
+
+  // The "Filters (N)" popover doubles as the editor: it lists everything applied, and drilling
+  // into one swaps the list for that filter's own builder (editFilterKey), with a Back link — a
+  // drill-down inside the same popover rather than a popover within a popover.
+  const [editFilterOpen, setEditFilterOpen] = useState(false);
+  const [editFilterKey, setEditFilterKey] = useState("");
+  const editFilterColumn = filterableColumns.find((c) => c.id === editFilterKey) ?? null;
+
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(HISTORY_OPTIONAL_COLUMNS),
   );
+
+  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
+  // a rearranged table is working context for this sitting, not a permanent preference. An empty
+  // array means "declared order", which is also what Reset order restores.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("scanHistory:columnOrder");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("scanHistory:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
+
   const toggleColumn = (key: string) =>
     setVisibleColumnIds((prev) => {
       const next = new Set(prev);
@@ -369,7 +482,8 @@ const Reports = () => {
     try {
       const r = await apiRequest("POST", "/api/scan-sessions/reports/upload-to-notion", {
         columns: notionColumns,
-        date:    selectedDate   || undefined,
+        from:    fromDate       || undefined,
+        to:      toDate         || undefined,
         search:  historySearch  || undefined,
         scanner: historyScanner || undefined,
         type:    historyType    || undefined,
@@ -382,11 +496,34 @@ const Reports = () => {
     }
   };
 
-  useEffect(() => { setHistoryPage(1); }, [historySearch, activeFilters, filtersJson]);
+
+  // Server-driven pagination, same as develop: ONE request for one 20-row page. This page briefly
+  // loaded the entire filtered history instead (walking it 100 rows at a time, in sequence, while
+  // a 5s poll restarted the walk) and took ~20s to show anything — pagination is what made it
+  // about a second, so it's back.
+  useEffect(() => { setHistoryPage(1); }, [selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+
+  // Keep the saved copy in step with what's applied, so coming back to this page restores it. The
+  // page number isn't saved — a filtered report should reopen at the top of its results.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        HISTORY_FILTERS_KEY,
+        JSON.stringify({
+          search: historySearch,
+          activeFilters,
+          conditions: columnConditions,
+        } satisfies SavedHistoryFilters),
+      );
+    } catch {
+      // Storage unavailable (private mode / quota) — filters just won't outlive the page.
+    }
+  }, [historySearch, activeFilters, columnConditions]);
 
   const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
-    date:    selectedDate   || undefined,
+    from:    fromDate       || undefined,
+    to:      toDate         || undefined,
     search:  historySearch  || undefined,
     scanner: historyScanner || undefined,
     type:    historyType    || undefined,
@@ -414,12 +551,10 @@ const Reports = () => {
   const historyScanners     = historyData?.scanners ?? [];
   const historyHasMore      = historyOffset + historyItems.length < historyTotal;
 
-  // Export must cover every row matching the current filters, not just the current page —
-  // the server caps `limit` at 100 (see /reports/scan-history), so this pages through with
-  // the SAME filters until it has everything, then hands the full set to the exporter.
-  // Previously the button exported `historyItems` directly, which is only the current
-  // HISTORY_PAGE_SIZE (20) page — e.g. exporting "today" silently dropped every row past
-  // page 1.
+  // Export must cover every row matching the current filters — the server caps `limit` at 100
+  // (see /reports/scan-history), so this pages through with the SAME filters until it has
+  // everything, then hands the full set to the exporter. Kept independent of the table's own
+  // fetch so a click always exports a fresh, complete set even mid-poll.
   async function fetchAllHistoryItems(): Promise<ScanHistoryItem[]> {
     const EXPORT_PAGE_SIZE = 100; // server-side max for `limit`
     let offset = 0;
@@ -427,7 +562,8 @@ const Reports = () => {
     const all: ScanHistoryItem[] = [];
     while (offset < total) {
       const url = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
-        date:    selectedDate   || undefined,
+        from:    fromDate       || undefined,
+        to:      toDate         || undefined,
         search:  historySearch  || undefined,
         scanner: historyScanner || undefined,
         type:    historyType    || undefined,
@@ -446,14 +582,14 @@ const Reports = () => {
   }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
-    ["#", "Scanned By", "Code", "Item", "Barcode", "Order", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
-    ...src.map((h, i) => [
-      i + 1,
+    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order Date", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
+    ...src.map((h) => [
+      h.srNo ?? "",
       h.scannedByName ?? "",
       h.scannedByCode ?? "",
       h.itemName ?? "",
       h.barcode ?? "",
-      h.orderName,
+      h.orderDate ?? "",
       h.plant,
       h.totalQty,
       h.pallets != null ? parseFloat(String(h.pallets)).toFixed(2) : "",
@@ -466,17 +602,24 @@ const Reports = () => {
   const dash = <span className="text-gray-300">—</span>;
 
   // Same table structure/styling as Overall Stock (DataTable + TableCard): sortable/resizable/
-  // hideable columns, zebra stripes, business-report borders. No totals row here — the server
-  // only ever hands us one page of rows, so a client-side sum would just total the visible page
-  // instead of the real filtered total (the summary tiles above already show the true totals).
+  // hideable columns, zebra stripes, business-report borders, plus a totals row.
+  //
+  // The table only ever holds one 20-row page, so DataTable's own row-summing would report the
+  // total of whatever page you happen to be on. Qty and Pallets therefore take their figure from
+  // the server, computed over the whole filtered set (see qtyTotal/palletsTotal on
+  // /reports/scan-history) — the number stays the same as you page through, which is the only
+  // reading of "Total" that means anything here. Voided scans are excluded, matching the rule the
+  // void dialog states ("removes it from totals and stock").
   const historyColumns: DataTableColumn<ScanHistoryItem>[] = [
     {
       id: "srNo",
-      header: "#",
+      header: "Sr. No",
       hideable: false,
-      width: 48,
-      cellClassName: "text-gray-400 tabular-nums",
-      render: (_row, rowIndex) => historyOffset + rowIndex + 1,
+      width: 64,
+      cellClassName: "text-gray-500 tabular-nums",
+      // The item's inventory Sr. No (products.new_sr), so the same item always shows the same
+      // number here as on the Inventory page — not a per-page running row count.
+      render: (row) => row.srNo || dash,
     },
     {
       id: "scannedBy",
@@ -499,6 +642,7 @@ const Reports = () => {
       hideable: false,
       width: 220,
       accessor: (row) => row.itemName,
+      totalable: false,
       cellClassName: "whitespace-normal break-words",
       render: (row) => (
         <>
@@ -518,22 +662,35 @@ const Reports = () => {
       header: columnHeader("barcode", "Barcode"),
       width: 120,
       accessor: (row) => row.barcode,
+      // A barcode is an identifier that happens to be digits — adding them up is meaningless, so
+      // it never joins the totals row (same reason SAP Code/STV opt out below).
+      totalable: false,
       cellClassName: "font-mono text-gray-500",
       render: (row) => row.barcode ?? dash,
     },
     {
       id: "order",
-      header: "Order",
-      width: 140,
-      accessor: (row) => row.orderName,
-      cellClassName: "truncate",
-      render: (row) => row.orderName,
+      // Opens straight to the Condition tab (a real calendar input for on/before/after/between)
+      // instead of the Values tab — the Values checklist only ever lists dates that already have
+      // a scan on them (capped at 500), not every date you might actually want to pick.
+      header: columnHeader("orderDate", "Order Date", "condition"),
+      width: 120,
+      accessor: (row) => row.orderDate ?? "",
+      totalable: false,
+      cellClassName: "whitespace-nowrap text-gray-600",
+      // Show the order's date (from the CSV import) instead of the order/file name.
+      render: (row) => {
+        if (!row.orderDate) return dash;
+        const d = new Date(row.orderDate);
+        return isNaN(d.getTime()) ? row.orderDate : format(d, "MMM d, yyyy");
+      },
     },
     {
       id: "plant",
       header: columnHeader("plant", "Plant"),
       width: 90,
       accessor: (row) => row.plant,
+      totalable: false,
       render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : <span className="text-gray-300">—</span>),
     },
     {
@@ -542,6 +699,12 @@ const Reports = () => {
       width: 80,
       align: "right",
       accessor: (row) => row.totalQty,
+      // Whole-set figure from the server; the row-sum fallback only covers the loaded page and is
+      // there for an older server that doesn't send the field.
+      total: (rows) =>
+        (historyData?.qtyTotal ??
+          rows.reduce((sum, r) => (r.voided ? sum : sum + (r.totalQty ?? 0)), 0)
+        ).toLocaleString(),
       cellClassName: "font-bold",
       render: (row) =>
         row.isExchange ? (
@@ -558,6 +721,10 @@ const Reports = () => {
       width: 90,
       align: "right",
       accessor: (row) => row.pallets,
+      total: (rows) =>
+        (historyData?.palletsTotal ??
+          rows.reduce((sum, r) => (r.voided ? sum : sum + Number(r.pallets ?? 0)), 0)
+        ).toFixed(2),
       cellClassName: "font-semibold text-[#001d6e]",
       render: (row) =>
         row.pallets != null && Number(row.pallets) > 0 ? parseFloat(String(row.pallets)).toFixed(2) : dash,
@@ -567,6 +734,7 @@ const Reports = () => {
       header: columnHeader("stv", "STV"),
       width: 90,
       accessor: (row) => row.stv,
+      totalable: false,
       cellClassName: "text-gray-600",
       render: (row) => row.stv ?? dash,
     },
@@ -605,7 +773,7 @@ const Reports = () => {
       cellClassName: "whitespace-nowrap text-gray-500",
       render: (row) => (row.scannedAt ? format(new Date(row.scannedAt), "MMM d, h:mm a") : dash),
     },
-    ...(isAdmin
+    ...(canVoidScan
       ? [
           {
             id: "void",
@@ -628,7 +796,7 @@ const Reports = () => {
   return (
     <>
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-      <div className="max-w-7xl mx-auto space-y-4">
+      <div className="mx-auto w-full max-w-[1800px] space-y-4">
         <PageHeader
           icon={History}
           title="Scan History"
@@ -636,15 +804,15 @@ const Reports = () => {
         />
 
         {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/
-            hideable columns, zebra stripes, mobile swipe hint. Pagination is server-driven
-            (Prev/Next over 20-row pages), so it's rendered via renderFooter instead of the
-            DataTable's own client pageIndex/pageSize controls. */}
+            hideable columns, zebra stripes, mobile swipe hint. No pagination — the whole filtered
+            list loads and the table body scrolls under a sticky header, matching the Scan page's
+            Master View. */}
         <TableCard
           icon={History}
           title="Scan Events"
           subtitle={
             <span className="inline-flex items-center gap-1.5">
-              <span>{historyTotal > 0 ? `${historyItems.length} of ${historyTotal.toLocaleString()} events` : "0 events"}</span>
+              <span>{historyTotal > 0 ? `${historyTotal.toLocaleString()} events` : "0 events"}</span>
               {/* Always mounted (visibility toggled, not presence) so the 5s poll never causes a
                   layout shift — kept here in the subtitle line instead of the button row, where
                   its reserved width used to show up as a permanent gap next to "+ Filter". */}
@@ -665,8 +833,127 @@ const Reports = () => {
                 placeholder="Item, barcode, or scanner…"
               />
 
-              {/* One unified "+ Filter" — Date, Scanned By, Type, Plant, and every generic
-                  column in the same searchable list, same pattern as Overall Stock. */}
+              {/* Standalone Scan Date control — sits BEFORE "+ Filter", same as Overall Stock.
+                  Single date or from/to range (both editable) plus quick-range presets; filters
+                  scan date (scannedAt) — when a box was physically scanned, not the order's own
+                  date (see the separate Order Date control right after this one). */}
+              <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) { setDatePickMode(dateIsRange ? "range" : "single"); } }}>
+                <PopoverTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`h-8 gap-1 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Scan Date: ", "") : "Scan Date"}
+                    {dateValue && (
+                      <span
+                        role="button"
+                        aria-label="Clear date"
+                        onClick={(e) => { e.stopPropagation(); clearSimpleFilter("date"); }}
+                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                      >
+                        <X className="h-3 w-3" />
+                      </span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                {/* align="end" + avoidCollisions={false}: box anchors to the button's right edge
+                    and never re-positions as its height changes while picking — stays put. */}
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(["single", "range"] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setDatePickMode(m)}
+                          className={`rounded-md border px-2 py-1 text-xs font-medium ${
+                            datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
+                          }`}
+                        >
+                          {m === "single" ? "Single date" : "Date range"}
+                        </button>
+                      ))}
+                    </div>
+
+                    {datePickMode === "single" ? (
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
+                        <input
+                          type="date"
+                          value={fromDate}
+                          onChange={(e) => {
+                            upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "");
+                            if (e.target.value) setDateOpen(false);
+                          }}
+                          className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                        />
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
+                          <input
+                            type="date"
+                            value={fromDate}
+                            max={toDate || undefined}
+                            onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
+                            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
+                          <input
+                            type="date"
+                            value={toDate}
+                            min={fromDate || undefined}
+                            onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
+                            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {DATE_PRESETS.map((o) => (
+                          <button
+                            key={o.value}
+                            type="button"
+                            onClick={() => {
+                              const v = datePresetValue(o.value);
+                              upsertSimpleFilter("date", v);
+                              setDatePickMode(v.startsWith("r:") ? "range" : "single");
+                              setDateOpen(false);
+                            }}
+                            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+                          >
+                            {o.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {dateValue && (
+                      <div className="flex items-center justify-end pt-1">
+                        <button
+                          type="button"
+                          onClick={() => { clearSimpleFilter("date"); setDateOpen(false); }}
+                          className="text-[11px] text-red-500 hover:underline"
+                        >
+                          Clear date
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </PopoverContent>
+              </Popover>
+
+
+              {/* One unified "+ Filter" — Scanned By, Type, Plant, and every generic column in the
+                  same searchable list, same pattern as Overall Stock. (Date is its own control.) */}
               <Popover
                 open={filterPickerOpen}
                 onOpenChange={(open) => {
@@ -712,25 +999,6 @@ const Reports = () => {
                             </button>
                           ))
                         )}
-                      </div>
-                    </div>
-                  ) : filterPickerKey === "date" ? (
-                    <div className="space-y-3">
-                      <button type="button" onClick={() => setFilterPickerKey("")} className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600">
-                        <ChevronLeft className="h-3 w-3" /> Back
-                      </button>
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
-                        <input
-                          type="date"
-                          onChange={(e) => {
-                            if (!e.target.value) return;
-                            upsertSimpleFilter("date", e.target.value);
-                            setFilterPickerOpen(false);
-                            setFilterPickerKey("");
-                          }}
-                          className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                        />
                       </div>
                     </div>
                   ) : filterPickerKey === "scanner" ? (
@@ -784,38 +1052,150 @@ const Reports = () => {
 
               {/* Every active filter (Date/Scanner/Type/Plant + column filters) in one list. */}
               {(activeFilters.length + Object.keys(columnConditions).length) > 0 && (
-                <Popover>
+                <Popover open={editFilterOpen} onOpenChange={(o) => { setEditFilterOpen(o); if (!o) setEditFilterKey(""); }}>
                   <PopoverTrigger asChild>
                     <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
                       <ListFilter className="h-3.5 w-3.5 mr-1" />
                       Filters ({activeFilters.length + Object.keys(columnConditions).length})
                     </Button>
                   </PopoverTrigger>
+                  {/* One place to see AND change every applied filter — the list drills down into
+                      a filter's own builder rather than opening a popover inside a popover. */}
                   <PopoverContent align="start" className="w-72">
-                    <div className="space-y-0.5">
-                      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Active filters</p>
-                      {activeFilters.map((f) => (
-                        <div key={f.id} className="flex items-center justify-between gap-2 rounded px-1.5 py-1 text-xs hover:bg-gray-50">
-                          <span className="text-gray-700">{describeSimpleFilter(f.field, f.value)}</span>
-                          <button type="button" onClick={() => removeFilter(f.id)} className="text-gray-400 hover:text-red-500" aria-label="Remove filter">
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ))}
-                      {Object.entries(columnConditions).map(([columnId, condition]) => (
-                        <div key={columnId} className="flex items-center justify-between gap-2 rounded px-1.5 py-1 text-xs hover:bg-gray-50">
-                          <span className="text-gray-700">{conditionSummary(condition, filterableColumns)}</span>
-                          <button type="button" onClick={() => clearColumnCondition(columnId)} className="text-gray-400 hover:text-red-500" aria-label="Remove filter">
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
+                    {editFilterKey === "scanner" || editFilterKey === "type" || editFilterKey === "date" ? (
+                      <div className="space-y-3">
+                        <button
+                          type="button"
+                          onClick={() => setEditFilterKey("")}
+                          className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
+                        >
+                          <ChevronLeft className="h-3 w-3" /> Back to filters
+                        </button>
+                        {editFilterKey === "scanner" && (
+                          <div className="space-y-1">
+                            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Scanned By</label>
+                            {/* value= so it opens showing what's currently set, not a blank picker. */}
+                            <Select value={historyScanner} onValueChange={(v) => { upsertSimpleFilter("scanner", v); setEditFilterKey(""); }}>
+                              <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Choose a scanner…" /></SelectTrigger>
+                              <SelectContent>
+                                {historyScanners.map((name) => <SelectItem key={name} value={name}>{name}</SelectItem>)}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+                        {editFilterKey === "type" && (
+                          <div className="space-y-1">
+                            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Type</label>
+                            <Select value={historyType} onValueChange={(v) => { upsertSimpleFilter("type", v); setEditFilterKey(""); }}>
+                              <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Choose a type…" /></SelectTrigger>
+                              <SelectContent>
+                                {TYPE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+                        {editFilterKey === "date" && (
+                          <div className="space-y-2">
+                            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                              {dateIsRange ? "Date range" : "Date"}
+                            </label>
+                            {dateIsRange ? (
+                              <div className="grid grid-cols-2 gap-2">
+                                <input
+                                  type="date"
+                                  value={fromDate}
+                                  max={toDate || undefined}
+                                  onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
+                                  className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                                />
+                                <input
+                                  type="date"
+                                  value={toDate}
+                                  min={fromDate || undefined}
+                                  onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
+                                  className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                                />
+                              </div>
+                            ) : (
+                              <input
+                                type="date"
+                                value={fromDate}
+                                onChange={(e) => upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "")}
+                                className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+                              />
+                            )}
+                            <p className="text-[10px] text-gray-400">
+                              Switch between a single date and a range from the Scan Date button above.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ) : editFilterColumn ? (
+                      <div className="space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => setEditFilterKey("")}
+                          className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
+                        >
+                          <ChevronLeft className="h-3 w-3" /> Back to filters
+                        </button>
+                        <ColumnFilterPopoverContent
+                          column={editFilterColumn}
+                          initial={columnConditions[editFilterColumn.id]}
+                          onApply={(c) => { setColumnCondition(editFilterColumn.id, c); setEditFilterKey(""); }}
+                          onClear={() => { clearColumnCondition(editFilterColumn.id); setEditFilterKey(""); }}
+                          onCancel={() => setEditFilterKey("")}
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-0.5">
+                        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Active filters</p>
+                        {/* Scanned By / Type / Date aren't column conditions — they're their own
+                            single-value server params — so they get their own small editors below
+                            rather than the shared builder. Clicking one still opens it pre-set. */}
+                        {activeFilters.map((f) => (
+                          <div key={f.id} className="flex items-center justify-between gap-2 rounded text-xs hover:bg-gray-50">
+                            <button
+                              type="button"
+                              onClick={() => setEditFilterKey(f.field)}
+                              className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5 py-1 text-left text-gray-700 hover:text-[#001d6e]"
+                              title="Edit this filter"
+                            >
+                              <Pencil className="h-3 w-3 shrink-0 opacity-40" />
+                              <span className="truncate">{describeSimpleFilter(f.field, f.value)}</span>
+                            </button>
+                            <button type="button" onClick={() => removeFilter(f.id)} className="mr-1.5 shrink-0 text-gray-400 hover:text-red-500" aria-label="Remove filter">
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                        {Object.entries(columnConditions).map(([columnId, condition]) => (
+                          <div key={columnId} className="flex items-center justify-between gap-2 rounded text-xs hover:bg-gray-50">
+                            {/* The summary itself is the edit control — clicking it opens this filter's
+                                builder pre-filled, so it can be changed without removing it first. */}
+                            <button
+                              type="button"
+                              onClick={() => setEditFilterKey(columnId)}
+                              className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5 py-1 text-left text-gray-700 hover:text-[#001d6e]"
+                              title="Edit this filter"
+                            >
+                              <Pencil className="h-3 w-3 shrink-0 opacity-40" />
+                              <span className="truncate">{conditionSummary(condition, filterableColumns)}</span>
+                            </button>
+                            <button type="button" onClick={() => clearColumnCondition(columnId)} className="mr-1.5 shrink-0 text-gray-400 hover:text-red-500" aria-label="Remove filter">
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </PopoverContent>
                 </Popover>
               )}
 
               <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
                 columns={historyColumns}
                 visibleColumnIds={visibleColumnIds}
                 onToggleColumn={toggleColumn}
@@ -836,27 +1216,44 @@ const Reports = () => {
                   {(["CSV", "Excel", "PDF"] as const).map((fmt) => (
                     <DropdownMenuItem
                       key={fmt}
-                      onSelect={() => {
-                        const rows = historyExportRows(historyItems);
-                        const suffix = `${selectedDate ? "-" + selectedDate : ""}-${format(new Date(), "yyyy-MM-dd")}`;
-                        if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
-                        if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
-                        if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
+                      disabled={historyExporting !== null}
+                      // The table now holds only the current 20-row page, so the export fetches
+                      // the full filtered set itself — otherwise a click would quietly produce a
+                      // file containing just the rows that happened to be on screen.
+                      onSelect={async (e) => {
+                        e.preventDefault();
+                        setHistoryExporting(fmt);
+                        try {
+                          const rows = historyExportRows(await fetchAllHistoryItems());
+                          const dateSuffix = dateValue ? `-${fromDate}${dateIsRange ? `_to_${toDate}` : ""}` : "";
+                          const suffix = `${dateSuffix}-${format(new Date(), "yyyy-MM-dd")}`;
+                          if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
+                          if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
+                          if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
+                        } catch (err: any) {
+                          toast({ title: `${fmt} export failed`, description: err?.message, variant: "destructive" });
+                        } finally {
+                          setHistoryExporting(null);
+                        }
                       }}
                     >
-                      <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />
+                      {historyExporting === fmt
+                        ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                        : <FileDown className="h-3.5 w-3.5 mr-2 opacity-70" />}
                       {fmt}
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuContent>
               </DropdownMenu>
 
-              <Button
-                size="sm" className={FILTER_BTN_CLASS}
-                onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
-              >
-                <Upload className="h-3.5 w-3.5 mr-1" />Upload to Notion
-              </Button>
+              {canUploadNotion && (
+                <Button
+                  size="sm" className={FILTER_BTN_CLASS}
+                  onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
+                >
+                  <Upload className="h-3.5 w-3.5 mr-1" />Upload to Notion
+                </Button>
+              )}
             </>
           }
         >
@@ -882,12 +1279,21 @@ const Reports = () => {
               return undefined;
             }}
             enableZebraStripes
+            enableTotalsRow
             enableColumnResizing
             enableColumnVisibility
             columnVisibility={visibleColumnIds}
+            columnOrder={columnOrder}
+            onColumnOrderChange={setColumnOrder}
             onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
+            // No isStickyHeader/maxHeight here, matching develop: a 20-row page is short enough to
+            // read whole, so a bounded scroll box would only add an inner scrollbar next to the
+            // page's own. The table flows and the card grows with it.
             headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+            // Pagination is server-driven (Prev/Next over 20-row pages), so it's rendered here
+            // rather than through DataTable's own client-side pageIndex/pageSize controls, which
+            // would only page the rows already in the browser.
             renderFooter={(ctx) => (
               <tfoot>
                 <tr>
@@ -1018,7 +1424,7 @@ const Reports = () => {
       </DialogContent>
     </Dialog>
 
-    {/* Void scan confirmation — admin-only. Keeps the row in history (never deleted), marked
+    {/* Void scan confirmation — admin or scan-history write access. Keeps the row in history (never deleted), marked
         Voided; excluded from totals and reversed out of stock. */}
     <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
       <DialogContent className="max-w-sm">

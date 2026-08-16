@@ -17,7 +17,7 @@ import {
   Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown,
   UserPlus, UserCog, AlertTriangle, KeyRound, IdCard, ShieldCheck,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { User } from '@shared/schema';
 import {
   Dialog,
@@ -57,7 +57,7 @@ import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 import { hasPageViewAccess, hasPageWriteAccess } from "@/lib/permissions";
 
-// Solid navy fill, matching the Notion Inventory action buttons.
+// Solid navy fill, matching the Product Master action buttons.
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 const PRIMARY_BTN_CLASS = "bg-[#001d6e] text-white hover:bg-[#001552]";
 
@@ -223,14 +223,34 @@ function MultiSelectField({
 
 const Users = () => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [pageIndex, setPageIndex] = useState(0);
+  // Searching re-cuts the list, so start it from the top rather than leaving you on a page number
+  // that means something different (or nothing at all) against the new set.
+  useEffect(() => { setPageIndex(0); }, [searchTerm]);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<Partial<User> | null>(null);
-  const [pageIndex, setPageIndex] = useState(0);
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(['avatar', 'name', 'username', 'designation', 'role', 'plants', 'actions']),
   );
+
+  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
+  // a rearranged table is working context for this sitting, not a permanent preference. An empty
+  // array means "declared order", which is also what Reset order restores.
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("users:columnOrder");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("users:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+  }, [columnOrder]);
+
   const { toast } = useToast();
 
   // Fetch users
@@ -403,7 +423,7 @@ const Users = () => {
 
   const [designations, setDesignations] = useState<string[]>([
     "DIRECTOR", "MANAGER", "ASST. MANAGER", "HEAD", "ASSISTANT", "STAFF",
-    "HELPER", "SUPERVISOR", "STOREKEEPER", "LOADER", "DRIVER"
+    "HELPER", "SUPERVISOR", "STOREKEEPER", "LOADER", "DRIVER", "SCANNER"
   ]);
   const [customDesignation, setCustomDesignation] = useState("");
   const [isAddingDesignation, setIsAddingDesignation] = useState(false);
@@ -790,7 +810,7 @@ const Users = () => {
 
   return (
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-      <div className="max-w-6xl mx-auto">
+      <div className="mx-auto w-full max-w-[1800px]">
         <div className="mb-6">
           <h2 className="text-2xl font-bold">Users</h2>
           <p className="text-gray-600">Manage user accounts and permissions</p>
@@ -817,12 +837,12 @@ const Users = () => {
                 <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
                 <input
                   value={searchTerm}
-                  onChange={(e) => { setSearchTerm(e.target.value); setPageIndex(0); }}
+                  onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder="Search users…"
                   className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
                 />
                 {searchTerm && (
-                  <button onClick={() => { setSearchTerm(''); setPageIndex(0); }} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
+                  <button onClick={() => setSearchTerm('')} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
                     <X className="h-3.5 w-3.5" />
                   </button>
                 )}
@@ -832,6 +852,8 @@ const Users = () => {
             {/* Filters */}
             <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
               <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
                 columns={userColumns}
                 visibleColumnIds={visibleColumnIds}
                 onToggleColumn={(id) =>
@@ -871,6 +893,8 @@ const Users = () => {
               noResultsState="No users found matching your search."
               hasActiveFilters={!!searchTerm}
               sortMode="client"
+              // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box
+              // of its own — matching develop.
               paginationMode="client"
               pageIndex={pageIndex}
               onPageIndexChange={setPageIndex}
@@ -879,6 +903,8 @@ const Users = () => {
               enableColumnResizing
               enableColumnVisibility
               columnVisibility={visibleColumnIds}
+            columnOrder={columnOrder}
+            onColumnOrderChange={setColumnOrder}
               onColumnVisibilityChange={setVisibleColumnIds}
               enableZebraStripes
               showMobileSwipeHint

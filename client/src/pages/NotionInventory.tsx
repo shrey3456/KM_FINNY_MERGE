@@ -135,8 +135,8 @@ const productColumns: ProductColumn[] = [
   { key: "productImage",     label: "Product Image" },
   { key: "volumeInCuFt",     label: "Vol Master" },
   { key: "itemsPerPallet",   label: "Packets" },
-  { key: "indPlt",           label: "IND PLT" },
-  { key: "valPlt",           label: "VAL PLT" },
+  { key: "mpPlt",            label: "MP PLT",             tone: "mp" },
+  { key: "gjPlt",            label: "GJ PLT",             tone: "gj" },
   { key: "gjSr",             label: "GJ Sr",              tone: "gj" },
   { key: "gjHsn",            label: "GJ HSN",             tone: "gj" },
   { key: "gjSap",            label: "GJ SAP",             tone: "gj" },
@@ -528,7 +528,7 @@ export default function NotionInventory() {
     <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
       <PageHeader
         icon={Database}
-        title="Notion Inventory"
+        title="Product Master"
         description="Product master synced from Notion into PostgreSQL."
       />
 

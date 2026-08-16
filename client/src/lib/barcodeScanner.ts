@@ -23,6 +23,9 @@ export class BarcodeScanner {
 
   constructor(options: ScannerOptions) {
     const hints = new Map();
+    // Every format ZXing can decode — previously limited to a fixed 1D subset, so any barcode
+    // outside that list (QR, Data Matrix, PDF417, Aztec, DataBar/RSS, UPC extension) was silently
+    // never detected, no matter how clearly it was in frame.
     const formats = options.formats ?? [
       BarcodeFormat.CODE_128,
       BarcodeFormat.CODE_39,
@@ -31,8 +34,15 @@ export class BarcodeScanner {
       BarcodeFormat.EAN_8,
       BarcodeFormat.UPC_A,
       BarcodeFormat.UPC_E,
+      BarcodeFormat.UPC_EAN_EXTENSION,
       BarcodeFormat.ITF,
       BarcodeFormat.CODABAR,
+      BarcodeFormat.QR_CODE,
+      BarcodeFormat.DATA_MATRIX,
+      BarcodeFormat.PDF_417,
+      BarcodeFormat.AZTEC,
+      BarcodeFormat.RSS_14,
+      BarcodeFormat.RSS_EXPANDED,
     ];
     hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
     // TRY_HARDER intentionally disabled — causes false positives on faces/backgrounds
@@ -104,7 +114,11 @@ export class BarcodeScanner {
       const callback = (result: Result | null, error: any) => {
         if (result) {
           const code = result.getText();
-          if (!code || code.trim().length < 3 || !/[a-zA-Z0-9]/.test(code)) return;
+          // Was `< 3`, which silently discarded any real barcode shorter than 3 characters
+          // (e.g. a 2-character code like "A1") — the two-reads-within-1.5s confirmation
+          // below is already the real defense against a noisy misread, so this only needs
+          // to reject a genuinely empty/whitespace decode, not filter by length.
+          if (!code || code.trim().length < 1 || !/[a-zA-Z0-9]/.test(code)) return;
           const now = Date.now();
           if (code === this.lastCode && now - this.lastCodeAt < this.CONFIRM_WINDOW_MS) {
             this.lastCodeCount++;
@@ -179,7 +193,11 @@ export class BarcodeScanner {
       const callback = (result: Result | null, error: any) => {
         if (result) {
           const code = result.getText();
-          if (!code || code.trim().length < 3 || !/[a-zA-Z0-9]/.test(code)) return;
+          // Was `< 3`, which silently discarded any real barcode shorter than 3 characters
+          // (e.g. a 2-character code like "A1") — the two-reads-within-1.5s confirmation
+          // below is already the real defense against a noisy misread, so this only needs
+          // to reject a genuinely empty/whitespace decode, not filter by length.
+          if (!code || code.trim().length < 1 || !/[a-zA-Z0-9]/.test(code)) return;
           const now = Date.now();
           if (code === this.lastCode && now - this.lastCodeAt < this.CONFIRM_WINDOW_MS) {
             this.lastCodeCount++;
