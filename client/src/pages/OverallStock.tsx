@@ -1753,6 +1753,7 @@ export default function OverallStock() {
             {displayRows.length === 0 ? (
               <p className="py-10 text-center text-sm text-gray-400">
                 No stock rows match your filters.
+
               </p>
             ) : (
               displayRows.map((row) => {

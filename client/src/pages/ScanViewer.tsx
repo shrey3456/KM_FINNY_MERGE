@@ -43,6 +43,10 @@ type OsScanItem = {
   id: number; sessionId: number;
   barcode: string | null; itemName: string | null; sapCode: string | null;
   expectedQty: number; itemsPerPallet: number;
+  // The item's real, defined GJ/MP PLT pack size (0 when not configured) — informational only,
+  // distinct from itemsPerPallet above which can be a per-scan fallback. See its comment in
+  // server/routes/order-scan.ts's /items endpoint.
+  realPackSize?: number;
   scannedPallets: number; scannedLooseQty: number; totalScannedQty: number;
   status: string; lastScannedAt: string | null;
 };
@@ -747,6 +751,11 @@ export default function ScanViewer() {
             <p className="whitespace-normal break-words font-mono text-xs text-gray-400">
               {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
             </p>
+            {/* Informational only — the item's real GJ/MP PLT pack size, never used in any
+                qty/plt calculation on this page. */}
+            {!!row.realPackSize && row.realPackSize > 0 && (
+              <p className="text-sm font-semibold text-gray-600">{row.realPackSize} per pallet</p>
+            )}
           </>
         );
       },
@@ -1265,6 +1274,9 @@ export default function ScanViewer() {
                               <p className="whitespace-normal break-words font-mono text-gray-400">
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                               </p>
+                              {!!item.realPackSize && item.realPackSize > 0 && (
+                                <p className="text-sm font-semibold text-gray-600">{item.realPackSize} per pallet</p>
+                              )}
                             </td>
                             <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums text-gray-600">
                               <span className="block text-lg">{exp || "—"}</span>
@@ -1373,6 +1385,9 @@ export default function ScanViewer() {
                           <p className="mt-0.5 font-mono text-xs text-gray-400">
                             {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                           </p>
+                          {!!item.realPackSize && item.realPackSize > 0 && (
+                            <p className="mt-0.5 text-sm font-semibold text-gray-600">{item.realPackSize} per pallet</p>
+                          )}
                           <p className="mt-1.5 text-sm leading-snug">
                             <span className="font-bold text-gray-900">{received}</span>
                             <span className="text-gray-400">/{exp}</span>{" "}
