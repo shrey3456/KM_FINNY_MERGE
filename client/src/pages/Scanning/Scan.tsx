@@ -2095,15 +2095,28 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       accessor: (i) => i.itemName,
       cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
       // Master View is view-only — no click-to-expand history here (moved to the Scan tab).
-      render: (i) =>
-        i._isEmptyBox ? (
-          <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-800">
-            Empty Box · {i._emptyBoxQty} box{i._emptyBoxQty === 1 ? "" : "es"}
-            {i._emptyBoxCount ? ` (${i._emptyBoxCount})` : ""}
-          </span>
-        ) : (
-          <span>{i.itemName ?? "—"}</span>
-        ),
+      render: (i) => {
+        if (i._isEmptyBox) {
+          return (
+            <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-semibold text-orange-800">
+              Empty Box · {i._emptyBoxQty} box{i._emptyBoxQty === 1 ? "" : "es"}
+              {i._emptyBoxCount ? ` (${i._emptyBoxCount})` : ""}
+            </span>
+          );
+        }
+        // Informational only — the item's real GJ/MP PLT pack size, never used in any qty/plt
+        // calculation on this page (same treatment as the Scan tab and Scan Viewer).
+        const invProduct = i.barcode ? productLookup.get(normalize(i.barcode)) ?? null : null;
+        const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
+        return (
+          <>
+            <span className="block">{i.itemName ?? "—"}</span>
+            {packSize > 0 && (
+              <span className="block text-sm font-semibold text-gray-600">{packSize} per pallet</span>
+            )}
+          </>
+        );
+      },
     },
     {
       id: "barcode",
@@ -2583,6 +2596,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         render: (item) => {
           const { credit } = osRowState(item);
           const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
+          // Informational only — the item's real GJ/MP PLT pack size from Product Master, not
+          // the scan-time-resolved itemsPerPallet (which can be a per-scan fallback when no
+          // real pack size is set, so isn't a fact about the product itself). Shown so an
+          // operator can see the pack size at a glance without it affecting any calculation.
+          const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+          const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
           return (
             <>
               <button
@@ -2596,6 +2615,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               >
                 {item.itemName ?? "—"}
               </button>
+              {packSize > 0 && (
+                <span className="block text-sm font-semibold text-gray-600">{packSize} per pallet</span>
+              )}
               {credit && (
                 <span
                   className="block truncate text-[10px] font-normal text-purple-600"
@@ -3464,6 +3486,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               <p className="mt-0.5 font-mono text-xs text-gray-400">
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                               </p>
+                              {(() => {
+                                const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+                                const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
+                                return packSize > 0 ? (
+                                  <p className="mt-0.5 text-sm font-semibold text-gray-600">{packSize} per pallet</p>
+                                ) : null;
+                              })()}
                               {credit && (
                                 <p className="mt-0.5 text-xs text-purple-600" title={credit.sources.map((s) => `${s.qty} from ${s.fromCsvFileName}`).join(", ")}>
                                   ✓ {credit.creditedQty} counted from an earlier part
@@ -3569,6 +3598,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               <p className="text-gray-400 font-mono whitespace-normal break-words">
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                               </p>
+                              {(() => {
+                                const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+                                const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
+                                return packSize > 0 ? (
+                                  <p className="text-sm font-semibold text-gray-600 mt-0.5">{packSize} per pallet</p>
+                                ) : null;
+                              })()}
                               {credit && (
                                 <p className="text-purple-600 mt-0.5" title={credit.sources.map((s) => `${s.qty} from ${s.fromCsvFileName}`).join(", ")}>
                                   ✓ {credit.creditedQty} counted from an earlier part
@@ -3753,6 +3789,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 <p className="mt-0.5 font-mono text-xs text-gray-400">
                                   {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                                 </p>
+                                {(() => {
+                                  const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+                                  const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
+                                  return packSize > 0 ? (
+                                    <p className="mt-0.5 text-sm font-semibold text-gray-600">{packSize} per pallet</p>
+                                  ) : null;
+                                })()}
                                 {mvShowFiles && item._files.length > 0 && (
                                   <p className="mt-0.5 text-[11px] text-gray-400" title={item._files.map(stripCsvExt).join(", ")}>
                                     {item._files.length > 1 ? `${item._files.length} files` : stripCsvExt(item._files[0] ?? "")}
@@ -3869,6 +3912,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                     <p className="text-gray-400 font-mono whitespace-normal break-words">
                                       {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                                     </p>
+                                    {(() => {
+                                      const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+                                      const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
+                                      return packSize > 0 ? (
+                                        <p className="text-sm font-semibold text-gray-600">{packSize} per pallet</p>
+                                      ) : null;
+                                    })()}
                                   </td>
                                   {mvShowFiles && (
                                     <td className="text-gray-400 truncate max-w-[100px] border-r border-gray-200 px-3 py-2.5" title={item._files.map(stripCsvExt).join(", ")}>

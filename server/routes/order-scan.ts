@@ -1268,10 +1268,15 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
         [barcodes],
       );
       const productMap = new Map(prodRows.rows.map((p: any) => [p.barcode, p]));
-      for (const item of items) {
+      for (const item of items as any[]) {
         const p = item.barcode ? productMap.get(item.barcode.toLowerCase()) : null;
         if (!p) continue;
         item.itemsPerPallet = resolvePalletSizeOrQty({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state, item.expectedQty ?? 0);
+        // The item's real, defined GJ/MP PLT pack size — 0 when not configured — as opposed to
+        // itemsPerPallet above, which can be a per-scan fallback (this item's own quantity) when
+        // no real pack size is set. Purely informational (e.g. Scan Viewer's "N per pallet"
+        // label); never used for any qty/plt math itself.
+        item.realPackSize = getPalletSize({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state);
       }
     }
 
