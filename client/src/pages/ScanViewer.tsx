@@ -54,6 +54,30 @@ type OsScanItem = {
 // Matches GET /api/order-scan/sessions/:id/extras (grouped, un-voided only).
 type ExtraRow = { barcode: string; itemName: string | null; totalQty: number };
 
+// One raw item row from GET /api/order-import/master-view's files[].items — a single CSV
+// part's line for one barcode, before merging across parts (see MvMergedItem below).
+type MvRawItem = {
+  id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
+  quantity: number | null; scannedQty: number | null; isExtra: boolean; lastScannedAt: string | null;
+  // The item's real GJ/MP PLT pack size (0/absent when not configured) — same informational
+  // field as realPackSize elsewhere on this page, resolved server-side.
+  itemsPerPallet?: number;
+};
+type MvFile = { sessionId: number; csvFileName: string; plant: string; items: MvRawItem[] };
+type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
+
+// Master View = one consolidated row per item across EVERY CSV part of this plant+date order,
+// mirroring the Scan Order page's own Master View tab (allMvItems in Scan.tsx) — same merge
+// rule: same barcode (falling back to item name) across every file sums into one row, and an
+// item that was scanned but never appeared on ANY of the order's CSVs shows up here too (the
+// server already includes those as isExtra rows — see order-import.ts's "Fold in extra scans"
+// comment), permanently, regardless of how long ago it was scanned.
+type MvMergedItem = {
+  barcode: string | null; itemName: string | null; sapCode: string | null;
+  quantity: number; scannedQty: number; extraQty: number; itemsPerPallet: number;
+  isExtraOnly: boolean; lastScannedAt: string | null;
+};
+
 // Matches GET /api/order-import/master-view/item-history.
 type HistoryEvent = {
   id: number; sessionId: number; barcode: string; itemName: string | null;
@@ -213,6 +237,12 @@ export default function ScanViewer() {
 
   const filtersReady = !!plant && !!date;
 
+  // Same two-tab split the Scan Order page has: Master View (everything in this order merged
+  // into one row per item, across every CSV part) vs Part View (this page's original behavior —
+  // pick one specific CSV/part and see just its items). Defaults to Master View since that's
+  // the "whole picture" view most lookups want first.
+  const [viewerTab, setViewerTab] = useState<"master-view" | "part-view">("master-view");
+
   const { data: allPlants } = useQuery<Plant[]>({
     queryKey: ["/api/plants"],
     queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
@@ -283,6 +313,52 @@ export default function ScanViewer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionOptions.map((s) => s.id).join(",")]);
 
+  // Master View data — same endpoint the Scan Order page's own Master View tab reads, scoped to
+  // this page's plant/date pickers instead of "whichever session is currently active."
+  const mvQuery = useQuery<MvResponse>({
+    queryKey: ["/api/order-import/master-view", "scan-viewer", plant, date],
+    queryFn: () =>
+      apiRequest("GET", `/api/order-import/master-view?date=${encodeURIComponent(date)}&plant=${encodeURIComponent(plant)}`)
+        .then((r) => r.json()),
+    enabled: filtersReady && viewerTab === "master-view",
+  });
+
+  // Merges every file's items by barcode (falling back to item name for a barcode-less row) —
+  // same rule as allMvItems in Scan.tsx. An item that's isExtra on every contributing row (i.e.
+  // never appeared on ANY of the order's CSVs) stays flagged isExtraOnly; one that's extra on
+  // some rows and a real CSV line on others is folded into the normal quantity instead, same as
+  // the Scan Order page's own Master View.
+  const allMvItems: MvMergedItem[] = useMemo(() => {
+    if (!mvQuery.data) return [];
+    const groups = new Map<string, MvMergedItem>();
+    mvQuery.data.files.forEach((f) => {
+      f.items.forEach((item) => {
+        const key = item.barcode?.trim().toLowerCase()
+          || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
+        let g = groups.get(key);
+        if (!g) {
+          g = {
+            barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
+            quantity: 0, scannedQty: 0, extraQty: 0, itemsPerPallet: 0,
+            isExtraOnly: true, lastScannedAt: null,
+          };
+          groups.set(key, g);
+        }
+        g.quantity += item.quantity ?? 0;
+        g.scannedQty += item.scannedQty ?? 0;
+        if (item.isExtra) g.extraQty += item.scannedQty ?? 0;
+        if (!item.isExtra) g.isExtraOnly = false;
+        if (!g.itemName && item.itemName) g.itemName = item.itemName;
+        if (!g.sapCode && item.sapCode) g.sapCode = item.sapCode;
+        if (!g.itemsPerPallet && item.itemsPerPallet) g.itemsPerPallet = item.itemsPerPallet;
+        if (item.lastScannedAt && (!g.lastScannedAt || new Date(item.lastScannedAt) > new Date(g.lastScannedAt))) {
+          g.lastScannedAt = item.lastScannedAt;
+        }
+      });
+    });
+    return Array.from(groups.values());
+  }, [mvQuery.data]);
+
   const itemsQuery = useQuery<OsScanItem[]>({
     queryKey: ["/api/order-scan/sessions", sessionId, "items", "scan-viewer"],
     queryFn: () => apiRequest("GET", `/api/order-scan/sessions/${sessionId}/items`).then((r) => r.json()),
@@ -298,6 +374,56 @@ export default function ScanViewer() {
   // Every part sharing this plant + order date — history spans the whole order, not just the
   // one part currently selected above, same as the Scan tab's own drill-down.
   const groupSessionIds = sessionOptions.map((s) => s.id);
+
+  // ── Master View derived data ──────────────────────────────────────────────
+  // Local copy of the same qty÷ipp rule used everywhere on this page (see pltQty further down)
+  // — defined here too since this block runs before that declaration in source order.
+  const mvPltQty = (qty: number, ipp: number) => (qty > 0 && ipp > 0 ? qty / ipp : 0);
+  const mvRowState = (i: MvMergedItem) => ({
+    exp: i.quantity,
+    received: i.scannedQty,
+    left: Math.max(0, i.quantity - i.scannedQty),
+    extra: i.extraQty,
+  });
+  const mvSearched = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return allMvItems;
+    return allMvItems.filter((i) => [i.itemName, i.barcode, i.sapCode].some((v) => v?.toLowerCase().includes(q)));
+  }, [allMvItems, search]);
+  const [mvStatFilter, setMvStatFilter] = useState<"" | "done" | "remaining" | "extra">("");
+  const mvFiltered = !mvStatFilter
+    ? mvSearched
+    : mvSearched.filter((i) => {
+        const { received, left, extra } = mvRowState(i);
+        if (mvStatFilter === "done") return received > 0;
+        if (mvStatFilter === "remaining") return left > 0;
+        return extra > 0;
+      });
+  const mvTotals = allMvItems.reduce((acc, i) => {
+    const { exp, received, left, extra } = mvRowState(i);
+    const ipp = i.itemsPerPallet ?? 0;
+    acc.expected += exp;
+    acc.done += Math.min(received, exp);
+    acc.remaining += left;
+    acc.extra += extra;
+    if (ipp > 0) {
+      acc.palletsExpected += exp / ipp;
+      acc.palletsDone += Math.min(received, exp) / ipp;
+      acc.palletsRemaining += left / ipp;
+      acc.palletsExtra += extra / ipp;
+    }
+    return acc;
+  }, { expected: 0, done: 0, remaining: 0, extra: 0, palletsExpected: 0, palletsDone: 0, palletsRemaining: 0, palletsExtra: 0 });
+  // Totals for the Master View kiosk table / card list closing row — over whatever's on screen
+  // (search + stat filter), same rule the Part View table's own totals row follows.
+  const mvCardTotals = mvFiltered.reduce((acc, i) => {
+    const { exp, received, left, extra } = mvRowState(i);
+    const ipp = i.itemsPerPallet ?? 0;
+    acc.exp += exp; acc.received += received; acc.left += left; acc.extra += extra;
+    acc.expPlt += mvPltQty(exp, ipp); acc.receivedPlt += mvPltQty(received, ipp);
+    acc.leftPlt += mvPltQty(left, ipp); acc.extraPlt += mvPltQty(extra, ipp);
+    return acc;
+  }, { exp: 0, received: 0, left: 0, extra: 0, expPlt: 0, receivedPlt: 0, leftPlt: 0, extraPlt: 0 });
 
   // ── STV filter (page level) ──────────────────────────────────────────────
   // Every other filter on this page reads a field that's already on the loaded item rows. STV
@@ -897,6 +1023,129 @@ export default function ScanViewer() {
     },
   ];
 
+  // Master View's own columns — same layout/order as Part View's itemColumns above (Item, Exp,
+  // Remain, Received, Extra, then the matching Plt columns, then Status), just backed by
+  // MvMergedItem's merged-across-every-part shape instead of one session's OsScanItem rows.
+  const mvColumns: DataTableColumn<MvMergedItem>[] = [
+    {
+      id: "item",
+      header: "Item",
+      hideable: false,
+      width: 260,
+      sortable: true,
+      accessor: (row) => `${row.itemName ?? ""} ${row.barcode ?? ""} ${row.sapCode ?? ""}`,
+      totalable: false,
+      cellClassName: `min-w-[180px] max-w-[320px] whitespace-normal break-words ${cellBorder}`,
+      render: (row) => {
+        const isOpen = historyItem?.barcode === row.barcode;
+        return (
+          <>
+            <button
+              type="button"
+              disabled={!row.barcode}
+              onClick={() => setHistoryItem((cur) => (cur?.barcode === row.barcode ? null : (row as any)))}
+              className={`whitespace-normal break-words text-left font-medium leading-snug text-gray-900 underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
+            >
+              {row.itemName ?? "—"}
+            </button>
+            <p className="whitespace-normal break-words font-mono text-xs text-gray-400">
+              {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+            </p>
+            {row.itemsPerPallet > 0 && (
+              <p className="text-sm font-semibold text-gray-600">{row.itemsPerPallet} per pallet</p>
+            )}
+            {row.isExtraOnly && (
+              <p className="text-[11px] font-semibold uppercase text-amber-700">Extra — not on any CSV</p>
+            )}
+          </>
+        );
+      },
+    },
+    {
+      id: "exp", header: "Exp Qty", width: 80, align: "right", sortable: true,
+      accessor: (row) => mvRowState(row).exp,
+      cellClassName: `tabular-nums text-gray-600 ${cellBorder}`,
+      render: (row) => mvRowState(row).exp || "—",
+    },
+    {
+      id: "left", header: "Remain Qty", width: 90, align: "right", sortable: true,
+      accessor: (row) => mvRowState(row).left,
+      cellClassName: cellBorder,
+      render: (row) => {
+        const { left } = mvRowState(row);
+        return <span className={`tabular-nums font-semibold ${left > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{left || "—"}</span>;
+      },
+    },
+    {
+      id: "received", header: "Received Qty", width: 90, align: "right", sortable: true,
+      accessor: (row) => mvRowState(row).received,
+      cellClassName: `tabular-nums font-semibold text-gray-900 ${cellBorder}`,
+      render: (row) => mvRowState(row).received,
+    },
+    {
+      id: "extra", header: "Extra Qty", width: 80, align: "right", sortable: true,
+      accessor: (row) => mvRowState(row).extra,
+      cellClassName: cellBorder,
+      render: (row) => {
+        const { extra } = mvRowState(row);
+        return <span className={`tabular-nums font-semibold ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>;
+      },
+    },
+    {
+      id: "expPlt", header: "Exp Plt", width: 80, align: "right", sortable: true,
+      accessor: (row) => mvPltQty(mvRowState(row).exp, row.itemsPerPallet),
+      total: (rows) => rows.reduce((s, r) => s + mvPltQty(mvRowState(r).exp, r.itemsPerPallet), 0).toFixed(2),
+      cellClassName: `tabular-nums text-gray-500 ${cellBorder}`,
+      render: (row) => mvPltQty(mvRowState(row).exp, row.itemsPerPallet).toFixed(2),
+    },
+    {
+      id: "leftPlt", header: "Remain Plt", width: 90, align: "right", sortable: true,
+      accessor: (row) => mvPltQty(mvRowState(row).left, row.itemsPerPallet),
+      total: (rows) => rows.reduce((s, r) => s + mvPltQty(mvRowState(r).left, r.itemsPerPallet), 0).toFixed(2),
+      cellClassName: `tabular-nums font-semibold text-purple-600 ${cellBorder}`,
+      render: (row) => mvPltQty(mvRowState(row).left, row.itemsPerPallet).toFixed(2),
+    },
+    {
+      id: "receivedPlt", header: "Received Plt", width: 90, align: "right", sortable: true,
+      accessor: (row) => mvPltQty(mvRowState(row).received, row.itemsPerPallet),
+      total: (rows) => rows.reduce((s, r) => s + mvPltQty(mvRowState(r).received, r.itemsPerPallet), 0).toFixed(2),
+      cellClassName: `tabular-nums font-semibold text-[#001d6e] ${cellBorder}`,
+      render: (row) => mvPltQty(mvRowState(row).received, row.itemsPerPallet).toFixed(2),
+    },
+    {
+      id: "extraPlt", header: "Extra Plt", width: 80, align: "right", sortable: true,
+      accessor: (row) => mvPltQty(mvRowState(row).extra, row.itemsPerPallet),
+      total: (rows) => rows.reduce((s, r) => s + mvPltQty(mvRowState(r).extra, r.itemsPerPallet), 0).toFixed(2),
+      cellClassName: `tabular-nums font-semibold text-amber-600 ${cellBorder}`,
+      render: (row) => mvPltQty(mvRowState(row).extra, row.itemsPerPallet).toFixed(2),
+    },
+    {
+      id: "status", header: "Status", width: 100, align: "center", sortable: true,
+      totalable: false,
+      accessor: (row) => (row.isExtraOnly ? "extra" : mvRowState(row).received >= mvRowState(row).exp && mvRowState(row).exp > 0 ? "complete" : mvRowState(row).received > 0 ? "partial" : "pending"),
+      render: (row) => {
+        const { received, exp } = mvRowState(row);
+        const status = row.isExtraOnly ? "extra" : received >= exp && exp > 0 ? "complete" : received > 0 ? "partial" : "pending";
+        return (
+          <span className={`inline-block px-2.5 py-1 text-xs font-semibold ${
+            status === "extra" ? "bg-orange-100 text-orange-700"
+            : status === "complete" ? "bg-emerald-100 text-emerald-700"
+            : status === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+          }`}>
+            {status === "extra" ? "Extra" : status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+          </span>
+        );
+      },
+    },
+    {
+      id: "lastScanned", header: "Last Scanned", width: 130, sortable: true,
+      accessor: (row) => row.lastScannedAt,
+      totalable: false,
+      cellClassName: "text-gray-500 whitespace-nowrap",
+      render: (row) => (row.lastScannedAt ? format(new Date(row.lastScannedAt), "MMM d, yyyy · h:mm a") : <span className="text-gray-300">—</span>),
+    },
+  ];
+
   return (
     <div ref={pageScrollRef} className={`flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6 ${rotateClass}`}>
       <RotateButton />
@@ -954,6 +1203,26 @@ export default function ScanViewer() {
           </span>
         </div>
 
+        {/* Master View / Part View tabs — same split the Scan Order page has: Master View
+            merges every CSV part of this order into one row per item; Part View is this page's
+            original behavior, one specific CSV/part at a time. */}
+        <div className="flex items-center gap-1.5">
+          {(["master-view", "part-view"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setViewerTab(t)}
+              className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                viewerTab === t
+                  ? "bg-[#001d6e] text-white"
+                  : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              {t === "master-view" ? "Master View" : "Part View"}
+            </button>
+          ))}
+        </div>
+
         {!filtersReady ? (
           <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
             Pick a plant and an order date to view its scan progress.
@@ -964,7 +1233,7 @@ export default function ScanViewer() {
           <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
             No order found for {plant} on {date}.
           </div>
-        ) : (
+        ) : viewerTab === "part-view" ? (
           <>
           {/* Order Totals — same card as the Scan Order page's: heading with a % complete
               readout, four click-to-filter tiles carrying a count and a pallet figure, and a
@@ -1434,6 +1703,282 @@ export default function ScanViewer() {
                   </div>
                 )}
               </div>
+            )}
+          </TableCard>
+          </>
+        ) : (
+          <>
+          {/* Master View — same Order Totals card as Part View, computed over every item merged
+              across all of this order's CSV parts (mvTotals) instead of one session's items. */}
+          <div className="flex flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
+            <div className="flex items-baseline justify-between">
+              <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals (All Parts)</p>
+              <p className="text-sm font-medium text-gray-400">
+                {mvTotals.expected > 0 ? `${Math.round((mvTotals.done / mvTotals.expected) * 100)}% complete` : "—"}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {([
+                { key: "", label: "Total", value: mvTotals.expected, plt: mvTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                { key: "done", label: "Received", value: mvTotals.done, plt: mvTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                { key: "remaining", label: "Remaining", value: mvTotals.remaining, plt: mvTotals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
+                { key: "extra", label: "Extra", value: mvTotals.extra, plt: mvTotals.palletsExtra, dot: "bg-orange-500", text: mvTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+              ] as const).map((s) => {
+                const isActive = mvStatFilter === s.key;
+                return (
+                  <button
+                    key={s.label}
+                    type="button"
+                    onClick={() => setMvStatFilter(isActive ? "" : (s.key as typeof mvStatFilter))}
+                    aria-pressed={isActive}
+                    title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                    className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                      isActive ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30" : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                    }`}
+                  >
+                    <div className="flex items-center justify-center gap-1.5">
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                    </div>
+                    <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                    <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="space-y-1">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                  style={{ width: `${mvTotals.expected > 0 ? Math.min(100, (mvTotals.done / mvTotals.expected) * 100) : 0}%` }}
+                />
+              </div>
+              <div className="flex justify-between text-[10px] font-medium text-gray-400">
+                <span>{mvTotals.done} received</span>
+                <span>{mvTotals.remaining} remaining</span>
+              </div>
+            </div>
+          </div>
+
+          <TableCard
+            icon={Eye}
+            title="Master View — All Parts"
+            subtitle={<PlantBadge plant={plant} />}
+            className="rounded-xl shadow-sm border-gray-200"
+            headerActions={
+              <CollapsibleSearch value={search} onChange={setSearch} placeholder="Search by name or barcode…" />
+            }
+          >
+            {mvQuery.isLoading ? (
+              <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+            ) : (
+              <>
+              <DataTable<MvMergedItem>
+                containerClassName="rounded-none border-0"
+                headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+                columns={mvColumns}
+                data={mvFiltered}
+                getRowId={(row) => row.barcode ?? row.itemName ?? String(Math.random())}
+                enableZebraStripes
+                rowClassName={(row) => (row.isExtraOnly ? "bg-orange-50/40" : undefined)}
+                renderExpandedRow={() => historyPanel}
+                isRowExpandable={(row) => !!row.barcode}
+                expandedRowId={historyItem?.barcode ?? null}
+                emptyState={allMvItems.length === 0 ? "No items in this order." : "No items match your filters."}
+                enableTotalsRow
+                totalsLabelColumnId="item"
+                isStickyHeader
+                maxHeight={tableMaxHeight}
+                showMobileSwipeHint
+                className={`space-y-0 ${bigView ? "hidden" : "hidden min-[480px]:block landscape:block"}`}
+              />
+
+              {/* Kiosk table — same rotated/portrait treatment as Part View's own. */}
+              {bigView && (
+                <div className={`${kioskTableBoxClass} hidden min-[480px]:block landscape:block`}>
+                  <table className="min-w-[640px] w-full border-collapse text-base">
+                    <thead>
+                      <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                        <th className="border-r border-gray-300 px-4 py-2.5 font-semibold">Item</th>
+                        {["Exp", "Received", "Left", "Extra"].map((h) => (
+                          <th key={h} className="border-r border-gray-300 px-3 py-2.5 text-right font-semibold">{h}</th>
+                        ))}
+                        <th className="px-4 py-2.5 text-center font-semibold">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mvFiltered.length === 0 ? (
+                        <tr><td colSpan={6} className="py-10 text-center text-gray-400">{allMvItems.length === 0 ? "No items in this order." : "No items match your filters."}</td></tr>
+                      ) : mvFiltered.map((item) => {
+                        const { exp, received, left, extra } = mvRowState(item);
+                        const ipp = item.itemsPerPallet;
+                        const status = item.isExtraOnly ? "extra" : received >= exp && exp > 0 ? "complete" : received > 0 ? "partial" : "pending";
+                        const plt = (q: number) => mvPltQty(q, ipp).toFixed(2);
+                        const isOpen = historyItem?.barcode === item.barcode;
+                        return (
+                          <Fragment key={item.barcode ?? item.itemName}>
+                            <tr className={`border-b border-gray-200 ${
+                              status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
+                            }`}>
+                              <td className="min-w-[180px] max-w-[320px] border-r border-gray-200 px-4 py-2.5">
+                                <button
+                                  type="button"
+                                  disabled={!item.barcode}
+                                  onClick={() => setHistoryItem((cur) => (cur?.barcode === item.barcode ? null : (item as any)))}
+                                  className={`whitespace-normal break-words text-left font-medium leading-snug text-gray-900 underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
+                                >
+                                  {item.itemName ?? "—"}
+                                </button>
+                                <p className="whitespace-normal break-words font-mono text-gray-400">
+                                  {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                                </p>
+                                {ipp > 0 && <p className="text-sm font-semibold text-gray-600">{ipp} per pallet</p>}
+                                {item.isExtraOnly && <p className="text-[11px] font-semibold uppercase text-amber-700">Extra — not on any CSV</p>}
+                              </td>
+                              <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums text-gray-600">
+                                <span className="block text-lg">{exp || "—"}</span>
+                                <span className="block text-sm font-extrabold text-gray-500">{plt(exp)} plt</span>
+                              </td>
+                              <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold text-gray-900">
+                                <span className="block text-lg">{received}</span>
+                                <span className="block text-sm font-extrabold text-gray-500">{plt(received)} plt</span>
+                              </td>
+                              <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${left > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>
+                                <span className="block text-lg">{left || "—"}</span>
+                                <span className="block text-sm font-extrabold text-gray-500">{plt(left)} plt</span>
+                              </td>
+                              <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
+                                <span className="block text-lg">{extra > 0 ? `+${extra}` : "—"}</span>
+                                <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
+                              </td>
+                              <td className="px-4 py-2.5 text-center">
+                                <span className={`inline-block px-2.5 py-1 text-xs font-semibold ${
+                                  status === "extra" ? "bg-orange-100 text-orange-700"
+                                  : status === "complete" ? "bg-emerald-100 text-emerald-700"
+                                  : status === "partial" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                                  {status === "extra" ? "Extra" : status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+                                </span>
+                              </td>
+                            </tr>
+                            {isOpen && (
+                              <tr><td colSpan={6} className="border-b border-gray-200 p-0">{historyPanel}</td></tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                      {mvFiltered.length > 0 && (
+                        <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                          <td className={`border-r border-gray-200 px-4 py-2.5 ${KIOSK_TOTALS_CELL}`}>Total</td>
+                          {([
+                            ["exp", "expPlt"], ["received", "receivedPlt"], ["left", "leftPlt"], ["extra", "extraPlt"],
+                          ] as const).map(([qtyKey, pltKey]) => (
+                            <td key={qtyKey} className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums ${KIOSK_TOTALS_CELL}`}>
+                              <span className="block text-lg">{mvCardTotals[qtyKey].toLocaleString()}</span>
+                              <span className="block text-sm font-extrabold text-gray-500">{mvCardTotals[pltKey].toFixed(2)} plt</span>
+                            </td>
+                          ))}
+                          <td className={`px-4 py-2.5 ${KIOSK_TOTALS_CELL}`} />
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Mobile card list — same treatment as Part View's own. */}
+              {!isRotated && (
+                <div className="min-[480px]:hidden landscape:hidden">
+                  {mvFiltered.length === 0 ? (
+                    <p className="py-10 text-center text-sm text-gray-400">
+                      {allMvItems.length === 0 ? "No items in this order." : "No items match your filters."}
+                    </p>
+                  ) : (
+                    mvFiltered.map((item) => {
+                      const { exp, received, left, extra } = mvRowState(item);
+                      const ipp = item.itemsPerPallet;
+                      const status = item.isExtraOnly ? "extra" : received >= exp && exp > 0 ? "complete" : received > 0 ? "partial" : "pending";
+                      const expPlt = mvPltQty(exp, ipp).toFixed(2);
+                      const leftPlt = mvPltQty(left, ipp).toFixed(2);
+                      return (
+                        <div
+                          key={item.barcode ?? item.itemName}
+                          className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                            status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
+                          }`}
+                        >
+                          <span className="mt-0.5 shrink-0">
+                            {status === "complete" ? (
+                              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100">
+                                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                              </span>
+                            ) : (
+                              <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
+                                status === "extra" ? "border-orange-300 text-orange-500" : status === "partial" ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                              }`}>
+                                <ScanLine className="h-3.5 w-3.5" />
+                              </span>
+                            )}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <button
+                              type="button"
+                              disabled={!item.barcode}
+                              onClick={() => setHistoryItem((cur) => (cur?.barcode === item.barcode ? null : (item as any)))}
+                              className="text-left text-[15px] font-semibold leading-snug text-gray-900 underline decoration-dotted underline-offset-2 decoration-gray-300 disabled:no-underline"
+                            >
+                              {item.itemName ?? "—"}
+                            </button>
+                            <p className="mt-0.5 font-mono text-xs text-gray-400">
+                              {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                            </p>
+                            {ipp > 0 && <p className="mt-0.5 text-sm font-semibold text-gray-600">{ipp} per pallet</p>}
+                            {item.isExtraOnly && <p className="mt-0.5 text-[11px] font-semibold uppercase text-amber-700">Extra — not on any CSV</p>}
+                            <p className="mt-1.5 text-sm leading-snug">
+                              <span className="font-bold text-gray-900">{received}</span>
+                              <span className="text-gray-400">/{exp}</span>{" "}
+                              <span className="text-gray-400">({expPlt} plt)</span>
+                              {left > 0 && (
+                                <>
+                                  <span className="text-gray-300"> · </span>
+                                  <span className="font-semibold text-[#001d6e]">{left} left</span>{" "}
+                                  <span className="text-purple-500">(≈{leftPlt} plt)</span>
+                                </>
+                              )}
+                              {extra > 0 && (
+                                <>
+                                  <span className="text-gray-300"> · </span>
+                                  <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                </>
+                              )}
+                            </p>
+                            {historyItem?.barcode === item.barcode && <div className="mt-2">{historyPanel}</div>}
+                          </div>
+                          <span className="shrink-0">
+                            <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                              status === "extra" ? "bg-orange-100 text-orange-700"
+                              : status === "complete" ? "bg-emerald-100 text-emerald-700"
+                              : status === "partial" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                              {status === "extra" ? "Extra" : status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+                            </span>
+                          </span>
+                        </div>
+                      );
+                    })
+                  )}
+                  {mvFiltered.length > 0 && (
+                    <div className="flex items-center justify-between gap-3 border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] px-4 py-3 text-sm font-bold text-gray-900">
+                      <span>Total</span>
+                      <span className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
+                        <span>{mvCardTotals.received}/{mvCardTotals.exp}</span>
+                        <span className="text-gray-500">({mvCardTotals.expPlt.toFixed(2)} plt)</span>
+                        {mvCardTotals.left > 0 && <span className="text-[#001d6e]">{mvCardTotals.left} left</span>}
+                        {mvCardTotals.extra > 0 && <span className="text-amber-600">+{mvCardTotals.extra} extra</span>}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+              </>
             )}
           </TableCard>
           </>

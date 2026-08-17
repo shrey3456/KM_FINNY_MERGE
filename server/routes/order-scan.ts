@@ -1833,7 +1833,16 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
         [event.scan_item_id],
       );
       const item = itemResult.rows[0];
-      if (item) {
+      if (item && event.is_extra) {
+        // A plain Extra event never added to total_scanned_qty when it was created — see
+        // writeScanEvents' "extraQty is recorded purely as an event — it must NOT also be added
+        // to order_scan_items" comment. Subtracting it here anyway (the bug this replaces)
+        // wiped out a still-active Regular scan's count too whenever both existed for the same
+        // item: e.g. a 20-qty Regular scan plus a later 20-qty Extra scan on an already-full
+        // item, then voiding just the Extra one, incorrectly zeroed Received Qty back to 0
+        // instead of leaving the Regular scan's 20 alone. Nothing to reverse — leave it as-is.
+        updatedItem = item;
+      } else if (item) {
         const newTotal = Math.max(0, Number(item.total_scanned_qty ?? 0) - Number(event.total_qty ?? 0));
         const updateResult = await client.query(
           `UPDATE order_scan_items
