@@ -1120,6 +1120,10 @@ export default function OverallStock() {
               <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
                 <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
                 <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order / CSV</th>
+                {/* Distinct from "Date & Movement" (when it was physically scanned) — this is
+                    the date chosen at upload, which identifies which order/CSV this row
+                    actually belongs to (the two can differ by days for a late-scanned part). */}
+                <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order Date</th>
                 <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Qty</th>
                 <th className="px-3 py-2 text-right font-semibold">Extra</th>
               </tr>
@@ -1151,6 +1155,9 @@ export default function OverallStock() {
                       ) : (
                         <span className="text-gray-400" title={m.reason ?? undefined}>{m.reason ?? "—"}</span>
                       )}
+                    </td>
+                    <td className="border-r border-gray-200 px-3 py-2 text-gray-600 whitespace-nowrap">
+                      {m.orderDate ? format(new Date(`${m.orderDate}T00:00:00`), "MMM d, yyyy") : <span className="text-gray-300">—</span>}
                     </td>
                     <td className={`border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums ${isNegative ? "text-red-500" : "text-[#001d6e]"}`}>
                       {isNegative ? m.qty : `+${m.qty}`}

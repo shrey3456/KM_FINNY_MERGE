@@ -1731,12 +1731,12 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
     if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const { rows } = await pool.query(`
       SELECT
-        COALESCE(ose.barcode, '')            AS barcode,
-        MAX(ose.item_name)                   AS "itemName",
-        SUM(ose.total_qty)::int              AS "totalQty",
-        COUNT(*)::int                        AS "scanCount",
-        MAX(ose.scanned_at)                  AS "lastScannedAt",
-        MAX(ose.scanned_by_name)             AS "scannedByName"
+        COALESCE(ose.barcode, '')                                    AS barcode,
+        MAX(ose.item_name)                                           AS "itemName",
+        SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0)))::int AS "totalQty",
+        COUNT(*)::int                                                AS "scanCount",
+        MAX(ose.scanned_at)                                          AS "lastScannedAt",
+        MAX(ose.scanned_by_name)                                     AS "scannedByName"
       FROM order_scan_events ose
       WHERE ose.session_id = $1 AND ose.is_extra = true AND ose.voided IS NOT TRUE
         AND ose.barcode <> 'EMPTY_BOX'
@@ -1833,7 +1833,16 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
         [event.scan_item_id],
       );
       const item = itemResult.rows[0];
-      if (item) {
+      if (item && event.is_extra) {
+        // A plain Extra event never added to total_scanned_qty when it was created — see
+        // writeScanEvents' "extraQty is recorded purely as an event — it must NOT also be added
+        // to order_scan_items" comment. Subtracting it here anyway (the bug this replaces)
+        // wiped out a still-active Regular scan's count too whenever both existed for the same
+        // item: e.g. a 20-qty Regular scan plus a later 20-qty Extra scan on an already-full
+        // item, then voiding just the Extra one, incorrectly zeroed Received Qty back to 0
+        // instead of leaving the Regular scan's 20 alone. Nothing to reverse — leave it as-is.
+        updatedItem = item;
+      } else if (item) {
         const newTotal = Math.max(0, Number(item.total_scanned_qty ?? 0) - Number(event.total_qty ?? 0));
         const updateResult = await client.query(
           `UPDATE order_scan_items

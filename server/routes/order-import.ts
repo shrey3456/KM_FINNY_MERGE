@@ -521,7 +521,7 @@ router.get('/order-import/sessions/:id/items', requireImportViewAccess, async (r
                  AND osi.session_id = oi.session_id
                  AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
           ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus",
-        (SELECT COALESCE(SUM(ose.total_qty), 0)::int
+        (SELECT COALESCE(SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0))), 0)::int
           FROM order_scan_events ose
           JOIN order_scan_items osi ON osi.id = ose.scan_item_id
           WHERE ose.is_extra = true AND ose.voided IS NOT TRUE
@@ -745,7 +745,7 @@ async function getSessionScanCounts(
     [sessionId],
   );
   const { rows: extraRows } = await queryable.query(
-    `SELECT COALESCE(SUM(total_qty), 0)::int AS "extraQtyTotal"
+    `SELECT COALESCE(SUM(GREATEST(0, total_qty - COALESCE(credited_qty, 0))), 0)::int AS "extraQtyTotal"
      FROM order_scan_events WHERE session_id = $1 AND is_extra = true AND voided IS NOT TRUE`,
     [sessionId],
   );
@@ -1103,14 +1103,47 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       WHERE oi.session_id = ANY($1::int[])
       ORDER BY oi.session_id, oi.id
     `, [sessionIds]);
+    // Real GJ/MP PLT pack size per item — informational only (see MvRawItem.itemsPerPallet on
+    // the Scan Viewer client), resolved fresh here rather than trusting any stale snapshot.
+    // Plant state is a per-session fact (sessions.plant -> plants.state); pack size comes
+    // straight from products.gj_plt/mp_plt. Deliberately does NOT fall back to items_per_pallet
+    // ("Packets") or the generic "pallets" column — same rule as everywhere else pallet size is
+    // resolved in this app.
+    const sessionPlants = Array.from(new Set(sessions.map((s) => s.plant).filter(Boolean)));
+    const { rows: planRows } = sessionPlants.length > 0
+      ? await pool.query(`SELECT name, state FROM plants WHERE LOWER(name) = ANY($1::text[])`, [sessionPlants.map((p) => p.toLowerCase())])
+      : { rows: [] as any[] };
+    const stateByPlant = new Map(planRows.map((p: any) => [String(p.name).toLowerCase(), String(p.state ?? '').toUpperCase()]));
+    const stateBySession = new Map(sessions.map((s) => [s.id, stateByPlant.get((s.plant ?? '').toLowerCase()) ?? null]));
+
+    const itemBarcodes = Array.from(new Set(rawItems.map((i: any) => i.barcode).filter((b: any): b is string => !!b)));
+    const packByBarcode = new Map<string, { gjPlt: number; mpPlt: number }>();
+    if (itemBarcodes.length > 0) {
+      const { rows: prodRows } = await pool.query(
+        `SELECT LOWER(barcode) AS barcode, gj_plt, mp_plt FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
+        [itemBarcodes.map((b) => b.toLowerCase())],
+      );
+      for (const p of prodRows as any[]) packByBarcode.set(p.barcode, { gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0 });
+    }
+    const resolvePackSize = (sessionId: number, barcode: string | null): number => {
+      if (!barcode) return 0;
+      const state = stateBySession.get(sessionId);
+      const pack = packByBarcode.get(barcode.toLowerCase());
+      if (!pack || !state) return 0;
+      if (state === 'GJ') return pack.gjPlt;
+      if (state === 'MP') return pack.mpPlt;
+      return 0;
+    };
+
     const allItems: Array<{
       id: number; sessionId: number; barcode: string | null; itemName: string | null;
       sapCode: string | null; quantity: number | null; expectedPallets: number | null;
       scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
-      lastScannedAt?: string | null;
+      lastScannedAt?: string | null; itemsPerPallet?: number;
     }> = rawItems.map((item: any) => {
       const credited = item.barcode ? creditedQtyByKey.get(`${item.sessionId}::${item.barcode}`) ?? 0 : 0;
-      return credited > 0 ? { ...item, scannedQty: (item.scannedQty ?? 0) + credited } : item;
+      const withCredit = credited > 0 ? { ...item, scannedQty: (item.scannedQty ?? 0) + credited } : item;
+      return { ...withCredit, itemsPerPallet: resolvePackSize(item.sessionId, item.barcode) };
     });
 
     // Group items by sessionId
@@ -1141,6 +1174,19 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       GROUP BY ose.session_id, ose.barcode
     `, [sessionIds]);
 
+    // Extra scans can be for barcodes that never appeared in any CSV, so they weren't covered
+    // by the itemBarcodes lookup above — fetch pack sizes for whichever of those are missing.
+    const missingExtraBarcodes = Array.from(new Set(
+      extraRows.map((ex: any) => ex.barcode).filter((b: any) => b && !packByBarcode.has(String(b).toLowerCase())),
+    ));
+    if (missingExtraBarcodes.length > 0) {
+      const { rows: extraProdRows } = await pool.query(
+        `SELECT LOWER(barcode) AS barcode, gj_plt, mp_plt FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
+        [missingExtraBarcodes.map((b: any) => String(b).toLowerCase())],
+      );
+      for (const p of extraProdRows as any[]) packByBarcode.set(p.barcode, { gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0 });
+    }
+
     extraRows.forEach((ex: any, idx: number) => {
       const list = itemsBySession.get(ex.sessionId) ?? [];
       const remaining = remainingExtraByKey.get(`${ex.sessionId}::${ex.barcode}`);
@@ -1160,6 +1206,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         scanStatus: 'extra',
         isExtra: true,
         lastScannedAt: ex.lastScannedAt ?? null,
+        itemsPerPallet: resolvePackSize(ex.sessionId, ex.barcode),
       });
       itemsBySession.set(ex.sessionId, list);
     });

@@ -1024,6 +1024,10 @@ export default function ScanOrderPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/sessions", "scan-page"] });
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/items"] });
+      // Same History panel the Void action already refreshes live (see mvVoidMutation) — a
+      // fresh scan needs the same treatment, or the open history drill-down for this item stays
+      // stale until a full page reload.
+      queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
     },
 
     onError: (err: any, _payload, context: any) => {
