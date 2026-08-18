@@ -1,12 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, X } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, FileText, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import { apiRequest } from "@/lib/queryClient";
-import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
@@ -36,6 +35,7 @@ type SessionOption = {
   orderDate: string | null;
   scanStatus: string | null;
   partIndex: number | null;
+  importedByName?: string | null;
 };
 
 // Matches GET /api/order-scan/sessions/:id/items.
@@ -78,6 +78,13 @@ type MvMergedItem = {
   isExtraOnly: boolean; lastScannedAt: string | null;
 };
 
+// Matches GET /api/order-import/sessions/:id/items — one CSV part's own rows (Part Order tab).
+type PartItem = {
+  id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
+  quantity: number | null; expectedPallets: number | null;
+  scannedQty: number | null; extraQty: number | null; scanStatus: string | null;
+};
+
 // Matches GET /api/order-import/master-view/item-history.
 type HistoryEvent = {
   id: number; sessionId: number; barcode: string; itemName: string | null;
@@ -88,6 +95,13 @@ type HistoryEvent = {
 };
 
 const normalize = (v?: string | null) => String(v ?? "").trim().toLowerCase();
+
+/** "2026-08-03" → "03 Aug 2026" — how the Scan Order header renders an order date. */
+function fmtOrderDate(value: string | null): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? value : format(d, "dd MMM yyyy");
+}
 
 // Kiosk rotation steps — a full turn, so a screen mounted at any angle can be matched. Mirrors the
 // Scan Order page's own control (see .kiosk-rotate-* in index.css for the mechanics).
@@ -241,7 +255,16 @@ export default function ScanViewer() {
   // into one row per item, across every CSV part) vs Part View (this page's original behavior —
   // pick one specific CSV/part and see just its items). Defaults to Master View since that's
   // the "whole picture" view most lookups want first.
-  const [viewerTab, setViewerTab] = useState<"master-view" | "part-view">("master-view");
+  const [viewerTab, setViewerTab] = useState<"master-view" | "scan" | "part-order">("master-view");
+
+  // Part Order — every CSV of this order listed on its own, expandable to its rows. Same tab the
+  // Scan Order page calls "Part Order"; the rows come from the same endpoint it uses.
+  const [partExpandedId, setPartExpandedId] = useState<number | null>(null);
+  const partItemsQuery = useQuery<PartItem[]>({
+    queryKey: ["/api/order-import/items", "scan-viewer", partExpandedId],
+    queryFn: () => apiRequest("GET", `/api/order-import/sessions/${partExpandedId}/items`).then((r) => r.json()),
+    enabled: partExpandedId !== null && viewerTab === "part-order",
+  });
 
   const { data: allPlants } = useQuery<Plant[]>({
     queryKey: ["/api/plants"],
@@ -765,7 +788,10 @@ export default function ScanViewer() {
   // The item-history drill-down panel — same content for whichever row is currently expanded
   // (driven by historyItem, set from the Item column's click handler below).
   const historyPanel = (
-    <div className="bg-gray-50 p-3">
+    // Sticky + width-capped, matching the Scan Order page's panel: this renders inside a
+    // <td colSpan> of a much wider table that scrolls sideways, so a plain 100%-width block
+    // inherits that full width. sticky left-0 pins it to the visible left edge instead.
+    <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
       {historyQuery.isLoading ? (
         <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
       ) : historyEventsInStvScope.length === 0 ? (
@@ -797,7 +823,6 @@ export default function ScanViewer() {
                 <th className="w-7 border-r border-gray-200 px-2 py-2 font-semibold">#</th>
                 <th className="w-[122px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
-                <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">STV</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Order / Part</th>
                 <th className="w-14 border-r border-gray-200 px-2 py-2 text-center font-semibold">Qty</th>
                 <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
@@ -810,7 +835,6 @@ export default function ScanViewer() {
                   <td className="border-r border-gray-100 px-2 py-2 font-mono text-gray-400">{idx + 1}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{format(new Date(ev.scannedAt), "MMM d · h:mm a")}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
-                  <td className="truncate border-r border-gray-100 px-2 py-2 font-mono text-gray-600">{ev.stv ?? "—"}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">
                     {ev.orderName?.replace(/\.csv$/i, "")}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
                   </td>
@@ -1040,17 +1064,14 @@ export default function ScanViewer() {
       totalable: false,
       cellClassName: `min-w-[180px] max-w-[320px] whitespace-normal break-words ${cellBorder}`,
       render: (row) => {
-        const isOpen = historyItem?.barcode === row.barcode;
         return (
           <>
-            <button
-              type="button"
-              disabled={!row.barcode}
-              onClick={() => setHistoryItem((cur) => (cur?.barcode === row.barcode ? null : (row as any)))}
-              className={`whitespace-normal break-words text-left font-medium leading-snug text-gray-900 underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
-            >
+            {/* Plain text, not a button: Master View is view-only, matching the Scan Order page.
+                Its rows are merged across every part, while the scan history panel is per-part —
+                so the drill-down lives on the Scan tab, where a row IS one part's line. */}
+            <p className="whitespace-normal break-words text-left font-medium leading-snug text-gray-900">
               {row.itemName ?? "—"}
-            </button>
+            </p>
             <p className="whitespace-normal break-words font-mono text-xs text-gray-400">
               {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
             </p>
@@ -1158,72 +1179,115 @@ export default function ScanViewer() {
         </div>
       )}
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
-        <PageHeader icon={Eye} title="Scan Viewer" description="Look up any order's scan progress by plant and date — view-only, with the ability to void a mistaken scan if you're allowed to." />
 
         {/* Plant switcher — unboxed, same exact markup/style as the Scan page's own "Active:"
             switcher (no bordered card wrapper) — scoped to this user's own assigned plants (all
             plants for admins), not a generic dropdown of every plant in the system. Order
             Date/Part sit inline right after it, same unboxed treatment. */}
-        <div className="flex flex-wrap items-center gap-1.5 bg-white sm:bg-transparent px-3 py-2 sm:px-0 sm:py-0 border-b sm:border-0 border-gray-100">
-          <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wide text-gray-400 mr-1">Plant:</span>
-          {plantOptions.length === 0 ? (
-            <span className="text-xs text-gray-400">No plants assigned to your account.</span>
-          ) : (
-            plantOptions.map((p) => (
+        {/* Session header — the same band the Scan Order page carries above its tabs: which
+            order this is, which plant, who loaded it, and how far along it is. No Complete
+            button: that writes (it closes the order), and this page is a read-only viewer whose
+            only write is voiding a single mistaken scan. */}
+        {filtersReady && selectedSession && (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/90">
+              <ScanLine className="h-5 w-5 text-white" />
+            </span>
+            <div className="min-w-0">
+              <p
+                className="truncate text-sm font-bold leading-tight text-gray-900"
+                title={selectedSession.csvFileName}
+              >
+                {fmtOrderDate(selectedSession.orderDate ?? date)}
+                {sessionOptions.length > 1 && (
+                  <span className="ml-1.5 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold text-purple-700">
+                    Part {selectedSession.partIndex ?? "?"} of {sessionOptions.length}
+                  </span>
+                )}
+              </p>
+              <p className="mt-1.5 flex items-center gap-1.5 truncate text-xs text-gray-500">
+                {/* Plant switcher, in the header rather than its own strip — same placement as
+                    the Scan Order page's. Picking one snaps the date to that plant's live order. */}
+                <Select value={plant} onValueChange={selectPlant}>
+                  <SelectTrigger className="h-6 w-auto gap-1 rounded-full border-emerald-200 bg-emerald-50 px-2.5 text-[11px] font-semibold text-emerald-800">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                {selectedSession.importedByName && <span>· loaded by {selectedSession.importedByName}</span>}
+              </p>
+            </div>
+            {/* Received progress, right-aligned — same readout as Scan Order's. */}
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <div className="h-2 w-28 overflow-hidden rounded-full bg-gray-100">
+                <div
+                  className="h-full rounded-full bg-[#001d6e] transition-[width] duration-300"
+                  style={{ width: `${items.length > 0 ? Math.round((items.filter((i) => (i.totalScannedQty ?? 0) > 0).length / items.length) * 100) : 0}%` }}
+                />
+              </div>
+              <span className="whitespace-nowrap text-xs font-medium text-gray-600">
+                {items.filter((i) => (i.totalScannedQty ?? 0) > 0).length}/{items.length} received
+              </span>
+            </div>
+          </div>
+        )}
+
+
+        {/* Master View / Part View tabs — same split the Scan Order page has: Master View
+            merges every CSV part of this order into one row per item; Part View is this page's
+            original behavior, one specific CSV/part at a time. */}
+        {/* Same tab treatment as Scan Order: an icon beside each label, the active one filled
+            navy. "Scan" is deliberately absent — that tab exists there to scan into, and this
+            page never writes scans. */}
+        <div className="flex flex-wrap items-center gap-2">
+          {([
+            { key: "master-view", label: "Master View", icon: Layers },
+            { key: "scan", label: "Scan", icon: ScanLine },
+            { key: "part-order", label: "Part Order", icon: FileText },
+          ] as const).map((t) => {
+            const Icon = t.icon;
+            return (
               <button
-                key={p}
+                key={t.key}
                 type="button"
-                onClick={() => selectPlant(p)}
-                className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
-                  plant === p
-                    ? "bg-[#001d6e] text-white"
+                onClick={() => setViewerTab(t.key)}
+                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-colors ${
+                  viewerTab === t.key
+                    ? "bg-[#001d6e] text-white shadow-sm"
                     : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
                 }`}
               >
-                {p}
+                <Icon className="h-4 w-4" />
+                {t.label}
               </button>
-            ))
-          )}
+            );
+          })}
 
-          <span className="ml-2 flex items-center gap-1.5">
-            <Input type="date" className="h-8 w-auto text-xs" value={date} onChange={(e) => { setDate(e.target.value); setSessionId(null); }} />
-            {/* Which date is actually being shown right now — the date input alone doesn't
-                read clearly at a glance, and it's easy to lose track of after switching plants
-                (each plant snaps to its own active date). */}
+          {/* Order date (and the part picker when an order has several) sit at the right of the
+              tab row — where the Scan Order page puts its STV selector. This page has to choose
+              WHICH order to show, which that page never does: it follows the live session. */}
+          <span className="ml-auto flex items-center gap-1.5">
+            <Input
+              type="date"
+              className="h-9 w-auto rounded-xl text-xs"
+              value={date}
+              onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
+            />
             {sessionOptions.length > 1 && (
               <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
-                <SelectTrigger className="h-8 w-36 text-xs"><SelectValue placeholder="Select part…" /></SelectTrigger>
+                <SelectTrigger className="h-9 w-36 rounded-xl text-xs"><SelectValue placeholder="Select part…" /></SelectTrigger>
                 <SelectContent>
-                  {sessionOptions.map((s) => (
-                    <SelectItem key={s.id} value={String(s.id)}>
-                      Part {s.partIndex ?? "—"} · {s.scanStatus ?? "—"}
+                  {sessionOptions.map((so) => (
+                    <SelectItem key={so.id} value={String(so.id)}>
+                      Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             )}
-
           </span>
-        </div>
-
-        {/* Master View / Part View tabs — same split the Scan Order page has: Master View
-            merges every CSV part of this order into one row per item; Part View is this page's
-            original behavior, one specific CSV/part at a time. */}
-        <div className="flex items-center gap-1.5">
-          {(["master-view", "part-view"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setViewerTab(t)}
-              className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
-                viewerTab === t
-                  ? "bg-[#001d6e] text-white"
-                  : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              {t === "master-view" ? "Master View" : "Part View"}
-            </button>
-          ))}
         </div>
 
         {!filtersReady ? (
@@ -1236,7 +1300,120 @@ export default function ScanViewer() {
           <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
             No order found for {plant} on {date}.
           </div>
-        ) : viewerTab === "part-view" ? (
+        ) : viewerTab === "part-order" ? (
+          /* Part Order — each CSV of this order on its own, expandable to its rows. Read-only
+             counterpart to the Scan Order page's own Part Order tab. */
+          <div className="space-y-2">
+            {sessionOptions.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
+                No CSV parts found for {plant} on {date}.
+              </p>
+            ) : sessionOptions.map((sess) => {
+              const isOpen = partExpandedId === sess.id;
+              const rows = isOpen ? (partItemsQuery.data ?? []) : [];
+              const t = rows.reduce(
+                (acc, i) => {
+                  const exp = i.quantity ?? 0;
+                  const done = i.scannedQty ?? 0;
+                  acc.exp += exp;
+                  acc.done += Math.min(done, exp);
+                  acc.left += Math.max(0, exp - done);
+                  acc.extra += i.extraQty ?? 0;
+                  return acc;
+                },
+                { exp: 0, done: 0, left: 0, extra: 0 },
+              );
+              return (
+                <div key={sess.id} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setPartExpandedId(isOpen ? null : sess.id)}
+                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
+                  >
+                    <span className="flex min-w-0 items-center gap-2.5">
+                      <Layers className="h-4 w-4 shrink-0 text-gray-400" />
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium text-gray-900">
+                          {sess.csvFileName?.replace(/\.csv$/i, "")}
+                        </span>
+                        <span className="block text-[11px] text-gray-400">
+                          Part {sess.partIndex ?? "—"} · {sess.scanStatus ?? "—"}
+                        </span>
+                      </span>
+                    </span>
+                    <ChevronDown className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+                  </button>
+
+                  {isOpen && (
+                    <div className="border-t border-gray-200">
+                      {partItemsQuery.isFetching && rows.length === 0 ? (
+                        <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+                      ) : rows.length === 0 ? (
+                        <p className="py-8 text-center text-sm text-gray-400">No items in this part.</p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full min-w-[640px] border-collapse text-sm">
+                            <thead>
+                              <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                                <th className="border-r border-gray-300 px-4 py-2.5 font-semibold">Item</th>
+                                {["Exp", "Received", "Left", "Extra"].map((h) => (
+                                  <th key={h} className="border-r border-gray-300 px-3 py-2.5 text-right font-semibold">{h}</th>
+                                ))}
+                                <th className="px-4 py-2.5 text-center font-semibold">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rows.map((i) => {
+                                const exp = i.quantity ?? 0;
+                                const done = i.scannedQty ?? 0;
+                                const left = Math.max(0, exp - done);
+                                const extra = i.extraQty ?? 0;
+                                const isDone = done >= exp && exp > 0;
+                                const isPartial = done > 0 && !isDone;
+                                return (
+                                  <tr key={i.id} className={`border-b border-gray-200 ${isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : ""}`}>
+                                    <td className="border-r border-gray-200 px-4 py-2.5">
+                                      <p className="font-medium leading-snug text-gray-900">{i.itemName ?? "—"}</p>
+                                      <p className="font-mono text-xs text-gray-400">
+                                        {i.barcode ?? "—"}{i.sapCode && ` · SAP ${i.sapCode}`}
+                                      </p>
+                                    </td>
+                                    <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums text-gray-600">{exp || "—"}</td>
+                                    <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold text-gray-900">{done}</td>
+                                    <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${left > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{left || "—"}</td>
+                                    <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</td>
+                                    <td className="px-4 py-2.5 text-center">
+                                      <span className={`inline-block px-2.5 py-1 text-xs font-semibold ${
+                                        isDone ? "bg-emerald-100 text-emerald-700"
+                                        : isPartial ? "bg-amber-100 text-amber-700"
+                                        : "bg-gray-100 text-gray-500"}`}>
+                                        {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                              {/* Totals close each part, same as every other table on this page. */}
+                              <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
+                                <td className="border-r border-gray-200 px-4 py-2.5">Total</td>
+                                {([t.exp, t.done, t.left, t.extra] as const).map((v, idx) => (
+                                  <td key={idx} className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums">
+                                    {v.toLocaleString()}
+                                  </td>
+                                ))}
+                                <td className="px-4 py-2.5" />
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : viewerTab === "scan" ? (
           <>
           {/* Order Totals — same card as the Scan Order page's: heading with a % complete
               readout, four click-to-filter tiles carrying a count and a pallet figure, and a
@@ -1305,15 +1482,10 @@ export default function ScanViewer() {
               column header, a unified "+ Filter" picker, and a "Filters (N)" summary. */}
           <TableCard
             icon={Eye}
-            title={selectedSession?.csvFileName ?? "Items"}
-            subtitle={
-              <span className="flex items-center gap-2">
-                <PlantBadge plant={plant} />
-                {selectedSession?.scanStatus && (
-                  <span className="uppercase tracking-wide">{selectedSession.scanStatus}</span>
-                )}
-              </span>
-            }
+            // Headerless, like the Scan Order page's items card: it leads with the row count
+            // rather than a title, since the order is already identified by the header band above.
+            compactHeader
+            title={`${filtered.length} of ${items.length} items`}
             className="rounded-xl shadow-sm border-gray-200"
             headerActions={
               <>
@@ -1715,7 +1887,7 @@ export default function ScanViewer() {
               across all of this order's CSV parts (mvTotals) instead of one session's items. */}
           <div className="flex flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
             <div className="flex items-baseline justify-between">
-              <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals (All Parts)</p>
+              <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
               <p className="text-sm font-medium text-gray-400">
                 {mvTotals.expected > 0 ? `${Math.round((mvTotals.done / mvTotals.expected) * 100)}% complete` : "—"}
               </p>
@@ -1765,8 +1937,8 @@ export default function ScanViewer() {
 
           <TableCard
             icon={Eye}
-            title="Master View — All Parts"
-            subtitle={<PlantBadge plant={plant} />}
+            compactHeader
+            title={`${mvFiltered.length} of ${allMvItems.length} items`}
             className="rounded-xl shadow-sm border-gray-200"
             headerActions={
               <CollapsibleSearch value={search} onChange={setSearch} placeholder="Search by name or barcode…" />
@@ -1784,9 +1956,6 @@ export default function ScanViewer() {
                 getRowId={(row) => row.barcode ?? row.itemName ?? String(Math.random())}
                 enableZebraStripes
                 rowClassName={(row) => (row.isExtraOnly ? "bg-orange-50/40" : undefined)}
-                renderExpandedRow={() => historyPanel}
-                isRowExpandable={(row) => !!row.barcode}
-                expandedRowId={historyItem?.barcode ?? null}
                 emptyState={allMvItems.length === 0 ? "No items in this order." : "No items match your filters."}
                 enableTotalsRow
                 totalsLabelColumnId="item"
@@ -1824,14 +1993,9 @@ export default function ScanViewer() {
                               status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
                             }`}>
                               <td className="min-w-[180px] max-w-[320px] border-r border-gray-200 px-4 py-2.5">
-                                <button
-                                  type="button"
-                                  disabled={!item.barcode}
-                                  onClick={() => setHistoryItem((cur) => (cur?.barcode === item.barcode ? null : (item as any)))}
-                                  className={`whitespace-normal break-words text-left font-medium leading-snug text-gray-900 underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
-                                >
+                                <p className="whitespace-normal break-words text-left font-medium leading-snug text-gray-900">
                                   {item.itemName ?? "—"}
-                                </button>
+                                </p>
                                 <p className="whitespace-normal break-words font-mono text-gray-400">
                                   {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                                 </p>
@@ -1923,14 +2087,10 @@ export default function ScanViewer() {
                             )}
                           </span>
                           <div className="min-w-0 flex-1">
-                            <button
-                              type="button"
-                              disabled={!item.barcode}
-                              onClick={() => setHistoryItem((cur) => (cur?.barcode === item.barcode ? null : (item as any)))}
-                              className="text-left text-[15px] font-semibold leading-snug text-gray-900 underline decoration-dotted underline-offset-2 decoration-gray-300 disabled:no-underline"
-                            >
+                            {/* View-only, like the Master View table above. */}
+                            <p className="text-left text-[15px] font-semibold leading-snug text-gray-900">
                               {item.itemName ?? "—"}
-                            </button>
+                            </p>
                             <p className="mt-0.5 font-mono text-xs text-gray-400">
                               {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                             </p>
