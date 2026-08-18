@@ -788,7 +788,10 @@ export default function ScanViewer() {
   // The item-history drill-down panel — same content for whichever row is currently expanded
   // (driven by historyItem, set from the Item column's click handler below).
   const historyPanel = (
-    <div className="bg-gray-50 p-3">
+    // Sticky + width-capped, matching the Scan Order page's panel: this renders inside a
+    // <td colSpan> of a much wider table that scrolls sideways, so a plain 100%-width block
+    // inherits that full width. sticky left-0 pins it to the visible left edge instead.
+    <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
       {historyQuery.isLoading ? (
         <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
       ) : historyEventsInStvScope.length === 0 ? (
@@ -820,7 +823,6 @@ export default function ScanViewer() {
                 <th className="w-7 border-r border-gray-200 px-2 py-2 font-semibold">#</th>
                 <th className="w-[122px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
-                <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">STV</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Order / Part</th>
                 <th className="w-14 border-r border-gray-200 px-2 py-2 text-center font-semibold">Qty</th>
                 <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
@@ -833,7 +835,6 @@ export default function ScanViewer() {
                   <td className="border-r border-gray-100 px-2 py-2 font-mono text-gray-400">{idx + 1}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{format(new Date(ev.scannedAt), "MMM d · h:mm a")}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
-                  <td className="truncate border-r border-gray-100 px-2 py-2 font-mono text-gray-600">{ev.stv ?? "—"}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">
                     {ev.orderName?.replace(/\.csv$/i, "")}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
                   </td>
@@ -1063,17 +1064,14 @@ export default function ScanViewer() {
       totalable: false,
       cellClassName: `min-w-[180px] max-w-[320px] whitespace-normal break-words ${cellBorder}`,
       render: (row) => {
-        const isOpen = historyItem?.barcode === row.barcode;
         return (
           <>
-            <button
-              type="button"
-              disabled={!row.barcode}
-              onClick={() => setHistoryItem((cur) => (cur?.barcode === row.barcode ? null : (row as any)))}
-              className={`whitespace-normal break-words text-left font-medium leading-snug text-gray-900 underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
-            >
+            {/* Plain text, not a button: Master View is view-only, matching the Scan Order page.
+                Its rows are merged across every part, while the scan history panel is per-part —
+                so the drill-down lives on the Scan tab, where a row IS one part's line. */}
+            <p className="whitespace-normal break-words text-left font-medium leading-snug text-gray-900">
               {row.itemName ?? "—"}
-            </button>
+            </p>
             <p className="whitespace-normal break-words font-mono text-xs text-gray-400">
               {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
             </p>
@@ -1958,9 +1956,6 @@ export default function ScanViewer() {
                 getRowId={(row) => row.barcode ?? row.itemName ?? String(Math.random())}
                 enableZebraStripes
                 rowClassName={(row) => (row.isExtraOnly ? "bg-orange-50/40" : undefined)}
-                renderExpandedRow={() => historyPanel}
-                isRowExpandable={(row) => !!row.barcode}
-                expandedRowId={historyItem?.barcode ?? null}
                 emptyState={allMvItems.length === 0 ? "No items in this order." : "No items match your filters."}
                 enableTotalsRow
                 totalsLabelColumnId="item"
@@ -1998,14 +1993,9 @@ export default function ScanViewer() {
                               status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
                             }`}>
                               <td className="min-w-[180px] max-w-[320px] border-r border-gray-200 px-4 py-2.5">
-                                <button
-                                  type="button"
-                                  disabled={!item.barcode}
-                                  onClick={() => setHistoryItem((cur) => (cur?.barcode === item.barcode ? null : (item as any)))}
-                                  className={`whitespace-normal break-words text-left font-medium leading-snug text-gray-900 underline decoration-dotted underline-offset-2 disabled:no-underline ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
-                                >
+                                <p className="whitespace-normal break-words text-left font-medium leading-snug text-gray-900">
                                   {item.itemName ?? "—"}
-                                </button>
+                                </p>
                                 <p className="whitespace-normal break-words font-mono text-gray-400">
                                   {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                                 </p>
@@ -2097,14 +2087,10 @@ export default function ScanViewer() {
                             )}
                           </span>
                           <div className="min-w-0 flex-1">
-                            <button
-                              type="button"
-                              disabled={!item.barcode}
-                              onClick={() => setHistoryItem((cur) => (cur?.barcode === item.barcode ? null : (item as any)))}
-                              className="text-left text-[15px] font-semibold leading-snug text-gray-900 underline decoration-dotted underline-offset-2 decoration-gray-300 disabled:no-underline"
-                            >
+                            {/* View-only, like the Master View table above. */}
+                            <p className="text-left text-[15px] font-semibold leading-snug text-gray-900">
                               {item.itemName ?? "—"}
-                            </button>
+                            </p>
                             <p className="mt-0.5 font-mono text-xs text-gray-400">
                               {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                             </p>
