@@ -521,7 +521,7 @@ router.get('/order-import/sessions/:id/items', requireImportViewAccess, async (r
                  AND osi.session_id = oi.session_id
                  AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
           ORDER BY osi.id DESC LIMIT 1)          AS "scanStatus",
-        (SELECT COALESCE(SUM(ose.total_qty), 0)::int
+        (SELECT COALESCE(SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0))), 0)::int
           FROM order_scan_events ose
           JOIN order_scan_items osi ON osi.id = ose.scan_item_id
           WHERE ose.is_extra = true AND ose.voided IS NOT TRUE
@@ -745,7 +745,7 @@ async function getSessionScanCounts(
     [sessionId],
   );
   const { rows: extraRows } = await queryable.query(
-    `SELECT COALESCE(SUM(total_qty), 0)::int AS "extraQtyTotal"
+    `SELECT COALESCE(SUM(GREATEST(0, total_qty - COALESCE(credited_qty, 0))), 0)::int AS "extraQtyTotal"
      FROM order_scan_events WHERE session_id = $1 AND is_extra = true AND voided IS NOT TRUE`,
     [sessionId],
   );

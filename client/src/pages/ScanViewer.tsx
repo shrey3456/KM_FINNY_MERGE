@@ -505,12 +505,15 @@ export default function ScanViewer() {
 
   const rowState = (item: OsScanItem) => {
     const exp = item.expectedQty ?? 0;
-    const received = item.totalScannedQty ?? 0;
+    const scanned = item.totalScannedQty ?? 0;
+    const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
     return {
       exp,
-      received,
-      left: Math.max(0, exp - received),
-      extra: extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0,
+      // Received = the full physical count (order-matched scanned qty PLUS extra) — same
+      // convention as the Scan Order page's osRowState.doneQty and both Master Views.
+      received: scanned + extra,
+      left: Math.max(0, exp - scanned),
+      extra,
     };
   };
   // qty ÷ its own items-per-pallet — never one blended pallet size for every item, same rule
@@ -612,7 +615,7 @@ export default function ScanViewer() {
       // columns in the same order, so the two pages read as one system.
       { id: "exp", label: "Exp Qty", filterType: "number", options: numberOptions((i) => i.expectedQty ?? 0), accessor: (i) => i.expectedQty ?? 0 },
       { id: "left", label: "Remain Qty", filterType: "number", options: numberOptions((i) => rowState(i).left), accessor: (i) => rowState(i).left },
-      { id: "received", label: "Received Qty", filterType: "number", options: numberOptions((i) => i.totalScannedQty ?? 0), accessor: (i) => i.totalScannedQty ?? 0 },
+      { id: "received", label: "Received Qty", filterType: "number", options: numberOptions((i) => rowState(i).received), accessor: (i) => rowState(i).received },
       { id: "extra", label: "Extra Qty", filterType: "number", options: numberOptions((i) => rowState(i).extra), accessor: (i) => rowState(i).extra },
       { id: "expPlt", label: "Exp Plt", filterType: "number", options: palletOptions((i) => pltQty(rowState(i).exp, i.itemsPerPallet ?? 0)), accessor: (i) => pltQty(rowState(i).exp, i.itemsPerPallet ?? 0) },
       { id: "leftPlt", label: "Remain Plt", filterType: "number", options: palletOptions((i) => pltQty(rowState(i).left, i.itemsPerPallet ?? 0)), accessor: (i) => pltQty(rowState(i).left, i.itemsPerPallet ?? 0) },
@@ -918,7 +921,7 @@ export default function ScanViewer() {
       width: 90,
       align: "right",
       sortable: true,
-      accessor: (row) => row.totalScannedQty ?? 0,
+      accessor: (row) => rowState(row).received,
       headerClassName: headerBorder,
       cellClassName: `tabular-nums font-semibold text-gray-900 ${cellBorder}`,
       render: (row) => rowState(row).received,

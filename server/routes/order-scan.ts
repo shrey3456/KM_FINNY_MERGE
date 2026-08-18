@@ -1731,12 +1731,12 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
     if (!(await checkSessionPlantOrRespond(req, res, id))) return;
     const { rows } = await pool.query(`
       SELECT
-        COALESCE(ose.barcode, '')            AS barcode,
-        MAX(ose.item_name)                   AS "itemName",
-        SUM(ose.total_qty)::int              AS "totalQty",
-        COUNT(*)::int                        AS "scanCount",
-        MAX(ose.scanned_at)                  AS "lastScannedAt",
-        MAX(ose.scanned_by_name)             AS "scannedByName"
+        COALESCE(ose.barcode, '')                                    AS barcode,
+        MAX(ose.item_name)                                           AS "itemName",
+        SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0)))::int AS "totalQty",
+        COUNT(*)::int                                                AS "scanCount",
+        MAX(ose.scanned_at)                                          AS "lastScannedAt",
+        MAX(ose.scanned_by_name)                                     AS "scannedByName"
       FROM order_scan_events ose
       WHERE ose.session_id = $1 AND ose.is_extra = true AND ose.voided IS NOT TRUE
         AND ose.barcode <> 'EMPTY_BOX'
