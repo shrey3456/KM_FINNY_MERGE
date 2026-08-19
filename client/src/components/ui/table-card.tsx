@@ -13,6 +13,12 @@ interface TableCardProps {
   searchValue?: string;
   onSearchChange?: (value: string) => void;
   searchPlaceholder?: string;
+  /**
+   * Drops the icon badge and renders the title as small muted text — the "headerless" treatment
+   * the Scan pages use, where the card leads with a row count rather than a title. Opt-in, so
+   * every existing caller keeps the icon + large title.
+   */
+  compactHeader?: boolean;
 
   /** Extra controls rendered beside the title, in the same row as the search box (to its
    *  left). Use this instead of `filters` when things need to sit next to the title rather
@@ -41,6 +47,7 @@ export function TableCard({
   searchValue,
   onSearchChange,
   searchPlaceholder = "Search…",
+  compactHeader,
   headerActions,
   filters,
   children,
@@ -53,11 +60,15 @@ export function TableCard({
       <div className="border-b border-gray-200 bg-white px-3 py-3 sm:px-5 sm:py-3.5">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#001d6e] text-white sm:h-9 sm:w-9">
-              <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
-            </div>
+            {!compactHeader && (
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#001d6e] text-white sm:h-9 sm:w-9">
+                <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
+              </div>
+            )}
             <div className="min-w-0">
-              <div className="text-lg font-bold tracking-tight text-gray-900 sm:text-xl">{title}</div>
+              <div className={compactHeader
+                ? "text-xs font-medium text-gray-500"
+                : "text-lg font-bold tracking-tight text-gray-900 sm:text-xl"}>{title}</div>
               {subtitle && (
                 <div className="mt-0.5 text-xs leading-none text-gray-400">{subtitle}</div>
               )}
