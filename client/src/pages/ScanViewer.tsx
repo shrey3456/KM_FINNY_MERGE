@@ -52,7 +52,7 @@ type OsScanItem = {
 };
 
 // Matches GET /api/order-scan/sessions/:id/extras (grouped, un-voided only).
-type ExtraRow = { barcode: string; itemName: string | null; totalQty: number };
+type ExtraRow = { barcode: string; itemName: string | null; totalQty: number; partIndexes: number[] };
 
 // One raw item row from GET /api/order-import/master-view's files[].items — a single CSV
 // part's line for one barcode, before merging across parts (see MvMergedItem below).
@@ -393,6 +393,11 @@ export default function ScanViewer() {
     enabled: sessionId != null,
   });
   const extraByBarcode = new Map((extrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.totalQty ?? 0]));
+  // Which part(s) each barcode's extra actually happened on (the endpoint now spans the whole
+  // order group, not just this one part) — used to label an extra "from Part X" when it isn't
+  // this part's own, same as the Scan tab.
+  const extraPartIndexesByBarcode = new Map((extrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.partIndexes ?? []]));
+  const currentPartIndex = sessionOptions.find((s) => s.id === sessionId)?.partIndex ?? null;
 
   // Every part sharing this plant + order date — history spans the whole order, not just the
   // one part currently selected above, same as the Scan tab's own drill-down.
@@ -524,12 +529,38 @@ export default function ScanViewer() {
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
 
-  const items = itemsQuery.data ?? [];
+  // Extras that don't match ANY CSV item — not on this part's CSV, and not on any other part's
+  // either — have no existing row to attach their "+N" to, so without this they stayed
+  // invisible here even after /extras started returning them (Master View doesn't have this
+  // problem — it never relied on a matching CSV row). One synthetic row per such barcode,
+  // Exp/Received left at 0 since there's no CSV line backing them; rowState's own `received`
+  // (scanned + extra) still correctly shows the physical qty via the Extra column.
+  const realItems = itemsQuery.data ?? [];
+  const matchedBarcodes = new Set(realItems.map((i) => normalize(i.barcode ?? "")));
+  const extraOnlyItems: OsScanItem[] = (extrasQuery.data ?? [])
+    .filter((e) => e.barcode && !matchedBarcodes.has(normalize(e.barcode)))
+    .map((e, idx) => ({
+      id: -1000 - idx,
+      sessionId: sessionId ?? 0,
+      barcode: e.barcode,
+      itemName: e.itemName,
+      sapCode: null,
+      expectedQty: 0,
+      itemsPerPallet: 0,
+      scannedPallets: 0,
+      scannedLooseQty: 0,
+      totalScannedQty: 0,
+      status: 'extra',
+      lastScannedAt: null,
+    }));
+  const items = [...realItems, ...extraOnlyItems];
 
   const rowState = (item: OsScanItem) => {
     const exp = item.expectedQty ?? 0;
     const scanned = item.totalScannedQty ?? 0;
     const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+    const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
+      .filter((p) => p !== currentPartIndex);
     return {
       exp,
       // Received = the full physical count (order-matched scanned qty PLUS extra) — same
@@ -537,6 +568,7 @@ export default function ScanViewer() {
       received: scanned + extra,
       left: Math.max(0, exp - scanned),
       extra,
+      extraFromOtherParts,
     };
   };
   // qty ÷ its own items-per-pallet — never one blended pallet size for every item, same rule
@@ -960,8 +992,16 @@ export default function ScanViewer() {
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) => {
-        const { extra } = rowState(row);
-        return <span className={`tabular-nums font-semibold ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>;
+        const { extra, extraFromOtherParts } = rowState(row);
+        if (extra <= 0) return <span className="tabular-nums font-semibold text-gray-300">—</span>;
+        return (
+          <span className="tabular-nums font-semibold text-amber-600">
+            +{extra}
+            {extraFromOtherParts.length > 0 && (
+              <span className="block text-[10px] font-normal text-gray-400">from Part {extraFromOtherParts.join(", ")}</span>
+            )}
+          </span>
+        );
       },
     },
     // Pallet columns, their own columns rather than a subline under each qty cell — same
@@ -1695,7 +1735,7 @@ export default function ScanViewer() {
                         </td>
                       </tr>
                     ) : filtered.map((item) => {
-                      const { exp, received, left, extra } = rowState(item);
+                      const { exp, received, left, extra, extraFromOtherParts } = rowState(item);
                       const ipp = item.itemsPerPallet ?? 0;
                       const status = item.status ?? "pending";
                       const plt = (q: number) => pltQty(q, ipp).toFixed(2);
@@ -1736,6 +1776,9 @@ export default function ScanViewer() {
                             </td>
                             <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
                               <span className="block text-lg">{extra > 0 ? `+${extra}` : "—"}</span>
+                              {extra > 0 && extraFromOtherParts.length > 0 && (
+                                <span className="block text-[10px] font-normal text-gray-400">from Part {extraFromOtherParts.join(", ")}</span>
+                              )}
                               <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
                             </td>
                             <td className="px-4 py-2.5 text-center">
@@ -1790,7 +1833,7 @@ export default function ScanViewer() {
                   </p>
                 ) : (
                   filtered.map((item) => {
-                    const { exp, received, left, extra } = rowState(item);
+                    const { exp, received, left, extra, extraFromOtherParts } = rowState(item);
                     const ipp = item.itemsPerPallet ?? 0;
                     const status = item.status ?? "pending";
                     const expPlt = pltQty(exp, ipp).toFixed(2);
@@ -1847,6 +1890,9 @@ export default function ScanViewer() {
                               <>
                                 <span className="text-gray-300"> · </span>
                                 <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                {extraFromOtherParts.length > 0 && (
+                                  <span className="text-[11px] font-normal text-gray-400"> (Part {extraFromOtherParts.join(", ")})</span>
+                                )}
                               </>
                             )}
                           </p>

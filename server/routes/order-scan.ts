@@ -1723,12 +1723,34 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
 
 
 // ── GET /api/order-scan/sessions/:id/extras ──────────────────────────────────
-// All extra scan events for a session (is_extra = true), grouped by barcode.
+// Every extra scan event across the WHOLE order group this session belongs to (every part of
+// the same day's CSV, not just this one part) — grouped by barcode, same day-level scope
+// Master View already uses. An unmatched extra only ever gets logged against whichever part
+// happened to be "front" at scan time (see /scan's forceAllExtra branches), so scoping this to
+// just the one session being viewed made an extra look like it "disappeared" the moment you
+// opened a different part of the same order. partIndexes tells the client which part(s) each
+// barcode's extra actually came from, so it can be labeled ("from Part 2") instead of showing
+// up with no indication of where it happened.
 router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
   try {
     if (!(await checkSessionPlantOrRespond(req, res, id))) return;
+
+    const anchorResult = await pool.query(
+      'SELECT id, receiving_session_id AS "receivingSessionId" FROM order_import_sessions WHERE id = $1',
+      [id],
+    );
+    const anchor = anchorResult.rows[0];
+    if (!anchor) return res.status(404).json({ message: 'Session not found' });
+    const groupId = anchor.receivingSessionId ?? anchor.id;
+
+    const groupResult = await pool.query(
+      `SELECT id FROM order_import_sessions WHERE (receiving_session_id = $1 OR id = $1) AND is_deleted = false`,
+      [groupId],
+    );
+    const groupSessionIds = groupResult.rows.length > 0 ? groupResult.rows.map((r: any) => r.id) : [id];
+
     const { rows } = await pool.query(`
       SELECT
         COALESCE(ose.barcode, '')                                    AS barcode,
@@ -1736,13 +1758,15 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
         SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0)))::int AS "totalQty",
         COUNT(*)::int                                                AS "scanCount",
         MAX(ose.scanned_at)                                          AS "lastScannedAt",
-        MAX(ose.scanned_by_name)                                     AS "scannedByName"
+        MAX(ose.scanned_by_name)                                     AS "scannedByName",
+        ARRAY_AGG(DISTINCT ois.part_index ORDER BY ois.part_index)   AS "partIndexes"
       FROM order_scan_events ose
-      WHERE ose.session_id = $1 AND ose.is_extra = true AND ose.voided IS NOT TRUE
+      JOIN order_import_sessions ois ON ois.id = ose.session_id
+      WHERE ose.session_id = ANY($1::int[]) AND ose.is_extra = true AND ose.voided IS NOT TRUE
         AND ose.barcode <> 'EMPTY_BOX'
       GROUP BY COALESCE(ose.barcode, '')
       ORDER BY MAX(ose.scanned_at) DESC
-    `, [id]);
+    `, [groupSessionIds]);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch extras' });
