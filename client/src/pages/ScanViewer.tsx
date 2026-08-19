@@ -591,6 +591,18 @@ export default function ScanViewer() {
   useEffect(() => {
     try { sessionStorage.setItem("scanViewer:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
   }, [columnOrder]);
+
+  const [mvColumnOrder, setMvColumnOrder] = useState<string[]>(() => {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem("scanViewer:mvColumnOrder") ?? "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("scanViewer:mvColumnOrder", JSON.stringify(mvColumnOrder)); } catch { /* storage unavailable */ }
+  }, [mvColumnOrder]);
   const setColumnCondition = (columnId: string, condition: FilterCondition) =>
     setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
   const clearColumnCondition = (columnId: string) =>
@@ -879,6 +891,22 @@ export default function ScanViewer() {
   const cellBorder = "border-r border-gray-200";
 
   const itemColumns: DataTableColumn<OsScanItem>[] = [
+    // Leading status icon, then Item and Barcode / SAP as their own columns — the same column
+    // set the Scan Order page's items table uses, so the two read identically.
+    {
+      id: "state",
+      header: "",
+      width: 40,
+      align: "center",
+      hideable: false,
+      totalable: false,
+      render: (row) => {
+        const status = row.status ?? "pending";
+        return status === "complete" ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
+          : status === "partial" ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
+          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+      },
+    },
     {
       id: "item",
       header: columnHeader("item", "Item"),
@@ -901,9 +929,6 @@ export default function ScanViewer() {
             >
               {row.itemName ?? "—"}
             </button>
-            <p className="whitespace-normal break-words font-mono text-xs text-gray-400">
-              {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
-            </p>
             {/* Informational only — the item's real GJ/MP PLT pack size, never used in any
                 qty/plt calculation on this page. */}
             {!!row.realPackSize && row.realPackSize > 0 && (
@@ -912,6 +937,23 @@ export default function ScanViewer() {
           </>
         );
       },
+    },
+    {
+      id: "barcode",
+      header: columnHeader("barcode", "Barcode / SAP"),
+      width: 140,
+      sortable: true,
+      accessor: (row) => row.barcode,
+      // An identifier, not a quantity — never summed into the totals row.
+      totalable: false,
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-500 ${cellBorder}`,
+      render: (row) => (
+        <>
+          <span className="block">{row.barcode ?? <span className="text-gray-300">—</span>}</span>
+          {row.sapCode && <span className="block text-[10px] text-gray-400">SAP: {row.sapCode}</span>}
+        </>
+      ),
     },
     // Qty block, in the Scan Order page's order: Exp → Remain → Received → Extra.
     {
@@ -1039,21 +1081,59 @@ export default function ScanViewer() {
       },
     },
     {
-      id: "lastScanned",
-      header: columnHeader("lastScanned", "Last Scanned"),
-      width: 130,
+      id: "stv",
+      header: columnHeader("stv", "STV"),
+      width: 110,
       sortable: true,
-      accessor: (row) => row.lastScannedAt,
+      accessor: (row) => stvsByBarcode.get(normalize(row.barcode ?? "")) ?? [],
       totalable: false,
-      cellClassName: "text-gray-500 whitespace-nowrap",
-      render: (row) => (row.lastScannedAt ? format(new Date(row.lastScannedAt), "MMM d, yyyy · h:mm a") : <span className="text-gray-300">—</span>),
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-600 ${cellBorder}`,
+      render: (row) => stvCell(row.barcode),
+    },
+    {
+      id: "orderDate",
+      header: columnHeader("orderDate", "Order Date"),
+      width: 120,
+      sortable: true,
+      accessor: () => viewerOrderDate,
+      totalable: false,
+      cellClassName: "whitespace-nowrap text-gray-500",
+      render: () => fmtOrderDate(viewerOrderDate),
     },
   ];
 
   // Master View's own columns — same layout/order as Part View's itemColumns above (Item, Exp,
   // Remain, Received, Extra, then the matching Plt columns, then Status), just backed by
   // MvMergedItem's merged-across-every-part shape instead of one session's OsScanItem rows.
+  // An item can be scanned across several STVs, so this lists them all rather than picking one.
+  // Sourced from the same per-event map the STV filter uses.
+  const stvCell = (barcode: string | null) => {
+    const list = stvsByBarcode.get(normalize(barcode ?? "")) ?? [];
+    return list.length ? list.join(", ") : <span className="text-gray-300">—</span>;
+  };
+  // Every row on this page belongs to the one plant + order date being viewed, so the order date
+  // is the same for all of them — carried as a column so it travels with an export.
+  const viewerOrderDate = selectedSession?.orderDate ?? date;
+
   const mvColumns: DataTableColumn<MvMergedItem>[] = [
+    // Same leading status icon and separate Barcode / SAP column as the Scan tab and the Scan
+    // Order page, so all three tables carry an identical column set.
+    {
+      id: "state",
+      header: "",
+      width: 40,
+      align: "center",
+      hideable: false,
+      totalable: false,
+      render: (row) => {
+        const done = row.quantity > 0 && row.scannedQty >= row.quantity;
+        const partial = !done && row.scannedQty > 0;
+        return done ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
+          : partial ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
+          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+      },
+    },
     {
       id: "item",
       header: "Item",
@@ -1072,9 +1152,6 @@ export default function ScanViewer() {
             <p className="whitespace-normal break-words text-left font-medium leading-snug text-gray-900">
               {row.itemName ?? "—"}
             </p>
-            <p className="whitespace-normal break-words font-mono text-xs text-gray-400">
-              {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
-            </p>
             {row.itemsPerPallet > 0 && (
               <p className="text-sm font-semibold text-gray-600">{row.itemsPerPallet} per pallet</p>
             )}
@@ -1084,6 +1161,23 @@ export default function ScanViewer() {
           </>
         );
       },
+    },
+    {
+      id: "barcode",
+      header: "Barcode / SAP",
+      width: 140,
+      sortable: true,
+      accessor: (row) => row.barcode,
+      // An identifier, not a quantity — never summed into the totals row.
+      totalable: false,
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-500 ${cellBorder}`,
+      render: (row) => (
+        <>
+          <span className="block">{row.barcode ?? <span className="text-gray-300">—</span>}</span>
+          {row.sapCode && <span className="block text-[10px] text-gray-400">SAP: {row.sapCode}</span>}
+        </>
+      ),
     },
     {
       id: "exp", header: "Exp Qty", width: 80, align: "right", sortable: true,
@@ -1162,11 +1256,25 @@ export default function ScanViewer() {
       },
     },
     {
-      id: "lastScanned", header: "Last Scanned", width: 130, sortable: true,
-      accessor: (row) => row.lastScannedAt,
+      id: "stv",
+      header: "STV",
+      width: 110,
+      sortable: true,
+      accessor: (row) => stvsByBarcode.get(normalize(row.barcode ?? "")) ?? [],
       totalable: false,
-      cellClassName: "text-gray-500 whitespace-nowrap",
-      render: (row) => (row.lastScannedAt ? format(new Date(row.lastScannedAt), "MMM d, yyyy · h:mm a") : <span className="text-gray-300">—</span>),
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-600 ${cellBorder}`,
+      render: (row) => stvCell(row.barcode),
+    },
+    {
+      id: "orderDate",
+      header: "Order Date",
+      width: 120,
+      sortable: true,
+      accessor: () => viewerOrderDate,
+      totalable: false,
+      cellClassName: "whitespace-nowrap text-gray-500",
+      render: () => fmtOrderDate(viewerOrderDate),
     },
   ];
 
@@ -1952,6 +2060,8 @@ export default function ScanViewer() {
                 containerClassName="rounded-none border-0"
                 headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                 columns={mvColumns}
+                columnOrder={mvColumnOrder}
+                onColumnOrderChange={setMvColumnOrder}
                 data={mvFiltered}
                 getRowId={(row) => row.barcode ?? row.itemName ?? String(Math.random())}
                 enableZebraStripes
