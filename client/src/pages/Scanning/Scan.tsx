@@ -837,7 +837,7 @@ export default function ScanOrderPage() {
   });
   const osGroupSessionIds = osGroupSessionIdsQuery.data?.sessionIds ?? (activeOrderScanSession ? [activeOrderScanSession.id] : []);
 
-  type OsExtraRow = { barcode: string; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null };
+  type OsExtraRow = { barcode: string; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null; partIndexes: number[] };
   const osExtrasQuery = useQuery<OsExtraRow[]>({
     queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "extras"],
     queryFn: () =>
@@ -2478,7 +2478,32 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
   // ── Embedded order-scan view (replaces dashboard when admin CSV is active) ─
   if (activeOrderScanSession) {
-    const osItems = osItemsQuery.data ?? [];
+    // Extras that don't match ANY CSV item — not on this part's CSV, and not on any other
+    // part's CSV either — have no existing row to attach their "+N" to, so without this they
+    // stayed invisible here even after the /extras endpoint above started returning them
+    // (Master View doesn't have this problem — it never relied on a matching CSV row to begin
+    // with). One synthetic row per such barcode, Exp/Received left at 0 since there's no CSV
+    // line backing them; osRowState's own doneQty (effScanned + extra) still correctly shows
+    // the physical qty received via the Extra column.
+    const osRealItems = osItemsQuery.data ?? [];
+    const osMatchedBarcodes = new Set(osRealItems.map((i) => normalize(i.barcode ?? "")));
+    const osExtraOnlyItems: OsScanItem[] = (osExtrasQuery.data ?? [])
+      .filter((e) => e.barcode && !osMatchedBarcodes.has(normalize(e.barcode)))
+      .map((e, idx) => ({
+        id: -1000 - idx,
+        sessionId: activeOrderScanSession.id,
+        barcode: e.barcode,
+        itemName: e.itemName,
+        sapCode: null,
+        expectedQty: 0,
+        itemsPerPallet: 0,
+        scannedPallets: 0,
+        scannedLooseQty: 0,
+        totalScannedQty: 0,
+        status: 'extra',
+        lastScannedAt: e.lastScannedAt,
+      }));
+    const osItems = [...osRealItems, ...osExtraOnlyItems];
     const osFiltered = (osSearch
       ? osItems.filter((i) =>
           [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(osSearch.toLowerCase()))
@@ -2510,11 +2535,18 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const osDoneCount = osItems.filter(osIsItemDone).length;
     const osTotalCount = osItems.length;
     const osPct = osTotalCount ? Math.round((osDoneCount / osTotalCount) * 100) : 0;
-    // Map of barcode → total extra qty for this session — used both for the per-row Extra
-    // column in the CSV Items table and the Extra-pallets total below.
+    // Map of barcode → total extra qty across the WHOLE order group (every part of this day's
+    // CSV, not just the part currently open) — used both for the per-row Extra column in the
+    // CSV Items table and the Extra-pallets total below. extraPartIndexesByBarcode carries which
+    // part(s) each barcode's extra actually happened on, so a "from Part X" label can be shown
+    // when it's not the part you're currently looking at.
     const extraByBarcode = new Map(
       (osExtrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.totalQty ?? 0]),
     );
+    const extraPartIndexesByBarcode = new Map(
+      (osExtrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.partIndexes ?? []]),
+    );
+    const currentPartIndex = osGroupCreditsQuery.data?.partIndex ?? null;
 
     // Per-row derived values shared by the CSV Items columns and the row tint.
     // Credit from an earlier part's extra counts toward this part's Received and reduces
@@ -2527,6 +2559,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       const exp = item.expectedQty ?? 0;
       const effScanned = (item.totalScannedQty ?? 0) + (credit?.creditedQty ?? 0);
       const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+      const extraPartIndexes = extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [];
+      // Only worth labeling when some of this barcode's extra happened on a DIFFERENT part
+      // than the one currently open — an extra scanned on this same part needs no "from Part
+      // X" note, that's just... this part.
+      const extraFromOtherParts = extraPartIndexes.filter((p) => p !== currentPartIndex);
       const done = exp > 0 && effScanned >= exp;
       return {
         credit,
@@ -2538,6 +2575,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         doneQty: effScanned + extra,
         rem: Math.max(0, exp - effScanned),
         extra,
+        extraFromOtherParts,
         ipp: item.itemsPerPallet ?? 0,
         done,
         partial: !done && effScanned > 0,
@@ -2704,8 +2742,18 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         accessor: (i) => osRowState(i).extra,
         cellClassName: "tabular-nums font-semibold",
         render: (i) => {
-          const { extra } = osRowState(i);
-          return extra > 0 ? <span className="text-amber-600">+{extra}</span> : <span className="text-gray-300">0</span>;
+          const { extra, extraFromOtherParts } = osRowState(i);
+          if (extra <= 0) return <span className="text-gray-300">0</span>;
+          return (
+            <>
+              <span className="text-amber-600">+{extra}</span>
+              {extraFromOtherParts.length > 0 && (
+                <span className="block text-[10px] font-normal text-gray-400">
+                  from Part {extraFromOtherParts.join(", ")}
+                </span>
+              )}
+            </>
+          );
         },
       },
       {
@@ -3460,6 +3508,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const effScanned = (item.totalScannedQty ?? 0) + creditQty;
                         const exp        = item.expectedQty ?? 0;
                         const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+                        const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
+                          .filter((p) => p !== currentPartIndex);
                         // Received = full physical count (order-matched + credit, plus extra) —
                         // matches Master View's convention. See osRowState's comment above.
                         const scanned    = effScanned + extra;
@@ -3517,6 +3567,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   <>
                                     <span className="text-gray-300"> · </span>
                                     <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                    {extraFromOtherParts.length > 0 && (
+                                      <span className="text-[11px] font-normal text-gray-400"> (Part {extraFromOtherParts.join(", ")})</span>
+                                    )}
                                   </>
                                 )}
                               </p>
@@ -3575,6 +3628,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const effScanned = (item.totalScannedQty ?? 0) + creditQty;
                         const exp        = item.expectedQty ?? 0;
                         const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+                        const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
+                          .filter((p) => p !== currentPartIndex);
                         const scanned    = effScanned + extra;
                         const remaining  = Math.max(0, exp - effScanned);
                         const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
@@ -3630,6 +3685,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             <td className={`text-right tabular-nums font-semibold border-r border-gray-200 px-3 py-2.5 ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>
                               <span className="block text-lg">{extra > 0 ? `+${extra}` : "—"}</span>
                               <span className="block text-sm font-extrabold text-gray-500">{plt(extra)} plt</span>
+                              {extra > 0 && extraFromOtherParts.length > 0 && (
+                                <span className="block text-[10px] font-normal text-gray-400">from Part {extraFromOtherParts.join(", ")}</span>
+                              )}
                             </td>
                             <td className="text-center px-4 py-2.5">
                               <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
