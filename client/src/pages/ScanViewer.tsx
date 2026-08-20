@@ -1226,20 +1226,18 @@ export default function ScanViewer() {
       )}
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
 
-        {/* Plant switcher — unboxed, same exact markup/style as the Scan page's own "Active:"
-            switcher (no bordered card wrapper) — scoped to this user's own assigned plants (all
-            plants for admins), not a generic dropdown of every plant in the system. Order
-            Date/Part sit inline right after it, same unboxed treatment. */}
-        {/* Session header — the same band the Scan Order page carries above its tabs: which
-            order this is, which plant, who loaded it, and how far along it is. No Complete
-            button: that writes (it closes the order), and this page is a read-only viewer whose
-            only write is voiding a single mistaken scan. */}
-        {filtersReady && selectedSession && (
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/90">
-              <ScanLine className="h-5 w-5 text-white" />
-            </span>
-            <div className="min-w-0">
+        {/* Session header — combines the plant/date/part CONTROLS (always visible, so they're
+            still there to change even when the chosen plant/date has no order at all) with the
+            rest of the order info (title, loaded-by, timing, progress), which only exists once
+            a session is actually loaded. Previously these were two separate rows; the plant
+            switcher living only in the data-dependent half was what made it disappear on a
+            date with no data — now the controls themselves never depend on selectedSession. */}
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/90">
+            <ScanLine className="h-5 w-5 text-white" />
+          </span>
+          <div className="min-w-0">
+            {filtersReady && selectedSession && (
               <p
                 className="truncate text-sm font-bold leading-tight text-gray-900"
                 title={selectedSession.csvFileName}
@@ -1251,133 +1249,111 @@ export default function ScanViewer() {
                   </span>
                 )}
               </p>
-              <p className="mt-1.5 flex items-center gap-1.5 truncate text-xs text-gray-500">
-                {/* Plant is now switched from the always-visible control in the tab row above
-                    (see its comment) — this is just a label here, not its own control, so it
-                    doesn't disappear along with the rest of this header when there's no data. */}
-                <span
-                  className="inline-block rounded-full border px-2.5 py-0.5 text-[11px] font-semibold"
+            )}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
+              {/* Plant switcher — same source/colors the Scan Order page's own switcher uses.
+                  Always rendered (not gated on selectedSession) so it's still usable to change
+                  plants even when the current plant/date combination has no order at all. */}
+              <Select value={plant} onValueChange={selectPlant}>
+                <SelectTrigger
+                  className="h-7 w-auto gap-1 rounded-full text-[11px] font-semibold"
                   style={(() => {
                     const cfg = getPlantColorCfg(plant);
-                    return cfg
-                      ? { backgroundColor: cfg.bgColor ?? undefined, color: cfg.textColor ?? undefined, borderColor: cfg.borderColor ?? undefined }
-                      : undefined;
+                    return cfg ? { backgroundColor: cfg.bgColor ?? undefined, color: cfg.textColor ?? undefined, borderColor: cfg.borderColor ?? undefined } : undefined;
                   })()}
                 >
-                  {plant}
-                </span>
-                {selectedSession.importedByName && <span>· loaded by {selectedSession.importedByName}</span>}
-                {/* Scan start/end — set once each, when the part is activated and when it's
-                    marked complete (order_import_sessions.scanActivatedAt/scanCompletedAt).
-                    Completed only shows once it's actually set; a still-in-progress part just
-                    shows Started. */}
-                {selectedSession.scanActivatedAt && (
-                  <span>· started {format(new Date(selectedSession.scanActivatedAt), "MMM d, h:mm a")}</span>
-                )}
-                {selectedSession.scanCompletedAt && (
-                  <span>· completed {format(new Date(selectedSession.scanCompletedAt), "MMM d, h:mm a")}</span>
-                )}
-                {selectedSession.scanActivatedAt && selectedSession.scanCompletedAt && (() => {
-                  const totalMinutes = Math.round(
-                    (new Date(selectedSession.scanCompletedAt).getTime() - new Date(selectedSession.scanActivatedAt).getTime()) / 60000,
-                  );
-                  if (isNaN(totalMinutes) || totalMinutes < 0) return null;
-                  const hours = Math.floor(totalMinutes / 60);
-                  const minutes = totalMinutes % 60;
-                  return <span className="font-semibold text-emerald-600">· active for {hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`}</span>;
-                })()}
-              </p>
-            </div>
-            {/* Received progress, right-aligned — same readout as Scan Order's. 100% only once
-                EVERY real CSV item has reached its own expected quantity, not just "has any
-                qty at all" — a part with several genuinely short items could otherwise show
-                100% the moment every line had SOME quantity in, however small. Synthetic
-                extra-only rows (expectedQty 0 — items scanned as Extra that aren't on this
-                CSV) are excluded from both the numerator and denominator, since they were
-                never part of the order and can never be "complete". */}
-            {(() => {
-              const realItems = items.filter((i) => (i.expectedQty ?? 0) > 0);
-              const fullyDone = realItems.filter((i) => (i.totalScannedQty ?? 0) >= (i.expectedQty ?? 0)).length;
-              const total = realItems.length;
-              const pct = total > 0 ? Math.round((fullyDone / total) * 100) : 0;
-              return (
-                <div className="ml-auto flex shrink-0 items-center gap-2">
-                  <div className="h-2 w-28 overflow-hidden rounded-full bg-gray-100">
-                    <div
-                      className={`h-full rounded-full transition-[width] duration-300 ${pct >= 100 && total > 0 ? "bg-emerald-500" : "bg-[#001d6e]"}`}
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <span className="whitespace-nowrap text-xs font-medium">
-                    {pct >= 100 && total > 0 ? (
-                      <span className="inline-flex items-center gap-1 font-semibold text-emerald-600">
-                        <CheckCircle2 className="h-3.5 w-3.5" /> Complete
-                      </span>
-                    ) : (
-                      <span className="text-gray-600">{fullyDone}/{total} received ({pct}%)</span>
-                    )}
-                  </span>
-                </div>
-              );
-            })()}
-          </div>
-        )}
-
-
-        {/* Plant switcher, order date (and the part picker when an order has several) — their
-            own row, ABOVE the Master View/Scan tabs rather than sharing a row with them. This
-            page has to choose WHICH order to show, which the Scan Order page never does: it
-            follows the live session. Kept OUTSIDE the selectedSession-gated header below so
-            it's still there to change even when the chosen plant/date has no order at all —
-            previously the only plant control lived inside that header, so hitting a date with
-            no data made it disappear along with everything else, leaving no way to switch
-            plants without editing the URL. */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Select value={plant} onValueChange={selectPlant}>
-            <SelectTrigger
-              className="h-9 w-auto gap-1 rounded-xl text-xs"
-              style={(() => {
-                const cfg = getPlantColorCfg(plant);
-                return cfg ? { backgroundColor: cfg.bgColor ?? undefined, color: cfg.textColor ?? undefined, borderColor: cfg.borderColor ?? undefined } : undefined;
-              })()}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {plantOptions.map((p) => {
-                const cfg = getPlantColorCfg(p);
-                return (
-                  <SelectItem key={p} value={p}>
-                    <span className="flex items-center gap-1.5">
-                      <span
-                        className="h-2 w-2 shrink-0 rounded-full border"
-                        style={cfg ? { backgroundColor: cfg.bgColor ?? undefined, borderColor: cfg.borderColor ?? undefined } : undefined}
-                      />
-                      {p}
-                    </span>
-                  </SelectItem>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {plantOptions.map((p) => {
+                    const cfg = getPlantColorCfg(p);
+                    return (
+                      <SelectItem key={p} value={p}>
+                        <span className="flex items-center gap-1.5">
+                          <span
+                            className="h-2 w-2 shrink-0 rounded-full border"
+                            style={cfg ? { backgroundColor: cfg.bgColor ?? undefined, borderColor: cfg.borderColor ?? undefined } : undefined}
+                          />
+                          {p}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+              {selectedSession?.importedByName && <span>loaded by {selectedSession.importedByName}</span>}
+              {/* Scan start/end — set once each, when the part is activated and when it's
+                  marked complete (order_import_sessions.scanActivatedAt/scanCompletedAt).
+                  Completed only shows once it's actually set; a still-in-progress part just
+                  shows Started. */}
+              {selectedSession?.scanActivatedAt && (
+                <span>· started {format(new Date(selectedSession.scanActivatedAt), "MMM d, h:mm a")}</span>
+              )}
+              {selectedSession?.scanCompletedAt && (
+                <span>· completed {format(new Date(selectedSession.scanCompletedAt), "MMM d, h:mm a")}</span>
+              )}
+              {selectedSession?.scanActivatedAt && selectedSession?.scanCompletedAt && (() => {
+                const totalMinutes = Math.round(
+                  (new Date(selectedSession.scanCompletedAt).getTime() - new Date(selectedSession.scanActivatedAt).getTime()) / 60000,
                 );
-              })}
-            </SelectContent>
-          </Select>
-          <Input
-            type="date"
-            className="h-9 w-auto rounded-xl text-xs"
-            value={date}
-            onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
-          />
-          {sessionOptions.length > 1 && (
-            <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
-              <SelectTrigger className="h-9 w-36 rounded-xl text-xs"><SelectValue placeholder="Select part…" /></SelectTrigger>
-              <SelectContent>
-                {sessionOptions.map((so) => (
-                  <SelectItem key={so.id} value={String(so.id)}>
-                    Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
+                if (isNaN(totalMinutes) || totalMinutes < 0) return null;
+                const hours = Math.floor(totalMinutes / 60);
+                const minutes = totalMinutes % 60;
+                return <span className="font-semibold text-emerald-600">· active for {hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`}</span>;
+              })()}
+              <Input
+                type="date"
+                className="h-7 w-auto rounded-full text-[11px]"
+                value={date}
+                onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
+              />
+              {sessionOptions.length > 1 && (
+                <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
+                  <SelectTrigger className="h-7 w-32 rounded-full text-[11px]"><SelectValue placeholder="Select part…" /></SelectTrigger>
+                  <SelectContent>
+                    {sessionOptions.map((so) => (
+                      <SelectItem key={so.id} value={String(so.id)}>
+                        Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          </div>
+          {/* Received progress, right-aligned — same readout as Scan Order's. 100% only once
+              EVERY real CSV item has reached its own expected quantity, not just "has any
+              qty at all" — a part with several genuinely short items could otherwise show
+              100% the moment every line had SOME quantity in, however small. Synthetic
+              extra-only rows (expectedQty 0 — items scanned as Extra that aren't on this
+              CSV) are excluded from both the numerator and denominator, since they were
+              never part of the order and can never be "complete". Only rendered once a
+              session is actually loaded — there's nothing to show progress on otherwise. */}
+          {filtersReady && selectedSession && (() => {
+            const realItems = items.filter((i) => (i.expectedQty ?? 0) > 0);
+            const fullyDone = realItems.filter((i) => (i.totalScannedQty ?? 0) >= (i.expectedQty ?? 0)).length;
+            const total = realItems.length;
+            const pct = total > 0 ? Math.round((fullyDone / total) * 100) : 0;
+            return (
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                <div className="h-2 w-28 overflow-hidden rounded-full bg-gray-100">
+                  <div
+                    className={`h-full rounded-full transition-[width] duration-300 ${pct >= 100 && total > 0 ? "bg-emerald-500" : "bg-[#001d6e]"}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className="whitespace-nowrap text-xs font-medium">
+                  {pct >= 100 && total > 0 ? (
+                    <span className="inline-flex items-center gap-1 font-semibold text-emerald-600">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Complete
+                    </span>
+                  ) : (
+                    <span className="text-gray-600">{fullyDone}/{total} received ({pct}%)</span>
+                  )}
+                </span>
+              </div>
+            );
+          })()}
         </div>
 
         {/* Master View / Part View tabs — same split the Scan Order page has: Master View
