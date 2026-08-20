@@ -699,6 +699,15 @@ export default function ScanOrderPage() {
   // read the same stale qty, independently decide "still under capacity", and double-log one
   // physical scan while skipping the breach dialog it should have hit on the second qty.
   const osScanLockRef = useRef(false);
+  // Same-barcode cooldown — osScanLockRef above only blocks a re-fire landing in the same
+  // few-millisecond window as the first (before a dialog opens or the mutation settles). A
+  // gun that double-fires a moment later — after the first scan already fully resolved — sails
+  // right past that guard and logs as a second, separate scan of the same physical box. This
+  // tracks the last barcode actually accepted for processing and how long ago; a repeat of the
+  // SAME barcode within SAME_BARCODE_COOLDOWN_MS is discarded. A DIFFERENT barcode is never
+  // held back by this, and the same barcode scans normally again once the window passes.
+  const osLastScanRef = useRef<{ barcode: string; at: number } | null>(null);
+  const SAME_BARCODE_COOLDOWN_MS = 5000;
   // The matched CSV item + pallet size for the scan currently being submitted. Set by BOTH
   // the auto-confirm path (_resolveOsScan) and the dialog-confirm path (handleOsConfirmScan)
   // just before osScanMutation.mutate, so onMutate can apply its optimistic totalScannedQty/
@@ -1166,6 +1175,17 @@ export default function ScanOrderPage() {
     if (stvs.length > 0 && !osSelectedStv) {
       toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
       return;
+    }
+    // Same-barcode cooldown — checked before the beep/lock below so a discarded duplicate
+    // stays silent (no beep, no dialog) rather than confusing the operator with a beep that
+    // then visibly does nothing. A DIFFERENT barcode is never affected by this check.
+    {
+      const nb = normalize(barcode);
+      const last = osLastScanRef.current;
+      if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) {
+        return;
+      }
+      osLastScanRef.current = { barcode, at: Date.now() };
     }
     // Held synchronously from here until either a dialog opens (osPendingRef/osMultiMatchRef
     // take over) or an early return below — closes the gap where a second rapid scan (gun
@@ -2525,15 +2545,24 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       if (aT !== bT) return bT - aT;
       return 0;
     });
-    // Counts toward the "received" tally once scanned qty PLUS any cross-part credit is above
-    // zero — a partially-scanned line (short of expected) still counts here even though its
-    // own row badge shows "Partial", same as a line fully covered by a credit.
-    const osIsItemDone = (i: OsScanItem) => {
+    // This feeds the "N of N items fully scanned" text on the Complete dialog and the main
+    // progress bar/percentage — both explicitly claim completion, so this has to mean actually
+    // FULLY received (scanned + credit >= expected), not just "has any progress." It used to
+    // count any item with qty > 0, which meant a part sitting at, say, 14 of 18 items truly
+    // complete (4 still partial) could show "18 of 18 items fully scanned" / 100% — as soon as
+    // every line had SOME quantity in, even far short of what was expected. Synthetic
+    // extra-only rows (expectedQty 0 — items scanned as Extra that aren't on this CSV at all)
+    // are excluded entirely: they were never part of the order, so they can never be "complete"
+    // and shouldn't count against — or inflate — this tally either way.
+    const osIsItemFullyDone = (i: OsScanItem) => {
+      const exp = i.expectedQty ?? 0;
+      if (exp <= 0) return false;
       const creditQty = osCreditByBarcode.get(normalize(i.barcode))?.creditedQty ?? 0;
-      return (i.totalScannedQty ?? 0) + creditQty > 0;
+      return (i.totalScannedQty ?? 0) + creditQty >= exp;
     };
-    const osDoneCount = osItems.filter(osIsItemDone).length;
-    const osTotalCount = osItems.length;
+    const osCsvOnlyItems = osItems.filter((i) => (i.expectedQty ?? 0) > 0);
+    const osDoneCount = osCsvOnlyItems.filter(osIsItemFullyDone).length;
+    const osTotalCount = osCsvOnlyItems.length;
     const osPct = osTotalCount ? Math.round((osDoneCount / osTotalCount) * 100) : 0;
     // Map of barcode → total extra qty across the WHOLE order group (every part of this day's
     // CSV, not just the part currently open) — used both for the per-row Extra column in the
