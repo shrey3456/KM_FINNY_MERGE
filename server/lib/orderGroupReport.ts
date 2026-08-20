@@ -20,6 +20,7 @@ export type GroupReport = {
   parts: Array<{
     id: number; partIndex: number; csvFileName: string; plant: string;
     scanStatus: string | null; rowCount: number | null;
+    scanActivatedAt: string | null; scanCompletedAt: string | null;
     items: GroupReportEntry[];
     summary: {
       totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number;
@@ -193,6 +194,11 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
     return {
       id: part.id, partIndex: (sequenceByPartId.get(part.id) ?? 0) + 1, csvFileName: part.csvFileName, plant: part.plant,
       scanStatus: part.scanStatus, rowCount: part.rowCount,
+      // When this part's scanning actually started/finished (order_import_sessions.scan_
+      // activated_at/scan_completed_at) — set once each, at /activate and /complete. Carried
+      // through to the report/export layer so Start/End/duration can show there too.
+      scanActivatedAt: part.scanActivatedAt ? part.scanActivatedAt.toISOString() : null,
+      scanCompletedAt: part.scanCompletedAt ? part.scanCompletedAt.toISOString() : null,
       items,
       summary: {
         totalExpected: items.reduce((s, e) => s + e.expectedQty, 0),
@@ -324,6 +330,8 @@ export async function computePartReport(sessionId: number): Promise<PartReport |
   return {
     id: session.id, partIndex: session.partIndex ?? 1, csvFileName: session.csvFileName, plant: session.plant,
     scanStatus: session.scanStatus, rowCount: session.rowCount,
+    scanActivatedAt: session.scanActivatedAt ? session.scanActivatedAt.toISOString() : null,
+    scanCompletedAt: session.scanCompletedAt ? session.scanCompletedAt.toISOString() : null,
     items,
     summary: {
       totalExpected: items.reduce((s, e) => s + e.expectedQty, 0),

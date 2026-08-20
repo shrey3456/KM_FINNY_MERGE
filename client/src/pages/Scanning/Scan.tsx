@@ -112,6 +112,7 @@ type ImpSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
   importedByName: string | null; createdAt: string | null; scanStatus: string;
   orderDate: string | null; totalQty: number; totalPallets: number;
+  scanActivatedAt?: string | null; scanCompletedAt?: string | null;
 };
 type ImpItem = {
   id: number; barcode: string | null; itemName: string | null;
@@ -2461,13 +2462,17 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       render: (item) => {
         const exp = item.quantity ?? 0;
         const done = item.scannedQty ?? 0;
+        const extra = item.extraQty ?? 0;
+        const isExtraOnly = exp <= 0 && extra > 0;
         const isDone = done >= exp && exp > 0;
         const isPartial = done > 0 && !isDone;
         return (
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-            isDone ? "bg-emerald-100 text-emerald-700" : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+            isExtraOnly ? "bg-orange-100 text-orange-700"
+            : isDone ? "bg-emerald-100 text-emerald-700"
+            : isPartial ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
           }`}>
-            {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
+            {isExtraOnly ? "Extra" : isDone ? "Received" : isPartial ? "Partial" : "Pending"}
           </span>
         );
       },
@@ -2594,6 +2599,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       // X" note, that's just... this part.
       const extraFromOtherParts = extraPartIndexes.filter((p) => p !== currentPartIndex);
       const done = exp > 0 && effScanned >= exp;
+      // Synthetic "extra-only" rows (barcodes scanned as Extra that aren't on any CSV — see
+      // osExtraOnlyItems above) have expectedQty 0, so `done`/`partial` above both come out
+      // false for them and the status badge fell through to "Pending" even though the item
+      // plainly has real Extra quantity sitting on it. Flag that case so the badge can show
+      // "Extra" instead of a misleading Pending.
+      const isExtraOnly = exp <= 0 && extra > 0;
       return {
         credit,
         exp,
@@ -2608,6 +2619,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         ipp: item.itemsPerPallet ?? 0,
         done,
         partial: !done && effScanned > 0,
+        isExtraOnly,
       };
     };
 
@@ -2839,13 +2851,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         width: 90,
         align: "center",
         render: (i) => {
-          const { done, partial } = osRowState(i);
+          const { done, partial, isExtraOnly } = osRowState(i);
           return (
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-              done ? "bg-emerald-100 text-emerald-700"
+              isExtraOnly ? "bg-orange-100 text-orange-700"
+              : done ? "bg-emerald-100 text-emerald-700"
               : partial ? "bg-amber-100 text-amber-700"
               : "bg-gray-100 text-gray-500"}`}>
-              {done ? "Received" : partial ? "Partial" : "Pending"}
+              {isExtraOnly ? "Extra" : done ? "Received" : partial ? "Partial" : "Pending"}
             </span>
           );
         },
@@ -3544,12 +3557,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const scanned    = effScanned + extra;
                         const remaining  = Math.max(0, exp - effScanned);
                         const ipp        = item.itemsPerPallet ?? 0;
-                        const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
+                        // Synthetic extra-only rows (no CSV line at all, exp 0) need their own
+                        // status distinct from "pending" — see osRowState's isExtraOnly comment.
+                        const effStatus  = exp <= 0 && extra > 0 ? "extra" : exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
                         const expPlt     = ipp > 0 ? (exp / ipp).toFixed(2) : "0.00";
                         const remainPlt  = ipp > 0 ? (remaining / ipp).toFixed(2) : "0.00";
                         return (
                           <div key={item.id} className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
-                            effStatus === "complete" ? "bg-emerald-50/40" : effStatus === "partial" ? "bg-amber-50/30" : undefined
+                            effStatus === "extra" ? "bg-orange-50/40" : effStatus === "complete" ? "bg-emerald-50/40" : effStatus === "partial" ? "bg-amber-50/30" : undefined
                           }`}>
                             <span className="mt-0.5 shrink-0">
                               {effStatus === "complete" ? (
@@ -3605,10 +3620,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             </div>
                             <span className="shrink-0">
                               <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                effStatus === "extra" ? "bg-orange-100 text-orange-700" :
                                 effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
                                 effStatus === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
                               }`}>
-                                {effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
+                                {effStatus === "extra" ? "Extra" : effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
                               </span>
                             </span>
                           </div>
@@ -3661,7 +3677,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           .filter((p) => p !== currentPartIndex);
                         const scanned    = effScanned + extra;
                         const remaining  = Math.max(0, exp - effScanned);
-                        const effStatus  = exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
+                        // Synthetic extra-only rows (no CSV line at all, exp 0) need their own
+                        // status distinct from "pending" — see osRowState's isExtraOnly comment.
+                        const effStatus  = exp <= 0 && extra > 0 ? "extra" : exp > 0 && effScanned >= exp ? "complete" : effScanned > 0 ? "partial" : "pending";
                         const isOpen = !!osHistoryItem && osHistoryItem.id === item.id;
                         // Pallet figure under each qty (qty ÷ items-per-pallet), same as Master View.
                         const ipp = item.itemsPerPallet ?? 0;
@@ -3669,6 +3687,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         return (
                           <Fragment key={item.id}>
                           <tr className={`border-b border-gray-200 ${
+                            effStatus === "extra" ? "bg-orange-50/40" :
                             effStatus === "complete" ? "bg-emerald-50/40" :
                             effStatus === "partial"  ? "bg-amber-50/30" : undefined
                           }`}>
@@ -3720,10 +3739,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             </td>
                             <td className="text-center px-4 py-2.5">
                               <span className={`inline-block font-semibold px-2.5 py-1 text-xs ${
+                                effStatus === "extra" ? "bg-orange-100 text-orange-700" :
                                 effStatus === "complete" ? "bg-emerald-100 text-emerald-700" :
                                 effStatus === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
                               }`}>
-                                {effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
+                                {effStatus === "extra" ? "Extra" : effStatus === "complete" ? "Received" : effStatus === "partial" ? "Partial" : "Pending"}
                               </span>
                             </td>
                           </tr>
@@ -4442,11 +4462,22 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="flex flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
                 <div className="flex items-baseline justify-between">
                   <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Order Totals</p>
-                  <p className="text-sm font-medium text-gray-400">
-                    {displayTotals.expected > 0
-                      ? `${Math.round((displayTotals.done / displayTotals.expected) * 100)}% complete`
-                      : "—"}
-                  </p>
+                  {(() => {
+                    // 100% only once every item's own received qty has reached its own expected
+                    // qty (done is summed pre-capped per item — see osTotals/mvTotals — so this
+                    // can only hit 100 when nothing is still short, never just "everything has
+                    // some qty in").
+                    const pct = displayTotals.expected > 0 ? Math.round((displayTotals.done / displayTotals.expected) * 100) : 0;
+                    if (displayTotals.expected <= 0) return <p className="text-sm font-medium text-gray-400">—</p>;
+                    if (pct >= 100) {
+                      return (
+                        <p className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+                          <CheckCircle2 className="h-4 w-4" /> Complete
+                        </p>
+                      );
+                    }
+                    return <p className="text-sm font-medium text-gray-400">{pct}% complete</p>;
+                  })()}
                 </div>
 
                 {/* All four totals on one line; they stack 2×2 only on narrow screens. */}
