@@ -4,7 +4,7 @@ import { Client } from '@notionhq/client';
 import type { Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { plants, insertPlantSchema } from '../../shared/schema';
-import { requirePageWrite } from '../lib/pageAccess';
+import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -620,10 +620,33 @@ router.delete('/plants/:id', async (req: Request, res: Response) => {
 });
 
 // Lock a proforma slip after print - CHECK IF PLANT ALLOWS LOCKING
-// Same rule as Unlock below: admin/super-admin, or Write Access to BOTH
-// "print-operations" AND "proforma" — chaining two single-key checks means both must
-// pass (an admin still short-circuits past both via requirePageWrite's own bypass).
-router.post('/proforma-slips/order/:orderNumber/lock', requirePageWrite('print-operations'), requirePageWrite('proforma'), async (req: Request, res: Response) => {
+//
+// Two different callers need two different gates here:
+//   1. The Print Operations page's own auto-lock-right-after-printing (see
+//      client's createPrintContent flow) — locking there is just the natural
+//      consequence of an action the user is already allowed to take (printing).
+//      Requiring separate WRITE access on top of that was blocking users who can
+//      legitimately open both pages but were never granted edit rights on either
+//      (e.g. a user with view-only access to Print Operations and Proforma) —
+//      printing would succeed but the lock would silently 403 and fail. This path
+//      is flagged by the client sending `autoLockFromPrint: true` in the body, and
+//      only needs READ access (allowedPages) to both pages, not write.
+//   2. A deliberate Lock/Unlock click on the Proforma Slips page itself (see
+//      ProformaSlips.tsx's lockSlip/unlockSlip) — a conscious administrative
+//      action, so this path (the default, no flag) keeps the stricter original
+//      rule: admin/super-admin, or Write Access to BOTH "print-operations" AND
+//      "proforma".
+function requireLockAccess(req: Request, res: Response, next: () => void) {
+  if (req.body?.autoLockFromPrint === true) {
+    // Read access to BOTH — requirePageAccess treats an array as "any one of these",
+    // not "all of these", so both keys must be checked in their own chained call
+    // (same reason the default branch below chains two requirePageWrite calls
+    // instead of passing an array to one).
+    return requirePageAccess('print-operations')(req, res, () => requirePageAccess('proforma')(req, res, next));
+  }
+  return requirePageWrite('print-operations')(req, res, () => requirePageWrite('proforma')(req, res, next));
+}
+router.post('/proforma-slips/order/:orderNumber/lock', requireLockAccess, async (req: Request, res: Response) => {
   try {
     const orderNumber = String(req.params.orderNumber).trim();
     const slip = await storage.getProformaSlipByOrderNumber(orderNumber);

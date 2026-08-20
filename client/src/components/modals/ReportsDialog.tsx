@@ -27,6 +27,7 @@ type GroupReportEntry = {
 type GroupReportPart = {
   id: number; partIndex: number; csvFileName: string; plant: string;
   scanStatus: string | null; rowCount: number | null;
+  scanActivatedAt: string | null; scanCompletedAt: string | null;
   items: GroupReportEntry[];
   summary: {
     totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number;
@@ -56,7 +57,11 @@ type ScanEvent = {
   // report's Received total (which already excludes voided) without looking unexplained.
   voided: boolean | null; voidedAt: string | null; voidReason: string | null;
 };
-type ScanActivity = { scope: string; totalEvents: number; events: ScanEvent[] };
+type ScanActivitySession = {
+  id: number; partIndex: number | null; csvFileName: string | null;
+  scanActivatedAt: string | null; scanCompletedAt: string | null;
+};
+type ScanActivity = { scope: string; totalEvents: number; events: ScanEvent[]; sessions?: ScanActivitySession[] };
 
 type Fmt = "CSV" | "Excel" | "PDF";
 type Row = (string | number)[];
@@ -65,6 +70,28 @@ function fmtIST(dt: string | null | undefined): string {
   if (!dt) return "—";
   const d = new Date(dt);
   return isNaN(d.getTime()) ? "—" : d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+}
+function fmtDuration(startedAt: string | null | undefined, completedAt: string | null | undefined): string {
+  if (!startedAt || !completedAt) return "—";
+  const start = new Date(startedAt).getTime();
+  const end = new Date(completedAt).getTime();
+  if (isNaN(start) || isNaN(end) || end < start) return "—";
+  const totalMinutes = Math.round((end - start) / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+// One row per part, prepended above the report's own header row — "Started"/"Completed"/
+// "Active For" for every export, matching what's shown on Scan Order/Scan Viewer. A single
+// blank row separates it from the report's real column header so exports don't misread it as
+// a data row.
+function buildTimingRows(parts: { partIndex: number; csvFileName: string; scanActivatedAt: string | null; scanCompletedAt: string | null }[]): Row[] {
+  const rows: Row[] = [["Part", "File", "Started", "Completed", "Active For"]];
+  parts.forEach((p) => rows.push([
+    p.partIndex, p.csvFileName, fmtIST(p.scanActivatedAt), fmtIST(p.scanCompletedAt), fmtDuration(p.scanActivatedAt, p.scanCompletedAt),
+  ]));
+  rows.push([]);
+  return rows;
 }
 function exportRows(fmt: Fmt, baseName: string, title: string, rows: Row[]) {
   if (fmt === "CSV") {
@@ -97,13 +124,18 @@ function safe(name: string) { return name.replace(/\.csv$/i, "").replace(/[^\w.-
 const qtyWithPlt = (qty: number, ipp: number): string =>
   ipp > 0 ? `${qty}\n${(qty / ipp).toFixed(2)} plt` : String(qty);
 
-function buildPartRows(part: GroupReportPart): Row[] {
+// includeTiming defaults on for downloads; the "View" dialog passes false and shows the same
+// info in its own header instead (see viewPart etc.) — the DataTable there always treats
+// rows[0] as the column header, so prepending the timing block would make it misread that
+// as the header and the real header as a data row.
+function buildPartRows(part: GroupReportPart, includeTiming = true): Row[] {
   // Each qty cell also shows its pallet equivalent below (qty ÷ items-per-pallet). The TOTAL row
   // sums pallets PER-ITEM (each with its own pallet size) so it lines up with the rows above.
-  const rows: Row[] = [[
-    "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing",
-    "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing",
-  ]];
+  const rows: Row[] = [
+    ...(includeTiming ? buildTimingRows([{ partIndex: part.partIndex, csvFileName: part.csvFileName, scanActivatedAt: part.scanActivatedAt, scanCompletedAt: part.scanCompletedAt }]) : []),
+    ["Barcode", "Item Name", "Expected", "Received", "Extra", "Missing",
+    "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing"],
+  ];
   const pltSum = { exp: 0, rec: 0, ext: 0, mis: 0, adjTo: 0, adjFrom: 0, netE: 0, netM: 0 };
   let anyPlt = false;
   part.items.forEach((i) => {
@@ -133,10 +165,13 @@ function buildPartRows(part: GroupReportPart): Row[] {
   return rows;
 }
 
-function buildGroupRows(report: GroupReport, kind: "partwise" | "final"): Row[] {
+function buildGroupRows(report: GroupReport, kind: "partwise" | "final", includeTiming = true): Row[] {
+  const timingRows = includeTiming ? buildTimingRows(report.parts.map((p) => ({
+    partIndex: p.partIndex, csvFileName: p.csvFileName, scanActivatedAt: p.scanActivatedAt, scanCompletedAt: p.scanCompletedAt,
+  }))) : [];
   if (kind === "partwise") {
     // Each qty cell also carries its pallet equivalent on a second line (qty ÷ items-per-pallet).
-    const rows: Row[] = [["Part", "File", "Status", "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing", "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing"]];
+    const rows: Row[] = [...timingRows, ["Part", "File", "Status", "Barcode", "Item Name", "Expected", "Received", "Extra", "Missing", "Adj To Next", "Adj From Prev", "Net Extra", "Net Missing"]];
     report.parts.forEach((p) => p.items.forEach((i) => {
       const ipp = i.itemsPerPallet ?? 0;
       rows.push([
@@ -151,7 +186,7 @@ function buildGroupRows(report: GroupReport, kind: "partwise" | "final"): Row[] 
   // Final Summary: each qty cell also shows its pallet equivalent on a second line (qty ÷
   // items-per-pallet). The consolidated TOTAL row sums pallets PER-PRODUCT (each with its own
   // pallet size) rather than dividing the grand total by one size, so it matches the rows above.
-  const rows: Row[] = [["Barcode", "Item Name", "Total Expected", "Total Received", "Total Extra", "Total Missing", "Total Adjusted"]];
+  const rows: Row[] = [...timingRows, ["Barcode", "Item Name", "Total Expected", "Total Received", "Total Extra", "Total Missing", "Total Adjusted"]];
   const pltSum = { exp: 0, rec: 0, ext: 0, mis: 0, adj: 0 };
   let anyPlt = false;
   report.consolidated.productWise.forEach((pw) => {
@@ -181,13 +216,18 @@ function buildGroupRows(report: GroupReport, kind: "partwise" | "final"): Row[] 
   return rows;
 }
 
-function buildActivityRows(data: ScanActivity, scope: "part" | "group"): Row[] {
+function buildActivityRows(data: ScanActivity, scope: "part" | "group", includeTiming = true): Row[] {
   const groupCols = scope === "group";
   const header: Row = [
     "#", ...(groupCols ? ["Part", "File"] : []),
     "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time", "Void",
   ];
-  const rows: Row[] = [header];
+  const timingRows = includeTiming && data.sessions
+    ? buildTimingRows(data.sessions.map((s) => ({
+        partIndex: s.partIndex ?? 0, csvFileName: s.csvFileName ?? "", scanActivatedAt: s.scanActivatedAt, scanCompletedAt: s.scanCompletedAt,
+      })))
+    : [];
+  const rows: Row[] = [...timingRows, header];
   data.events.forEach((e, idx) => rows.push([
     idx + 1, ...(groupCols ? [e.partIndex ?? "", e.csvFileName ?? ""] : []),
     e.scannedByName ?? "", e.scannedByCode ?? "", e.barcode ?? "", e.itemName ?? "",
@@ -279,7 +319,9 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
     if (!session) return;
     setBusy("view-part");
     try {
-      const rows = buildPartRows(await fetchPartReport(session.id));
+      // includeTiming false — the View table always reads rows[0] as its column header, so the
+      // timing block (only meaningful in the flat CSV/Excel/PDF exports) is left out here.
+      const rows = buildPartRows(await fetchPartReport(session.id), false);
       setViewData({ title: `Part Report — ${session.csvFileName}`, rows });
     } catch {
       toast({ title: "Failed to load report", variant: "destructive" });
@@ -290,7 +332,7 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
     if (!session) return;
     setBusy("view-activity-part");
     try {
-      const rows = buildActivityRows(await fetchActivity(session.id, "part"), "part");
+      const rows = buildActivityRows(await fetchActivity(session.id, "part"), "part", false);
       setViewData({ title: `Scan Activity — ${session.csvFileName}`, rows });
     } catch {
       toast({ title: "Failed to load activity", variant: "destructive" });
@@ -302,7 +344,7 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
     const groupId = session.receivingSessionId;
     setBusy(`view-group-${kind}`);
     try {
-      const rows = buildGroupRows(await fetchGroupReport(groupId), kind);
+      const rows = buildGroupRows(await fetchGroupReport(groupId), kind, false);
       setViewData({ title: `FIFO ${kind === "partwise" ? "CSV-wise" : "Final"} Report — Group #${groupId}`, rows });
     } catch {
       toast({ title: "Failed to load report", variant: "destructive" });
@@ -314,7 +356,7 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
     const groupId = session.receivingSessionId;
     setBusy("view-activity-group");
     try {
-      const rows = buildActivityRows(await fetchActivity(groupId, "group"), "group");
+      const rows = buildActivityRows(await fetchActivity(groupId, "group"), "group", false);
       setViewData({ title: `Scan Activity — Group #${groupId} (all parts)`, rows });
     } catch {
       toast({ title: "Failed to load activity", variant: "destructive" });
