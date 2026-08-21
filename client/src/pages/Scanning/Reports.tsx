@@ -393,16 +393,127 @@ const Reports = () => {
   const [filterPickerOpen, setFilterPickerOpen] = useState(false);
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
+  // The date filter, split so each "+ Filter" entry does one job. Both write the same
+  // activeFilters["date"], so whichever sets it, the other opens on that value.
+  //   Date        — named ranges only (Today, Yesterday, This week, This month)
+  //   Custom date — the calendar: a single date, or a from/to range
+  const dateQuickBody = (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
+        <div className="grid grid-cols-2 gap-1.5">
+          {DATE_PRESETS.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => {
+                const v = datePresetValue(o.value);
+                upsertSimpleFilter("date", v);
+                setDatePickMode(v.startsWith("r:") ? "range" : "single");
+                setDateOpen(false);
+                setFilterPickerOpen(false);
+                setFilterPickerKey("");
+              }}
+              className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  const dateCustomBody = (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-1.5">
+        {(["single", "range"] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => setDatePickMode(m)}
+            className={`rounded-md border px-2 py-1 text-xs font-medium ${
+              datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            {m === "single" ? "Single date" : "Date range"}
+          </button>
+        ))}
+      </div>
+
+      {datePickMode === "single" ? (
+        <div className="space-y-1">
+          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
+          <input
+            type="date"
+            value={fromDate}
+            onChange={(e) => {
+              upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "");
+              if (e.target.value) setDateOpen(false);
+            }}
+            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
+            <input
+              type="date"
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
+              className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
+            <input
+              type="date"
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
+              className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+            />
+          </div>
+        </div>
+      )}
+      {dateValue && (
+        <div className="flex items-center justify-end pt-1">
+          <button
+            type="button"
+            onClick={() => { clearSimpleFilter("date"); setDateOpen(false); setFilterPickerOpen(false); setFilterPickerKey(""); }}
+            className="text-[11px] text-red-500 hover:underline"
+          >
+            Clear date
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  // Both halves together — what the "Filters (N)" editor shows, since editing an applied date
+  // should offer every way of changing it, not just the calendar.
+  const dateFullBody = (
+    <>
+      {dateCustomBody}
+      {dateQuickBody}
+    </>
+  );
+
   const filterPickerOptions = useMemo(() => {
-    // Date is its own standalone control (below), not part of this "+ Filter" list — same split
-    // as Overall Stock.
-    const dims = [
+    // Date lives here rather than in its own toolbar button, split in two: named ranges under
+    // "Date", the calendar under "Custom date". Both drive the same activeFilters["date"].
+    const dims: { key: string; label: string; icon?: typeof CalendarDays }[] = [
+      { key: "date", label: "Date" },
+      { key: "date-custom", label: "Custom date" },
       { key: "scanner", label: "Scanned By" },
       { key: "type", label: "Type" },
       ...filterableColumns.map((c) => ({ key: c.id, label: c.label })),
     ];
     const isActive = (key: string) =>
-      ["scanner", "type"].includes(key)
+      ["date", "date-custom"].includes(key) ? false
+        : ["scanner", "type"].includes(key)
         ? activeFilters.some((f) => f.field === key)
         : !!columnConditions[key];
     // Already-filtered columns are left OUT of this list: "+ Filter" adds a new one, while
@@ -833,127 +944,10 @@ const Reports = () => {
                 placeholder="Item, barcode, or scanner…"
               />
 
-              {/* Standalone Scan Date control — sits BEFORE "+ Filter", same as Overall Stock.
-                  Single date or from/to range (both editable) plus quick-range presets; filters
-                  scan date (scannedAt) — when a box was physically scanned, not the order's own
-                  date (see the separate Order Date control right after this one). */}
-              <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) { setDatePickMode(dateIsRange ? "range" : "single"); } }}>
-                <PopoverTrigger asChild>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className={`h-8 gap-1 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
-                  >
-                    <CalendarDays className="h-3.5 w-3.5" />
-                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Scan Date: ", "") : "Scan Date"}
-                    {dateValue && (
-                      <span
-                        role="button"
-                        aria-label="Clear date"
-                        onClick={(e) => { e.stopPropagation(); clearSimpleFilter("date"); }}
-                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
-                      >
-                        <X className="h-3 w-3" />
-                      </span>
-                    )}
-                  </Button>
-                </PopoverTrigger>
-                {/* align="end" + avoidCollisions={false}: box anchors to the button's right edge
-                    and never re-positions as its height changes while picking — stays put. */}
-                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {(["single", "range"] as const).map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => setDatePickMode(m)}
-                          className={`rounded-md border px-2 py-1 text-xs font-medium ${
-                            datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
-                          }`}
-                        >
-                          {m === "single" ? "Single date" : "Date range"}
-                        </button>
-                      ))}
-                    </div>
-
-                    {datePickMode === "single" ? (
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
-                        <input
-                          type="date"
-                          value={fromDate}
-                          onChange={(e) => {
-                            upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "");
-                            if (e.target.value) setDateOpen(false);
-                          }}
-                          className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                        />
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="space-y-1">
-                          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
-                          <input
-                            type="date"
-                            value={fromDate}
-                            max={toDate || undefined}
-                            onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
-                            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
-                          <input
-                            type="date"
-                            value={toDate}
-                            min={fromDate || undefined}
-                            onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
-                            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        {DATE_PRESETS.map((o) => (
-                          <button
-                            key={o.value}
-                            type="button"
-                            onClick={() => {
-                              const v = datePresetValue(o.value);
-                              upsertSimpleFilter("date", v);
-                              setDatePickMode(v.startsWith("r:") ? "range" : "single");
-                              setDateOpen(false);
-                            }}
-                            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
-                          >
-                            {o.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {dateValue && (
-                      <div className="flex items-center justify-end pt-1">
-                        <button
-                          type="button"
-                          onClick={() => { clearSimpleFilter("date"); setDateOpen(false); }}
-                          className="text-[11px] text-red-500 hover:underline"
-                        >
-                          Clear date
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </PopoverContent>
-              </Popover>
 
 
-              {/* One unified "+ Filter" — Scanned By, Type, Plant, and every generic column in the
-                  same searchable list, same pattern as Overall Stock. (Date is its own control.) */}
+              {/* One unified "+ Filter" — Date (named ranges), Custom date (the calendar),
+                  Scanned By, Type, Plant and every generic column in the same searchable list. */}
               <Popover
                 open={filterPickerOpen}
                 onOpenChange={(open) => {
@@ -995,11 +989,18 @@ const Reports = () => {
                               onClick={() => setFilterPickerKey(d.key)}
                               className="block w-full rounded px-2 py-1.5 text-left text-xs text-gray-700 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
                             >
-                              {d.label}
+                                {d.label}
                             </button>
                           ))
                         )}
                       </div>
+                    </div>
+                  ) : filterPickerKey === "date" || filterPickerKey === "date-custom" ? (
+                    <div className="space-y-3">
+                      <button type="button" onClick={() => setFilterPickerKey("")} className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600">
+                        <ChevronLeft className="h-3 w-3" /> Back
+                      </button>
+                      {filterPickerKey === "date" ? dateQuickBody : dateCustomBody}
                     </div>
                   ) : filterPickerKey === "scanner" ? (
                     <div className="space-y-3">
@@ -1095,39 +1096,10 @@ const Reports = () => {
                           </div>
                         )}
                         {editFilterKey === "date" && (
-                          <div className="space-y-2">
-                            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                              {dateIsRange ? "Date range" : "Date"}
-                            </label>
-                            {dateIsRange ? (
-                              <div className="grid grid-cols-2 gap-2">
-                                <input
-                                  type="date"
-                                  value={fromDate}
-                                  max={toDate || undefined}
-                                  onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
-                                  className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                                />
-                                <input
-                                  type="date"
-                                  value={toDate}
-                                  min={fromDate || undefined}
-                                  onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
-                                  className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                                />
-                              </div>
-                            ) : (
-                              <input
-                                type="date"
-                                value={fromDate}
-                                onChange={(e) => upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "")}
-                                className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                              />
-                            )}
-                            <p className="text-[10px] text-gray-400">
-                              Switch between a single date and a range from the Scan Date button above.
-                            </p>
-                          </div>
+                          // The complete control, not just the inputs: the single/range toggle and
+                          // the quick ranges belong here too, so editing an applied date offers
+                          // everything setting it did.
+                          <>{dateFullBody}</>
                         )}
                       </div>
                     ) : editFilterColumn ? (
