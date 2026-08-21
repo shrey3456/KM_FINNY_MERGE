@@ -1850,7 +1850,29 @@ export default function OrderImport() {
                                       Part {(session as any).partIndex ?? "?"}
                                     </span>
                                   )}
-                                </div>
+                                  {/* When this part's scanning actually started/finished
+                                      (order_import_sessions.scanActivatedAt/scanCompletedAt) —
+                                      plus how long it was active, computed from the two. */}
+                                  {(session as any).scanActivatedAt && (
+                                    <span className="text-xs text-gray-400">Started: {fmtIST((session as any).scanActivatedAt)}</span>
+                                  )}
+                                  {(session as any).scanCompletedAt && (
+                                    <span className="text-xs text-gray-400">Completed: {fmtIST((session as any).scanCompletedAt)}</span>
+                                  )}
+                                  {(session as any).scanActivatedAt && (session as any).scanCompletedAt && (() => {
+                                    const totalMinutes = Math.round(
+                                      (new Date((session as any).scanCompletedAt).getTime() - new Date((session as any).scanActivatedAt).getTime()) / 60000,
+                                    );
+                                    if (isNaN(totalMinutes) || totalMinutes < 0) return null;
+                                    const hours = Math.floor(totalMinutes / 60);
+                                    const minutes = totalMinutes % 60;
+                                    return (
+                                      <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                        Completed In {hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`}
+                                      </span>
+                                    );
+                                  })()}
+\                                </div>
                               </div>
                               <div className="flex shrink-0 items-center gap-1 ml-1">
                                 <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>
