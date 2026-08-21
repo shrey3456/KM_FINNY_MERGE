@@ -1448,7 +1448,11 @@ export default function OrderImport() {
                           className="cursor-pointer px-5 py-3 hover:bg-gray-50 active:bg-gray-100"
                           onClick={() => { setScanExpandedId(isExpanded ? null : s.id); setScanItemSearch(""); }}
                         >
-                          <div className="flex items-center gap-3">
+                          {/* Stacks on a phone. Side by side, the action cluster on the right is
+                              shrink-0 and eats ~220px of a ~340px screen, leaving so little for the
+                              text that names wrapped one character per line. */}
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                            <div className="flex min-w-0 flex-1 items-center gap-3">
                             <span className="shrink-0 text-gray-400">
                               {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                             </span>
@@ -1463,8 +1467,8 @@ export default function OrderImport() {
                                     For {s.orderDate}
                                   </span>
                                 )}
-                                <span className="text-xs text-gray-400" title="Uploaded at">{fmtIST(s.createdAt)}</span>
-                                {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
+                                <span className="hidden text-xs text-gray-400 sm:inline" title="Uploaded at">{fmtIST(s.createdAt)}</span>
+                                {s.importedByName && <span className="truncate text-xs text-gray-400">· {s.importedByName}</span>}
                                 {plantBusy && (
                                   <span className="bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700" title="Another session is already active for this plant">
                                     Plant busy
@@ -1472,7 +1476,8 @@ export default function OrderImport() {
                                 )}
                               </div>
                             </div>
-                            <div className="flex shrink-0 items-center gap-1.5">
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 pl-7 sm:shrink-0 sm:pl-0">
                               <span className="inline-flex items-center bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]" title={`${s.rowCount} rows`}>
                                 {s.rowCount}
                               </span>
