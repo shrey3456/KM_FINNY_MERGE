@@ -298,6 +298,9 @@ const Reports = () => {
   const dateIsRange = dateValue.startsWith("r:");
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
   const [dateOpen, setDateOpen] = useState(false);
+  // The calendar half opens separately from the quick-ranges half — two buttons, two
+  // popovers, one shared date value.
+  const [dateCalOpen, setDateCalOpen] = useState(false);
   const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
   const datePresetValue = (key: string): string => {
     const d = new Date();
@@ -316,10 +319,17 @@ const Reports = () => {
 
   const describeSimpleFilter = (field: string, value: string) => {
     if (field === "date") {
-      if (value.startsWith("d:")) return `Scan Date: ${format(new Date(value.slice(2)), "MMM d, yyyy")}`;
+      // Same guard as the range branch below — an empty or malformed date must not throw.
+      if (value.startsWith("d:")) {
+        const d = value.slice(2) ? new Date(value.slice(2)) : null;
+        return `Scan Date: ${d && !isNaN(d.getTime()) ? format(d, "MMM d, yyyy") : "…"}`;
+      }
       if (value.startsWith("r:")) {
         const [, f, t] = value.split(":");
-        const fmt = (s: string) => (s ? format(new Date(s), "MMM d") : "…");
+        const fmt = (s: string) => {
+          const d = s ? new Date(s) : null;
+          return d && !isNaN(d.getTime()) ? format(d, "MMM d") : "…";
+        };
         return `Scan Date: ${fmt(f)} → ${fmt(t)}`;
       }
       return `Scan Date: ${value}`;
@@ -478,19 +488,9 @@ const Reports = () => {
           </div>
         </div>
       )}
-      {dateValue && (
-        <div className="flex items-center justify-end pt-1">
-          <button
-            type="button"
-            onClick={() => { clearSimpleFilter("date"); setDateOpen(false); setFilterPickerOpen(false); setFilterPickerKey(""); }}
-            className="text-[11px] text-red-500 hover:underline"
-          >
-            Clear date
-          </button>
-        </div>
-      )}
     </div>
   );
+
 
   // Both halves together — what the "Filters (N)" editor shows, since editing an applied date
   // should offer every way of changing it, not just the calendar.
@@ -505,8 +505,6 @@ const Reports = () => {
     // Date lives here rather than in its own toolbar button, split in two: named ranges under
     // "Date", the calendar under "Custom date". Both drive the same activeFilters["date"].
     const dims: { key: string; label: string; icon?: typeof CalendarDays }[] = [
-      { key: "date", label: "Date" },
-      { key: "date-custom", label: "Custom date" },
       { key: "scanner", label: "Scanned By" },
       { key: "type", label: "Type" },
       ...filterableColumns.map((c) => ({ key: c.id, label: c.label })),
@@ -946,8 +944,55 @@ const Reports = () => {
 
 
 
-              {/* One unified "+ Filter" — Date (named ranges), Custom date (the calendar),
-                  Scanned By, Type, Plant and every generic column in the same searchable list. */}
+            {/* Two buttons, one filter. "Filter by date" offers ONLY the named ranges
+                (Today / Yesterday / This week / This month); "Calendar" is where a single date or a
+                from/to range is picked. Both write the same value, so each reflects the other.
+                Deliberately not the shared SingleDateFilter: that offers Today/Tomorrow/Yesterday and
+                is single-date only, so it can express neither of those two requirements. */}
+            <div className="flex items-center gap-1">
+              <Popover open={dateOpen} onOpenChange={setDateOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`h-8 gap-1.5 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    {/* Shows what's actually applied — a single date, or "from – to" for a
+                        range — so the filter is readable without opening either panel. */}
+                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Scan Date: ", "") : "Filter by date"}
+                    {dateValue && (
+                      <span
+                        role="button"
+                        aria-label="Clear date"
+                        onClick={(e) => { e.stopPropagation(); clearSimpleFilter("date"); }}
+                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                      >
+                        <X className="h-3 w-3" />
+                      </span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateQuickBody}
+                </PopoverContent>
+              </Popover>
+
+              <Popover open={dateCalOpen} onOpenChange={(o) => { setDateCalOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
+                <PopoverTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-8 rounded-md border-gray-300 text-xs font-medium text-gray-500 hover:bg-gray-50">
+                    Calendar
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateCustomBody}
+                </PopoverContent>
+              </Popover>
+            </div>
+
+
+              {/* One unified "+ Filter" — Scanned By, Type, Plant and every generic column in
+                  the same searchable list. Date has its own pair of buttons above. */}
               <Popover
                 open={filterPickerOpen}
                 onOpenChange={(open) => {

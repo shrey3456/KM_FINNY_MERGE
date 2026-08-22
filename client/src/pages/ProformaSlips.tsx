@@ -278,12 +278,17 @@ export default function ProformaSlips() {
   // Every other column gets an Excel-style per-column filter via the shared column-filter engine.
   // Seeded from whatever was left applied last time this page was open — see SLIP_FILTERS_KEY.
   const [activePlantTab, setActivePlantTab] = useState<string>(() => readSavedSlipFilters().plant ?? "");
-  const [dateValue, setDateValue] = useState<string>(() => {
-    const saved = readSavedSlipFilters().date;
-    if (saved !== undefined) return saved;
-    return `d:${format(new Date(), "yyyy-MM-dd")}`;
-  });
+  // Defaults to today. The saved value is only honoured when it actually holds a date —
+  // once any filter has been persisted the bundle always carries date: "", which is not
+  // undefined, so an `=== undefined` check would let that empty string win and the page would
+  // open unfiltered.
+  const [dateValue, setDateValue] = useState<string>(
+    () => readSavedSlipFilters().date || `d:${format(new Date(), "yyyy-MM-dd")}`,
+  );
   const [dateOpen, setDateOpen] = useState(false);
+  // The calendar half opens separately from the quick-ranges half — two buttons, two
+  // popovers, one shared date value.
+  const [dateCalOpen, setDateCalOpen] = useState(false);
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
   const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
     () => readSavedSlipFilters().conditions ?? {},
@@ -1063,7 +1068,7 @@ export default function ProformaSlips() {
             <button
               key={o.value}
               type="button"
-              onClick={() => { const v = datePresetValue(o.value); setDateValue(v); setDatePickMode(v.startsWith("r:") ? "range" : "single"); setDateOpen(false); setFilterPickerOpen(false); setFilterPickerKey(""); }}
+              onClick={() => { const v = datePresetValue(o.value); setDateValue(v); setDatePickMode(v.startsWith("r:") ? "range" : "single"); setDateOpen(false); setDateCalOpen(false); }}
               className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
             >
               {o.label}
@@ -1096,7 +1101,7 @@ export default function ProformaSlips() {
           <input
             type="date"
             value={fromStr}
-            onChange={(e) => { setDateValue(e.target.value ? `d:${e.target.value}` : ""); if (e.target.value) setDateOpen(false); }}
+            onChange={(e) => { setDateValue(e.target.value ? `d:${e.target.value}` : ""); if (e.target.value) setDateOpen(false); setDateCalOpen(false); }}
             className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
           />
         </div>
@@ -1112,13 +1117,9 @@ export default function ProformaSlips() {
           </div>
         </div>
       )}
-      {dateValue && (
-        <div className="flex items-center justify-end pt-1">
-          <button type="button" onClick={() => { setDateValue(""); setDateOpen(false); }} className="text-[11px] text-red-500 hover:underline">Clear date</button>
-        </div>
-      )}
     </div>
   );
+
 
   // Both halves together — what editing an applied date shows, since that should offer every way
   // of changing it, not just the calendar.
@@ -1137,8 +1138,6 @@ export default function ProformaSlips() {
     // Date lives here rather than in its own toolbar button, split in two: named ranges under
     // "Date", the calendar under "Custom date". Both drive the same dateValue.
     const dateDims: { key: string; label: string; icon?: typeof CalendarDays }[] = [
-      { key: "date", label: "Date" },
-      { key: "date-custom", label: "Custom date" },
     ];
     return [
       ...dateDims,
@@ -2107,8 +2106,55 @@ export default function ProformaSlips() {
             />
 
 
-            {/* + Filter — Date (named ranges), Custom date (the calendar), and every column
-                except Plant, which is the tab strip. */}
+            {/* Two buttons, one filter. "Filter by date" offers ONLY the named ranges
+                (Today / Yesterday / This week / This month); "Calendar" is where a single date or a
+                from/to range is picked. Both write the same value, so each reflects the other.
+                Deliberately not the shared SingleDateFilter: that offers Today/Tomorrow/Yesterday and
+                is single-date only, so it can express neither of those two requirements. */}
+            <div className="flex items-center gap-1">
+              <Popover open={dateOpen} onOpenChange={setDateOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`h-8 gap-1.5 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    {/* Shows what's actually applied — a single date, or "from – to" for a
+                        range — so the filter is readable without opening either panel. */}
+                    {dateValue ? describeDate(dateValue) : "Filter by date"}
+                    {dateValue && (
+                      <span
+                        role="button"
+                        aria-label="Clear date"
+                        onClick={(e) => { e.stopPropagation(); setDateValue(""); }}
+                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                      >
+                        <X className="h-3 w-3" />
+                      </span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateQuickBody}
+                </PopoverContent>
+              </Popover>
+
+              <Popover open={dateCalOpen} onOpenChange={(o) => { setDateCalOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
+                <PopoverTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-8 rounded-md border-gray-300 text-xs font-medium text-gray-500 hover:bg-gray-50">
+                    Calendar
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateCustomBody}
+                </PopoverContent>
+              </Popover>
+            </div>
+
+
+            {/* + Filter — every column except Plant, which is the tab strip. Date has its own
+                pair of buttons above. */}
             <Popover open={filterPickerOpen} onOpenChange={(open) => { setFilterPickerOpen(open); if (!open) { setFilterPickerKey(""); setFilterPickerSearch(""); } }}>
               <PopoverTrigger asChild>
                 <Button size="sm" variant="outline" className="h-8 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]">
@@ -2130,15 +2176,6 @@ export default function ProformaSlips() {
                         ))
                       )}
                     </div>
-                  </div>
-                ) : filterPickerKey === "date" || filterPickerKey === "date-custom" || filterPickerKey === "date-full" ? (
-                  <div className="space-y-3">
-                    <button type="button" onClick={() => setFilterPickerKey("")} className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600">
-                      <ChevronLeft className="h-3 w-3" /> Back
-                    </button>
-                    {filterPickerKey === "date" ? dateQuickBody
-                      : filterPickerKey === "date-full" ? dateFullBody
-                      : dateCustomBody}
                   </div>
                 ) : pickedFilterColumn ? (
                   <div className="space-y-2">
@@ -2192,7 +2229,7 @@ export default function ProformaSlips() {
                         <div className="flex items-center justify-between gap-2 rounded border border-gray-200">
                           <button
                             type="button"
-                            onClick={() => { setEditFilterOpen(false); setFilterPickerOpen(true); setFilterPickerKey("date-full"); }}
+                            onClick={() => { setEditFilterOpen(false); setDateOpen(true); }}
                             className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left text-xs text-gray-700 hover:text-[#001d6e]"
                             title="Edit this filter"
                           >

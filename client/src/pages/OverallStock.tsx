@@ -303,7 +303,10 @@ export default function OverallStock() {
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
   // Date control: "single" shows one editable date input, "range" shows editable From + To.
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
-  const [dateOpen, setDateOpen] = useState(false); // controls the Date popover
+  const [dateOpen, setDateOpen] = useState(false);
+  // The calendar half opens separately from the quick-ranges half — two buttons, two
+  // popovers, one shared date value.
+  const [dateCalOpen, setDateCalOpen] = useState(false); // controls the Date popover
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
     () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
   );
@@ -518,7 +521,13 @@ export default function OverallStock() {
   const describeSimpleFilter = (field: string, value: string) => {
     if (field === "plant") return `Plant: ${value}`;
     if (field === "date") {
-      const fmt = (s: string) => format(new Date(s), "MMM d, yyyy");
+      // Half-set ranges are normal while picking: choosing the FROM bound leaves TO empty, and
+      // format(new Date(""), …) throws "Invalid time value". Render the missing bound as "…"
+      // instead of crashing the page mid-selection.
+      const fmt = (s: string) => {
+        const d = s ? new Date(s) : null;
+        return d && !isNaN(d.getTime()) ? format(d, "MMM d, yyyy") : "…";
+      };
       if (value.startsWith("d:")) return `Date: ${fmt(value.slice(2))}`;
       if (value.startsWith("r:")) { const [, f, t] = value.split(":"); return `Date: ${fmt(f)} – ${fmt(t)}`; }
       return `Date: ${value}`;
@@ -573,8 +582,6 @@ export default function OverallStock() {
     // Date leads the list — it's the dimension people reach for first, and it opens the same
     // single/range + quick-ranges panel the toolbar's own Date button shows.
     const dims: { key: string; label: string; icon?: typeof CalendarDays }[] = [
-      { key: "date", label: "Date" },
-      { key: "date-custom", label: "Custom date" },
       ...filterableColumns
         .filter((c) => !columnConditions[c.id])
         .map((c) => ({ key: c.id, label: c.label })),
@@ -677,20 +684,9 @@ export default function OverallStock() {
             </div>
           </div>
         )}
-        {/* Every pick above applies immediately (no Done button) — this just clears it. */}
-        {dateValue && (
-          <div className="flex items-center justify-end pt-1">
-            <button
-              type="button"
-              onClick={() => { upsertSimpleFilter("date", ""); setDateOpen(false); setFilterPickerOpen(false); setFilterPickerKey(""); }}
-              className="text-[11px] text-red-500 hover:underline"
-            >
-              Clear date
-            </button>
-          </div>
-        )}
     </div>
   );
+
 
   // Both halves together — what the toolbar's own Date button still shows.
   const dateFilterBody = (
@@ -777,7 +773,7 @@ export default function OverallStock() {
           <div className="flex items-center justify-end pt-1">
             <button
               type="button"
-              onClick={() => { upsertSimpleFilter("date", ""); setDateOpen(false); setFilterPickerOpen(false); setFilterPickerKey(""); }}
+              onClick={() => { upsertSimpleFilter("date", ""); setDateOpen(false); setDateCalOpen(false); }}
               className="text-[11px] text-red-500 hover:underline"
             >
               Clear date
@@ -1574,9 +1570,55 @@ export default function OverallStock() {
               />
 
 
-              {/* One unified "+ Filter" — every dimension in the same searchable list, Date
-                  included (as "Date" for named ranges and "Custom date" for the calendar). Plant
-                  stays the tab strip. */}
+            {/* Two buttons, one filter. "Filter by date" offers ONLY the named ranges
+                (Today / Yesterday / This week / This month); "Calendar" is where a single date or a
+                from/to range is picked. Both write the same value, so each reflects the other.
+                Deliberately not the shared SingleDateFilter: that offers Today/Tomorrow/Yesterday and
+                is single-date only, so it can express neither of those two requirements. */}
+            <div className="flex items-center gap-1">
+              <Popover open={dateOpen} onOpenChange={setDateOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`h-8 gap-1.5 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    {/* Shows what's actually applied — a single date, or "from – to" for a
+                        range — so the filter is readable without opening either panel. */}
+                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Date: ", "") : "Filter by date"}
+                    {dateValue && (
+                      <span
+                        role="button"
+                        aria-label="Clear date"
+                        onClick={(e) => { e.stopPropagation(); upsertSimpleFilter("date", ""); }}
+                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                      >
+                        <X className="h-3 w-3" />
+                      </span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateQuickBody}
+                </PopoverContent>
+              </Popover>
+
+              <Popover open={dateCalOpen} onOpenChange={(o) => { setDateCalOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
+                <PopoverTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-8 rounded-md border-gray-300 text-xs font-medium text-gray-500 hover:bg-gray-50">
+                    Calendar
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateCustomBody}
+                </PopoverContent>
+              </Popover>
+            </div>
+
+
+              {/* One unified "+ Filter" — every column in the same searchable list. Plant is
+                  the tab strip; Date has its own pair of buttons above. */}
               <Popover
                 open={filterPickerOpen}
                 onOpenChange={(open) => {
@@ -1628,21 +1670,6 @@ export default function OverallStock() {
                           ))
                         )}
                       </div>
-                    </div>
-                  ) : filterPickerKey === "date" || filterPickerKey === "date-custom" || filterPickerKey === "date-full" ? (
-                    <div className="space-y-3">
-                      <button
-                        type="button"
-                        onClick={() => setFilterPickerKey("")}
-                        className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
-                      >
-                        <ChevronLeft className="h-3 w-3" /> Back
-                      </button>
-                      {/* Same filter, two ways in: named ranges under "Date", the calendar under
-                          "Custom date". Whichever set the current value, the other opens on it. */}
-                      {filterPickerKey === "date" ? dateQuickBody
-                        : filterPickerKey === "date-full" ? dateFilterBody
-                        : dateCustomBody}
                     </div>
                   ) : filterPickerKey === "plant" ? (
                     <div className="space-y-3">
@@ -1749,8 +1776,7 @@ export default function OverallStock() {
                               onClick={() => {
                                 if (f.field !== "date") return;
                                 setEditFilterOpen(false);
-                                setFilterPickerOpen(true);
-                                setFilterPickerKey("date-full");
+                                setDateOpen(true);
                               }}
                               disabled={f.field !== "date"}
                               className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5 py-1 text-left text-gray-700 enabled:hover:text-[#001d6e] disabled:cursor-default"
