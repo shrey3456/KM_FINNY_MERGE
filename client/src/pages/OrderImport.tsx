@@ -1877,7 +1877,7 @@ export default function OrderImport() {
                                       </span>
                                     );
                                   })()}
-\                                </div>
+                                </div>
                               </div>
                               <div className="flex shrink-0 items-center gap-1 ml-1">
                                 <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>

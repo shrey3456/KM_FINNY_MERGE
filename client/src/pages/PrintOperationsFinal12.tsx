@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Card, CardContent } from '../components/ui/card';
 import { CardHeader } from '../components/ui/card';
 import { Input } from '../components/ui/input';
@@ -9,29 +9,8 @@ import { Search, PrinterCheck, FileDown, Factory } from 'lucide-react';
 import axios from 'axios';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-import JsBarcode from 'jsbarcode';
 import { useLocation } from 'wouter';
 import { hasPageWriteAccess } from '../lib/permissions';
-
-// Code128 (not QR) so it reads on both the warehouse's existing barcode guns and the camera
-// scanner — most gun hardware here is a laser/1D scanner that can only decode linear barcodes
-// like this, not a 2D QR pattern. Encodes the slip's orderNumber, the same human-readable key
-// already used to look a slip up (see activeOrderNumber below) — future scan-driven features
-// can reuse that exact same lookup with no new backend work.
-function generateOrderBarcodeDataUrl(orderNumber: string): string {
-  const canvas = document.createElement('canvas');
-  JsBarcode(canvas, orderNumber, {
-    format: 'CODE128',
-    width: 2,
-    height: 36,
-    // No text baked into the barcode image itself — it sits directly above the existing
-    // "#<orderNumber>" label in the slip's corner box, so a second number printed under the
-    // bars would just be a redundant third copy of the same value.
-    displayValue: false,
-    margin: 2,
-  });
-  return canvas.toDataURL('image/png');
-}
 
 // Product/order interfaces
 interface ProformaSlipItem {
@@ -163,16 +142,6 @@ const PrintOperations: React.FC = () => {
     if (proformaData) {
       setHasPrintedCurrentSlip(false);
     }
-  }, [proformaData?.slip?.orderNumber]);
-
-  // Same barcode shown at the top of the actual printed slip (see generateOrderBarcodeDataUrl
-  // above and createPrintContent below) — generated here too so the on-screen preview matches
-  // what actually prints, instead of only appearing once the page is on paper. Memoized on the
-  // order number since drawing a barcode to a canvas isn't free and this only needs to change
-  // when a different slip is loaded, not on every unrelated re-render.
-  const previewBarcodeDataUrl = useMemo(() => {
-    const orderNumber = proformaData?.slip?.orderNumber;
-    return orderNumber ? generateOrderBarcodeDataUrl(orderNumber) : '';
   }, [proformaData?.slip?.orderNumber]);
 
   // Fetch plant config for current slip
@@ -315,13 +284,6 @@ const PrintOperations: React.FC = () => {
       willCreateMultiplePages: shouldSplitPages && sortedItems.length > 20
     });
     
-    // Encodes orderNumber so the printed slip can be scanned later (barcode gun or camera) to
-    // pull this exact slip back up — see generateOrderBarcodeDataUrl's own comment for why
-    // Code128 over QR. Skipped only if orderNumber is somehow missing.
-    const barcodeDataUrl = proformaData.slip.orderNumber
-      ? generateOrderBarcodeDataUrl(proformaData.slip.orderNumber)
-      : '';
-
     // Function to create header HTML
     const createHeaderHTML = () => `
       <div style="text-align: center; font-weight: bold; font-size: 10pt; background-color: ${bgColor}; color: ${textColor}; padding: 2px 0; margin-bottom: 1mm; border-radius: 0; border-bottom: 1px solid ${borderColor};">
@@ -350,7 +312,6 @@ const PrintOperations: React.FC = () => {
             </div>
           </div>
           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1mm;">
-            ${barcodeDataUrl ? `<img src="${barcodeDataUrl}" style="height: 9mm; max-width: 40mm;" alt="Order ${proformaData.slip.orderNumber}" />` : ''}
             <div style="font-size: 14pt; font-weight: bold; text-align: right; color: #a10808;">#${proformaData.slip.orderNumber}</div>
             <div style="font-size: 10pt; font-weight: bold; line-height: 1.2; text-align: right;">${formatDate(proformaData.slip.orderDate)}</div>
           </div>
@@ -1071,9 +1032,6 @@ const PrintOperations: React.FC = () => {
                           </div>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1mm' }}>
-                          {previewBarcodeDataUrl && (
-                            <img src={previewBarcodeDataUrl} style={{ height: '9mm', maxWidth: '40mm' }} alt={`Order ${proformaData.slip.orderNumber}`} />
-                          )}
                           <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808' }}>#{proformaData.slip.orderNumber}</div>
                           <div style={{ fontSize: '10pt', fontWeight: 'bold', lineHeight: '1.2', textAlign: 'right' }}>{formatDate(proformaData.slip.orderDate)}</div>
                         </div>
