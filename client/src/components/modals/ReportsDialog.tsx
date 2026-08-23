@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  ChevronDown, Download, Eye, ListChecks, Loader2,
+  ChevronDown, Clock, Download, Eye, ListChecks, Loader2,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,9 @@ import {
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import {
+  Accordion, AccordionItem, AccordionTrigger, AccordionContent,
+} from "@/components/ui/accordion";
 import { useToast } from "@/hooks/use-toast";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import * as XLSX from "xlsx";
@@ -56,6 +59,11 @@ type ScanEvent = {
   // History), just clearly marked, so the raw event count here can differ from the Summary
   // report's Received total (which already excludes voided) without looking unexplained.
   voided: boolean | null; voidedAt: string | null; voidReason: string | null;
+  // System-generated credit transfer (see order_scan_events.is_credit in schema.ts) — it never
+  // added new physical stock, it just reassigns boxes an earlier part's Extra scan already
+  // counted. Excluded from the Hourly report's item/pallet totals for the same reason voided
+  // scans are: it isn't a real arrival.
+  isCredit: boolean | null;
 };
 type ScanActivitySession = {
   id: number; partIndex: number | null; csvFileName: string | null;
@@ -239,6 +247,156 @@ function buildActivityRows(data: ScanActivity, scope: "part" | "group", includeT
   return rows;
 }
 
+function fmtHourLabel(bucketStartMs: number): string {
+  const fmt = (ms: number) => new Date(ms).toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: true,
+  });
+  return `${fmt(bucketStartMs)} – ${fmt(bucketStartMs + 3_600_000)}`;
+}
+// Shared bucketing for the Hourly report — rolling 1-hour windows anchored to the scan's
+// actual start time (scanActivatedAt) rather than clock-hour boundaries — e.g. a 2:30 start
+// produces "2:30 – 3:30", "3:30 – 4:30", ... not "2:00 – 3:00". For a group, the earliest
+// part's start anchors all parts' windows so they line up on one shared timeline. Falls back
+// to the earliest scan's own time if no activation time was recorded. Voided scans and system
+// credit-transfers are excluded (not real physical arrivals), same as the Summary report's
+// Received totals. Returns null when there's nothing to bucket.
+function computeHourlyBuckets(data: ScanActivity): { anchor: number; minIdx: number; maxIdx: number; byHour: Map<number, ScanEvent[]> } | null {
+  const real = data.events.filter((e) => !e.voided && !e.isCredit && e.scannedAt);
+  if (real.length === 0) return null;
+
+  const activatedTimes = (data.sessions ?? [])
+    .map((s) => (s.scanActivatedAt ? new Date(s.scanActivatedAt).getTime() : NaN))
+    .filter((t) => !isNaN(t));
+  const scanTimes = real.map((e) => new Date(e.scannedAt as string).getTime()).filter((t) => !isNaN(t));
+  const anchor = activatedTimes.length > 0 ? Math.min(...activatedTimes) : Math.min(...scanTimes);
+
+  const byHour = new Map<number, ScanEvent[]>();
+  let minIdx = Infinity;
+  let maxIdx = -Infinity;
+  real.forEach((e) => {
+    const t = new Date(e.scannedAt as string).getTime();
+    if (isNaN(t)) return;
+    const idx = Math.floor((t - anchor) / 3_600_000);
+    if (idx < minIdx) minIdx = idx;
+    if (idx > maxIdx) maxIdx = idx;
+    const list = byHour.get(idx) ?? [];
+    list.push(e);
+    byHour.set(idx, list);
+  });
+  if (minIdx === Infinity) return null;
+  // Windows never start before the anchor (start time) itself, even if a stray scan landed
+  // just before it — anchor is the report's fixed timeline origin.
+  minIdx = Math.min(minIdx, 0);
+  return { anchor, minIdx, maxIdx, byHour };
+}
+
+// Flat rows for CSV/Excel/PDF export — every hour from start to the last scan appears even if
+// empty, so gaps are visible rather than silently skipped. Each hour lists its individual
+// scans (barcode, item, who, qty, pallets, time), followed by that hour's Subtotal row, then a
+// grand TOTAL at the end.
+function buildHourlyRows(data: ScanActivity, scope: "part" | "group", includeTiming = true): Row[] {
+  const groupCols = scope === "group";
+  const timingRows = includeTiming && data.sessions
+    ? buildTimingRows(data.sessions.map((s) => ({
+        partIndex: s.partIndex ?? 0, csvFileName: s.csvFileName ?? "", scanActivatedAt: s.scanActivatedAt, scanCompletedAt: s.scanCompletedAt,
+      })))
+    : [];
+  const header: Row = [
+    "Hour (IST)", ...(groupCols ? ["Part", "File"] : []),
+    "Time", "Barcode", "Item Name", "Scanned By", "Pallets", "Total Qty",
+  ];
+  const buckets = computeHourlyBuckets(data);
+  if (!buckets) return [...timingRows, header, ["No scans recorded"]];
+  const { anchor, minIdx, maxIdx, byHour } = buckets;
+
+  const rows: Row[] = [...timingRows, header];
+  const grand = { items: 0, pallets: 0 };
+  for (let idx = minIdx; idx <= maxIdx; idx++) {
+    const events = (byHour.get(idx) ?? [])
+      .slice()
+      .sort((a, b) => new Date(a.scannedAt as string).getTime() - new Date(b.scannedAt as string).getTime());
+    const hourLabel = fmtHourLabel(anchor + idx * 3_600_000);
+    if (events.length === 0) {
+      rows.push([hourLabel, ...(groupCols ? ["", ""] : []), "", "", "— no scans this hour —", "", 0, 0]);
+      rows.push([]);
+      continue;
+    }
+    let subItems = 0;
+    let subPallets = 0;
+    events.forEach((e) => {
+      subItems += e.totalQty ?? 0;
+      subPallets += e.pallets ?? 0;
+      rows.push([
+        hourLabel, ...(groupCols ? [e.partIndex ?? "", e.csvFileName ?? ""] : []),
+        fmtIST(e.scannedAt), e.barcode ?? "", e.itemName ?? "", e.scannedByName ?? "",
+        e.pallets ?? 0, e.totalQty ?? 0,
+      ]);
+    });
+    rows.push([
+      "", ...(groupCols ? ["", ""] : []), "", "", "Subtotal", "",
+      Number(subPallets.toFixed(2)), subItems,
+    ]);
+    rows.push([]);
+    grand.items += subItems;
+    grand.pallets += subPallets;
+  }
+  rows.push([
+    "TOTAL", ...(groupCols ? ["", ""] : []), "", "", "", "",
+    Number(grand.pallets.toFixed(2)), grand.items,
+  ]);
+  return rows;
+}
+
+// Structured (not flat-row) form of the same breakdown, for the expandable in-browser view —
+// one group per hour window, each carrying its own events so the UI can render it as a
+// collapsed-by-default accordion item instead of a giant flat table.
+type HourlyGroup = { idx: number; label: string; events: ScanEvent[]; items: number; pallets: number };
+function buildHourlyGroups(data: ScanActivity): { groups: HourlyGroup[]; grand: { items: number; pallets: number; scans: number } } {
+  const buckets = computeHourlyBuckets(data);
+  if (!buckets) return { groups: [], grand: { items: 0, pallets: 0, scans: 0 } };
+  const { anchor, minIdx, maxIdx, byHour } = buckets;
+
+  const groups: HourlyGroup[] = [];
+  const grand = { items: 0, pallets: 0, scans: 0 };
+  for (let idx = minIdx; idx <= maxIdx; idx++) {
+    const events = (byHour.get(idx) ?? [])
+      .slice()
+      .sort((a, b) => new Date(a.scannedAt as string).getTime() - new Date(b.scannedAt as string).getTime());
+    const items = events.reduce((s, e) => s + (e.totalQty ?? 0), 0);
+    const pallets = events.reduce((s, e) => s + (e.pallets ?? 0), 0);
+    groups.push({ idx, label: fmtHourLabel(anchor + idx * 3_600_000), events, items, pallets });
+    grand.items += items;
+    grand.pallets += pallets;
+    grand.scans += events.length;
+  }
+  return { groups, grand };
+}
+
+// Same row shape as buildHourlyRows, for exporting just ONE hour window — used by each
+// accordion item's own Download button in the expandable view.
+function buildSingleHourRows(scope: "part" | "group", group: HourlyGroup): Row[] {
+  const groupCols = scope === "group";
+  const header: Row = [
+    "Hour (IST)", ...(groupCols ? ["Part", "File"] : []),
+    "Time", "Barcode", "Item Name", "Scanned By", "Pallets", "Total Qty",
+  ];
+  const rows: Row[] = [header];
+  if (group.events.length === 0) {
+    rows.push([group.label, ...(groupCols ? ["", ""] : []), "", "", "— no scans this hour —", "", 0, 0]);
+    return rows;
+  }
+  group.events.forEach((e) => rows.push([
+    group.label, ...(groupCols ? [e.partIndex ?? "", e.csvFileName ?? ""] : []),
+    fmtIST(e.scannedAt), e.barcode ?? "", e.itemName ?? "", e.scannedByName ?? "",
+    e.pallets ?? 0, e.totalQty ?? 0,
+  ]));
+  rows.push([
+    "", ...(groupCols ? ["", ""] : []), "", "", "Subtotal", "",
+    Number(group.pallets.toFixed(2)), group.items,
+  ]);
+  return rows;
+}
+
 export type ReportsDialogSession = {
   id: number;
   csvFileName: string;
@@ -261,6 +419,12 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
   const { toast } = useToast();
   const [busy, setBusy] = useState<string | null>(null);
   const [viewData, setViewData] = useState<{ title: string; rows: Row[] } | null>(null);
+  // Hourly report's View is its own expandable-list UI (not the generic flat DataTable the
+  // other reports share via viewData) — see the dialog near the bottom of this component.
+  const [hourlyView, setHourlyView] = useState<{
+    title: string; scope: "part" | "group"; data: ScanActivity;
+    groups: HourlyGroup[]; grand: { items: number; pallets: number; scans: number };
+  } | null>(null);
 
   const fetchPartReport = (sessionId: number) =>
     apiRequest("GET", `/api/order-import/sessions/${sessionId}/part-report`).then((r) => r.json()) as Promise<GroupReportPart>;
@@ -291,6 +455,17 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
     } finally { setBusy(null); }
   }
 
+  async function downloadPartHourly(fmt: Fmt) {
+    if (!session) return;
+    setBusy(`hourly-part-${fmt}`);
+    try {
+      const rows = buildHourlyRows(await fetchActivity(session.id, "part"), "part");
+      exportRows(fmt, `hourly-report-${safe(session.csvFileName)}`, `Hourly Report — ${session.csvFileName}`, rows);
+    } catch {
+      toast({ title: "Failed to download hourly report", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+
   async function downloadGroup(kind: "partwise" | "final", fmt: Fmt) {
     if (!session?.receivingSessionId) return;
     const groupId = session.receivingSessionId;
@@ -312,6 +487,18 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
       exportRows(fmt, `scan-activity-group${groupId}-all`, `Scan Activity — Group #${groupId} (all parts)`, rows);
     } catch {
       toast({ title: "Failed to download activity", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+
+  async function downloadGroupHourly(fmt: Fmt) {
+    if (!session?.receivingSessionId) return;
+    const groupId = session.receivingSessionId;
+    setBusy(`hourly-group-${fmt}`);
+    try {
+      const rows = buildHourlyRows(await fetchActivity(groupId, "group"), "group");
+      exportRows(fmt, `hourly-report-group${groupId}-all`, `Hourly Report — Group #${groupId} (all parts)`, rows);
+    } catch {
+      toast({ title: "Failed to download hourly report", variant: "destructive" });
     } finally { setBusy(null); }
   }
 
@@ -339,6 +526,18 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
     } finally { setBusy(null); }
   }
 
+  async function viewPartHourly() {
+    if (!session) return;
+    setBusy("view-hourly-part");
+    try {
+      const data = await fetchActivity(session.id, "part");
+      const { groups, grand } = buildHourlyGroups(data);
+      setHourlyView({ title: `Hourly Report — ${session.csvFileName}`, scope: "part", data, groups, grand });
+    } catch {
+      toast({ title: "Failed to load hourly report", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+
   async function viewGroup(kind: "partwise" | "final") {
     if (!session?.receivingSessionId) return;
     const groupId = session.receivingSessionId;
@@ -360,6 +559,19 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
       setViewData({ title: `Scan Activity — Group #${groupId} (all parts)`, rows });
     } catch {
       toast({ title: "Failed to load activity", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+
+  async function viewGroupHourly() {
+    if (!session?.receivingSessionId) return;
+    const groupId = session.receivingSessionId;
+    setBusy("view-hourly-group");
+    try {
+      const data = await fetchActivity(groupId, "group");
+      const { groups, grand } = buildHourlyGroups(data);
+      setHourlyView({ title: `Hourly Report — Group #${groupId} (all parts)`, scope: "group", data, groups, grand });
+    } catch {
+      toast({ title: "Failed to load hourly report", variant: "destructive" });
     } finally { setBusy(null); }
   }
 
@@ -420,6 +632,8 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
                 <DownloadMenu label="Summary" busyKey="part" onPick={downloadPart} onView={viewPart} />
                 <DownloadMenu label="Activity" icon={<ListChecks className="h-3.5 w-3.5" />} busyKey="activity-part"
                   onPick={downloadPartActivity} onView={viewPartActivity} />
+                <DownloadMenu label="Hourly" icon={<Clock className="h-3.5 w-3.5" />} busyKey="hourly-part"
+                  onPick={downloadPartHourly} onView={viewPartHourly} />
               </div>
             </div>
 
@@ -435,6 +649,8 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
                     onPick={(f) => downloadGroup("partwise", f)} onView={() => viewGroup("partwise")} />
                   <DownloadMenu label="Activity" icon={<ListChecks className="h-3.5 w-3.5" />} busyKey="activity-group"
                     onPick={downloadGroupActivity} onView={viewGroupActivity} />
+                  <DownloadMenu label="Hourly" icon={<Clock className="h-3.5 w-3.5" />} busyKey="hourly-group"
+                    onPick={downloadGroupHourly} onView={viewGroupHourly} />
                 </div>
               </div>
             )}
@@ -512,6 +728,100 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
           </div>
           <DialogFooter className="mt-2">
             <Button variant="outline" onClick={() => setViewData(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Hourly report's View — an expandable list, one collapsed-by-default accordion item per
+          hour window, instead of the flat DataTable the other reports use (a per-scan table
+          spanning every hour at once would be far too long to scan visually). Download stays
+          available here too via the same CSV/Excel/PDF export the outer "Hourly" button offers. */}
+      <Dialog open={!!hourlyView} onOpenChange={(open) => { if (!open) setHourlyView(null); }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="text-base">{hourlyView?.title}</DialogTitle>
+            <DialogDescription className="text-xs">
+              {hourlyView
+                ? `${hourlyView.groups.length} hour window(s) · ${hourlyView.grand.scans} scan(s) · ${hourlyView.grand.items} item(s) · ${hourlyView.grand.pallets.toFixed(2)} plt`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto rounded border">
+            {hourlyView && hourlyView.groups.length === 0 && (
+              <p className="p-4 text-sm text-gray-400">No scans recorded</p>
+            )}
+            {hourlyView && hourlyView.groups.length > 0 && (
+              <Accordion type="multiple" className="px-2">
+                {hourlyView.groups.map((g) => (
+                  <AccordionItem key={g.idx} value={String(g.idx)}>
+                    <AccordionTrigger className="py-2.5 text-sm hover:no-underline">
+                      <span className="font-medium">{g.label}</span>
+                      <span className="mr-2 text-xs font-normal text-gray-500">
+                        {g.events.length === 0
+                          ? "no scans"
+                          : `${g.events.length} scan${g.events.length === 1 ? "" : "s"} · ${g.items} item(s) · ${g.pallets.toFixed(2)} plt`}
+                      </span>
+                    </AccordionTrigger>
+                    <AccordionContent className="pb-3">
+                      {g.events.length === 0 ? (
+                        <p className="text-xs text-gray-400">No scans in this hour.</p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <div className="mb-2 flex justify-end">
+                            <DownloadMenu
+                              label="Download this hour"
+                              busyKey={`hourly-hour-${g.idx}`}
+                              onPick={(f) => exportRows(
+                                f,
+                                `hourly-report-${safe(hourlyView!.title)}-${g.label.replace(/[^\w]+/g, "_")}`,
+                                `${hourlyView!.title} — ${g.label}`,
+                                buildSingleHourRows(hourlyView!.scope, g),
+                              )}
+                            />
+                          </div>
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="text-left text-gray-400">
+                                <th className="py-1 pr-3 font-medium">Time</th>
+                                {hourlyView.scope === "group" && <th className="py-1 pr-3 font-medium">Part</th>}
+                                <th className="py-1 pr-3 font-medium">Barcode</th>
+                                <th className="py-1 pr-3 font-medium">Item Name</th>
+                                <th className="py-1 pr-3 font-medium">Scanned By</th>
+                                <th className="py-1 pr-3 text-right font-medium">Pallets</th>
+                                <th className="py-1 pr-3 text-right font-medium">Qty</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {g.events.map((e, i) => (
+                                <tr key={i} className="border-t border-gray-100">
+                                  <td className="py-1 pr-3 text-gray-500 whitespace-nowrap">{fmtIST(e.scannedAt)}</td>
+                                  {hourlyView.scope === "group" && <td className="py-1 pr-3">{e.partIndex ?? "—"}</td>}
+                                  <td className="py-1 pr-3 font-mono">{e.barcode || "—"}</td>
+                                  <td className="py-1 pr-3">{e.itemName || "—"}</td>
+                                  <td className="py-1 pr-3">{e.scannedByName || "—"}</td>
+                                  <td className="py-1 pr-3 text-right">{e.pallets ?? 0}</td>
+                                  <td className="py-1 pr-3 text-right">{e.totalQty ?? 0}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </AccordionContent>
+                  </AccordionItem>
+                ))}
+              </Accordion>
+            )}
+          </div>
+          <DialogFooter className="mt-2 gap-2 sm:justify-between">
+            <Button variant="outline" onClick={() => setHourlyView(null)}>Close</Button>
+            {hourlyView && (
+              <DownloadMenu
+                label="Download"
+                busyKey="hourly-view-download"
+                onPick={(f) => exportRows(f, `hourly-report-${safe(hourlyView.title)}`, hourlyView.title, buildHourlyRows(hourlyView.data, hourlyView.scope))}
+              />
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

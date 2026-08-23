@@ -671,7 +671,8 @@ router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, 
               CASE WHEN item_name LIKE 'Empty Box: %' THEN SUBSTRING(item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
               stv, scanned_by_code AS "scannedByCode",
               scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
-              voided, voided_at AS "voidedAt", void_reason AS "voidReason"
+              voided, voided_at AS "voidedAt", void_reason AS "voidReason",
+              is_credit AS "isCredit"
        FROM order_scan_events
        WHERE session_id = ANY($1::int[])
        ORDER BY scanned_at ASC, id ASC`,

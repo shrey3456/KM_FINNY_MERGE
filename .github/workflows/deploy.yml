@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - develop
-  workflow_dispatch: # Allows manual trigger from Actions tab
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -13,5 +13,5 @@ jobs:
     steps:
       - name: Run Deployment Script
         shell: cmd
-        working-directory: D:\KM-finny\KM-FINNY-Github\KM_FINNY_MERGE
+        working-directory: D:\KM-finny\TEST_FINNY\KM_FINNY_MERGE
         run: deploy.bat

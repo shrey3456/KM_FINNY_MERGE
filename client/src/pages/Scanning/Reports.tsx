@@ -610,7 +610,24 @@ const Reports = () => {
   // loaded the entire filtered history instead (walking it 100 rows at a time, in sequence, while
   // a 5s poll restarted the walk) and took ~20s to show anything — pagination is what made it
   // about a second, so it's back.
-  useEffect(() => { setHistoryPage(1); }, [selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+  //
+  // Resetting historyPage via a plain effect (the previous approach) ran one render AFTER the
+  // filter actually changed — so the render in between still queried with the OLD page number
+  // against the NEW filters. Page 3 of a brand-new filtered set usually doesn't exist, so that
+  // request came back genuinely empty, which placeholderData can't paper over (it's a real
+  // successful response, not a stale one) — hence the "No events found" flash before the
+  // corrected page-1 request landed a moment later. Comparing a signature of the filter values
+  // at render time (not in an effect) means the very first render after a filter change already
+  // computes page 1 for the query, so that wrong intermediate request never happens at all.
+  const historyFilterSignature = JSON.stringify([selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+  const lastHistoryFilterSignatureRef = useRef(historyFilterSignature);
+  const effectiveHistoryPage = historyFilterSignature !== lastHistoryFilterSignatureRef.current ? 1 : historyPage;
+  useEffect(() => {
+    if (historyFilterSignature !== lastHistoryFilterSignatureRef.current) {
+      lastHistoryFilterSignatureRef.current = historyFilterSignature;
+      setHistoryPage(1);
+    }
+  }, [historyFilterSignature]);
 
   // Keep the saved copy in step with what's applied, so coming back to this page restores it. The
   // page number isn't saved — a filtered report should reopen at the top of its results.
@@ -629,7 +646,7 @@ const Reports = () => {
     }
   }, [historySearch, activeFilters, columnConditions]);
 
-  const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
+  const historyOffset = (effectiveHistoryPage - 1) * HISTORY_PAGE_SIZE;
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
     from:    fromDate       || undefined,
     to:      toDate         || undefined,
@@ -645,13 +662,21 @@ const Reports = () => {
     useQuery<ScanHistoryResponse>({
       queryKey: [
         "/api/scan-sessions/reports/scan-history",
-        selectedDate, historySearch, historyScanner, historyType, filtersJson, historyPage,
+        selectedDate, historySearch, historyScanner, historyType, filtersJson, effectiveHistoryPage,
       ],
       queryFn: async () => {
         const r = await apiRequest("GET", historyUrl, undefined, false, true);
         return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
       },
-      refetchInterval: 5000,
+      // Only auto-polls on page 1. This page sorts newest-first, and new scans keep landing at
+      // the top in a busy warehouse — every new one pushes page 2+'s fixed OFFSET window down
+      // by one, so on page 2+ the 5s poll was fighting the live insert order: the total crossing
+      // the page boundary between polls made that page flip between having rows and being empty
+      // ("No events found" for a moment, then real rows, repeating) even though nothing was
+      // actually wrong. Page 1 doesn't have this problem — new rows only ever ADD to its front,
+      // never shift what's already showing out of the window — so it's the only page safe to
+      // keep live.
+      refetchInterval: effectiveHistoryPage === 1 ? 5000 : false,
       placeholderData: (previousData) => previousData,
     });
 

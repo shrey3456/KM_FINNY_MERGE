@@ -859,6 +859,13 @@ const SCAN_HISTORY_FILTER_COLUMNS: Record<string, { sql: string; type: 'text' | 
   time:      { sql: '"scannedAt"', type: 'date' },
   orderDate: { sql: '"orderDate"', type: 'date' },
   plant:     { sql: '"plant"',     type: 'text' },
+  // Client's historyColumns wires the same "+ Filter" condition UI onto these three too
+  // (Barcode/Qty/Pallets) — missing here meant the request still went out with the filter,
+  // but applyScanHistoryColumnFilters silently dropped it (unknown column id, not an error),
+  // so those three filters looked broken even though everything else worked.
+  barcode:   { sql: 'barcode',     type: 'text' },
+  qty:       { sql: '"totalQty"',  type: 'number' },
+  pallets:   { sql: 'pallets',     type: 'number' },
 };
 
 type GenericFilterCondition = { columnIds?: string[]; operator?: string; value?: unknown };
