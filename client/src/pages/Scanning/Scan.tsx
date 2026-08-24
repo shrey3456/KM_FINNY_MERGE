@@ -464,7 +464,14 @@ export default function ScanOrderPage() {
   // The unit flips on a QUARTER turn: that turns the subtree 90°, so content-space height runs
   // along the viewport's WIDTH — vw there, vh when upright, half-turned, or naturally portrait.
   const kioskTableBoxClass = bigView
-    ? `overflow-auto kiosk-scroll ${osQuarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
+    // Under 480px in portrait the card list below already covers this, so the table has to stand
+    // down or BOTH render — bigView is true on a portrait phone, which was showing the card list
+    // and this table stacked one above the other.
+    // The exemption is rotated mode: there the card list is switched off entirely, and the media
+    // query keys off the REAL viewport width (not the rotated container's), so on a phone it
+    // would hide the table too and leave nothing at all.
+    ? `overflow-auto kiosk-scroll ${osQuarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"} ${
+        osRotated ? "" : "hidden min-[480px]:block landscape:block"}`
     : "hidden overflow-x-auto min-[480px]:block landscape:block";
   const RotateToggleButton = () => (
     <button

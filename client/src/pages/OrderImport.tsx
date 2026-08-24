@@ -1826,7 +1826,8 @@ export default function OrderImport() {
                               setItemSearch("");
                             }}
                           >
-                            <div className="flex items-start gap-2">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-2">
+                              <div className="flex min-w-0 flex-1 items-start gap-2">
                               <span className="mt-0.5 shrink-0 text-gray-400">
                                 {expandedId === session.id
                                   ? <ChevronDown className="h-4 w-4" />
@@ -1843,7 +1844,7 @@ export default function OrderImport() {
                                       For {(session as any).orderDate}
                                     </span>
                                   )}
-                                  <span className="text-xs text-gray-400" title="Uploaded at">{fmtIST(session.createdAt)}</span>
+                                  <span className="hidden text-xs text-gray-400 sm:inline" title="Uploaded at">{fmtIST(session.createdAt)}</span>
                                   <span className="inline-flex items-center gap-1 text-xs text-gray-500">
                                     <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                       <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
@@ -1879,7 +1880,8 @@ export default function OrderImport() {
                                   })()}
                                 </div>
                               </div>
-                              <div className="flex shrink-0 items-center gap-1 ml-1">
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1 pl-6 sm:ml-1 sm:shrink-0 sm:pl-0">
                                 <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>
                                   {session.rowCount}
                                 </Badge>

@@ -298,6 +298,9 @@ const Reports = () => {
   const dateIsRange = dateValue.startsWith("r:");
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
   const [dateOpen, setDateOpen] = useState(false);
+  // The calendar half opens separately from the quick-ranges half — two buttons, two
+  // popovers, one shared date value.
+  const [dateCalOpen, setDateCalOpen] = useState(false);
   const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
   const datePresetValue = (key: string): string => {
     const d = new Date();
@@ -316,10 +319,17 @@ const Reports = () => {
 
   const describeSimpleFilter = (field: string, value: string) => {
     if (field === "date") {
-      if (value.startsWith("d:")) return `Scan Date: ${format(new Date(value.slice(2)), "MMM d, yyyy")}`;
+      // Same guard as the range branch below — an empty or malformed date must not throw.
+      if (value.startsWith("d:")) {
+        const d = value.slice(2) ? new Date(value.slice(2)) : null;
+        return `Scan Date: ${d && !isNaN(d.getTime()) ? format(d, "MMM d, yyyy") : "…"}`;
+      }
       if (value.startsWith("r:")) {
         const [, f, t] = value.split(":");
-        const fmt = (s: string) => (s ? format(new Date(s), "MMM d") : "…");
+        const fmt = (s: string) => {
+          const d = s ? new Date(s) : null;
+          return d && !isNaN(d.getTime()) ? format(d, "MMM d") : "…";
+        };
         return `Scan Date: ${fmt(f)} → ${fmt(t)}`;
       }
       return `Scan Date: ${value}`;
@@ -478,19 +488,9 @@ const Reports = () => {
           </div>
         </div>
       )}
-      {dateValue && (
-        <div className="flex items-center justify-end pt-1">
-          <button
-            type="button"
-            onClick={() => { clearSimpleFilter("date"); setDateOpen(false); setFilterPickerOpen(false); setFilterPickerKey(""); }}
-            className="text-[11px] text-red-500 hover:underline"
-          >
-            Clear date
-          </button>
-        </div>
-      )}
     </div>
   );
+
 
   // Both halves together — what the "Filters (N)" editor shows, since editing an applied date
   // should offer every way of changing it, not just the calendar.
@@ -505,8 +505,6 @@ const Reports = () => {
     // Date lives here rather than in its own toolbar button, split in two: named ranges under
     // "Date", the calendar under "Custom date". Both drive the same activeFilters["date"].
     const dims: { key: string; label: string; icon?: typeof CalendarDays }[] = [
-      { key: "date", label: "Date" },
-      { key: "date-custom", label: "Custom date" },
       { key: "scanner", label: "Scanned By" },
       { key: "type", label: "Type" },
       ...filterableColumns.map((c) => ({ key: c.id, label: c.label })),
@@ -971,8 +969,55 @@ const Reports = () => {
 
 
 
-              {/* One unified "+ Filter" — Date (named ranges), Custom date (the calendar),
-                  Scanned By, Type, Plant and every generic column in the same searchable list. */}
+            {/* Two buttons, one filter. "Filter by date" offers ONLY the named ranges
+                (Today / Yesterday / This week / This month); "Calendar" is where a single date or a
+                from/to range is picked. Both write the same value, so each reflects the other.
+                Deliberately not the shared SingleDateFilter: that offers Today/Tomorrow/Yesterday and
+                is single-date only, so it can express neither of those two requirements. */}
+            <div className="flex items-center gap-1">
+              <Popover open={dateOpen} onOpenChange={setDateOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`h-8 gap-1.5 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    {/* Shows what's actually applied — a single date, or "from – to" for a
+                        range — so the filter is readable without opening either panel. */}
+                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Scan Date: ", "") : "Filter by date"}
+                    {dateValue && (
+                      <span
+                        role="button"
+                        aria-label="Clear date"
+                        onClick={(e) => { e.stopPropagation(); clearSimpleFilter("date"); }}
+                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                      >
+                        <X className="h-3 w-3" />
+                      </span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateQuickBody}
+                </PopoverContent>
+              </Popover>
+
+              <Popover open={dateCalOpen} onOpenChange={(o) => { setDateCalOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
+                <PopoverTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-8 rounded-md border-gray-300 text-xs font-medium text-gray-500 hover:bg-gray-50">
+                    Calendar
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateCustomBody}
+                </PopoverContent>
+              </Popover>
+            </div>
+
+
+              {/* One unified "+ Filter" — Scanned By, Type, Plant and every generic column in
+                  the same searchable list. Date has its own pair of buttons above. */}
               <Popover
                 open={filterPickerOpen}
                 onOpenChange={(open) => {
@@ -1255,7 +1300,9 @@ const Reports = () => {
           }
         >
           <DataTable<ScanHistoryItem>
-            className="space-y-0"
+            // Below 480px the card list below replaces this table — thirteen columns on a phone
+            // means reading every row by scrolling sideways, same split the Scan pages use.
+            className="space-y-0 hidden min-[480px]:block landscape:block"
             containerClassName="rounded-none border-0"
             columns={historyColumns}
             data={historyItems}
@@ -1313,6 +1360,79 @@ const Reports = () => {
               </tfoot>
             )}
           />
+
+          {/* Mobile card list — the narrow-screen counterpart to the table: each scan's fields
+              stacked as labelled lines, so nothing depends on horizontal scrolling. */}
+          <div className="min-[480px]:hidden landscape:hidden">
+            {historyLoading ? (
+              <p className="py-10 text-center text-sm text-gray-400">Loading scan history…</p>
+            ) : historyItems.length === 0 ? (
+              <p className="py-10 text-center text-sm text-gray-400">No scan events found.</p>
+            ) : (
+              historyItems.map((row) => (
+                <div
+                  key={row.id}
+                  className={`border-b border-gray-100 px-4 py-3 ${
+                    row.isExchange ? "bg-purple-50/60"
+                    : row.isEmptyBox ? "bg-orange-50/60"
+                    : row.voided ? "bg-gray-50 opacity-60"
+                    : row.isExtra ? "bg-amber-50/60" : ""}`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className={`text-[15px] font-semibold leading-snug text-gray-900 ${row.voided ? "line-through" : ""}`}>
+                        {row.itemName ?? "—"}
+                      </p>
+                      <p className="mt-0.5 font-mono text-xs text-gray-400">{row.barcode ?? "—"}</p>
+                    </div>
+                    {row.plant && <PlantBadge plant={row.plant} />}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                    <span>
+                      <span className="text-gray-400">Qty </span>
+                      <span className="font-bold tabular-nums text-gray-900">{(row.totalQty ?? 0).toLocaleString()}</span>
+                    </span>
+                    {row.pallets != null && Number(row.pallets) > 0 && (
+                      <span>
+                        <span className="text-gray-400">Pallets </span>
+                        <span className="font-bold tabular-nums text-[#001d6e]">{parseFloat(String(row.pallets)).toFixed(2)}</span>
+                      </span>
+                    )}
+                    {row.stv && (
+                      <span>
+                        <span className="text-gray-400">STV </span>
+                        <span className="font-medium text-gray-700">{row.stv}</span>
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-400">
+                    {row.scannedByName ?? "—"} · {format(new Date(row.scannedAt), "MMM d, yyyy · h:mm a")}
+                  </p>
+                  {row.voided && (
+                    <p className="mt-1 text-[11px] font-semibold uppercase text-red-500">
+                      Voided{row.voidReason ? ` · ${row.voidReason}` : ""}
+                    </p>
+                  )}
+                </div>
+              ))
+            )}
+
+            {/* The table's pager lives in its <tfoot>, which is hidden with the table — so the
+                card list needs its own or a phone can only ever see page 1. */}
+            <div className="flex items-center justify-between gap-2 border-t border-gray-200 px-4 py-3">
+              <span className="text-xs text-gray-500">
+                {historyTotal > 0
+                  ? `${(historyOffset + 1).toLocaleString()}–${Math.min(historyOffset + historyItems.length, historyTotal).toLocaleString()} of ${historyTotal.toLocaleString()}`
+                  : "No events"}
+              </span>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" className="h-8 rounded-xl" disabled={historyPage <= 1}
+                  onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
+                <Button variant="outline" size="sm" className="h-8 rounded-xl" disabled={!historyHasMore}
+                  onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
+              </div>
+            </div>
+          </div>
         </TableCard>
       </div>
     </div>
