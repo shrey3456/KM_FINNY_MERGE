@@ -74,7 +74,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
       
       {/* Main content area — "sidebar-hidden" (see index.css) lets pages that center themselves
           with max-w-Nxl reclaim the width the sidebar used to take, instead of leaving it blank. */}
-      <div className={`flex flex-col flex-1 overflow-hidden ${!sidebarVisible ? "sidebar-hidden" : ""}`}>
+      <div className={`flex min-w-0 flex-col flex-1 overflow-hidden ${!sidebarVisible ? "sidebar-hidden" : ""}`}>
         {/* Header for desktop with hamburger menu — collapsible on the scan page. */}
         {!hideHeader && (
         <div className="hidden lg:flex items-center w-full bg-white border-b border-gray-200">
@@ -185,8 +185,11 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
         )}
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto bg-white">
-          <div className="px-4 sm:px-6">
+        {/* overflow-x-hidden is deliberate: with only overflow-y set, the x axis computes to
+            `auto` and the entire page pans sideways into empty space past the widest element.
+            Tables scroll horizontally inside their own containers, so nothing is lost here. */}
+        <main className="flex-1 overflow-y-auto overflow-x-hidden bg-white">
+          <div className="min-w-0 px-4 sm:px-6">
             {children}
           </div>
         </main>
