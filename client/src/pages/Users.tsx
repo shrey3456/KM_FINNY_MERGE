@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/data-table';
 import {
   Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown,
+  ChevronLeft, ChevronRight,
   UserPlus, UserCog, AlertTriangle, KeyRound, IdCard, ShieldCheck,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -84,6 +85,46 @@ const userFormSchema = z.object({
 type UserFormValues = z.infer<typeof userFormSchema>;
 
 // Helper: parse JSON array field from user object
+/**
+ * Which page numbers a pager should offer, given the current page and how many there are — all of
+ * them when they fit, otherwise the first, the last, a window around the current page, and "gap"
+ * where the run is broken. Both indexes are 0-based, matching DataTable's own pageIndex.
+ * Mirrors the pager on Proforma Slips so every pager in the app looks and behaves the same.
+ */
+function buildPageList(pageIndex: number, pageCount: number, window = 1): Array<number | "gap"> {
+  const maxWithoutGaps = window * 2 + 5;
+  if (pageCount <= maxWithoutGaps) return Array.from({ length: pageCount }, (_, i) => i);
+
+  const last = pageCount - 1;
+  // Near either end the window would be clipped by the edge, leaving a stubby "1 2 … 42".
+  // Extend it inward so the run of numbers stays the same length wherever you are.
+  let from: number;
+  let to: number;
+  if (pageIndex <= window) {
+    from = 1;
+    to = Math.min(last - 1, window * 2);
+  } else if (pageIndex >= last - window) {
+    from = Math.max(1, last - window * 2);
+    to = last - 1;
+  } else {
+    from = pageIndex - window;
+    to = pageIndex + window;
+  }
+
+  const pages: Array<number | "gap"> = [0];
+  // A gap standing in for a single page takes as much room as the page itself, so only use one
+  // where at least two pages are hidden — otherwise show that page.
+  if (from > 2) pages.push("gap");
+  else if (from === 2) pages.push(1);
+  for (let i = from; i <= to; i++) pages.push(i);
+  if (to < last - 2) pages.push("gap");
+  else if (to === last - 2) pages.push(last - 1);
+  pages.push(last);
+  return pages;
+}
+
+const USERS_PAGE_SIZE = 15;
+
 function parseJsonArray(val: string | null | undefined): string[] {
   try { return JSON.parse(val || "[]"); } catch { return []; }
 }
@@ -809,7 +850,7 @@ const Users = () => {
   ];
 
   return (
-    <div className="flex-1 overflow-y-auto p-4 lg:p-6">
+    <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px]">
         <div className="mb-6">
           <h2 className="text-2xl font-bold">Users</h2>
@@ -881,8 +922,126 @@ const Users = () => {
           </div>
 
           <CardContent className="p-0">
+            {/* Seven columns total ~890px — a phone can only reach them by swiping sideways, so
+                below 480px (and in portrait) each user becomes a stacked card instead. */}
+            <div className="min-[480px]:hidden landscape:hidden">
+              {isLoading ? (
+                <div className="flex justify-center py-10">
+                  <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+                </div>
+              ) : filteredUsers.length === 0 ? (
+                <p className="py-10 text-center text-sm text-gray-400">
+                  {searchTerm ? "No users found matching your search." : "No users have been added yet."}
+                </p>
+              ) : (
+                <>
+                  {filteredUsers
+                    .slice(pageIndex * USERS_PAGE_SIZE, (pageIndex + 1) * USERS_PAGE_SIZE)
+                    .map((user) => {
+                      const userPlants = parseJsonArray((user as any).plants);
+                      const isAdminRole = user.role === "admin" || user.role === "super-admin";
+                      return (
+                        <div key={user.userCode} className="flex items-start gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0">
+                          <Avatar className="mt-0.5 h-9 w-9 shrink-0">
+                            <AvatarFallback className="bg-primary/10 text-[11px] text-primary">
+                              {(user.name || user.username).substring(0, 2).toUpperCase()}
+                            </AvatarFallback>
+                          </Avatar>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-[15px] font-semibold leading-snug text-gray-900">
+                              {user.name || "-"}
+                            </p>
+                            <p className="mt-0.5 truncate text-xs text-gray-400">{user.username}</p>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                              <Badge
+                                variant="outline"
+                                className={isAdminRole
+                                  ? "border-blue-200 bg-blue-50 text-blue-700"
+                                  : "border-green-200 bg-green-50 text-green-700"}
+                              >
+                                {user.role || "User"}
+                              </Badge>
+                              {user.designation && (
+                                <span className="text-xs text-gray-500">{user.designation}</span>
+                              )}
+                            </div>
+                            {userPlants.length > 0 && (
+                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                {userPlants.map((pl: string) => (
+                                  <PlantBadge key={pl} plant={pl} className="text-[10px]" />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex shrink-0 gap-1">
+                            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEditDialog(user)}>
+                              <Edit className="h-4 w-4" />
+                              <span className="sr-only">Edit</span>
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openDeleteDialog(user)}>
+                              <Trash className="h-4 w-4" />
+                              <span className="sr-only">Delete</span>
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                  {/* The table's pager lives inside the table, which is hidden here — so the card
+                      list needs its own or mobile can only ever see page 1. */}
+                  {filteredUsers.length > USERS_PAGE_SIZE && (() => {
+                    const pageCount = Math.ceil(filteredUsers.length / USERS_PAGE_SIZE);
+                    return (
+                      <div className="flex flex-col gap-2 border-t border-gray-200 px-4 py-3">
+                        <span className="text-xs text-gray-500">
+                          Showing {(pageIndex * USERS_PAGE_SIZE + 1).toLocaleString()}–
+                          {Math.min((pageIndex + 1) * USERS_PAGE_SIZE, filteredUsers.length).toLocaleString()} of{" "}
+                          {filteredUsers.length.toLocaleString()}
+                        </span>
+                        <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
+                          <Button
+                            variant="outline" size="sm" className="h-8 w-8 p-0"
+                            onClick={() => setPageIndex(Math.max(0, pageIndex - 1))}
+                            disabled={pageIndex === 0}
+                            aria-label="Previous page"
+                          >
+                            <ChevronLeft className="h-4 w-4" />
+                          </Button>
+                          {buildPageList(pageIndex, pageCount).map((pg, i) =>
+                            pg === "gap" ? (
+                              <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-sm text-gray-400">…</span>
+                            ) : (
+                              <Button
+                                key={pg}
+                                variant={pg === pageIndex ? "default" : "outline"}
+                                size="sm"
+                                className={`h-8 min-w-8 px-2 tabular-nums ${pg === pageIndex ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
+                                onClick={() => setPageIndex(pg)}
+                                aria-label={`Page ${pg + 1}`}
+                                aria-current={pg === pageIndex ? "page" : undefined}
+                              >
+                                {pg + 1}
+                              </Button>
+                            ),
+                          )}
+                          <Button
+                            variant="outline" size="sm" className="h-8 w-8 p-0"
+                            onClick={() => setPageIndex(Math.min(pageCount - 1, pageIndex + 1))}
+                            disabled={pageIndex >= pageCount - 1}
+                            aria-label="Next page"
+                          >
+                            <ChevronRight className="h-4 w-4" />
+                          </Button>
+                        </nav>
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+            </div>
+
             <DataTable<User>
-              className="space-y-0"
+              className="hidden space-y-0 min-[480px]:block landscape:block"
               containerClassName="rounded-none border-0"
               columns={userColumns}
               data={filteredUsers}

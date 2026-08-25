@@ -929,7 +929,7 @@ const Reports = () => {
 
   return (
     <>
-    <div className="flex-1 overflow-y-auto p-4 lg:p-6">
+    <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
         <PageHeader
           icon={History}

@@ -122,7 +122,7 @@ export default function ScanHistoryPage() {
 
   return (
     <>
-      <div className="flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50 p-4 lg:p-6">
         <div className="mx-auto w-full max-w-[1800px] space-y-5">
           <PageHeader
             icon={History}

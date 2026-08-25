@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, X } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, FileText, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, Search, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -264,7 +264,11 @@ export default function ScanViewer() {
   // Part Order was removed as a separate tab — switching which CSV/part you're looking at now
   // happens via the "Select part…" picker in the tab row (always visible, next to the date
   // picker), which drives this same "scan" tab directly instead of needing its own tab.
-  const [viewerTab, setViewerTab] = useState<"master-view" | "scan">("master-view");
+  const [viewerTab, setViewerTab] = useState<"master-view" | "scan" | "part-order">("master-view");
+  // Part Order lists each CSV part of this order on its own, expandable to its rows — the
+  // read-only counterpart of the Scan Order page's own Part Order tab.
+  const [partExpId, setPartExpId] = useState<number | null>(null);
+  const [partSearch, setPartSearch] = useState("");
 
   const { data: allPlants } = useQuery<Plant[]>({
     queryKey: ["/api/plants"],
@@ -500,6 +504,15 @@ export default function ScanViewer() {
   const stvOptions = useMemo(
     () => Array.from(new Set(Array.from(stvsByBarcode.values()).flat())).sort((a, b) => a.localeCompare(b)),
     [stvsByBarcode],
+  );
+
+  const partItemsQuery = useQuery<OsScanItem[]>({
+    queryKey: ["/api/order-scan/sessions", partExpId, "items", "scan-viewer-part"],
+    queryFn: () => apiRequest("GET", `/api/order-scan/sessions/${partExpId}/items`).then((r) => r.json()),
+    enabled: partExpId !== null && viewerTab === "part-order",
+  });
+  const partItems = (partItemsQuery.data ?? []).filter((i) =>
+    !partSearch || [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(partSearch.toLowerCase())),
   );
 
   const [historyItem, setHistoryItem] = useState<OsScanItem | null>(null);
@@ -1336,7 +1349,7 @@ export default function ScanViewer() {
   ];
 
   return (
-    <div ref={pageScrollRef} className={`flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6 ${rotateClass}`}>
+    <div ref={pageScrollRef} className={`flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6 ${rotateClass || "overflow-x-hidden"}`}>
       <RotateButton />
       {isRotated && (
         <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
@@ -1351,11 +1364,13 @@ export default function ScanViewer() {
             a session is actually loaded. Previously these were two separate rows; the plant
             switcher living only in the data-dependent half was what made it disappear on a
             date with no data — now the controls themselves never depend on selectedSession. */}
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/90">
             <ScanLine className="h-5 w-5 text-white" />
           </span>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             {filtersReady && selectedSession && (
               <p
                 className="truncate text-sm font-bold leading-tight text-gray-900"
@@ -1400,7 +1415,7 @@ export default function ScanViewer() {
                   })}
                 </SelectContent>
               </Select>
-              {selectedSession?.importedByName && <span>loaded by {selectedSession.importedByName}</span>}
+              {selectedSession?.importedByName && <span>· {selectedSession.importedByName}</span>}
               {/* Scan start/end — set once each, when the part is activated and when it's
                   marked complete (order_import_sessions.scanActivatedAt/scanCompletedAt).
                   Completed only shows once it's actually set; a still-in-progress part just
@@ -1420,25 +1435,8 @@ export default function ScanViewer() {
                 const minutes = totalMinutes % 60;
                 return <span className="font-semibold text-emerald-600">· active for {hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`}</span>;
               })()}
-              <Input
-                type="date"
-                className="h-7 w-auto rounded-full text-[11px]"
-                value={date}
-                onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
-              />
-              {sessionOptions.length > 1 && (
-                <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
-                  <SelectTrigger className="h-7 w-32 rounded-full text-[11px]"><SelectValue placeholder="Select part…" /></SelectTrigger>
-                  <SelectContent>
-                    {sessionOptions.map((so) => (
-                      <SelectItem key={so.id} value={String(so.id)}>
-                        Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
             </div>
+          </div>
           </div>
           {/* Received progress, right-aligned — same readout as Scan Order's. 100% only once
               EVERY real CSV item has reached its own expected quantity, not just "has any
@@ -1454,25 +1452,52 @@ export default function ScanViewer() {
             const total = realItems.length;
             const pct = total > 0 ? Math.round((fullyDone / total) * 100) : 0;
             return (
-              <div className="ml-auto flex shrink-0 items-center gap-2">
-                <div className="h-2 w-28 overflow-hidden rounded-full bg-gray-100">
+              <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto sm:shrink-0">
+                <div className="h-2 flex-1 overflow-hidden rounded-full bg-gray-100 sm:w-28 sm:flex-none">
                   <div
                     className={`h-full rounded-full transition-[width] duration-300 ${pct >= 100 && total > 0 ? "bg-emerald-500" : "bg-[#001d6e]"}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>
-                <span className="whitespace-nowrap text-xs font-medium">
+                <span className="whitespace-nowrap text-right text-xs font-medium leading-tight">
                   {pct >= 100 && total > 0 ? (
                     <span className="inline-flex items-center gap-1 font-semibold text-emerald-600">
                       <CheckCircle2 className="h-3.5 w-3.5" /> Complete
                     </span>
                   ) : (
-                    <span className="text-gray-600">{fullyDone}/{total} received ({pct}%)</span>
+                    <>
+                      <span className="block text-gray-700">{fullyDone}/{total}</span>
+                      <span className="block text-[10px] font-semibold text-gray-400">{pct}%</span>
+                    </>
                   )}
                 </span>
               </div>
             );
           })()}
+        </div>
+
+          {/* Which order is being viewed — its own row, so the controls read as controls rather
+              than as part of the sentence above them. */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Input
+              type="date"
+              className="h-8 w-auto rounded-full text-xs"
+              value={date}
+              onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
+            />
+            {sessionOptions.length > 1 && (
+              <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
+                <SelectTrigger className="h-8 w-36 rounded-full text-xs"><SelectValue placeholder="Select part…" /></SelectTrigger>
+                <SelectContent>
+                  {sessionOptions.map((so) => (
+                    <SelectItem key={so.id} value={String(so.id)}>
+                      Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+          </div>
         </div>
 
         {/* Master View / Part View tabs — same split the Scan Order page has: Master View
@@ -1485,6 +1510,7 @@ export default function ScanViewer() {
           {([
             { key: "master-view", label: "Master View", icon: Layers },
             { key: "scan", label: "Scan", icon: ScanLine },
+            { key: "part-order", label: "Part Order", icon: FileText },
           ] as const).map((t) => {
             const Icon = t.icon;
             return (
@@ -1514,6 +1540,103 @@ export default function ScanViewer() {
         ) : sessionOptions.length === 0 ? (
           <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
             No order found for {plant} on {date}.
+          </div>
+        ) : viewerTab === "part-order" ? (
+          // Part Order — each CSV part of this order on its own, expandable to its rows. The
+          // read-only counterpart of the Scan Order page's Part Order tab: same card-per-part
+          // layout, minus anything that writes.
+          <div className="space-y-2">
+            {sessionOptions.map((sess) => {
+              const isOpen = partExpId === sess.id;
+              return (
+                <div key={sess.id} className="overflow-hidden rounded-xl border bg-white shadow-sm">
+                  <button
+                    className="flex w-full items-start justify-between gap-2 px-3 py-2.5 transition-colors hover:bg-gray-50"
+                    onClick={() => { setPartExpId(isOpen ? null : sess.id); setPartSearch(""); }}
+                  >
+                    <div className="flex min-w-0 items-start gap-2.5">
+                      <Layers className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+                      <div className="min-w-0 text-left">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="truncate text-sm font-semibold text-gray-900">{sess.csvFileName?.replace(/\.csv$/i, "")}</p>
+                          {sess.plant && <PlantBadge plant={sess.plant} />}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-gray-400">
+                          <span className="whitespace-nowrap font-semibold text-gray-600">Part {sess.partIndex ?? "—"}</span>
+                          {sess.scanStatus && <span className="whitespace-nowrap uppercase">{sess.scanStatus}</span>}
+                          {sess.orderDate && <span className="whitespace-nowrap">Order date: {fmtOrderDate(sess.orderDate)}</span>}
+                        </div>
+                      </div>
+                    </div>
+                    <ChevronDown className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+                  </button>
+
+                  {isOpen && (
+                    <div className="border-t">
+                      <div className="border-b bg-gray-50 px-3 py-2">
+                        <div className="relative">
+                          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+                          <input
+                            value={partSearch}
+                            onChange={(e) => setPartSearch(e.target.value)}
+                            placeholder="Search…"
+                            className="w-full border border-gray-200 bg-white py-1.5 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#001d6e]"
+                          />
+                        </div>
+                      </div>
+                      {partItemsQuery.isLoading ? (
+                        <p className="animate-pulse px-3 py-4 text-center text-sm text-gray-400">Loading items…</p>
+                      ) : partItems.length === 0 ? (
+                        <p className="px-3 py-4 text-center text-sm text-gray-400">No items</p>
+                      ) : (
+                        partItems.map((item) => {
+                          const { exp, received, left, extra } = rowState(item);
+                          const ipp = item.itemsPerPallet ?? 0;
+                          const status = item.status ?? "pending";
+                          return (
+                            <div
+                              key={item.id}
+                              className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                                status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""}`}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
+                                <p className="mt-0.5 font-mono text-xs text-gray-400">
+                                  {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                                </p>
+                                <p className="mt-1.5 text-sm leading-snug">
+                                  <span className="font-bold text-gray-900">{received}</span>
+                                  <span className="text-gray-400">/{exp}</span>{" "}
+                                  <span className="text-gray-400">({pltQty(exp, ipp).toFixed(2)} plt)</span>
+                                  {left > 0 && (
+                                    <>
+                                      <span className="text-gray-300"> · </span>
+                                      <span className="font-semibold text-[#001d6e]">{left} left</span>
+                                    </>
+                                  )}
+                                  {extra > 0 && (
+                                    <>
+                                      <span className="text-gray-300"> · </span>
+                                      <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                    </>
+                                  )}
+                                </p>
+                              </div>
+                              <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                status === "complete" ? "bg-emerald-100 text-emerald-700"
+                                : status === "partial" ? "bg-amber-100 text-amber-700"
+                                : "bg-gray-100 text-gray-500"}`}>
+                                {status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+                              </span>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         ) : viewerTab === "scan" ? (
           <>

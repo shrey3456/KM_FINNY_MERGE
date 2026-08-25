@@ -1157,7 +1157,7 @@ export default function OrderImport() {
   };
 
   return (
-    <main className="flex-1 overflow-y-auto bg-gray-50">
+    <main className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50">
       <div className="mx-auto w-full max-w-[1800px] px-4 py-6 space-y-6">
 
         {/* ── Page Header ── */}
@@ -1547,7 +1547,42 @@ export default function OrderImport() {
                                 <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
                               </div>
                             ) : (
-                              <div className="overflow-x-auto border">
+                              <>
+                              {/* A 6-column table can't fit a phone without sideways scrolling,
+                                  so below 480px (and in portrait) the rows become stacked cards. */}
+                              <div className="min-[480px]:hidden landscape:hidden border bg-white">
+                                {scanFiltered.length === 0 ? (
+                                  <p className="py-8 text-center text-sm text-gray-400">No items</p>
+                                ) : (
+                                  <>
+                                    {scanFiltered.map((item, idx) => (
+                                      <div key={item.id} className="flex items-start gap-3 border-b border-gray-100 px-3 py-2.5 last:border-b-0">
+                                        <span className="mt-0.5 w-5 shrink-0 text-right text-xs tabular-nums text-gray-400">{idx + 1}</span>
+                                        <div className="min-w-0 flex-1">
+                                          <p className="text-sm font-semibold leading-snug text-gray-900">{item.itemName || "—"}</p>
+                                          <p className="mt-0.5 font-mono text-[11px] text-gray-400">
+                                            {item.barcode || "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                                          </p>
+                                        </div>
+                                        <span className="shrink-0 text-right text-sm tabular-nums">
+                                          <span className="font-bold text-gray-900">{item.quantity ?? 0}</span>
+                                          <span className="block text-[11px] text-purple-500">{item.expectedPallets ?? "—"} plt</span>
+                                        </span>
+                                      </div>
+                                    ))}
+                                    <div className="flex items-center justify-between gap-3 border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] px-3 py-2.5 text-sm font-bold text-gray-900">
+                                      <span>Total</span>
+                                      <span className="text-right tabular-nums">
+                                        {scanFiltered.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                        <span className="block text-[11px] font-semibold text-purple-600">
+                                          {scanFiltered.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)} plt
+                                        </span>
+                                      </span>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                              <div className="hidden overflow-x-auto border min-[480px]:block landscape:block">
                                 <table className="w-max min-w-full border-collapse text-xs">
                                   <thead>
                                     <tr>
@@ -1583,6 +1618,7 @@ export default function OrderImport() {
                                   </tbody>
                                 </table>
                               </div>
+                              </>
                             )}
                           </div>
                         )}
@@ -1949,7 +1985,44 @@ export default function OrderImport() {
                                   <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
                                 </div>
                               ) : (
-                                <div className="overflow-x-auto border">
+                                <>
+                                {/* Same reason as the Available tab: 7 columns won't fit a phone. */}
+                                <div className="min-[480px]:hidden landscape:hidden border bg-white">
+                                  {filteredItems.length === 0 ? (
+                                    <p className="py-8 text-center text-sm text-gray-400">No items</p>
+                                  ) : (
+                                    <>
+                                      {filteredItems.map((item, idx) => (
+                                        <div key={item.id} className="flex items-start gap-3 border-b border-gray-100 px-3 py-2.5 last:border-b-0">
+                                          <span className="mt-0.5 w-5 shrink-0 text-right text-xs tabular-nums text-gray-400">{idx + 1}</span>
+                                          <div className="min-w-0 flex-1">
+                                            <p className="text-sm font-semibold leading-snug text-gray-900">{item.itemName || "—"}</p>
+                                            <p className="mt-0.5 font-mono text-[11px] text-gray-400">
+                                              {item.barcode || "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                                            </p>
+                                            {(item as any).date && (
+                                              <p className="mt-0.5 text-[11px] text-gray-400">{(item as any).date}</p>
+                                            )}
+                                          </div>
+                                          <span className="shrink-0 text-right text-sm tabular-nums">
+                                            <span className="font-bold text-gray-900">{item.quantity ?? 0}</span>
+                                            <span className="block text-[11px] text-purple-500">{item.expectedPallets ?? "—"} plt</span>
+                                          </span>
+                                        </div>
+                                      ))}
+                                      <div className="flex items-center justify-between gap-3 border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] px-3 py-2.5 text-sm font-bold text-gray-900">
+                                        <span>Total</span>
+                                        <span className="text-right tabular-nums">
+                                          {filteredItems.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                          <span className="block text-[11px] font-semibold text-purple-600">
+                                            {filteredItems.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)} plt
+                                          </span>
+                                        </span>
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                                <div className="hidden overflow-x-auto border min-[480px]:block landscape:block">
                                   <table className="w-max min-w-full border-collapse text-xs">
                                     <thead>
                                       <tr>
@@ -1989,6 +2062,7 @@ export default function OrderImport() {
                                     </tbody>
                                   </table>
                                 </div>
+                                </>
                               )}
                             </div>
                           )}

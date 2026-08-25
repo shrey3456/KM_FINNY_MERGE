@@ -4130,11 +4130,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               {sess.plant && <PlantBadge plant={sess.plant} />}
                             </div>
                             <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-gray-400">
-                              <span className="font-semibold text-gray-600">{sess.rowCount} rows</span>
-                              <span className="font-semibold text-gray-600">{sess.totalQty} qty · {sess.totalPallets.toFixed(2)} plt</span>
-                              <span>By {sess.importedByName ?? "Unknown"}</span>
-                              <span>Order date: {scanFmtOrderDate(sess.orderDate)}</span>
-                              <span>Uploaded: {scanFmtIST(sess.createdAt)}</span>
+                              <span className="whitespace-nowrap font-semibold text-gray-600">{sess.rowCount} rows</span>
+                              <span className="whitespace-nowrap font-semibold text-gray-600">{sess.totalQty} qty · {sess.totalPallets.toFixed(2)} plt</span>
+                              <span className="whitespace-nowrap font-medium text-gray-600">By {sess.importedByName ?? "Unknown"}</span>
+                              <span className="whitespace-nowrap">Order date: {scanFmtOrderDate(sess.orderDate)}</span>
+                              <span className="whitespace-nowrap">Uploaded: {scanFmtIST(sess.createdAt)}</span>
                             </div>
                           </div>
                         </div>
@@ -4155,7 +4155,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               item names — matching the Scan/Master View tables, so all three tabs
                               read as one system. */}
                           {!csvItemsQuery2.isFetching && (
-                            bigView ? (
+                            <>
                               <div className={kioskTableBoxClass}>
                                 <table className="min-w-[640px] w-full border-collapse text-sm">
                                   <thead>
@@ -4235,9 +4235,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   </tbody>
                                 </table>
                               </div>
-                            ) : (
-                              /* Card list — matches the Scan/Master View mobile treatment. */
-                              <div>
+                              {/* Card list — the narrow-screen counterpart, gated by the same
+                                  media queries as the Scan/Master View tabs so exactly one of the
+                                  two ever shows. Never in rotated mode: the table covers that. */}
+                              {!osRotated && (
+                              <div className="min-[480px]:hidden landscape:hidden">
                                 {filtCsvItems.length === 0 ? (
                                   <p className="py-10 text-center text-sm text-gray-400">No items</p>
                                 ) : filtCsvItems.map((item) => {
@@ -4313,7 +4315,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   </div>
                                 )}
                               </div>
-                            )
+                              )}
+                            </>
                           )}
                         </div>
                       )}
@@ -4916,11 +4919,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               {sess.plant && <PlantBadge plant={sess.plant} />}
                             </div>
                             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-400">
-                              <span className="font-semibold text-gray-600">{sess.rowCount} rows</span>
-                              <span className="font-semibold text-gray-600">{sess.totalQty} qty · {sess.totalPallets.toFixed(2)} plt</span>
-                              <span>By {sess.importedByName ?? "Unknown"}</span>
-                              <span>Order date: {scanFmtOrderDate(sess.orderDate)}</span>
-                              <span>Uploaded: {scanFmtIST(sess.createdAt)}</span>
+                              <span className="whitespace-nowrap font-semibold text-gray-600">{sess.rowCount} rows</span>
+                              <span className="whitespace-nowrap font-semibold text-gray-600">{sess.totalQty} qty · {sess.totalPallets.toFixed(2)} plt</span>
+                              <span className="whitespace-nowrap font-medium text-gray-600">By {sess.importedByName ?? "Unknown"}</span>
+                              <span className="whitespace-nowrap">Order date: {scanFmtOrderDate(sess.orderDate)}</span>
+                              <span className="whitespace-nowrap">Uploaded: {scanFmtIST(sess.createdAt)}</span>
                             </div>
                           </div>
                         </div>
@@ -5486,7 +5489,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   }
 
   return (
-    <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${kioskRotateClass}`}>
+    <div className={`flex-1 overflow-y-auto bg-white p-4 lg:p-6 ${kioskRotateClass || "overflow-x-hidden"}`}>
       <RotateToggleButton />
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
         <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
