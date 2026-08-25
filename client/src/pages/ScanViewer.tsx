@@ -1525,7 +1525,7 @@ export default function ScanViewer() {
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {([
                 { key: "", label: "Total", value: totals.expected, plt: totals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                { key: "done", label: "Received", value: totals.done, plt: totals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                { key: "done", label: "Received", value: totals.done + totals.extra, plt: totals.palletsDone + totals.palletsExtra, dot: "bg-emerald-500", text: "text-emerald-600" },
                 { key: "remaining", label: "Remaining", value: totals.remaining, plt: totals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
                 { key: "extra", label: "Extra", value: totals.extra, plt: totals.palletsExtra, dot: "bg-orange-500", text: totals.extra > 0 ? "text-amber-600" : "text-gray-300" },
               ] as const).map((s) => {
@@ -1994,7 +1994,7 @@ export default function ScanViewer() {
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {([
                 { key: "", label: "Total", value: mvTotals.expected, plt: mvTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                { key: "done", label: "Received", value: mvTotals.done, plt: mvTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                { key: "done", label: "Received", value: mvTotals.done + mvTotals.extra, plt: mvTotals.palletsDone + mvTotals.palletsExtra, dot: "bg-emerald-500", text: "text-emerald-600" },
                 { key: "remaining", label: "Remaining", value: mvTotals.remaining, plt: mvTotals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
                 { key: "extra", label: "Extra", value: mvTotals.extra, plt: mvTotals.palletsExtra, dot: "bg-orange-500", text: mvTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
               ] as const).map((s) => {
