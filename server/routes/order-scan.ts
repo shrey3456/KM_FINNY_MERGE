@@ -1078,10 +1078,18 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteAccess, async (r
     // local (IST) wall-clock value. Every other timestamp write in this file (activate,
     // stock_applied_at) already goes through raw pg for that reason; this one must match or
     // scan_completed_at ends up ~5.5h off from scan_activated_at for the exact same instant.
+    //
+    // WHERE scan_status <> 'completed' makes this idempotent — needed now that Auto Complete
+    // (the plant setting) can complete this exact session on its own, in the same window a
+    // human might also click this button. Without the guard, a manual click landing right
+    // after auto-completion already fired would silently overwrite scan_completed_at with a
+    // later timestamp and re-run reconcileCredits/auto-activate for no reason. With it, a
+    // request that loses the race just finds 0 rows here and the rest of this handler
+    // (credits, auto-activate, broadcast) correctly no-ops instead of double-processing.
     const { rows: completedRows } = await pool.query(
       `UPDATE order_import_sessions
        SET scan_status = 'completed', scan_completed_at = $1
-       WHERE id = $2
+       WHERE id = $2 AND scan_status <> 'completed'
        RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName", part_index AS "partIndex"`,
       [new Date(), id],
     );
@@ -1620,23 +1628,22 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // Derived auto-completion — gated by the plant's "Auto Complete" setting (Plant
     // Settings page). OFF (default): skip entirely, every part stays manual-only. ON: any
     // touched session whose items are now all 'complete' flips to scan_status='completed'
-    // automatically, EXCEPT the last part of the group (or the only session in a standalone
-    // import) — that one always waits for the manual Complete button, regardless of the
-    // setting, so there's always a deliberate final review before an order fully closes out.
+    // automatically — including the last part of the group (previously excluded on purpose,
+    // to force a manual review before an order closed out; now applies uniformly). The manual
+    // Complete button (POST /complete) still exists and still works at any time, including
+    // after auto-completion has already fired — its own UPDATE is conditional (WHERE
+    // scan_status <> 'completed') the same way this one is, so whichever of the two reaches
+    // the row first "wins" and the other becomes a safe no-op rather than re-running
+    // reconcileCredits/auto-activate a second time or clobbering scan_completed_at.
     const { rows: plantRows } = await client.query(
       `SELECT is_auto_complete_enabled AS "isAutoCompleteEnabled" FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`,
       [anchorSession.plant],
     );
     const autoCompleteEnabled = plantRows[0]?.isAutoCompleteEnabled === true;
-    const lastPartId = sessions.reduce(
-      (max: any, s: any) => ((s.partIndex ?? 0) > (max?.partIndex ?? -1) ? s : max),
-      null as any,
-    )?.id;
 
     const newlyCompleted: number[] = [];
     if (autoCompleteEnabled) {
       for (const sid of touchedSessions) {
-        if (sid === lastPartId) continue; // last part: always manual, never auto
         const { rows: remainRows } = await client.query(
           `SELECT COUNT(*) FILTER (WHERE status <> 'complete')::int AS remaining FROM order_scan_items WHERE session_id = $1`,
           [sid],

@@ -3,12 +3,15 @@ name: Deploy Application
 on:
   push:
     branches:
-      - main
+      - develop
+  workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Windows, X64]
 
     steps:
-      - name: Deploy Application
-        run: D:\KM-finny\KM-FINNY-Github\KM_FINNY_MERGE\deploy.bat
+      - name: Run Deployment Script
+        shell: cmd
+        working-directory: D:\KM-finny\TEST_FINNY\KM_FINNY_MERGE
+        run: deploy.bat

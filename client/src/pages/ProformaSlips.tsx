@@ -278,8 +278,17 @@ export default function ProformaSlips() {
   // Every other column gets an Excel-style per-column filter via the shared column-filter engine.
   // Seeded from whatever was left applied last time this page was open — see SLIP_FILTERS_KEY.
   const [activePlantTab, setActivePlantTab] = useState<string>(() => readSavedSlipFilters().plant ?? "");
-  const [dateValue, setDateValue] = useState<string>(() => readSavedSlipFilters().date ?? "");
+  // Defaults to today. The saved value is only honoured when it actually holds a date —
+  // once any filter has been persisted the bundle always carries date: "", which is not
+  // undefined, so an `=== undefined` check would let that empty string win and the page would
+  // open unfiltered.
+  const [dateValue, setDateValue] = useState<string>(
+    () => readSavedSlipFilters().date || `d:${format(new Date(), "yyyy-MM-dd")}`,
+  );
   const [dateOpen, setDateOpen] = useState(false);
+  // The calendar half opens separately from the quick-ranges half — two buttons, two
+  // popovers, one shared date value.
+  const [dateCalOpen, setDateCalOpen] = useState(false);
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
   const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
     () => readSavedSlipFilters().conditions ?? {},
@@ -1046,15 +1055,96 @@ export default function ProformaSlips() {
     ];
   }, [proformaSlips]);
 
+  // The date filter, split so each "+ Filter" entry does one job. Both write the same dateValue,
+  // so whichever sets it, the other opens on that value.
+  //   Date        — named ranges only (Today, Yesterday, This week, This month)
+  //   Custom date — the calendar: a single date, or a from/to range
+  const dateQuickBody = (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
+        <div className="grid grid-cols-2 gap-1.5">
+          {DATE_PRESETS.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => { const v = datePresetValue(o.value); setDateValue(v); setDatePickMode(v.startsWith("r:") ? "range" : "single"); setDateOpen(false); setDateCalOpen(false); }}
+              className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  const dateCustomBody = (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-1.5">
+        {(["single", "range"] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => setDatePickMode(m)}
+            className={`rounded-md border px-2 py-1 text-xs font-medium ${
+              datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            {m === "single" ? "Single date" : "Date range"}
+          </button>
+        ))}
+      </div>
+      {datePickMode === "single" ? (
+        <div className="space-y-1">
+          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
+          <input
+            type="date"
+            value={fromStr}
+            onChange={(e) => { setDateValue(e.target.value ? `d:${e.target.value}` : ""); if (e.target.value) setDateOpen(false); setDateCalOpen(false); }}
+            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
+            <input type="date" value={fromStr} max={toStr || undefined} onChange={(e) => setDateValue(`r:${e.target.value}:${toStr}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
+            <input type="date" value={toStr} min={fromStr || undefined} onChange={(e) => setDateValue(`r:${fromStr}:${e.target.value}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+
+  // Both halves together — what editing an applied date shows, since that should offer every way
+  // of changing it, not just the calendar.
+  const dateFullBody = (
+    <>
+      {dateCustomBody}
+      {dateQuickBody}
+    </>
+  );
+
   const filterPickerOptions = useMemo(() => {
     // Already-filtered columns are left OUT of this list: "+ Filter" adds a new one, while
     // changing or removing an existing filter happens in the "Filters (N)" dropdown, which lists
     // them all and opens each one's builder pre-filled.
     const q = filterPickerSearch.trim().toLowerCase();
-    return filterableColumns
-      .filter((c) => !columnConditions[c.id])
-      .filter((c) => !q || c.label.toLowerCase().includes(q))
-      .map((c) => ({ key: c.id, label: c.label }));
+    // Date lives here rather than in its own toolbar button, split in two: named ranges under
+    // "Date", the calendar under "Custom date". Both drive the same dateValue.
+    const dateDims: { key: string; label: string; icon?: typeof CalendarDays }[] = [
+    ];
+    return [
+      ...dateDims,
+      ...filterableColumns
+        .filter((c) => !columnConditions[c.id])
+        .map((c) => ({ key: c.id, label: c.label, icon: undefined as typeof CalendarDays | undefined })),
+    ].filter((d) => !q || d.label.toLowerCase().includes(q));
   }, [filterableColumns, columnConditions, filterPickerSearch]);
   const pickedFilterColumn = filterableColumns.find((c) => c.id === filterPickerKey) ?? null;
 
@@ -2015,91 +2105,56 @@ export default function ProformaSlips() {
               placeholder="Search slips by order number or party…"
             />
 
-            {/* Standalone Date control — single date or from/to range + quick-range presets. */}
-            <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
-              <PopoverTrigger asChild>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className={`h-8 gap-1 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
-                >
-                  <CalendarDays className="h-3.5 w-3.5" />
-                  {dateValue ? describeDate(dateValue) : "Date"}
-                  {dateValue && (
-                    <span
-                      role="button"
-                      aria-label="Clear date"
-                      onClick={(e) => { e.stopPropagation(); setDateValue(""); }}
-                      className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
-                    >
-                      <X className="h-3 w-3" />
-                    </span>
-                  )}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {(["single", "range"] as const).map((m) => (
-                      <button
-                        key={m}
-                        type="button"
-                        onClick={() => setDatePickMode(m)}
-                        className={`rounded-md border px-2 py-1 text-xs font-medium ${
-                          datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
-                        }`}
-                      >
-                        {m === "single" ? "Single date" : "Date range"}
-                      </button>
-                    ))}
-                  </div>
-                  {datePickMode === "single" ? (
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
-                      <input
-                        type="date"
-                        value={fromStr}
-                        onChange={(e) => { setDateValue(e.target.value ? `d:${e.target.value}` : ""); if (e.target.value) setDateOpen(false); }}
-                        className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                      />
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
-                        <input type="date" value={fromStr} max={toStr || undefined} onChange={(e) => setDateValue(`r:${e.target.value}:${toStr}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
-                        <input type="date" value={toStr} min={fromStr || undefined} onChange={(e) => setDateValue(`r:${fromStr}:${e.target.value}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
-                      </div>
-                    </div>
-                  )}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {DATE_PRESETS.map((o) => (
-                        <button
-                          key={o.value}
-                          type="button"
-                          onClick={() => { const v = datePresetValue(o.value); setDateValue(v); setDatePickMode(v.startsWith("r:") ? "range" : "single"); setDateOpen(false); }}
-                          className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  {dateValue && (
-                    <div className="flex items-center justify-end pt-1">
-                      <button type="button" onClick={() => { setDateValue(""); setDateOpen(false); }} className="text-[11px] text-red-500 hover:underline">Clear date</button>
-                    </div>
-                  )}
-                </div>
-              </PopoverContent>
-            </Popover>
 
-            {/* + Filter — every column except Plant (tab) and Order Date (Date control). */}
+            {/* Two buttons, one filter. "Filter by date" offers ONLY the named ranges
+                (Today / Yesterday / This week / This month); "Calendar" is where a single date or a
+                from/to range is picked. Both write the same value, so each reflects the other.
+                Deliberately not the shared SingleDateFilter: that offers Today/Tomorrow/Yesterday and
+                is single-date only, so it can express neither of those two requirements. */}
+            <div className="flex items-center gap-1">
+              <Popover open={dateOpen} onOpenChange={setDateOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`h-8 gap-1.5 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    {/* Shows what's actually applied — a single date, or "from – to" for a
+                        range — so the filter is readable without opening either panel. */}
+                    {dateValue ? describeDate(dateValue) : "Filter by date"}
+                    {dateValue && (
+                      <span
+                        role="button"
+                        aria-label="Clear date"
+                        onClick={(e) => { e.stopPropagation(); setDateValue(""); }}
+                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
+                      >
+                        <X className="h-3 w-3" />
+                      </span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateQuickBody}
+                </PopoverContent>
+              </Popover>
+
+              <Popover open={dateCalOpen} onOpenChange={(o) => { setDateCalOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
+                <PopoverTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-8 rounded-md border-gray-300 text-xs font-medium text-gray-500 hover:bg-gray-50">
+                    Calendar
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateCustomBody}
+                </PopoverContent>
+              </Popover>
+            </div>
+
+
+            {/* + Filter — every column except Plant, which is the tab strip. Date has its own
+                pair of buttons above. */}
             <Popover open={filterPickerOpen} onOpenChange={(open) => { setFilterPickerOpen(open); if (!open) { setFilterPickerKey(""); setFilterPickerSearch(""); } }}>
               <PopoverTrigger asChild>
                 <Button size="sm" variant="outline" className="h-8 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]">
@@ -2116,7 +2171,7 @@ export default function ProformaSlips() {
                       ) : (
                         filterPickerOptions.map((d) => (
                           <button key={d.key} type="button" onClick={() => setFilterPickerKey(d.key)} className="block w-full rounded px-2 py-1.5 text-left text-xs text-gray-700 hover:bg-[#001d6e]/5 hover:text-[#001d6e]">
-                            {d.label}
+                              {d.label}
                           </button>
                         ))
                       )}
@@ -2137,12 +2192,12 @@ export default function ProformaSlips() {
               </PopoverContent>
             </Popover>
 
-            {/* Active column filters */}
-            {Object.keys(columnConditions).length > 0 && (
+            {/* Active filters — the date included, since it no longer has a button of its own. */}
+            {(Object.keys(columnConditions).length > 0 || !!dateValue) && (
               <Popover open={editFilterOpen} onOpenChange={(o) => { setEditFilterOpen(o); if (!o) setEditFilterKey(""); }}>
                 <PopoverTrigger asChild>
                   <Button size="sm" variant="outline" className={FILTER_BTN_CLASS}>
-                    <ListFilter className="h-3.5 w-3.5 mr-1" /> Filters ({Object.keys(columnConditions).length})
+                    <ListFilter className="h-3.5 w-3.5 mr-1" /> Filters ({Object.keys(columnConditions).length + (dateValue ? 1 : 0)})
                   </Button>
                 </PopoverTrigger>
                 {/* One place to see AND change every applied filter. */}
@@ -2168,8 +2223,24 @@ export default function ProformaSlips() {
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between pb-1">
                         <span className="text-xs font-semibold text-gray-700">Active filters</span>
-                        <button type="button" onClick={() => setColumnConditions({})} className="text-[11px] text-red-500 hover:underline">Clear all</button>
+                        <button type="button" onClick={() => { setColumnConditions({}); setDateValue(""); }} className="text-[11px] text-red-500 hover:underline">Clear all</button>
                       </div>
+                      {dateValue && (
+                        <div className="flex items-center justify-between gap-2 rounded border border-gray-200">
+                          <button
+                            type="button"
+                            onClick={() => { setEditFilterOpen(false); setDateOpen(true); }}
+                            className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left text-xs text-gray-700 hover:text-[#001d6e]"
+                            title="Edit this filter"
+                          >
+                            <CalendarDays className="h-3 w-3 shrink-0 opacity-40" />
+                            <span className="truncate">{describeDate(dateValue)}</span>
+                          </button>
+                          <button type="button" onClick={() => setDateValue("")} className="mr-2 shrink-0 text-gray-400 hover:text-red-500" aria-label="Remove filter">
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      )}
                       {Object.entries(columnConditions).map(([columnId, condition]) => (
                         <div key={columnId} className="flex items-center justify-between gap-2 rounded border border-gray-200">
                           {/* The summary itself is the edit control — clicking it opens this

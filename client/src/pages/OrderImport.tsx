@@ -1157,7 +1157,7 @@ export default function OrderImport() {
   };
 
   return (
-    <main className="flex-1 overflow-y-auto bg-gray-50">
+    <main className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50">
       <div className="mx-auto w-full max-w-[1800px] px-4 py-6 space-y-6">
 
         {/* ── Page Header ── */}
@@ -1448,7 +1448,11 @@ export default function OrderImport() {
                           className="cursor-pointer px-5 py-3 hover:bg-gray-50 active:bg-gray-100"
                           onClick={() => { setScanExpandedId(isExpanded ? null : s.id); setScanItemSearch(""); }}
                         >
-                          <div className="flex items-center gap-3">
+                          {/* Stacks on a phone. Side by side, the action cluster on the right is
+                              shrink-0 and eats ~220px of a ~340px screen, leaving so little for the
+                              text that names wrapped one character per line. */}
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                            <div className="flex min-w-0 flex-1 items-center gap-3">
                             <span className="shrink-0 text-gray-400">
                               {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                             </span>
@@ -1463,8 +1467,8 @@ export default function OrderImport() {
                                     For {s.orderDate}
                                   </span>
                                 )}
-                                <span className="text-xs text-gray-400" title="Uploaded at">{fmtIST(s.createdAt)}</span>
-                                {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
+                                <span className="hidden text-xs text-gray-400 sm:inline" title="Uploaded at">{fmtIST(s.createdAt)}</span>
+                                {s.importedByName && <span className="truncate text-xs text-gray-400">· {s.importedByName}</span>}
                                 {plantBusy && (
                                   <span className="bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700" title="Another session is already active for this plant">
                                     Plant busy
@@ -1472,7 +1476,8 @@ export default function OrderImport() {
                                 )}
                               </div>
                             </div>
-                            <div className="flex shrink-0 items-center gap-1.5">
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 pl-7 sm:shrink-0 sm:pl-0">
                               <span className="inline-flex items-center bg-[#001d6e]/10 px-2 py-0.5 text-xs font-semibold text-[#001d6e]" title={`${s.rowCount} rows`}>
                                 {s.rowCount}
                               </span>
@@ -1542,7 +1547,42 @@ export default function OrderImport() {
                                 <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
                               </div>
                             ) : (
-                              <div className="overflow-x-auto border">
+                              <>
+                              {/* A 6-column table can't fit a phone without sideways scrolling,
+                                  so below 480px (and in portrait) the rows become stacked cards. */}
+                              <div className="min-[480px]:hidden landscape:hidden border bg-white">
+                                {scanFiltered.length === 0 ? (
+                                  <p className="py-8 text-center text-sm text-gray-400">No items</p>
+                                ) : (
+                                  <>
+                                    {scanFiltered.map((item, idx) => (
+                                      <div key={item.id} className="flex items-start gap-3 border-b border-gray-100 px-3 py-2.5 last:border-b-0">
+                                        <span className="mt-0.5 w-5 shrink-0 text-right text-xs tabular-nums text-gray-400">{idx + 1}</span>
+                                        <div className="min-w-0 flex-1">
+                                          <p className="text-sm font-semibold leading-snug text-gray-900">{item.itemName || "—"}</p>
+                                          <p className="mt-0.5 font-mono text-[11px] text-gray-400">
+                                            {item.barcode || "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                                          </p>
+                                        </div>
+                                        <span className="shrink-0 text-right text-sm tabular-nums">
+                                          <span className="font-bold text-gray-900">{item.quantity ?? 0}</span>
+                                          <span className="block text-[11px] text-purple-500">{item.expectedPallets ?? "—"} plt</span>
+                                        </span>
+                                      </div>
+                                    ))}
+                                    <div className="flex items-center justify-between gap-3 border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] px-3 py-2.5 text-sm font-bold text-gray-900">
+                                      <span>Total</span>
+                                      <span className="text-right tabular-nums">
+                                        {scanFiltered.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                        <span className="block text-[11px] font-semibold text-purple-600">
+                                          {scanFiltered.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)} plt
+                                        </span>
+                                      </span>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                              <div className="hidden overflow-x-auto border min-[480px]:block landscape:block">
                                 <table className="w-max min-w-full border-collapse text-xs">
                                   <thead>
                                     <tr>
@@ -1578,6 +1618,7 @@ export default function OrderImport() {
                                   </tbody>
                                 </table>
                               </div>
+                              </>
                             )}
                           </div>
                         )}
@@ -1821,7 +1862,8 @@ export default function OrderImport() {
                               setItemSearch("");
                             }}
                           >
-                            <div className="flex items-start gap-2">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-2">
+                              <div className="flex min-w-0 flex-1 items-start gap-2">
                               <span className="mt-0.5 shrink-0 text-gray-400">
                                 {expandedId === session.id
                                   ? <ChevronDown className="h-4 w-4" />
@@ -1838,7 +1880,7 @@ export default function OrderImport() {
                                       For {(session as any).orderDate}
                                     </span>
                                   )}
-                                  <span className="text-xs text-gray-400" title="Uploaded at">{fmtIST(session.createdAt)}</span>
+                                  <span className="hidden text-xs text-gray-400 sm:inline" title="Uploaded at">{fmtIST(session.createdAt)}</span>
                                   <span className="inline-flex items-center gap-1 text-xs text-gray-500">
                                     <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                       <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
@@ -1850,9 +1892,32 @@ export default function OrderImport() {
                                       Part {(session as any).partIndex ?? "?"}
                                     </span>
                                   )}
+                                  {/* When this part's scanning actually started/finished
+                                      (order_import_sessions.scanActivatedAt/scanCompletedAt) —
+                                      plus how long it was active, computed from the two. */}
+                                  {(session as any).scanActivatedAt && (
+                                    <span className="text-xs text-gray-400">Started: {fmtIST((session as any).scanActivatedAt)}</span>
+                                  )}
+                                  {(session as any).scanCompletedAt && (
+                                    <span className="text-xs text-gray-400">Completed: {fmtIST((session as any).scanCompletedAt)}</span>
+                                  )}
+                                  {(session as any).scanActivatedAt && (session as any).scanCompletedAt && (() => {
+                                    const totalMinutes = Math.round(
+                                      (new Date((session as any).scanCompletedAt).getTime() - new Date((session as any).scanActivatedAt).getTime()) / 60000,
+                                    );
+                                    if (isNaN(totalMinutes) || totalMinutes < 0) return null;
+                                    const hours = Math.floor(totalMinutes / 60);
+                                    const minutes = totalMinutes % 60;
+                                    return (
+                                      <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                        Completed In {hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`}
+                                      </span>
+                                    );
+                                  })()}
                                 </div>
                               </div>
-                              <div className="flex shrink-0 items-center gap-1 ml-1">
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1 pl-6 sm:ml-1 sm:shrink-0 sm:pl-0">
                                 <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>
                                   {session.rowCount}
                                 </Badge>
@@ -1920,7 +1985,44 @@ export default function OrderImport() {
                                   <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
                                 </div>
                               ) : (
-                                <div className="overflow-x-auto border">
+                                <>
+                                {/* Same reason as the Available tab: 7 columns won't fit a phone. */}
+                                <div className="min-[480px]:hidden landscape:hidden border bg-white">
+                                  {filteredItems.length === 0 ? (
+                                    <p className="py-8 text-center text-sm text-gray-400">No items</p>
+                                  ) : (
+                                    <>
+                                      {filteredItems.map((item, idx) => (
+                                        <div key={item.id} className="flex items-start gap-3 border-b border-gray-100 px-3 py-2.5 last:border-b-0">
+                                          <span className="mt-0.5 w-5 shrink-0 text-right text-xs tabular-nums text-gray-400">{idx + 1}</span>
+                                          <div className="min-w-0 flex-1">
+                                            <p className="text-sm font-semibold leading-snug text-gray-900">{item.itemName || "—"}</p>
+                                            <p className="mt-0.5 font-mono text-[11px] text-gray-400">
+                                              {item.barcode || "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
+                                            </p>
+                                            {(item as any).date && (
+                                              <p className="mt-0.5 text-[11px] text-gray-400">{(item as any).date}</p>
+                                            )}
+                                          </div>
+                                          <span className="shrink-0 text-right text-sm tabular-nums">
+                                            <span className="font-bold text-gray-900">{item.quantity ?? 0}</span>
+                                            <span className="block text-[11px] text-purple-500">{item.expectedPallets ?? "—"} plt</span>
+                                          </span>
+                                        </div>
+                                      ))}
+                                      <div className="flex items-center justify-between gap-3 border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] px-3 py-2.5 text-sm font-bold text-gray-900">
+                                        <span>Total</span>
+                                        <span className="text-right tabular-nums">
+                                          {filteredItems.reduce((sum, i) => sum + (i.quantity ?? 0), 0).toLocaleString()}
+                                          <span className="block text-[11px] font-semibold text-purple-600">
+                                            {filteredItems.reduce((sum, i) => sum + (i.expectedPallets ?? 0), 0).toFixed(2)} plt
+                                          </span>
+                                        </span>
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                                <div className="hidden overflow-x-auto border min-[480px]:block landscape:block">
                                   <table className="w-max min-w-full border-collapse text-xs">
                                     <thead>
                                       <tr>
@@ -1960,6 +2062,7 @@ export default function OrderImport() {
                                     </tbody>
                                   </table>
                                 </div>
+                                </>
                               )}
                             </div>
                           )}

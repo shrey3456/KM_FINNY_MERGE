@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, FileText, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, X } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, FileText, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, Search, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -25,7 +25,7 @@ import {
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type Plant = { id: number; name: string };
+type Plant = { id: number; name: string; bgColor?: string | null; textColor?: string | null; borderColor?: string | null };
 
 // Matches GET /api/order-import/sessions' row shape (only the fields this page needs).
 type SessionOption = {
@@ -36,6 +36,8 @@ type SessionOption = {
   scanStatus: string | null;
   partIndex: number | null;
   importedByName?: string | null;
+  scanActivatedAt?: string | null;
+  scanCompletedAt?: string | null;
 };
 
 // Matches GET /api/order-scan/sessions/:id/items.
@@ -78,13 +80,6 @@ type MvMergedItem = {
   isExtraOnly: boolean; lastScannedAt: string | null;
 };
 
-// Matches GET /api/order-import/sessions/:id/items — one CSV part's own rows (Part Order tab).
-type PartItem = {
-  id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
-  quantity: number | null; expectedPallets: number | null;
-  scannedQty: number | null; extraQty: number | null; scanStatus: string | null;
-};
-
 // Matches GET /api/order-import/master-view/item-history.
 type HistoryEvent = {
   id: number; sessionId: number; barcode: string; itemName: string | null;
@@ -95,6 +90,17 @@ type HistoryEvent = {
 };
 
 const normalize = (v?: string | null) => String(v ?? "").trim().toLowerCase();
+
+// Most-recently-scanned first, so a freshly scanned item surfaces at the top the way it does on
+// the Scan Order page. Only the server timestamp applies here — this page never scans, so there's
+// no client-side "I just scanned this" tier to blend in. Never-scanned rows keep their original
+// order (return 0) rather than being shuffled.
+const byRecency = (a: { lastScannedAt: string | null }, b: { lastScannedAt: string | null }) => {
+  const at = a.lastScannedAt ? new Date(a.lastScannedAt).getTime() : 0;
+  const bt = b.lastScannedAt ? new Date(b.lastScannedAt).getTime() : 0;
+  return at === bt ? 0 : bt - at;
+};
+
 
 /** "2026-08-03" → "03 Aug 2026" — how the Scan Order header renders an order date. */
 function fmtOrderDate(value: string | null): string {
@@ -255,16 +261,14 @@ export default function ScanViewer() {
   // into one row per item, across every CSV part) vs Part View (this page's original behavior —
   // pick one specific CSV/part and see just its items). Defaults to Master View since that's
   // the "whole picture" view most lookups want first.
+  // Part Order was removed as a separate tab — switching which CSV/part you're looking at now
+  // happens via the "Select part…" picker in the tab row (always visible, next to the date
+  // picker), which drives this same "scan" tab directly instead of needing its own tab.
   const [viewerTab, setViewerTab] = useState<"master-view" | "scan" | "part-order">("master-view");
-
-  // Part Order — every CSV of this order listed on its own, expandable to its rows. Same tab the
-  // Scan Order page calls "Part Order"; the rows come from the same endpoint it uses.
-  const [partExpandedId, setPartExpandedId] = useState<number | null>(null);
-  const partItemsQuery = useQuery<PartItem[]>({
-    queryKey: ["/api/order-import/items", "scan-viewer", partExpandedId],
-    queryFn: () => apiRequest("GET", `/api/order-import/sessions/${partExpandedId}/items`).then((r) => r.json()),
-    enabled: partExpandedId !== null && viewerTab === "part-order",
-  });
+  // Part Order lists each CSV part of this order on its own, expandable to its rows — the
+  // read-only counterpart of the Scan Order page's own Part Order tab.
+  const [partExpId, setPartExpId] = useState<number | null>(null);
+  const [partSearch, setPartSearch] = useState("");
 
   const { data: allPlants } = useQuery<Plant[]>({
     queryKey: ["/api/plants"],
@@ -276,6 +280,16 @@ export default function ScanViewer() {
   const plantOptions = isAdminOrSuper
     ? (allPlants ?? []).map((p) => p.name)
     : myPlantNames.map((p) => p.toUpperCase());
+
+  // Plant Management's configured colors for a plant — same source/lookup the Scan Order
+  // page's own plant switcher uses (getPlantColorCfg there), so this page's plant switcher is
+  // colored consistently with every other PlantBadge in the app instead of a flat, uncolored
+  // dropdown that doesn't match what's actually saved in Plant Management.
+  const getPlantColorCfg = (plantName: string | null | undefined) => {
+    const name = (plantName ?? "").trim().toUpperCase();
+    if (!name || !allPlants) return null;
+    return allPlants.find((p) => String(p.name ?? "").trim().toUpperCase() === name) ?? null;
+  };
 
   // Same source the Scan page's own switcher uses — already scoped server-side to this
   // user's plants. Used here to resolve each plant's currently-active order date, so picking
@@ -379,7 +393,7 @@ export default function ScanViewer() {
         }
       });
     });
-    return Array.from(groups.values());
+    return Array.from(groups.values()).sort(byRecency);
   }, [mvQuery.data]);
 
   const itemsQuery = useQuery<OsScanItem[]>({
@@ -492,6 +506,15 @@ export default function ScanViewer() {
     [stvsByBarcode],
   );
 
+  const partItemsQuery = useQuery<OsScanItem[]>({
+    queryKey: ["/api/order-scan/sessions", partExpId, "items", "scan-viewer-part"],
+    queryFn: () => apiRequest("GET", `/api/order-scan/sessions/${partExpId}/items`).then((r) => r.json()),
+    enabled: partExpId !== null && viewerTab === "part-order",
+  });
+  const partItems = (partItemsQuery.data ?? []).filter((i) =>
+    !partSearch || [i.barcode, i.itemName, i.sapCode].some((v) => v?.toLowerCase().includes(partSearch.toLowerCase())),
+  );
+
   const [historyItem, setHistoryItem] = useState<OsScanItem | null>(null);
   const historyQuery = useQuery<{ items: HistoryEvent[] }>({
     queryKey: ["/api/order-import/master-view/item-history", "scan-viewer", historyItem?.barcode, groupSessionIds.join(",")],
@@ -553,7 +576,7 @@ export default function ScanViewer() {
       status: 'extra',
       lastScannedAt: null,
     }));
-  const items = [...realItems, ...extraOnlyItems];
+  const items = [...realItems, ...extraOnlyItems].sort(byRecency);
 
   const rowState = (item: OsScanItem) => {
     const exp = item.expectedQty ?? 0;
@@ -561,6 +584,11 @@ export default function ScanViewer() {
     const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
     const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
       .filter((p) => p !== currentPartIndex);
+    // Synthetic extra-only rows (barcodes scanned as Extra that aren't on any CSV — see
+    // extraOnlyItems above) have expectedQty 0, so a status badge that only checks
+    // exp>=received/received>0 falls through to "Pending" even though the item has real Extra
+    // quantity. Flag that case so the badge can show "Extra" instead.
+    const isExtraOnly = exp <= 0 && extra > 0;
     return {
       exp,
       // Received = the full physical count (order-matched scanned qty PLUS extra) — same
@@ -569,6 +597,7 @@ export default function ScanViewer() {
       left: Math.max(0, exp - scanned),
       extra,
       extraFromOtherParts,
+      isExtraOnly,
     };
   };
   // qty ÷ its own items-per-pallet — never one blended pallet size for every item, same rule
@@ -623,6 +652,18 @@ export default function ScanViewer() {
   useEffect(() => {
     try { sessionStorage.setItem("scanViewer:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
   }, [columnOrder]);
+
+  const [mvColumnOrder, setMvColumnOrder] = useState<string[]>(() => {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem("scanViewer:mvColumnOrder") ?? "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("scanViewer:mvColumnOrder", JSON.stringify(mvColumnOrder)); } catch { /* storage unavailable */ }
+  }, [mvColumnOrder]);
   const setColumnCondition = (columnId: string, condition: FilterCondition) =>
     setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
   const clearColumnCondition = (columnId: string) =>
@@ -911,6 +952,22 @@ export default function ScanViewer() {
   const cellBorder = "border-r border-gray-200";
 
   const itemColumns: DataTableColumn<OsScanItem>[] = [
+    // Leading status icon, then Item and Barcode / SAP as their own columns — the same column
+    // set the Scan Order page's items table uses, so the two read identically.
+    {
+      id: "state",
+      header: "",
+      width: 40,
+      align: "center",
+      hideable: false,
+      totalable: false,
+      render: (row) => {
+        const status = row.status ?? "pending";
+        return status === "complete" ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
+          : status === "partial" ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
+          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+      },
+    },
     {
       id: "item",
       header: columnHeader("item", "Item"),
@@ -933,9 +990,6 @@ export default function ScanViewer() {
             >
               {row.itemName ?? "—"}
             </button>
-            <p className="whitespace-normal break-words font-mono text-xs text-gray-400">
-              {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
-            </p>
             {/* Informational only — the item's real GJ/MP PLT pack size, never used in any
                 qty/plt calculation on this page. */}
             {!!row.realPackSize && row.realPackSize > 0 && (
@@ -944,6 +998,23 @@ export default function ScanViewer() {
           </>
         );
       },
+    },
+    {
+      id: "barcode",
+      header: columnHeader("barcode", "Barcode / SAP"),
+      width: 140,
+      sortable: true,
+      accessor: (row) => row.barcode,
+      // An identifier, not a quantity — never summed into the totals row.
+      totalable: false,
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-500 ${cellBorder}`,
+      render: (row) => (
+        <>
+          <span className="block">{row.barcode ?? <span className="text-gray-300">—</span>}</span>
+          {row.sapCode && <span className="block text-[10px] text-gray-400">SAP: {row.sapCode}</span>}
+        </>
+      ),
     },
     // Qty block, in the Scan Order page's order: Exp → Remain → Received → Extra.
     {
@@ -1070,30 +1141,69 @@ export default function ScanViewer() {
         const status = row.status ?? "pending";
         return (
           <span className={`inline-block px-2.5 py-1 text-xs font-semibold ${
+            status === "extra"    ? "bg-orange-100 text-orange-700" :
             status === "complete" ? "bg-emerald-100 text-emerald-700" :
             status === "partial"  ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
           }`}>
-            {status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+            {status === "extra" ? "Extra" : status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
           </span>
         );
       },
     },
     {
-      id: "lastScanned",
-      header: columnHeader("lastScanned", "Last Scanned"),
-      width: 130,
+      id: "stv",
+      header: columnHeader("stv", "STV"),
+      width: 110,
       sortable: true,
-      accessor: (row) => row.lastScannedAt,
+      accessor: (row) => stvsByBarcode.get(normalize(row.barcode ?? "")) ?? [],
       totalable: false,
-      cellClassName: "text-gray-500 whitespace-nowrap",
-      render: (row) => (row.lastScannedAt ? format(new Date(row.lastScannedAt), "MMM d, yyyy · h:mm a") : <span className="text-gray-300">—</span>),
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-600 ${cellBorder}`,
+      render: (row) => stvCell(row.barcode),
+    },
+    {
+      id: "orderDate",
+      header: columnHeader("orderDate", "Order Date"),
+      width: 120,
+      sortable: true,
+      accessor: () => viewerOrderDate,
+      totalable: false,
+      cellClassName: "whitespace-nowrap text-gray-500",
+      render: () => fmtOrderDate(viewerOrderDate),
     },
   ];
 
   // Master View's own columns — same layout/order as Part View's itemColumns above (Item, Exp,
   // Remain, Received, Extra, then the matching Plt columns, then Status), just backed by
   // MvMergedItem's merged-across-every-part shape instead of one session's OsScanItem rows.
+  // An item can be scanned across several STVs, so this lists them all rather than picking one.
+  // Sourced from the same per-event map the STV filter uses.
+  const stvCell = (barcode: string | null) => {
+    const list = stvsByBarcode.get(normalize(barcode ?? "")) ?? [];
+    return list.length ? list.join(", ") : <span className="text-gray-300">—</span>;
+  };
+  // Every row on this page belongs to the one plant + order date being viewed, so the order date
+  // is the same for all of them — carried as a column so it travels with an export.
+  const viewerOrderDate = selectedSession?.orderDate ?? date;
+
   const mvColumns: DataTableColumn<MvMergedItem>[] = [
+    // Same leading status icon and separate Barcode / SAP column as the Scan tab and the Scan
+    // Order page, so all three tables carry an identical column set.
+    {
+      id: "state",
+      header: "",
+      width: 40,
+      align: "center",
+      hideable: false,
+      totalable: false,
+      render: (row) => {
+        const done = row.quantity > 0 && row.scannedQty >= row.quantity;
+        const partial = !done && row.scannedQty > 0;
+        return done ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
+          : partial ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
+          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+      },
+    },
     {
       id: "item",
       header: "Item",
@@ -1112,9 +1222,6 @@ export default function ScanViewer() {
             <p className="whitespace-normal break-words text-left font-medium leading-snug text-gray-900">
               {row.itemName ?? "—"}
             </p>
-            <p className="whitespace-normal break-words font-mono text-xs text-gray-400">
-              {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
-            </p>
             {row.itemsPerPallet > 0 && (
               <p className="text-sm font-semibold text-gray-600">{row.itemsPerPallet} per pallet</p>
             )}
@@ -1124,6 +1231,23 @@ export default function ScanViewer() {
           </>
         );
       },
+    },
+    {
+      id: "barcode",
+      header: "Barcode / SAP",
+      width: 140,
+      sortable: true,
+      accessor: (row) => row.barcode,
+      // An identifier, not a quantity — never summed into the totals row.
+      totalable: false,
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-500 ${cellBorder}`,
+      render: (row) => (
+        <>
+          <span className="block">{row.barcode ?? <span className="text-gray-300">—</span>}</span>
+          {row.sapCode && <span className="block text-[10px] text-gray-400">SAP: {row.sapCode}</span>}
+        </>
+      ),
     },
     {
       id: "exp", header: "Exp Qty", width: 80, align: "right", sortable: true,
@@ -1202,16 +1326,30 @@ export default function ScanViewer() {
       },
     },
     {
-      id: "lastScanned", header: "Last Scanned", width: 130, sortable: true,
-      accessor: (row) => row.lastScannedAt,
+      id: "stv",
+      header: "STV",
+      width: 110,
+      sortable: true,
+      accessor: (row) => stvsByBarcode.get(normalize(row.barcode ?? "")) ?? [],
       totalable: false,
-      cellClassName: "text-gray-500 whitespace-nowrap",
-      render: (row) => (row.lastScannedAt ? format(new Date(row.lastScannedAt), "MMM d, yyyy · h:mm a") : <span className="text-gray-300">—</span>),
+      headerClassName: headerBorder,
+      cellClassName: `font-mono text-gray-600 ${cellBorder}`,
+      render: (row) => stvCell(row.barcode),
+    },
+    {
+      id: "orderDate",
+      header: "Order Date",
+      width: 120,
+      sortable: true,
+      accessor: () => viewerOrderDate,
+      totalable: false,
+      cellClassName: "whitespace-nowrap text-gray-500",
+      render: () => fmtOrderDate(viewerOrderDate),
     },
   ];
 
   return (
-    <div ref={pageScrollRef} className={`flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6 ${rotateClass}`}>
+    <div ref={pageScrollRef} className={`flex-1 overflow-y-auto bg-gray-50 p-4 lg:p-6 ${rotateClass || "overflow-x-hidden"}`}>
       <RotateButton />
       {isRotated && (
         <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
@@ -1220,20 +1358,20 @@ export default function ScanViewer() {
       )}
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
 
-        {/* Plant switcher — unboxed, same exact markup/style as the Scan page's own "Active:"
-            switcher (no bordered card wrapper) — scoped to this user's own assigned plants (all
-            plants for admins), not a generic dropdown of every plant in the system. Order
-            Date/Part sit inline right after it, same unboxed treatment. */}
-        {/* Session header — the same band the Scan Order page carries above its tabs: which
-            order this is, which plant, who loaded it, and how far along it is. No Complete
-            button: that writes (it closes the order), and this page is a read-only viewer whose
-            only write is voiding a single mistaken scan. */}
-        {filtersReady && selectedSession && (
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/90">
-              <ScanLine className="h-5 w-5 text-white" />
-            </span>
-            <div className="min-w-0">
+        {/* Session header — combines the plant/date/part CONTROLS (always visible, so they're
+            still there to change even when the chosen plant/date has no order at all) with the
+            rest of the order info (title, loaded-by, timing, progress), which only exists once
+            a session is actually loaded. Previously these were two separate rows; the plant
+            switcher living only in the data-dependent half was what made it disappear on a
+            date with no data — now the controls themselves never depend on selectedSession. */}
+        <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/90">
+            <ScanLine className="h-5 w-5 text-white" />
+          </span>
+          <div className="min-w-0 flex-1">
+            {filtersReady && selectedSession && (
               <p
                 className="truncate text-sm font-bold leading-tight text-gray-900"
                 title={selectedSession.csvFileName}
@@ -1245,35 +1383,122 @@ export default function ScanViewer() {
                   </span>
                 )}
               </p>
-              <p className="mt-1.5 flex items-center gap-1.5 truncate text-xs text-gray-500">
-                {/* Plant switcher, in the header rather than its own strip — same placement as
-                    the Scan Order page's. Picking one snaps the date to that plant's live order. */}
-                <Select value={plant} onValueChange={selectPlant}>
-                  <SelectTrigger className="h-6 w-auto gap-1 rounded-full border-emerald-200 bg-emerald-50 px-2.5 text-[11px] font-semibold text-emerald-800">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                {selectedSession.importedByName && <span>· loaded by {selectedSession.importedByName}</span>}
-              </p>
-            </div>
-            {/* Received progress, right-aligned — same readout as Scan Order's. */}
-            <div className="ml-auto flex shrink-0 items-center gap-2">
-              <div className="h-2 w-28 overflow-hidden rounded-full bg-gray-100">
-                <div
-                  className="h-full rounded-full bg-[#001d6e] transition-[width] duration-300"
-                  style={{ width: `${items.length > 0 ? Math.round((items.filter((i) => (i.totalScannedQty ?? 0) > 0).length / items.length) * 100) : 0}%` }}
-                />
-              </div>
-              <span className="whitespace-nowrap text-xs font-medium text-gray-600">
-                {items.filter((i) => (i.totalScannedQty ?? 0) > 0).length}/{items.length} received
-              </span>
+            )}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
+              {/* Plant switcher — same source/colors the Scan Order page's own switcher uses.
+                  Always rendered (not gated on selectedSession) so it's still usable to change
+                  plants even when the current plant/date combination has no order at all. */}
+              <Select value={plant} onValueChange={selectPlant}>
+                <SelectTrigger
+                  className="h-7 w-auto gap-1 rounded-full text-[11px] font-semibold"
+                  style={(() => {
+                    const cfg = getPlantColorCfg(plant);
+                    return cfg ? { backgroundColor: cfg.bgColor ?? undefined, color: cfg.textColor ?? undefined, borderColor: cfg.borderColor ?? undefined } : undefined;
+                  })()}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {plantOptions.map((p) => {
+                    const cfg = getPlantColorCfg(p);
+                    return (
+                      <SelectItem key={p} value={p}>
+                        <span className="flex items-center gap-1.5">
+                          <span
+                            className="h-2 w-2 shrink-0 rounded-full border"
+                            style={cfg ? { backgroundColor: cfg.bgColor ?? undefined, borderColor: cfg.borderColor ?? undefined } : undefined}
+                          />
+                          {p}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+              {selectedSession?.importedByName && <span>· {selectedSession.importedByName}</span>}
+              {/* Scan start/end — set once each, when the part is activated and when it's
+                  marked complete (order_import_sessions.scanActivatedAt/scanCompletedAt).
+                  Completed only shows once it's actually set; a still-in-progress part just
+                  shows Started. */}
+              {selectedSession?.scanActivatedAt && (
+                <span>· started {format(new Date(selectedSession.scanActivatedAt), "MMM d, h:mm a")}</span>
+              )}
+              {selectedSession?.scanCompletedAt && (
+                <span>· completed {format(new Date(selectedSession.scanCompletedAt), "MMM d, h:mm a")}</span>
+              )}
+              {selectedSession?.scanActivatedAt && selectedSession?.scanCompletedAt && (() => {
+                const totalMinutes = Math.round(
+                  (new Date(selectedSession.scanCompletedAt).getTime() - new Date(selectedSession.scanActivatedAt).getTime()) / 60000,
+                );
+                if (isNaN(totalMinutes) || totalMinutes < 0) return null;
+                const hours = Math.floor(totalMinutes / 60);
+                const minutes = totalMinutes % 60;
+                return <span className="font-semibold text-emerald-600">· active for {hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`}</span>;
+              })()}
             </div>
           </div>
-        )}
+          </div>
+          {/* Received progress, right-aligned — same readout as Scan Order's. 100% only once
+              EVERY real CSV item has reached its own expected quantity, not just "has any
+              qty at all" — a part with several genuinely short items could otherwise show
+              100% the moment every line had SOME quantity in, however small. Synthetic
+              extra-only rows (expectedQty 0 — items scanned as Extra that aren't on this
+              CSV) are excluded from both the numerator and denominator, since they were
+              never part of the order and can never be "complete". Only rendered once a
+              session is actually loaded — there's nothing to show progress on otherwise. */}
+          {filtersReady && selectedSession && (() => {
+            const realItems = items.filter((i) => (i.expectedQty ?? 0) > 0);
+            const fullyDone = realItems.filter((i) => (i.totalScannedQty ?? 0) >= (i.expectedQty ?? 0)).length;
+            const total = realItems.length;
+            const pct = total > 0 ? Math.round((fullyDone / total) * 100) : 0;
+            return (
+              <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto sm:shrink-0">
+                <div className="h-2 flex-1 overflow-hidden rounded-full bg-gray-100 sm:w-28 sm:flex-none">
+                  <div
+                    className={`h-full rounded-full transition-[width] duration-300 ${pct >= 100 && total > 0 ? "bg-emerald-500" : "bg-[#001d6e]"}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className="whitespace-nowrap text-right text-xs font-medium leading-tight">
+                  {pct >= 100 && total > 0 ? (
+                    <span className="inline-flex items-center gap-1 font-semibold text-emerald-600">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Complete
+                    </span>
+                  ) : (
+                    <>
+                      <span className="block text-gray-700">{fullyDone}/{total}</span>
+                      <span className="block text-[10px] font-semibold text-gray-400">{pct}%</span>
+                    </>
+                  )}
+                </span>
+              </div>
+            );
+          })()}
+        </div>
 
+          {/* Which order is being viewed — its own row, so the controls read as controls rather
+              than as part of the sentence above them. */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Input
+              type="date"
+              className="h-8 w-auto rounded-full text-xs"
+              value={date}
+              onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
+            />
+            {sessionOptions.length > 1 && (
+              <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
+                <SelectTrigger className="h-8 w-36 rounded-full text-xs"><SelectValue placeholder="Select part…" /></SelectTrigger>
+                <SelectContent>
+                  {sessionOptions.map((so) => (
+                    <SelectItem key={so.id} value={String(so.id)}>
+                      Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+          </div>
+        </div>
 
         {/* Master View / Part View tabs — same split the Scan Order page has: Master View
             merges every CSV part of this order into one row per item; Part View is this page's
@@ -1304,30 +1529,6 @@ export default function ScanViewer() {
               </button>
             );
           })}
-
-          {/* Order date (and the part picker when an order has several) sit at the right of the
-              tab row — where the Scan Order page puts its STV selector. This page has to choose
-              WHICH order to show, which that page never does: it follows the live session. */}
-          <span className="ml-auto flex items-center gap-1.5">
-            <Input
-              type="date"
-              className="h-9 w-auto rounded-xl text-xs"
-              value={date}
-              onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
-            />
-            {sessionOptions.length > 1 && (
-              <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
-                <SelectTrigger className="h-9 w-36 rounded-xl text-xs"><SelectValue placeholder="Select part…" /></SelectTrigger>
-                <SelectContent>
-                  {sessionOptions.map((so) => (
-                    <SelectItem key={so.id} value={String(so.id)}>
-                      Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </span>
         </div>
 
         {!filtersReady ? (
@@ -1341,111 +1542,95 @@ export default function ScanViewer() {
             No order found for {plant} on {date}.
           </div>
         ) : viewerTab === "part-order" ? (
-          /* Part Order — each CSV of this order on its own, expandable to its rows. Read-only
-             counterpart to the Scan Order page's own Part Order tab. */
+          // Part Order — each CSV part of this order on its own, expandable to its rows. The
+          // read-only counterpart of the Scan Order page's Part Order tab: same card-per-part
+          // layout, minus anything that writes.
           <div className="space-y-2">
-            {sessionOptions.length === 0 ? (
-              <p className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
-                No CSV parts found for {plant} on {date}.
-              </p>
-            ) : sessionOptions.map((sess) => {
-              const isOpen = partExpandedId === sess.id;
-              const rows = isOpen ? (partItemsQuery.data ?? []) : [];
-              const t = rows.reduce(
-                (acc, i) => {
-                  const exp = i.quantity ?? 0;
-                  const done = i.scannedQty ?? 0;
-                  acc.exp += exp;
-                  acc.done += Math.min(done, exp);
-                  acc.left += Math.max(0, exp - done);
-                  acc.extra += i.extraQty ?? 0;
-                  return acc;
-                },
-                { exp: 0, done: 0, left: 0, extra: 0 },
-              );
+            {sessionOptions.map((sess) => {
+              const isOpen = partExpId === sess.id;
               return (
-                <div key={sess.id} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                <div key={sess.id} className="overflow-hidden rounded-xl border bg-white shadow-sm">
                   <button
-                    type="button"
-                    onClick={() => setPartExpandedId(isOpen ? null : sess.id)}
-                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
+                    className="flex w-full items-start justify-between gap-2 px-3 py-2.5 transition-colors hover:bg-gray-50"
+                    onClick={() => { setPartExpId(isOpen ? null : sess.id); setPartSearch(""); }}
                   >
-                    <span className="flex min-w-0 items-center gap-2.5">
-                      <Layers className="h-4 w-4 shrink-0 text-gray-400" />
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-medium text-gray-900">
-                          {sess.csvFileName?.replace(/\.csv$/i, "")}
-                        </span>
-                        <span className="block text-[11px] text-gray-400">
-                          Part {sess.partIndex ?? "—"} · {sess.scanStatus ?? "—"}
-                        </span>
-                      </span>
-                    </span>
+                    <div className="flex min-w-0 items-start gap-2.5">
+                      <Layers className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+                      <div className="min-w-0 text-left">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="truncate text-sm font-semibold text-gray-900">{sess.csvFileName?.replace(/\.csv$/i, "")}</p>
+                          {sess.plant && <PlantBadge plant={sess.plant} />}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-gray-400">
+                          <span className="whitespace-nowrap font-semibold text-gray-600">Part {sess.partIndex ?? "—"}</span>
+                          {sess.scanStatus && <span className="whitespace-nowrap uppercase">{sess.scanStatus}</span>}
+                          {sess.orderDate && <span className="whitespace-nowrap">Order date: {fmtOrderDate(sess.orderDate)}</span>}
+                        </div>
+                      </div>
+                    </div>
                     <ChevronDown className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${isOpen ? "rotate-180" : ""}`} />
                   </button>
 
                   {isOpen && (
-                    <div className="border-t border-gray-200">
-                      {partItemsQuery.isFetching && rows.length === 0 ? (
-                        <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
-                      ) : rows.length === 0 ? (
-                        <p className="py-8 text-center text-sm text-gray-400">No items in this part.</p>
-                      ) : (
-                        <div className="overflow-x-auto">
-                          <table className="w-full min-w-[640px] border-collapse text-sm">
-                            <thead>
-                              <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
-                                <th className="border-r border-gray-300 px-4 py-2.5 font-semibold">Item</th>
-                                {["Exp", "Received", "Left", "Extra"].map((h) => (
-                                  <th key={h} className="border-r border-gray-300 px-3 py-2.5 text-right font-semibold">{h}</th>
-                                ))}
-                                <th className="px-4 py-2.5 text-center font-semibold">Status</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {rows.map((i) => {
-                                const exp = i.quantity ?? 0;
-                                const done = i.scannedQty ?? 0;
-                                const left = Math.max(0, exp - done);
-                                const extra = i.extraQty ?? 0;
-                                const isDone = done >= exp && exp > 0;
-                                const isPartial = done > 0 && !isDone;
-                                return (
-                                  <tr key={i.id} className={`border-b border-gray-200 ${isDone ? "bg-emerald-50/40" : isPartial ? "bg-amber-50/30" : ""}`}>
-                                    <td className="border-r border-gray-200 px-4 py-2.5">
-                                      <p className="font-medium leading-snug text-gray-900">{i.itemName ?? "—"}</p>
-                                      <p className="font-mono text-xs text-gray-400">
-                                        {i.barcode ?? "—"}{i.sapCode && ` · SAP ${i.sapCode}`}
-                                      </p>
-                                    </td>
-                                    <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums text-gray-600">{exp || "—"}</td>
-                                    <td className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold text-gray-900">{done}</td>
-                                    <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${left > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{left || "—"}</td>
-                                    <td className={`border-r border-gray-200 px-3 py-2.5 text-right tabular-nums font-semibold ${extra > 0 ? "text-amber-600" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</td>
-                                    <td className="px-4 py-2.5 text-center">
-                                      <span className={`inline-block px-2.5 py-1 text-xs font-semibold ${
-                                        isDone ? "bg-emerald-100 text-emerald-700"
-                                        : isPartial ? "bg-amber-100 text-amber-700"
-                                        : "bg-gray-100 text-gray-500"}`}>
-                                        {isDone ? "Received" : isPartial ? "Partial" : "Pending"}
-                                      </span>
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                              {/* Totals close each part, same as every other table on this page. */}
-                              <tr className="border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] font-bold text-gray-900">
-                                <td className="border-r border-gray-200 px-4 py-2.5">Total</td>
-                                {([t.exp, t.done, t.left, t.extra] as const).map((v, idx) => (
-                                  <td key={idx} className="border-r border-gray-200 px-3 py-2.5 text-right tabular-nums">
-                                    {v.toLocaleString()}
-                                  </td>
-                                ))}
-                                <td className="px-4 py-2.5" />
-                              </tr>
-                            </tbody>
-                          </table>
+                    <div className="border-t">
+                      <div className="border-b bg-gray-50 px-3 py-2">
+                        <div className="relative">
+                          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+                          <input
+                            value={partSearch}
+                            onChange={(e) => setPartSearch(e.target.value)}
+                            placeholder="Search…"
+                            className="w-full border border-gray-200 bg-white py-1.5 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#001d6e]"
+                          />
                         </div>
+                      </div>
+                      {partItemsQuery.isLoading ? (
+                        <p className="animate-pulse px-3 py-4 text-center text-sm text-gray-400">Loading items…</p>
+                      ) : partItems.length === 0 ? (
+                        <p className="px-3 py-4 text-center text-sm text-gray-400">No items</p>
+                      ) : (
+                        partItems.map((item) => {
+                          const { exp, received, left, extra } = rowState(item);
+                          const ipp = item.itemsPerPallet ?? 0;
+                          const status = item.status ?? "pending";
+                          return (
+                            <div
+                              key={item.id}
+                              className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
+                                status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""}`}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
+                                <p className="mt-0.5 font-mono text-xs text-gray-400">
+                                  {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
+                                </p>
+                                <p className="mt-1.5 text-sm leading-snug">
+                                  <span className="font-bold text-gray-900">{received}</span>
+                                  <span className="text-gray-400">/{exp}</span>{" "}
+                                  <span className="text-gray-400">({pltQty(exp, ipp).toFixed(2)} plt)</span>
+                                  {left > 0 && (
+                                    <>
+                                      <span className="text-gray-300"> · </span>
+                                      <span className="font-semibold text-[#001d6e]">{left} left</span>
+                                    </>
+                                  )}
+                                  {extra > 0 && (
+                                    <>
+                                      <span className="text-gray-300"> · </span>
+                                      <span className="font-semibold text-amber-600">+{extra} extra</span>
+                                    </>
+                                  )}
+                                </p>
+                              </div>
+                              <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                status === "complete" ? "bg-emerald-100 text-emerald-700"
+                                : status === "partial" ? "bg-amber-100 text-amber-700"
+                                : "bg-gray-100 text-gray-500"}`}>
+                                {status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+                              </span>
+                            </div>
+                          );
+                        })
                       )}
                     </div>
                   )}
@@ -1474,7 +1659,7 @@ export default function ScanViewer() {
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {([
                 { key: "", label: "Total", value: totals.expected, plt: totals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                { key: "done", label: "Received", value: totals.done, plt: totals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                { key: "done", label: "Received", value: totals.done + totals.extra, plt: totals.palletsDone + totals.palletsExtra, dot: "bg-emerald-500", text: "text-emerald-600" },
                 { key: "remaining", label: "Remaining", value: totals.remaining, plt: totals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
                 { key: "extra", label: "Extra", value: totals.extra, plt: totals.palletsExtra, dot: "bg-orange-500", text: totals.extra > 0 ? "text-amber-600" : "text-gray-300" },
               ] as const).map((s) => {
@@ -1686,7 +1871,7 @@ export default function ScanViewer() {
               enableZebraStripes
               rowClassName={(row) => {
                 const status = row.status ?? "pending";
-                return status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : undefined;
+                return status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : undefined;
               }}
               renderExpandedRow={() => historyPanel}
               isRowExpandable={(row) => !!row.barcode}
@@ -1743,7 +1928,7 @@ export default function ScanViewer() {
                       return (
                         <Fragment key={item.id}>
                           <tr className={`border-b border-gray-200 ${
-                            status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
+                            status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
                           }`}>
                             <td className="min-w-[180px] max-w-[320px] border-r border-gray-200 px-4 py-2.5">
                               {/* Same click-to-open scan history as the desktop table's Item cell. */}
@@ -1783,10 +1968,11 @@ export default function ScanViewer() {
                             </td>
                             <td className="px-4 py-2.5 text-center">
                               <span className={`inline-block px-2.5 py-1 text-xs font-semibold ${
-                                status === "complete" ? "bg-emerald-100 text-emerald-700"
+                                status === "extra" ? "bg-orange-100 text-orange-700"
+                                : status === "complete" ? "bg-emerald-100 text-emerald-700"
                                 : status === "partial" ? "bg-amber-100 text-amber-700"
                                 : "bg-gray-100 text-gray-500"}`}>
-                                {status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+                                {status === "extra" ? "Extra" : status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
                               </span>
                             </td>
                           </tr>
@@ -1842,7 +2028,7 @@ export default function ScanViewer() {
                       <div
                         key={item.id}
                         className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
-                          status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
+                          status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
                         }`}
                       >
                         <span className="mt-0.5 shrink-0">
@@ -1852,7 +2038,7 @@ export default function ScanViewer() {
                             </span>
                           ) : (
                             <span className={`flex h-7 w-7 items-center justify-center rounded-md border-2 border-dashed ${
-                              status === "partial" ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
+                              status === "extra" ? "border-orange-300 text-orange-500" : status === "partial" ? "border-amber-400 text-amber-500" : "border-gray-300 text-gray-400"
                             }`}>
                               <ScanLine className="h-3.5 w-3.5" />
                             </span>
@@ -1900,10 +2086,11 @@ export default function ScanViewer() {
                         </div>
                         <span className="shrink-0">
                           <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${
-                            status === "complete" ? "bg-emerald-100 text-emerald-700"
+                            status === "extra" ? "bg-orange-100 text-orange-700"
+                            : status === "complete" ? "bg-emerald-100 text-emerald-700"
                             : status === "partial" ? "bg-amber-100 text-amber-700"
                             : "bg-gray-100 text-gray-500"}`}>
-                            {status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+                            {status === "extra" ? "Extra" : status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
                           </span>
                         </span>
                       </div>
@@ -1941,7 +2128,7 @@ export default function ScanViewer() {
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {([
                 { key: "", label: "Total", value: mvTotals.expected, plt: mvTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                { key: "done", label: "Received", value: mvTotals.done, plt: mvTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                { key: "done", label: "Received", value: mvTotals.done + mvTotals.extra, plt: mvTotals.palletsDone + mvTotals.palletsExtra, dot: "bg-emerald-500", text: "text-emerald-600" },
                 { key: "remaining", label: "Remaining", value: mvTotals.remaining, plt: mvTotals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
                 { key: "extra", label: "Extra", value: mvTotals.extra, plt: mvTotals.palletsExtra, dot: "bg-orange-500", text: mvTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
               ] as const).map((s) => {
@@ -1998,6 +2185,8 @@ export default function ScanViewer() {
                 containerClassName="rounded-none border-0"
                 headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                 columns={mvColumns}
+                columnOrder={mvColumnOrder}
+                onColumnOrderChange={setMvColumnOrder}
                 data={mvFiltered}
                 getRowId={(row) => row.barcode ?? row.itemName ?? String(Math.random())}
                 enableZebraStripes

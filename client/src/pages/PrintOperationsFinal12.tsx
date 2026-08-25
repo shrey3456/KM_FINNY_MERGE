@@ -143,7 +143,7 @@ const PrintOperations: React.FC = () => {
       setHasPrintedCurrentSlip(false);
     }
   }, [proformaData?.slip?.orderNumber]);
-  
+
   // Fetch plant config for current slip
   const { data: plantConfig, refetch: refetchPlantConfig } = useQuery<any>({
     queryKey: ['plant', proformaData?.slip?.plant],
@@ -289,7 +289,7 @@ const PrintOperations: React.FC = () => {
       <div style="text-align: center; font-weight: bold; font-size: 10pt; background-color: ${bgColor}; color: ${textColor}; padding: 2px 0; margin-bottom: 1mm; border-radius: 0; border-bottom: 1px solid ${borderColor};">
         KRUPA MARKETING - ${proformaData.slip.plant?.toUpperCase() || ''}
       </div>
-      
+
       <div style="margin-bottom: 0.5mm;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5mm;">
           <div style="display: flex; width: 45px; height: 45px; border-radius: 50%; border: 2px solid #000000; background-color: transparent; color: #000000; font-size: 16pt; font-weight: bold; align-items: center; justify-content: center; flex-shrink: 0;">
@@ -868,9 +868,21 @@ const PrintOperations: React.FC = () => {
           console.log(`Locking previous slip #${proformaData.slip.orderNumber} before searching new one...`);
           await axios.post(`/api/proforma-slips/order/${proformaData.slip.orderNumber}/lock`, {
             printedByCode: currentUser?.userCode,
+            // Tells the server this is the automatic post-print lock, not a deliberate
+            // Lock-button click from the Proforma Slips page — that path only needs read
+            // access to both pages, not write (see requireLockAccess server-side).
+            autoLockFromPrint: true,
           });
           toast({ title: "Locked", description: `Previous slip #${proformaData.slip.orderNumber} locked.` });
-        } catch (err) {
+        } catch (err: any) {
+          // Previously silent (console.error only) — a permission or network failure here
+          // meant the slip just never locked with no indication why. Now surfaced so it's
+          // never an invisible failure again.
+          toast({
+            title: "Failed to lock previous slip",
+            description: err?.response?.data?.message || err?.message || `Could not lock slip #${proformaData.slip.orderNumber} — it may still be printable by others.`,
+            variant: "destructive",
+          });
           console.error('Failed to auto-lock previous slip:', err);
         }
       }
@@ -984,7 +996,7 @@ const PrintOperations: React.FC = () => {
                         </div>
                       );
                     })()}
-                    
+
                     <div style={{ marginBottom: '0.5mm' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5mm' }}>
                         <div style={{ 

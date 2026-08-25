@@ -162,6 +162,10 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
         scanStatus:     orderImportSessions.scanStatus,
         receivingSessionId: orderImportSessions.receivingSessionId,
         partIndex:      orderImportSessions.partIndex,
+        // When this part's scanning actually started/finished — set once each, at /activate and
+        // /complete respectively (see order-scan.ts). Null until each happens.
+        scanActivatedAt: orderImportSessions.scanActivatedAt,
+        scanCompletedAt: orderImportSessions.scanCompletedAt,
         // Ordered totals for this CSV. rowCount alone says how many LINES the file has, which
         // isn't what anyone means by "how big is this order" — these give the quantity and pallet
         // figures, so the list can show them without expanding every session to add them up.
@@ -628,28 +632,36 @@ router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, 
 
     const scope = String(req.query.scope ?? 'part');
 
-    // Resolve which sessions to include + a Part#/file label per session.
+    // Resolve which sessions to include + a Part#/file label per session. scanActivatedAt/
+    // scanCompletedAt travel along here too — start/end/duration for the Activity export's
+    // own summary header, same fields shown on Scan Viewer and included in the Summary reports.
     let sessionIds: number[] = [id];
-    const labelBySession = new Map<number, { partIndex: number | null; csvFileName: string }>();
+    const labelBySession = new Map<number, { partIndex: number | null; csvFileName: string; scanActivatedAt: Date | null; scanCompletedAt: Date | null }>();
 
     if (scope === 'group') {
       const groupId = await resolveGroupId(id) ?? id; // fall back to the session itself
       const parts = await db
-        .select({ id: orderImportSessions.id, partIndex: orderImportSessions.partIndex, csvFileName: orderImportSessions.csvFileName })
+        .select({
+          id: orderImportSessions.id, partIndex: orderImportSessions.partIndex, csvFileName: orderImportSessions.csvFileName,
+          scanActivatedAt: orderImportSessions.scanActivatedAt, scanCompletedAt: orderImportSessions.scanCompletedAt,
+        })
         .from(orderImportSessions)
         .where(and(eq(orderImportSessions.receivingSessionId, groupId), eq(orderImportSessions.isDeleted, false)))
         .orderBy(asc(orderImportSessions.partIndex), asc(orderImportSessions.id));
       if (parts.length > 0) {
         sessionIds = parts.map((p) => p.id);
-        parts.forEach((p) => labelBySession.set(p.id, { partIndex: p.partIndex, csvFileName: p.csvFileName }));
+        parts.forEach((p) => labelBySession.set(p.id, { partIndex: p.partIndex, csvFileName: p.csvFileName, scanActivatedAt: p.scanActivatedAt, scanCompletedAt: p.scanCompletedAt }));
       }
     }
     if (labelBySession.size === 0) {
       const [self] = await db
-        .select({ id: orderImportSessions.id, partIndex: orderImportSessions.partIndex, csvFileName: orderImportSessions.csvFileName })
+        .select({
+          id: orderImportSessions.id, partIndex: orderImportSessions.partIndex, csvFileName: orderImportSessions.csvFileName,
+          scanActivatedAt: orderImportSessions.scanActivatedAt, scanCompletedAt: orderImportSessions.scanCompletedAt,
+        })
         .from(orderImportSessions)
         .where(eq(orderImportSessions.id, id));
-      if (self) { sessionIds = [self.id]; labelBySession.set(self.id, { partIndex: self.partIndex, csvFileName: self.csvFileName }); }
+      if (self) { sessionIds = [self.id]; labelBySession.set(self.id, { partIndex: self.partIndex, csvFileName: self.csvFileName, scanActivatedAt: self.scanActivatedAt, scanCompletedAt: self.scanCompletedAt }); }
     }
 
     const { rows: events } = await pool.query(
@@ -659,7 +671,8 @@ router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, 
               CASE WHEN item_name LIKE 'Empty Box: %' THEN SUBSTRING(item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
               stv, scanned_by_code AS "scannedByCode",
               scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
-              voided, voided_at AS "voidedAt", void_reason AS "voidReason"
+              voided, voided_at AS "voidedAt", void_reason AS "voidReason",
+              is_credit AS "isCredit"
        FROM order_scan_events
        WHERE session_id = ANY($1::int[])
        ORDER BY scanned_at ASC, id ASC`,
@@ -672,7 +685,16 @@ router.get('/order-import/sessions/:id/scan-activity', requireImportViewAccess, 
       csvFileName: labelBySession.get(e.sessionId)?.csvFileName ?? null,
     }));
 
-    res.json({ scope, totalEvents: withLabels.length, events: withLabels });
+    // One row per included session, carrying its own Start/End — the export builds a
+    // Start/End/Duration summary from this instead of from the (potentially very long) event
+    // list itself.
+    const sessions = Array.from(labelBySession.entries()).map(([sid, info]) => ({
+      id: sid, partIndex: info.partIndex, csvFileName: info.csvFileName,
+      scanActivatedAt: info.scanActivatedAt ? info.scanActivatedAt.toISOString() : null,
+      scanCompletedAt: info.scanCompletedAt ? info.scanCompletedAt.toISOString() : null,
+    }));
+
+    res.json({ scope, totalEvents: withLabels.length, events: withLabels, sessions });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch scan activity' });
   }

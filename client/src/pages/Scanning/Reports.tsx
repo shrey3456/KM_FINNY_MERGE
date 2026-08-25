@@ -298,6 +298,9 @@ const Reports = () => {
   const dateIsRange = dateValue.startsWith("r:");
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
   const [dateOpen, setDateOpen] = useState(false);
+  // The calendar half opens separately from the quick-ranges half — two buttons, two
+  // popovers, one shared date value.
+  const [dateCalOpen, setDateCalOpen] = useState(false);
   const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
   const datePresetValue = (key: string): string => {
     const d = new Date();
@@ -316,10 +319,17 @@ const Reports = () => {
 
   const describeSimpleFilter = (field: string, value: string) => {
     if (field === "date") {
-      if (value.startsWith("d:")) return `Scan Date: ${format(new Date(value.slice(2)), "MMM d, yyyy")}`;
+      // Same guard as the range branch below — an empty or malformed date must not throw.
+      if (value.startsWith("d:")) {
+        const d = value.slice(2) ? new Date(value.slice(2)) : null;
+        return `Scan Date: ${d && !isNaN(d.getTime()) ? format(d, "MMM d, yyyy") : "…"}`;
+      }
       if (value.startsWith("r:")) {
         const [, f, t] = value.split(":");
-        const fmt = (s: string) => (s ? format(new Date(s), "MMM d") : "…");
+        const fmt = (s: string) => {
+          const d = s ? new Date(s) : null;
+          return d && !isNaN(d.getTime()) ? format(d, "MMM d") : "…";
+        };
         return `Scan Date: ${fmt(f)} → ${fmt(t)}`;
       }
       return `Scan Date: ${value}`;
@@ -393,16 +403,115 @@ const Reports = () => {
   const [filterPickerOpen, setFilterPickerOpen] = useState(false);
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
+  // The date filter, split so each "+ Filter" entry does one job. Both write the same
+  // activeFilters["date"], so whichever sets it, the other opens on that value.
+  //   Date        — named ranges only (Today, Yesterday, This week, This month)
+  //   Custom date — the calendar: a single date, or a from/to range
+  const dateQuickBody = (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
+        <div className="grid grid-cols-2 gap-1.5">
+          {DATE_PRESETS.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => {
+                const v = datePresetValue(o.value);
+                upsertSimpleFilter("date", v);
+                setDatePickMode(v.startsWith("r:") ? "range" : "single");
+                setDateOpen(false);
+                setFilterPickerOpen(false);
+                setFilterPickerKey("");
+              }}
+              className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  const dateCustomBody = (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-1.5">
+        {(["single", "range"] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => setDatePickMode(m)}
+            className={`rounded-md border px-2 py-1 text-xs font-medium ${
+              datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            {m === "single" ? "Single date" : "Date range"}
+          </button>
+        ))}
+      </div>
+
+      {datePickMode === "single" ? (
+        <div className="space-y-1">
+          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
+          <input
+            type="date"
+            value={fromDate}
+            onChange={(e) => {
+              upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "");
+              if (e.target.value) setDateOpen(false);
+            }}
+            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
+            <input
+              type="date"
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
+              className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
+            <input
+              type="date"
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
+              className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+
+  // Both halves together — what the "Filters (N)" editor shows, since editing an applied date
+  // should offer every way of changing it, not just the calendar.
+  const dateFullBody = (
+    <>
+      {dateCustomBody}
+      {dateQuickBody}
+    </>
+  );
+
   const filterPickerOptions = useMemo(() => {
-    // Date is its own standalone control (below), not part of this "+ Filter" list — same split
-    // as Overall Stock.
-    const dims = [
+    // Date lives here rather than in its own toolbar button, split in two: named ranges under
+    // "Date", the calendar under "Custom date". Both drive the same activeFilters["date"].
+    const dims: { key: string; label: string; icon?: typeof CalendarDays }[] = [
       { key: "scanner", label: "Scanned By" },
       { key: "type", label: "Type" },
       ...filterableColumns.map((c) => ({ key: c.id, label: c.label })),
     ];
     const isActive = (key: string) =>
-      ["scanner", "type"].includes(key)
+      ["date", "date-custom"].includes(key) ? false
+        : ["scanner", "type"].includes(key)
         ? activeFilters.some((f) => f.field === key)
         : !!columnConditions[key];
     // Already-filtered columns are left OUT of this list: "+ Filter" adds a new one, while
@@ -501,7 +610,24 @@ const Reports = () => {
   // loaded the entire filtered history instead (walking it 100 rows at a time, in sequence, while
   // a 5s poll restarted the walk) and took ~20s to show anything — pagination is what made it
   // about a second, so it's back.
-  useEffect(() => { setHistoryPage(1); }, [selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+  //
+  // Resetting historyPage via a plain effect (the previous approach) ran one render AFTER the
+  // filter actually changed — so the render in between still queried with the OLD page number
+  // against the NEW filters. Page 3 of a brand-new filtered set usually doesn't exist, so that
+  // request came back genuinely empty, which placeholderData can't paper over (it's a real
+  // successful response, not a stale one) — hence the "No events found" flash before the
+  // corrected page-1 request landed a moment later. Comparing a signature of the filter values
+  // at render time (not in an effect) means the very first render after a filter change already
+  // computes page 1 for the query, so that wrong intermediate request never happens at all.
+  const historyFilterSignature = JSON.stringify([selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+  const lastHistoryFilterSignatureRef = useRef(historyFilterSignature);
+  const effectiveHistoryPage = historyFilterSignature !== lastHistoryFilterSignatureRef.current ? 1 : historyPage;
+  useEffect(() => {
+    if (historyFilterSignature !== lastHistoryFilterSignatureRef.current) {
+      lastHistoryFilterSignatureRef.current = historyFilterSignature;
+      setHistoryPage(1);
+    }
+  }, [historyFilterSignature]);
 
   // Keep the saved copy in step with what's applied, so coming back to this page restores it. The
   // page number isn't saved — a filtered report should reopen at the top of its results.
@@ -520,7 +646,7 @@ const Reports = () => {
     }
   }, [historySearch, activeFilters, columnConditions]);
 
-  const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
+  const historyOffset = (effectiveHistoryPage - 1) * HISTORY_PAGE_SIZE;
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
     from:    fromDate       || undefined,
     to:      toDate         || undefined,
@@ -536,13 +662,21 @@ const Reports = () => {
     useQuery<ScanHistoryResponse>({
       queryKey: [
         "/api/scan-sessions/reports/scan-history",
-        selectedDate, historySearch, historyScanner, historyType, filtersJson, historyPage,
+        selectedDate, historySearch, historyScanner, historyType, filtersJson, effectiveHistoryPage,
       ],
       queryFn: async () => {
         const r = await apiRequest("GET", historyUrl, undefined, false, true);
         return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
       },
-      refetchInterval: 5000,
+      // Only auto-polls on page 1. This page sorts newest-first, and new scans keep landing at
+      // the top in a busy warehouse — every new one pushes page 2+'s fixed OFFSET window down
+      // by one, so on page 2+ the 5s poll was fighting the live insert order: the total crossing
+      // the page boundary between polls made that page flip between having rows and being empty
+      // ("No events found" for a moment, then real rows, repeating) even though nothing was
+      // actually wrong. Page 1 doesn't have this problem — new rows only ever ADD to its front,
+      // never shift what's already showing out of the window — so it's the only page safe to
+      // keep live.
+      refetchInterval: effectiveHistoryPage === 1 ? 5000 : false,
       placeholderData: (previousData) => previousData,
     });
 
@@ -795,7 +929,7 @@ const Reports = () => {
 
   return (
     <>
-    <div className="flex-1 overflow-y-auto p-4 lg:p-6">
+    <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
         <PageHeader
           icon={History}
@@ -833,19 +967,25 @@ const Reports = () => {
                 placeholder="Item, barcode, or scanner…"
               />
 
-              {/* Standalone Scan Date control — sits BEFORE "+ Filter", same as Overall Stock.
-                  Single date or from/to range (both editable) plus quick-range presets; filters
-                  scan date (scannedAt) — when a box was physically scanned, not the order's own
-                  date (see the separate Order Date control right after this one). */}
-              <Popover open={dateOpen} onOpenChange={(o) => { setDateOpen(o); if (o) { setDatePickMode(dateIsRange ? "range" : "single"); } }}>
+
+
+            {/* Two buttons, one filter. "Filter by date" offers ONLY the named ranges
+                (Today / Yesterday / This week / This month); "Calendar" is where a single date or a
+                from/to range is picked. Both write the same value, so each reflects the other.
+                Deliberately not the shared SingleDateFilter: that offers Today/Tomorrow/Yesterday and
+                is single-date only, so it can express neither of those two requirements. */}
+            <div className="flex items-center gap-1">
+              <Popover open={dateOpen} onOpenChange={setDateOpen}>
                 <PopoverTrigger asChild>
                   <Button
                     size="sm"
                     variant="outline"
-                    className={`h-8 gap-1 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+                    className={`h-8 gap-1.5 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
                   >
                     <CalendarDays className="h-3.5 w-3.5" />
-                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Scan Date: ", "") : "Scan Date"}
+                    {/* Shows what's actually applied — a single date, or "from – to" for a
+                        range — so the filter is readable without opening either panel. */}
+                    {dateValue ? describeSimpleFilter("date", dateValue).replace("Scan Date: ", "") : "Filter by date"}
                     {dateValue && (
                       <span
                         role="button"
@@ -858,102 +998,26 @@ const Reports = () => {
                     )}
                   </Button>
                 </PopoverTrigger>
-                {/* align="end" + avoidCollisions={false}: box anchors to the button's right edge
-                    and never re-positions as its height changes while picking — stays put. */}
                 <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {(["single", "range"] as const).map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => setDatePickMode(m)}
-                          className={`rounded-md border px-2 py-1 text-xs font-medium ${
-                            datePickMode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
-                          }`}
-                        >
-                          {m === "single" ? "Single date" : "Date range"}
-                        </button>
-                      ))}
-                    </div>
-
-                    {datePickMode === "single" ? (
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
-                        <input
-                          type="date"
-                          value={fromDate}
-                          onChange={(e) => {
-                            upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "");
-                            if (e.target.value) setDateOpen(false);
-                          }}
-                          className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                        />
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="space-y-1">
-                          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
-                          <input
-                            type="date"
-                            value={fromDate}
-                            max={toDate || undefined}
-                            onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
-                            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
-                          <input
-                            type="date"
-                            value={toDate}
-                            min={fromDate || undefined}
-                            onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
-                            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        {DATE_PRESETS.map((o) => (
-                          <button
-                            key={o.value}
-                            type="button"
-                            onClick={() => {
-                              const v = datePresetValue(o.value);
-                              upsertSimpleFilter("date", v);
-                              setDatePickMode(v.startsWith("r:") ? "range" : "single");
-                              setDateOpen(false);
-                            }}
-                            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
-                          >
-                            {o.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {dateValue && (
-                      <div className="flex items-center justify-end pt-1">
-                        <button
-                          type="button"
-                          onClick={() => { clearSimpleFilter("date"); setDateOpen(false); }}
-                          className="text-[11px] text-red-500 hover:underline"
-                        >
-                          Clear date
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                  {dateQuickBody}
                 </PopoverContent>
               </Popover>
 
+              <Popover open={dateCalOpen} onOpenChange={(o) => { setDateCalOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
+                <PopoverTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-8 rounded-md border-gray-300 text-xs font-medium text-gray-500 hover:bg-gray-50">
+                    Calendar
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+                  {dateCustomBody}
+                </PopoverContent>
+              </Popover>
+            </div>
 
-              {/* One unified "+ Filter" — Scanned By, Type, Plant, and every generic column in the
-                  same searchable list, same pattern as Overall Stock. (Date is its own control.) */}
+
+              {/* One unified "+ Filter" — Scanned By, Type, Plant and every generic column in
+                  the same searchable list. Date has its own pair of buttons above. */}
               <Popover
                 open={filterPickerOpen}
                 onOpenChange={(open) => {
@@ -995,11 +1059,18 @@ const Reports = () => {
                               onClick={() => setFilterPickerKey(d.key)}
                               className="block w-full rounded px-2 py-1.5 text-left text-xs text-gray-700 hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
                             >
-                              {d.label}
+                                {d.label}
                             </button>
                           ))
                         )}
                       </div>
+                    </div>
+                  ) : filterPickerKey === "date" || filterPickerKey === "date-custom" ? (
+                    <div className="space-y-3">
+                      <button type="button" onClick={() => setFilterPickerKey("")} className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600">
+                        <ChevronLeft className="h-3 w-3" /> Back
+                      </button>
+                      {filterPickerKey === "date" ? dateQuickBody : dateCustomBody}
                     </div>
                   ) : filterPickerKey === "scanner" ? (
                     <div className="space-y-3">
@@ -1095,39 +1166,10 @@ const Reports = () => {
                           </div>
                         )}
                         {editFilterKey === "date" && (
-                          <div className="space-y-2">
-                            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                              {dateIsRange ? "Date range" : "Date"}
-                            </label>
-                            {dateIsRange ? (
-                              <div className="grid grid-cols-2 gap-2">
-                                <input
-                                  type="date"
-                                  value={fromDate}
-                                  max={toDate || undefined}
-                                  onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
-                                  className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                                />
-                                <input
-                                  type="date"
-                                  value={toDate}
-                                  min={fromDate || undefined}
-                                  onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
-                                  className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                                />
-                              </div>
-                            ) : (
-                              <input
-                                type="date"
-                                value={fromDate}
-                                onChange={(e) => upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "")}
-                                className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-                              />
-                            )}
-                            <p className="text-[10px] text-gray-400">
-                              Switch between a single date and a range from the Scan Date button above.
-                            </p>
-                          </div>
+                          // The complete control, not just the inputs: the single/range toggle and
+                          // the quick ranges belong here too, so editing an applied date offers
+                          // everything setting it did.
+                          <>{dateFullBody}</>
                         )}
                       </div>
                     ) : editFilterColumn ? (
@@ -1258,7 +1300,9 @@ const Reports = () => {
           }
         >
           <DataTable<ScanHistoryItem>
-            className="space-y-0"
+            // Below 480px the card list below replaces this table — thirteen columns on a phone
+            // means reading every row by scrolling sideways, same split the Scan pages use.
+            className="space-y-0 hidden min-[480px]:block landscape:block"
             containerClassName="rounded-none border-0"
             columns={historyColumns}
             data={historyItems}
@@ -1316,6 +1360,79 @@ const Reports = () => {
               </tfoot>
             )}
           />
+
+          {/* Mobile card list — the narrow-screen counterpart to the table: each scan's fields
+              stacked as labelled lines, so nothing depends on horizontal scrolling. */}
+          <div className="min-[480px]:hidden landscape:hidden">
+            {historyLoading ? (
+              <p className="py-10 text-center text-sm text-gray-400">Loading scan history…</p>
+            ) : historyItems.length === 0 ? (
+              <p className="py-10 text-center text-sm text-gray-400">No scan events found.</p>
+            ) : (
+              historyItems.map((row) => (
+                <div
+                  key={row.id}
+                  className={`border-b border-gray-100 px-4 py-3 ${
+                    row.isExchange ? "bg-purple-50/60"
+                    : row.isEmptyBox ? "bg-orange-50/60"
+                    : row.voided ? "bg-gray-50 opacity-60"
+                    : row.isExtra ? "bg-amber-50/60" : ""}`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className={`text-[15px] font-semibold leading-snug text-gray-900 ${row.voided ? "line-through" : ""}`}>
+                        {row.itemName ?? "—"}
+                      </p>
+                      <p className="mt-0.5 font-mono text-xs text-gray-400">{row.barcode ?? "—"}</p>
+                    </div>
+                    {row.plant && <PlantBadge plant={row.plant} />}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                    <span>
+                      <span className="text-gray-400">Qty </span>
+                      <span className="font-bold tabular-nums text-gray-900">{(row.totalQty ?? 0).toLocaleString()}</span>
+                    </span>
+                    {row.pallets != null && Number(row.pallets) > 0 && (
+                      <span>
+                        <span className="text-gray-400">Pallets </span>
+                        <span className="font-bold tabular-nums text-[#001d6e]">{parseFloat(String(row.pallets)).toFixed(2)}</span>
+                      </span>
+                    )}
+                    {row.stv && (
+                      <span>
+                        <span className="text-gray-400">STV </span>
+                        <span className="font-medium text-gray-700">{row.stv}</span>
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-400">
+                    {row.scannedByName ?? "—"} · {format(new Date(row.scannedAt), "MMM d, yyyy · h:mm a")}
+                  </p>
+                  {row.voided && (
+                    <p className="mt-1 text-[11px] font-semibold uppercase text-red-500">
+                      Voided{row.voidReason ? ` · ${row.voidReason}` : ""}
+                    </p>
+                  )}
+                </div>
+              ))
+            )}
+
+            {/* The table's pager lives in its <tfoot>, which is hidden with the table — so the
+                card list needs its own or a phone can only ever see page 1. */}
+            <div className="flex items-center justify-between gap-2 border-t border-gray-200 px-4 py-3">
+              <span className="text-xs text-gray-500">
+                {historyTotal > 0
+                  ? `${(historyOffset + 1).toLocaleString()}–${Math.min(historyOffset + historyItems.length, historyTotal).toLocaleString()} of ${historyTotal.toLocaleString()}`
+                  : "No events"}
+              </span>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" className="h-8 rounded-xl" disabled={historyPage <= 1}
+                  onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
+                <Button variant="outline" size="sm" className="h-8 rounded-xl" disabled={!historyHasMore}
+                  onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
+              </div>
+            </div>
+          </div>
         </TableCard>
       </div>
     </div>
