@@ -3461,7 +3461,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             <div className={`grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white ${bigView ? "text-base" : ""}`}>
               {([
                 { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, text: "text-gray-900" },
-                { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, text: "text-emerald-600" },
+                { key: "done", label: "Received", value: displayTotals.done + displayTotals.extra, plt: displayTotals.palletsDone + displayTotals.palletsExtra, text: "text-emerald-600" },
                 { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, text: "text-red-600" },
                 { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
               ] as const).map((s) => {
@@ -4493,7 +4493,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {([
                     { key: "", label: "Total", value: displayTotals.expected, plt: displayTotals.palletsExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                    { key: "done", label: "Received", value: displayTotals.done, plt: displayTotals.palletsDone, dot: "bg-emerald-500", text: "text-emerald-600" },
+                    { key: "done", label: "Received", value: displayTotals.done + displayTotals.extra, plt: displayTotals.palletsDone + displayTotals.palletsExtra, dot: "bg-emerald-500", text: "text-emerald-600" },
                     { key: "remaining", label: "Remaining", value: displayTotals.remaining, plt: displayTotals.palletsRemaining, dot: "bg-red-500", text: "text-red-600" },
                     { key: "extra", label: "Extra", value: displayTotals.extra, plt: displayTotals.palletsExtra, dot: "bg-orange-500", text: displayTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
                   ] as const).map((s) => {
