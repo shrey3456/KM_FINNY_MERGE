@@ -91,6 +91,17 @@ type HistoryEvent = {
 
 const normalize = (v?: string | null) => String(v ?? "").trim().toLowerCase();
 
+// Most-recently-scanned first, so a freshly scanned item surfaces at the top the way it does on
+// the Scan Order page. Only the server timestamp applies here — this page never scans, so there's
+// no client-side "I just scanned this" tier to blend in. Never-scanned rows keep their original
+// order (return 0) rather than being shuffled.
+const byRecency = (a: { lastScannedAt: string | null }, b: { lastScannedAt: string | null }) => {
+  const at = a.lastScannedAt ? new Date(a.lastScannedAt).getTime() : 0;
+  const bt = b.lastScannedAt ? new Date(b.lastScannedAt).getTime() : 0;
+  return at === bt ? 0 : bt - at;
+};
+
+
 /** "2026-08-03" → "03 Aug 2026" — how the Scan Order header renders an order date. */
 function fmtOrderDate(value: string | null): string {
   if (!value) return "—";
@@ -378,7 +389,7 @@ export default function ScanViewer() {
         }
       });
     });
-    return Array.from(groups.values());
+    return Array.from(groups.values()).sort(byRecency);
   }, [mvQuery.data]);
 
   const itemsQuery = useQuery<OsScanItem[]>({
@@ -552,7 +563,7 @@ export default function ScanViewer() {
       status: 'extra',
       lastScannedAt: null,
     }));
-  const items = [...realItems, ...extraOnlyItems];
+  const items = [...realItems, ...extraOnlyItems].sort(byRecency);
 
   const rowState = (item: OsScanItem) => {
     const exp = item.expectedQty ?? 0;
