@@ -482,7 +482,7 @@
         <div class="page-head"><h3>What this is</h3></div>
         <p class="page-purpose">One system covering the whole path from "an order lands" to "the truck is dispatched with the right paperwork."</p>
         <ol class="steps">
-          <li>A CSV order (one file per part of a delivery) gets uploaded on the <strong>Order Management</strong> page.</li>
+          <li>A CSV order (one file per part of a delivery) gets uploaded on the <strong>Order Management</strong> page. Each session's own Reports dialog (Summary / Activity / Hourly) becomes available as soon as scanning starts producing data — Hourly buckets scans into rolling 1-hour windows from the session's real start time, expandable per hour and downloadable whole or one hour at a time.</li>
           <li>Warehouse staff scan barcodes against it on the <strong>Scan Order</strong> page as boxes physically arrive — the system tracks Expected vs. Received vs. Extra per item, in real time, across every device scanning against the same order.</li>
           <li><strong>Scan Viewer</strong> is a read-only sibling of Scan Order — pick any plant and any order date, including already-completed ones, to see that order's scan progress without touching live scanning. Void is available there too, but only under its own, separately-granted permission.</li>
           <li><strong>Overall Stock</strong> shows the live, per-plant running stock total that every scan feeds into, alongside what was ordered (Expected) and what's actually been sold (Sale, from Proforma Slips) for the same barcode.</li>

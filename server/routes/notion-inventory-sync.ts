@@ -1,4 +1,4 @@
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router, Request, Response } from 'express';
 import path from 'path';
 import {
   detectChangesFromNotion,
@@ -12,20 +12,9 @@ import {
   PRODUCT_IMAGE_DIR,
 } from '../services/notionInventorySync';
 import { storage } from '../storage';
+import { requireAdminRole } from '../lib/pageAccess';
 
 const router = Router();
-
-function requireAdminRole(req: Request, res: Response, next: NextFunction) {
-  if (!req.isAuthenticated()) {
-    return res.status(401).json({ success: false, message: 'Not authenticated' });
-  }
-  const user = req.user as any;
-  const role = (user?.role ?? '').toLowerCase();
-  if (role !== 'admin' && role !== 'super-admin') {
-    return res.status(403).json({ success: false, message: 'Admin access required' });
-  }
-  next();
-}
 
 router.use('/notion-inventory-sync', requireAdminRole);
 

@@ -292,7 +292,7 @@ export function getUserPlants(user: any): string[] | null {
 // source of a "defined" pallet size. Deliberately does NOT fall back to itemsPerPallet
 // ("Packets" in the Product Master UI) or the generic "pallets" column — those are a
 // different concept from a real pallet size and are no longer treated as equivalent to one.
-function getPalletSize(product: any, state: string | null): number {
+export function getPalletSize(product: any, state: string | null): number {
   const s = (state ?? '').toUpperCase();
   if (s === 'GJ') return Number(product.gjPlt) || 0;
   if (s === 'MP') return Number(product.mpPlt) || 0;
@@ -303,7 +303,7 @@ function getPalletSize(product: any, state: string | null): number {
 // item is treated as exactly ONE pallet sized to its own expected quantity (whatever qty is
 // being converted at this call site — CSV expected qty, live order qty, etc.) rather than
 // silently defaulting to 1-unit-per-pallet or guessing from the product name.
-function resolvePalletSizeOrQty(
+export function resolvePalletSizeOrQty(
   product: { gjPlt?: number | null; mpPlt?: number | null } | null,
   state: string | null,
   expectedQty: number,
@@ -316,7 +316,7 @@ function resolvePalletSizeOrQty(
 // Resolves a plant name to its Indian-state short code (plants.state, e.g. "GJ"/"MP") — pallet
 // size lives per-state on products (gjPlt/mpPlt), not per-plant, so every pallet-size lookup
 // needs this first. One query per call site (the plant doesn't change per-row), not per item.
-async function getPlantStateCode(client: any, plantName: string): Promise<string | null> {
+export async function getPlantStateCode(client: any, plantName: string): Promise<string | null> {
   if (!plantName) return null;
   const { rows } = await client.query(
     `SELECT state FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`,

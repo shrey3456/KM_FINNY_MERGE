@@ -350,6 +350,17 @@ export const proformaSlips = pgTable("proforma_slips", {
   printedByName: text("printed_by_name"),
   printedAt: timestamp("printed_at"),
   printCount: integer("print_count").default(0),
+  // Set once the Loading page's item-scanning is done for this order — either automatically
+  // (every proforma_slip_item's expected qty fully matched by loadingScanEvents) or manually via
+  // the Complete button (same "force it even if not everything is loaded" allowance Order Scan
+  // gives a non-loader/helper/driver/scanner designation). Null while loading is still open.
+  loadingCompletedAt: timestamp("loading_completed_at"),
+  loadingCompletedByCode: text("loading_completed_by_code"),
+  // Whoever most recently linked/changed the vehicle on the Loading page — once set, only this
+  // user or an admin/super-admin may change the assignment again (server-enforced in
+  // server/routes/loading.ts's /link-vehicle, not just hidden client-side). Anyone with write
+  // access to Loading may still perform the FIRST assignment (this column starts null).
+  vehicleAssignedByCode: text("vehicle_assigned_by_code"),
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
@@ -359,11 +370,15 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
   totalQuantity: true, totalVolume: true, vehicleNumber: true, driverName: true,
   createdByCode: true, notes: true, isBackedUp: true, isPrintLocked: true,
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
+  loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,
 });
 
 // IMPORTANT: All fields below are IMMUTABLE SNAPSHOTS of product data at import
 // time. They must NEVER be updated after the slip is created, even if the live
-// product record changes later.
+// product record changes later — EXCEPT via an explicit "edit SKU" action (Proforma
+// Slips page, PUT /api/proforma-slip-items/:id with a new productId), which
+// re-snapshots every field below from the newly-picked product on purpose, since
+// that's a correction to a wrong line, not a passive product-master update.
 export const proformaSlipItems = pgTable("proforma_slip_items", {
   id: serial("id").primaryKey(),
   proformaSlipId: integer("proforma_slip_id").references(() => proformaSlips.id),
@@ -393,6 +408,83 @@ export type ProformaSlip = typeof proformaSlips.$inferSelect;
 export type InsertProformaSlip = z.infer<typeof insertProformaSlipSchema>;
 export type ProformaSlipItem = typeof proformaSlipItems.$inferSelect;
 export type InsertProformaSlipItem = z.infer<typeof insertProformaSlipItemSchema>;
+
+// ============================================================================
+// LOADING RECORDS
+// Purpose : One row per completed "link a vehicle to a proforma slip" action on the Loading
+//           page (server/routes/loading.ts) — a history log of who loaded which order onto
+//           which vehicle, and when. Fields are snapshots at the moment of linking (party
+//           name, plant, RTO, volume), not live joins, so this history stays accurate even
+//           if the proforma or the vehicle record changes later.
+// Used by : Loading page (/loading) — its landing table, scoped to the current user unless
+//           they're admin/super-admin (see requirePageAccess('loading') + server-side filter).
+// ============================================================================
+
+export const loadingRecords = pgTable("loading_records", {
+  id: serial("id").primaryKey(),
+  orderNumber: text("order_number").notNull(),
+  proformaSlipId: integer("proforma_slip_id"),
+  partyName: text("party_name"),
+  plant: text("plant"),
+  vehicleNumber: text("vehicle_number").notNull(),
+  rtoNumber: text("rto_number"),
+  volume: text("volume"),
+  createdByCode: text("created_by_code").references(() => users.userCode),
+  createdByName: text("created_by_name"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertLoadingRecordSchema = createInsertSchema(loadingRecords).pick({
+  orderNumber: true, proformaSlipId: true, partyName: true, plant: true,
+  vehicleNumber: true, rtoNumber: true, volume: true, createdByCode: true, createdByName: true,
+});
+
+export type LoadingRecord = typeof loadingRecords.$inferSelect;
+export type InsertLoadingRecord = z.infer<typeof insertLoadingRecordSchema>;
+
+// ============================================================================
+// LOADING SCAN EVENTS
+// Purpose : Per-scan audit trail for the Loading page's item-loading step — mirrors
+//           order_scan_events' role for Order Scan, one row per confirmed barcode scan while
+//           physically loading a proforma slip's items onto the linked vehicle. This is what
+//           actually decrements product_plant_stock/stock_movements (type 'dispatch') — a real,
+//           scan-verified removal, not a passive estimate from the slip's planned quantity.
+// Used by : Loading page (/loading).
+// ============================================================================
+
+export const loadingScanEvents = pgTable("loading_scan_events", {
+  id: serial("id").primaryKey(),
+  orderNumber: text("order_number").notNull(),
+  proformaSlipId: integer("proforma_slip_id"),
+  barcode: text("barcode").notNull(),
+  itemName: text("item_name"),
+  sapCode: text("sap_code"),
+  pallets: real("pallets").default(0),
+  looseQty: integer("loose_qty").default(0),
+  totalQty: integer("total_qty").default(0),
+  isExtra: boolean("is_extra").default(false), // scanned beyond this item's proforma quantity
+  plant: text("plant"),
+  scannedByCode: text("scanned_by_code").references(() => users.userCode),
+  scannedByName: text("scanned_by_name"),
+  scannedAt: timestamp("scanned_at").defaultNow(),
+  // Void — same "keep it in history, reverse the stock, mark it" pattern as order_scan_events'
+  // voided/voidedByCode/voidedAt/voidReason (server/routes/order-scan.ts). Voiding here reverses
+  // the opposite direction (adds stock back to product_plant_stock instead of subtracting it),
+  // since a loading scan removed stock rather than added it. See POST /api/loading/events/:id/void.
+  voided: boolean("voided").default(false),
+  voidedByCode: text("voided_by_code").references(() => users.userCode),
+  voidedAt: timestamp("voided_at"),
+  voidReason: text("void_reason"),
+});
+
+export const insertLoadingScanEventSchema = createInsertSchema(loadingScanEvents).pick({
+  orderNumber: true, proformaSlipId: true, barcode: true, itemName: true, sapCode: true,
+  pallets: true, looseQty: true, totalQty: true, isExtra: true, plant: true,
+  scannedByCode: true, scannedByName: true,
+});
+
+export type LoadingScanEvent = typeof loadingScanEvents.$inferSelect;
+export type InsertLoadingScanEvent = z.infer<typeof insertLoadingScanEventSchema>;
 
 // ============================================================================
 // LOAD OPERATIONS  (GJ / Truck Loading Jobs)
@@ -672,18 +764,63 @@ export type PlantStv = typeof plantStvs.$inferSelect;
 export type InsertPlantStv = z.infer<typeof insertPlantStvSchema>;
 
 // ============================================================================
-// VEHICLE INFO
-// Purpose : Registry of company vehicles with their RTO numbers.
-//           Provides an autocomplete source for the vehicle number field
-//           in Proforma Slips and Load Operations.
-// Used by : Proforma Slips page, Load Operations page, Settings.
+// VEHICLE MASTER (vehicle_info table)
+// Purpose : Registry of company vehicles, mirrored from Notion the same way Product Master
+//           mirrors the product catalog (see notionPageId + server/services/notionVehicleSync.ts).
+//           Field names below are confirmed against the real Notion database schema (via a
+//           one-off schema-inspection run against NOTION_VEHICLE_DATABASE_ID) — several of the
+//           Notion columns are formulas that just re-derive a simpler underlying field (e.g.
+//           "RTO Number :" is a formula wrapping "Link to RTO No. :"; "Volume" wraps "Vol ";
+//           "Vehicle %" wraps "Vehi %") — this table stores the raw underlying value, not the
+//           formatted formula output. Three relation properties (VEHICLE FILE MANAGEMENT,
+//           ORDER{CURRENT}, ORDER {BKUP}...) have no title rollup to read text from, so their
+//           columns stay unpopulated by sync — kept for a future manual/rollup-backed use.
+// Used by : Vehicle Master page (/vehicle-master).
 // ============================================================================
 
 export const vehicleInfo = pgTable("vehicle_info", {
   id: serial("id").primaryKey(),
+  notionPageId: text("notion_page_id"), // Notion page.id — drives detect/apply sync matching, like products.notionPageId
+
+  // Identity
   srNo: integer("sr_no").notNull(),
-  rtoNumber: text("rto_number").notNull(),
-  vehicleNumber: text("vehicle_number").notNull().unique(),
+  vehicleNumber: text("vehicle_number").notNull().unique(), // Notion: "Vehicle No. :" (title)
+  rtoNumber: text("rto_number"), // Notion: "Link to RTO No. :" (plain text, despite the "Link to" name — not a relation)
+  series: text("series"),
+
+  // Vehicle details
+  companyType: text("company_type"), // Notion: "Company Type :" — a short prefix code (e.g. "T-"), distinct from Company below
+  acTruckUrl: text("ac_truck_url"), // Notion: "AC Track :" — a URL property (a document/photo link), not a yes/no
+  company: text("company"),
+  manufacturer: text("manufacturer"),
+  modelYear: text("model_year"),
+  engine: text("engine"),
+  volume: real("volume"), // Notion: "Vol " (note trailing space in the real property name)
+  vehiclePercent: real("vehicle_percent"), // Notion: "Vehi %"
+
+  // GPS
+  gps: text("gps"),
+  forGps: text("for_gps"),
+
+  // Driver
+  driver: text("driver"),
+  recordDriver: text("record_driver"), // Notion: "Dri Records :"
+
+  // Plant / status / ops
+  plant: text("plant"),
+  status: text("status"),
+  remark: text("remark"),
+  vehicleFitness: text("vehicle_fitness"), // Notion: "VEHICLE FILE MANAGEMENT" — relation, no rollup; stays unpopulated by sync
+
+  // Rollups / formulas
+  latestEntry: text("latest_entry"),
+  latestOrder: text("latest_order"),
+  linkToVehicle: text("link_to_vehicle"), // Notion: "Link to Vehicle No. :" — a composite display label, e.g. "T-578 {CG-04-QK-7186}"
+  orderCurrent: text("order_current"), // Notion: "ORDER{CURRENT}" — relation, no rollup; stays unpopulated by sync
+  orderBackup: text("order_backup"), // Notion: "ORDER {BKUP} - DATABASE (Vehi No. :)" — relation, no rollup; stays unpopulated by sync
+
+  // Audit — who last touched this row (a manual edit, or whoever clicked "Apply" on a Notion
+  // sync run that changed it), so the page can show a real name, not a raw code.
   lastEditedByCode: text("last_edited_by_code").references(() => users.userCode),
   lastEditedAt: timestamp("last_edited_at").defaultNow(),
   createdByCode: text("created_by_code").references(() => users.userCode),
@@ -691,7 +828,11 @@ export const vehicleInfo = pgTable("vehicle_info", {
 });
 
 export const insertVehicleInfoSchema = createInsertSchema(vehicleInfo).pick({
-  srNo: true, rtoNumber: true, vehicleNumber: true,
+  notionPageId: true, srNo: true, vehicleNumber: true, rtoNumber: true, series: true,
+  companyType: true, acTruckUrl: true, company: true, manufacturer: true, modelYear: true, engine: true,
+  volume: true, vehiclePercent: true, gps: true, forGps: true, driver: true, recordDriver: true,
+  plant: true, status: true, remark: true, vehicleFitness: true,
+  latestEntry: true, latestOrder: true, linkToVehicle: true, orderCurrent: true, orderBackup: true,
   lastEditedByCode: true, createdByCode: true,
 });
 

@@ -51,6 +51,9 @@ type ScanHistoryItem = {
   isExtra: boolean;
   isEmptyBox?: boolean;
   isExchange?: boolean;
+  // Loading page's item-scanning history (server/routes/loading.ts) — a real stock removal onto
+  // a vehicle for a proforma order, distinct from a receiving scan (isExchange stays false here).
+  isDispatch?: boolean;
   emptyBoxNote?: string | null;
   stv: string | null;
   scannedByCode: string | null;
@@ -89,7 +92,7 @@ const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hove
 // Column ids that can be hidden via the column-visibility toggle — mirrors historyColumns
 // below. "#", Scanned By, Item and Void always stay visible (hideable: false there), so they
 // don't need to be included/excluded here — DataTable adds them back regardless.
-const HISTORY_OPTIONAL_COLUMNS = ["barcode", "order", "plant", "qty", "pallets", "stv", "type", "time"] as const;
+const HISTORY_OPTIONAL_COLUMNS = ["barcode", "orderNumber", "order", "plant", "qty", "pallets", "stv", "type", "time"] as const;
 
 // Rows per request. One page per view keeps the load to a single query — see the note on the
 // query below for why this page is paginated rather than loading the whole history.
@@ -221,6 +224,11 @@ function SimpleFilterHeaderButton({
 
 const ALL_NOTION_COLUMNS = ["#", "Scanned By", "Code", "Item", "Barcode", "Order", "Plant", "Qty", "Pallets", "STV", "Type", "Time"] as const;
 
+// A dispatch row's combined-table id is (3000000000 + loading_scan_events.id) — see
+// SCAN_HISTORY_COMBINED_SOURCE in server/routes/scan-sessions.ts, kept out of the other two
+// sources' id space in the same UNION. The Load Event void endpoint takes the real underlying id.
+const LOADING_EVENT_ID_OFFSET = 3000000000;
+
 const Reports = () => {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -228,17 +236,30 @@ const Reports = () => {
   const isAdmin = ["admin", "super-admin"].includes(((user as any)?.role ?? "").toLowerCase());
   // Matches the server's actual rule (POST /reports/upload-to-notion: requirePageWrite('scan-history')).
   const canUploadNotion = isAdmin || hasPageWriteAccess("scan-history");
-  // Matches the server's actual rule (POST /events/:id/void: requirePageWrite chained for BOTH
-  // 'scan-order' and 'scan-history') — a user with only one of the two would otherwise see a
-  // clickable Void button that 403s on click.
+  // Matches the server's actual rule (POST /order-scan/events/:id/void: requirePageWrite chained
+  // for BOTH 'scan-order' and 'scan-history') — a user with only one of the two would otherwise
+  // see a clickable Void button that 403s on click. Load Event's void (loading_scan_events) is
+  // the same idea with "loading" swapped in for "scan-order" — see requireLoadingVoidAccess in
+  // server/routes/loading.ts.
   const canVoidScan = isAdmin || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"));
+  const canVoidLoadEvent = isAdmin || (hasPageWriteAccess("loading") && hasPageWriteAccess("scan-history"));
   const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const voidMutation = useMutation({
-    mutationFn: (payload: { id: number; reason: string }) =>
-      apiRequest("POST", `/api/order-scan/events/${payload.id}/void`, { reason: payload.reason }).then((r) => r.json()),
+    mutationFn: (payload: { id: number; reason: string; isDispatch?: boolean }) =>
+      apiRequest(
+        "POST",
+        payload.isDispatch
+          ? `/api/loading/events/${payload.id}/void`
+          : `/api/order-scan/events/${payload.id}/void`,
+        { reason: payload.reason },
+      ).then((r) => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
+      // Load Event's order-summary row (totalQty/itemCount/etc.) is a server-side aggregate over
+      // these same events, so it needs its own invalidation — voiding one event doesn't touch the
+      // scan-history query key at all.
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/load-events"] });
       // Voiding reverses real stock (product_plant_stock/products.in_stock) — keep Overall
       // Stock's cache from showing a now-stale number if that tab is already open.
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
@@ -248,6 +269,10 @@ const Reports = () => {
     },
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
+  // The page's two sections — receiving history (the original page) and Loading's own
+  // item-scanning history (server/routes/loading.ts). Same table/filters/export/void shell for
+  // both; only the server-side `source` scoping (isDispatch) and a couple of labels differ.
+  const [historySource, setHistorySource] = useState<"receiving" | "dispatch">("receiving");
   // Seeded from whatever was left applied last time — see HISTORY_FILTERS_KEY.
   const [historySearch,  setHistorySearch]  = useState(() => readSavedHistoryFilters().search ?? "");
   const [historyPage,    setHistoryPage]    = useState(1);
@@ -277,12 +302,19 @@ const Reports = () => {
   };
   const removeFilter = (id: number) => setActiveFilters((prev) => prev.filter((f) => f.id !== id));
   const clearSimpleFilter = (field: string) => setActiveFilters((prev) => prev.filter((f) => f.field !== field));
-  const TYPE_OPTIONS = [
-    { value: "regular", label: "Regular only" },
-    { value: "extra", label: "Extra only" },
-    { value: "empty", label: "Empty Box only" },
-    { value: "exchange", label: "Exchange only" },
-  ];
+  // Empty Box / Exchange only ever happen on the receiving side — Load Event's Type filter only
+  // offers what can actually occur there (a load that matched what was expected, or went over).
+  const TYPE_OPTIONS = historySource === "dispatch"
+    ? [
+        { value: "regular", label: "Loaded only" },
+        { value: "extra", label: "Loaded Extra only" },
+      ]
+    : [
+        { value: "regular", label: "Regular only" },
+        { value: "extra", label: "Extra only" },
+        { value: "empty", label: "Empty Box only" },
+        { value: "exchange", label: "Exchange only" },
+      ];
 
   // Date filter — same control/encoding as Overall Stock: the stored value is either a single
   // day ("d:YYYY-MM-DD") or a from–to range ("r:YYYY-MM-DD:YYYY-MM-DD"), both resolving to a
@@ -344,8 +376,8 @@ const Reports = () => {
   // from the fully-loaded rows already in the browser — there's no complete dataset on the
   // client to read distinct values from otherwise).
   const { data: filterValues = {} } = useQuery<Record<string, { value: string; label: string }[]>>({
-    queryKey: ["/api/scan-sessions/reports/scan-history/filter-values"],
-    queryFn: () => apiRequest("GET", "/api/scan-sessions/reports/scan-history/filter-values", undefined, false, true),
+    queryKey: ["/api/scan-sessions/reports/scan-history/filter-values", historySource],
+    queryFn: () => apiRequest("GET", `/api/scan-sessions/reports/scan-history/filter-values?source=${historySource}`, undefined, false, true),
     staleTime: 60_000,
   });
 
@@ -619,7 +651,7 @@ const Reports = () => {
   // corrected page-1 request landed a moment later. Comparing a signature of the filter values
   // at render time (not in an effect) means the very first render after a filter change already
   // computes page 1 for the query, so that wrong intermediate request never happens at all.
-  const historyFilterSignature = JSON.stringify([selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+  const historyFilterSignature = JSON.stringify([historySource, selectedDate, historySearch, historyScanner, historyType, filtersJson]);
   const lastHistoryFilterSignatureRef = useRef(historyFilterSignature);
   const effectiveHistoryPage = historyFilterSignature !== lastHistoryFilterSignatureRef.current ? 1 : historyPage;
   useEffect(() => {
@@ -648,6 +680,7 @@ const Reports = () => {
 
   const historyOffset = (effectiveHistoryPage - 1) * HISTORY_PAGE_SIZE;
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
+    source:  historySource,
     from:    fromDate       || undefined,
     to:      toDate         || undefined,
     search:  historySearch  || undefined,
@@ -662,7 +695,7 @@ const Reports = () => {
     useQuery<ScanHistoryResponse>({
       queryKey: [
         "/api/scan-sessions/reports/scan-history",
-        selectedDate, historySearch, historyScanner, historyType, filtersJson, effectiveHistoryPage,
+        historySource, selectedDate, historySearch, historyScanner, historyType, filtersJson, effectiveHistoryPage,
       ],
       queryFn: async () => {
         const r = await apiRequest("GET", historyUrl, undefined, false, true);
@@ -696,6 +729,7 @@ const Reports = () => {
     const all: ScanHistoryItem[] = [];
     while (offset < total) {
       const url = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
+        source:  historySource,
         from:    fromDate       || undefined,
         to:      toDate         || undefined,
         search:  historySearch  || undefined,
@@ -716,19 +750,20 @@ const Reports = () => {
   }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
-    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order Date", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
+    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Order Date", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
     ...src.map((h) => [
       h.srNo ?? "",
       h.scannedByName ?? "",
       h.scannedByCode ?? "",
       h.itemName ?? "",
       h.barcode ?? "",
+      h.orderName ?? "",
       h.orderDate ?? "",
       h.plant,
       h.totalQty,
       h.pallets != null ? parseFloat(String(h.pallets)).toFixed(2) : "",
       h.stv ?? "",
-      h.isExchange ? "Exchange" : h.isEmptyBox ? "Empty Box" : h.isExtra ? "Extra" : "Regular",
+      h.isExchange ? "Exchange" : h.isDispatch ? (h.isExtra ? "Loaded Extra" : "Loaded") : h.isEmptyBox ? "Empty Box" : h.isExtra ? "Extra" : "Regular",
       h.scannedAt ? format(new Date(h.scannedAt), "yyyy-MM-dd HH:mm") : "",
     ]),
   ];
@@ -801,6 +836,18 @@ const Reports = () => {
       totalable: false,
       cellClassName: "font-mono text-gray-500",
       render: (row) => row.barcode ?? dash,
+    },
+    {
+      // Which order this entry belongs to — the receiving CSV/session name for a Scan History
+      // row, or the proforma slip's order number for a Load Event row (see "orderName" in
+      // SCAN_HISTORY_COMBINED_SOURCE, server/routes/scan-sessions.ts).
+      id: "orderNumber",
+      header: "Order No.",
+      width: 130,
+      accessor: (row) => row.orderName,
+      totalable: false,
+      cellClassName: "text-gray-600",
+      render: (row) => row.orderName || dash,
     },
     {
       id: "order",
@@ -887,10 +934,15 @@ const Reports = () => {
         </span>
       ),
       width: 100,
-      accessor: (row) => (row.isExchange ? "Exchange" : row.isEmptyBox ? "Empty Box" : row.isExtra ? "Extra" : "Regular"),
+      accessor: (row) => (row.isExchange ? "Exchange" : row.isDispatch ? (row.isExtra ? "Loaded Extra" : "Loaded") : row.isEmptyBox ? "Empty Box" : row.isExtra ? "Extra" : "Regular"),
       render: (row) =>
         row.isExchange ? (
           <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-100 text-[11px] px-1.5 border-0">Exchange</Badge>
+        ) : row.isDispatch ? (
+          <span className="inline-flex items-center gap-1">
+            <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100 text-[11px] px-1.5 border-0">Loaded</Badge>
+            {row.isExtra && <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>}
+          </span>
         ) : row.isEmptyBox ? (
           <Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 text-[11px] px-1.5 border-0">Empty Box</Badge>
         ) : row.isExtra ? (
@@ -907,7 +959,7 @@ const Reports = () => {
       cellClassName: "whitespace-nowrap text-gray-500",
       render: (row) => (row.scannedAt ? format(new Date(row.scannedAt), "MMM d, h:mm a") : dash),
     },
-    ...(canVoidScan
+    ...(canVoidScan || canVoidLoadEvent
       ? [
           {
             id: "void",
@@ -916,7 +968,11 @@ const Reports = () => {
             width: 56,
             align: "center" as const,
             render: (row: ScanHistoryItem) =>
-              !row.voided && !row.isExchange && (
+              // Exchange rows aren't backed by a voidable event at all. Receiving vs dispatch each
+              // check their own permission and hit their own endpoint (see voidMutation) — a user
+              // with only one of the two write-access pairs would otherwise see a Void button that
+              // 403s on the row it doesn't cover.
+              !row.voided && !row.isExchange && (row.isDispatch ? canVoidLoadEvent : canVoidScan) && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
                   onClick={() => setVoidTarget(row)} title="Void this scan">
                   <Trash2 className="h-3.5 w-3.5" />
@@ -934,8 +990,31 @@ const Reports = () => {
         <PageHeader
           icon={History}
           title="Scan History"
-          description="Every individual scan event — who scanned what, when, and on which order."
+          description={
+            historySource === "dispatch"
+              ? "Every item loaded onto a vehicle — who scanned what, when, and for which order."
+              : "Every individual receiving scan event — who scanned what, when, and on which order."
+          }
         />
+
+        {/* Two sections, same table/filters/export/void shell underneath — only the server-side
+            `source` scoping (isDispatch) and a couple of labels differ between them. */}
+        <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white w-fit">
+          <button
+            type="button"
+            onClick={() => { setHistorySource("receiving"); clearSimpleFilter("type"); }}
+            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold transition-colors ${historySource === "receiving" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+          >
+            Scan History
+          </button>
+          <button
+            type="button"
+            onClick={() => { setHistorySource("dispatch"); clearSimpleFilter("type"); }}
+            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold transition-colors ${historySource === "dispatch" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+          >
+            Load Event
+          </button>
+        </div>
 
         {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/
             hideable columns, zebra stripes, mobile swipe hint. No pagination — the whole filtered
@@ -943,7 +1022,7 @@ const Reports = () => {
             Master View. */}
         <TableCard
           icon={History}
-          title="Scan Events"
+          title={historySource === "dispatch" ? "Load Events" : "Scan Events"}
           subtitle={
             <span className="inline-flex items-center gap-1.5">
               <span>{historyTotal > 0 ? `${historyTotal.toLocaleString()} events` : "0 events"}</span>
@@ -1288,7 +1367,10 @@ const Reports = () => {
                 </DropdownMenuContent>
               </DropdownMenu>
 
-              {canUploadNotion && (
+              {/* Notion export reads receiving history only (server/services/scanHistoryNotionSync.ts
+                  queries order_scan_events directly) — hidden on the Load Event tab so it can't
+                  be mistaken for exporting whatever's currently filtered there. */}
+              {canUploadNotion && historySource === "receiving" && (
                 <Button
                   size="sm" className={FILTER_BTN_CLASS}
                   onClick={() => { setNotionOpen(true); setNotionResult(null); setNotionError(null); }}
@@ -1309,8 +1391,8 @@ const Reports = () => {
             getRowId={(row) => String(row.id)}
             isLoading={historyLoading}
             loadingLabel="Loading scan history…"
-            emptyState={`No scan events found${selectedDate ? " for this date" : ""}.`}
-            noResultsState="No scan events match your search."
+            emptyState={`No ${historySource === "dispatch" ? "load" : "scan"} events found${selectedDate ? " for this date" : ""}.`}
+            noResultsState={`No ${historySource === "dispatch" ? "load" : "scan"} events match your search.`}
             hasActiveFilters={!!historySearch || activeFilters.length > 0 || Object.keys(columnConditions).length > 0}
             rowClassName={(row) => {
               // Stripe by the row's stable id (not its position), so a new scan landing at the
@@ -1319,6 +1401,7 @@ const Reports = () => {
               if (row.isExchange) return stripeEven ? "bg-purple-50/50" : "bg-purple-50/80";
               if (row.isEmptyBox) return stripeEven ? "bg-orange-50/50" : "bg-orange-50/80";
               if (row.voided) return "bg-gray-50 opacity-60";
+              if (row.isDispatch) return stripeEven ? "bg-blue-50/50" : "bg-blue-50/80";
               if (row.isExtra) return stripeEven ? "bg-amber-50/50" : "bg-amber-50/80";
               return undefined;
             }}
@@ -1563,7 +1646,11 @@ const Reports = () => {
             Cancel
           </Button>
           <Button
-            onClick={() => { if (voidTarget) voidMutation.mutate({ id: voidTarget.id, reason: voidReason }); }}
+            onClick={() => {
+              if (!voidTarget) return;
+              const id = voidTarget.isDispatch ? voidTarget.id - LOADING_EVENT_ID_OFFSET : voidTarget.id;
+              voidMutation.mutate({ id, reason: voidReason, isDispatch: voidTarget.isDispatch });
+            }}
             disabled={voidMutation.isPending}
             className="bg-red-600 hover:bg-red-700 text-white"
           >
