@@ -382,7 +382,88 @@ export default function StockSheets() {
             </div>
           ) : stockData && stockData.length > 0 ? (
             /* Table with Data */
-            <div className="overflow-x-auto rounded-md border">
+            <>
+            {/* Seven columns, three of them pinned left — on a phone that is all sideways
+                scrolling, so below 480px each item becomes a card. Company Remaining stays
+                editable here exactly as it is in the table. */}
+            <div className="min-[480px]:hidden landscape:hidden rounded-md border divide-y">
+              {stockData.map((item, index) => (
+                <div key={`m-${item.sr}-${index}`} className="px-3 py-3" data-testid={`stock-card-${item.sr}`}>
+                  <div className="flex items-start gap-2">
+                    <span className="mt-0.5 shrink-0 text-xs font-medium tabular-nums text-muted-foreground">
+                      {item.sr}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="break-words text-sm font-semibold leading-snug">{item.itemName}</p>
+                      {item.category && <div className="mt-1"><CategoryBadge category={item.category} /></div>}
+                    </div>
+                    <span
+                      className={cn(
+                        "shrink-0 text-right text-base font-semibold tabular-nums",
+                        item.stock > 0 ? "text-green-600" : item.stock < 0 ? "text-red-600" : "text-gray-600",
+                      )}
+                    >
+                      {item.stock.toLocaleString()}
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        stock
+                      </span>
+                    </span>
+                  </div>
+
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    <div>
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Company Rem.
+                      </span>
+                      {editingId === item.id ? (
+                        <Input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={editValue}
+                          onChange={handleEditValueChange}
+                          onBlur={() => saveEdit(item)}
+                          onKeyDown={(e) => handleKeyDown(e, item)}
+                          disabled={updateStockMutation.isPending}
+                          className={cn(
+                            "h-9 w-full border-2 border-blue-500 tabular-nums touch-manipulation focus:border-blue-600",
+                            updateStockMutation.isPending && "cursor-not-allowed opacity-50",
+                          )}
+                          data-testid={`input-company-remaining-mobile-${item.sr}`}
+                        />
+                      ) : (
+                        <div
+                          onClick={() => startEditing(item)}
+                          className="flex min-h-[36px] cursor-pointer items-center rounded px-1 text-sm tabular-nums transition-colors hover:bg-muted/80 touch-manipulation"
+                          title="Tap to edit"
+                          data-testid={`display-company-remaining-mobile-${item.sr}`}
+                        >
+                          {item.companyRemaining.toLocaleString()}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Purchase
+                      </span>
+                      <span className="flex min-h-[36px] items-center px-1 text-sm tabular-nums">
+                        {item.purchase.toLocaleString()}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Sale
+                      </span>
+                      <span className="flex min-h-[36px] items-center px-1 text-sm tabular-nums">
+                        {item.sale.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="hidden overflow-x-auto rounded-md border min-[480px]:block landscape:block">
               <Table data-testid="stock-table">
                 <TableHeader>
                   <TableRow>
@@ -484,6 +565,7 @@ export default function StockSheets() {
                 </TableBody>
               </Table>
             </div>
+            </>
           ) : error ? (
             /* Error State */
             <div className="text-center py-12" data-testid="error-state">

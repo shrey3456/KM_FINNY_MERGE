@@ -5591,7 +5591,29 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
               {/* Table */}
               {(dispatchHistory?.items?.length ?? 0) > 0 && (
-                <div className="overflow-x-auto" style={{ WebkitOverflowScrolling: "touch" }}>
+                <>
+                {/* min-w-[720px] against a ~390px phone: the card list below stands in there. */}
+                <div className="min-[480px]:hidden landscape:hidden">
+                  {dispatchHistory!.items.map((ev: any, idx: number) => (
+                    <div key={ev.id ?? idx} className="flex items-start gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0">
+                      <span className="mt-0.5 w-5 shrink-0 text-right font-mono text-xs text-gray-400">
+                        {(showAllHistory ? historyPage * 10 : 0) + idx + 1}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold leading-snug text-gray-900">{ev.itemName ?? "—"}</p>
+                        <p className="mt-0.5 font-mono text-[11px] text-gray-400">{ev.barcode ?? "—"}</p>
+                        <p className="mt-1 truncate text-[11px] text-gray-500">
+                          {ev.orderName ?? "—"}
+                          {ev.scannedAt && ` · ${new Date(ev.scannedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`}
+                        </p>
+                      </div>
+                      <span className="inline-flex shrink-0 items-center justify-center rounded-full bg-[#001d6e]/10 px-2 py-0.5 text-[11px] font-bold text-[#001d6e]">
+                        {ev.totalQty ?? ev.quantity ?? 0}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div className="hidden overflow-x-auto min-[480px]:block landscape:block" style={{ WebkitOverflowScrolling: "touch" }}>
                   <table className="w-full min-w-[720px] border-collapse text-xs">
                     <thead>
                       <tr className="bg-[#001d6e]">
@@ -5630,6 +5652,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </tbody>
                   </table>
                 </div>
+                </>
               )}
 
               {/* Footer — pagination + View All / Recent Only toggle */}

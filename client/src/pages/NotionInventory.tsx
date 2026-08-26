@@ -831,7 +831,7 @@ export default function NotionInventory() {
 
         {/* Mobile swipe hint */}
         {(products.length > 0 && visibleColumns.length > 3) && (
-          <div className="flex items-center justify-center gap-1.5 py-1 bg-[#001d6e]/5 border-b border-gray-100 sm:hidden">
+          <div className="hidden items-center justify-center gap-1.5 py-1 bg-[#001d6e]/5 border-b border-gray-100 min-[480px]:flex sm:hidden">
             <span className="text-[10px] text-[#001d6e]/60 font-medium">← Swipe left / right to see all columns →</span>
           </div>
         )}
@@ -839,7 +839,10 @@ export default function NotionInventory() {
         {/* Table */}
         {(productsQuery.isLoading || products.length > 0) && (
           <div
-            className="overflow-x-auto overflow-y-auto max-h-[52vh] sm:max-h-[calc(100vh-320px)] min-h-[260px] sm:min-h-[400px]"
+            // max-height bounds the scroll box; a min-height would prop it open past the rows and
+            // leave an empty band under a short table. Hidden below 480px, where the card list
+            // stands in for a table far wider than the screen.
+            className="hidden overflow-x-auto overflow-y-auto max-h-[52vh] min-[480px]:block sm:max-h-[calc(100vh-320px)] landscape:block"
             style={{ WebkitOverflowScrolling: "touch" }}
           >
             <table className="w-max min-w-full caption-bottom border-collapse text-xs">
@@ -945,6 +948,62 @@ export default function NotionInventory() {
                 )}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Narrow-screen counterpart to the table above: the product master runs to a dozen-odd
+            columns, so on a phone each product becomes a card with its name as the heading and
+            the remaining visible columns beneath as labelled pairs. */}
+        {(productsQuery.isLoading || products.length > 0) && (
+          <div className="min-[480px]:hidden landscape:hidden">
+            {productsQuery.isLoading ? (
+              <div className="flex justify-center py-10">
+                <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+              </div>
+            ) : filteredProducts.length === 0 ? (
+              <div className="py-10 text-center text-muted-foreground">
+                <Search className="mx-auto mb-2 h-5 w-5 opacity-30" />
+                <div className="text-sm">No products match your search.</div>
+              </div>
+            ) : (
+              filteredProducts.map((product) => {
+                const detailCols = visibleColumns.filter((c) => c.key !== "name" && c.key !== "productImage");
+                const hasImage = visibleColumns.some((c) => c.key === "productImage")
+                  && cellValue(product, "productImage" as any) !== "-";
+                return (
+                  <div key={product.id} className="flex items-start gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0">
+                    {hasImage && (
+                      <img
+                        src={`/api/products/image-by-name?name=${encodeURIComponent(product.name)}`}
+                        alt=""
+                        className="mt-0.5 h-10 w-10 shrink-0 rounded border border-gray-200 bg-gray-50 object-contain"
+                        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                      />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[15px] font-semibold leading-snug text-[#001d6e]">{product.name}</p>
+                      {detailCols.length > 0 && (
+                        <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1.5">
+                          {detailCols.map((col) => {
+                            const val = cellValue(product, col.key);
+                            return (
+                              <div key={String(col.key)} className="min-w-0">
+                                <dt className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                                  {col.label}
+                                </dt>
+                                <dd className={`truncate text-xs ${val === "-" ? "text-gray-300" : "text-gray-700"}`}>
+                                  {val}
+                                </dd>
+                              </div>
+                            );
+                          })}
+                        </dl>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         )}
 

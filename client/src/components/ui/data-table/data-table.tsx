@@ -516,6 +516,123 @@ export function DataTable<TData>({
     );
   };
 
+  /**
+   * The narrow-screen counterpart to the table. Any table with more than two or three columns is
+   * wider than a phone, and the only way to reach the far columns was to swipe sideways — so
+   * below 480px (and in portrait) each row is stacked into a card instead and the table is hidden.
+   *
+   * Built from the same `columns` the table uses, so a column added, hidden, reordered or
+   * re-rendered shows up here too without a second definition to keep in step. The first column
+   * with a real header becomes the card's heading; columns with no header (action menus, icon
+   * buttons) go to a strip on the right, where they read as controls rather than data.
+   */
+  const renderMobileCards = () => {
+    const headed = visibleColumns.filter((c) => typeof c.header === "string" && c.header.trim() !== "");
+    const titleCol = headed[0] ?? visibleColumns[0];
+    const controlCols = visibleColumns.filter(
+      (c) => c !== titleCol && (typeof c.header !== "string" || c.header.trim() === ""),
+    );
+    const detailCols = visibleColumns.filter((c) => c !== titleCol && !controlCols.includes(c));
+
+    const cellFor = (col: DataTableColumn<TData>, row: TData, i: number) =>
+      col.render ? col.render(row, i) : cellText(getCellValue(row, col));
+
+    return (
+      <div className="min-[480px]:hidden landscape:hidden">
+        {pageRows.length === 0 ? (
+          <div className="px-3">
+            {computedHasActiveFilters
+              ? renderEmptyState(noResultsState ?? emptyState, "No results match your filters.")
+              : renderEmptyState(emptyState, "No data found.")}
+          </div>
+        ) : (
+          pageRows.map(({ row, id }, rowIndex) => {
+            const globalRowIndex = paginationMode === "client" ? safePageIndex * pSize + rowIndex : rowIndex;
+            const clickable = onRowClick ? (isRowClickable ? isRowClickable(row) : true) : false;
+            const expandable = renderExpandedRow ? (isRowExpandable ? isRowExpandable(row) : true) : false;
+            const isExpanded = expandable && expandedRowId === id;
+            const selectable = isRowSelectable ? isRowSelectable(row) : true;
+
+            return (
+              <div
+                key={id}
+                className={cn(
+                  "border-b border-gray-100 last:border-b-0",
+                  rowClassName?.(row, globalRowIndex),
+                  selectedSet.has(id) && "bg-muted/50",
+                  isExpanded && "bg-[#001d6e]/[0.03]",
+                )}
+              >
+                <div
+                  className={cn("flex items-start gap-3 px-4 py-3", clickable && "cursor-pointer")}
+                  onClick={() => clickable && onRowClick?.(row)}
+                >
+                  {enableRowSelection && selectable && (
+                    <span className="mt-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <Checkbox
+                        checked={selectedSet.has(id)}
+                        onCheckedChange={() => toggleRowSelected(id)}
+                        aria-label="Select row"
+                      />
+                    </span>
+                  )}
+
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[15px] font-semibold leading-snug text-gray-900">
+                      {cellFor(titleCol, row, globalRowIndex)}
+                    </div>
+                    {detailCols.length > 0 && (
+                      // Label above value, two to a line: a phone is too narrow for a label and a
+                      // long value side by side without one of them wrapping mid-word.
+                      <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1.5">
+                        {detailCols.map((col) => (
+                          <div key={col.id} className="min-w-0">
+                            <dt className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                              {col.header}
+                            </dt>
+                            <dd className="truncate text-xs text-gray-700">
+                              {cellFor(col, row, globalRowIndex)}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
+                  </div>
+
+                  {controlCols.length > 0 && (
+                    <div className="flex shrink-0 items-start gap-1" onClick={(e) => e.stopPropagation()}>
+                      {controlCols.map((col) => (
+                        <span key={col.id}>{cellFor(col, row, globalRowIndex)}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {isExpanded && renderExpandedRow!(row)}
+              </div>
+            );
+          })
+        )}
+
+        {showTotalsRow && pageRows.length > 0 && (
+          <div className={cn("flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-sm", DATA_TABLE_TOTALS_ROW)}>
+            <span className="shrink-0">{totalsLabel}</span>
+            {visibleColumns
+              .filter((col) => col.id !== totalsLabelId && col.total)
+              .map((col) => (
+                <span key={col.id} className="tabular-nums">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                    {typeof col.header === "string" ? col.header : ""}
+                  </span>{" "}
+                  {columnTotal(col, totalsRows)}
+                </span>
+              ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const totalColSpan = visibleColumns.length + (enableRowSelection ? 1 : 0);
   const totalTableWidth =
     (enableRowSelection ? 40 : 0) + visibleColumns.reduce((sum, col) => sum + getColWidth(col), 0);
@@ -577,14 +694,16 @@ export function DataTable<TData>({
         // body instead of replacing the whole table.
         <div className={cn("rounded-md border", containerClassName)}>
           {computedShowSwipeHint && (
-            <div className="flex items-center justify-center gap-1.5 border-b bg-muted/40 py-1 sm:hidden">
+            <div className="hidden items-center justify-center gap-1.5 border-b bg-muted/40 py-1 min-[480px]:flex sm:hidden">
               <span className="text-[10px] font-medium text-muted-foreground">
                 ← Swipe left / right to see all columns →
               </span>
             </div>
           )}
+          {/* The scrolling table is for screens that can actually hold it; below 480px (and in
+              portrait) renderMobileCards() stands in for it. */}
           <div
-            className="w-full overflow-x-auto"
+            className="hidden w-full overflow-x-auto min-[480px]:block landscape:block"
             style={{
               overflowY: isStickyHeader ? "auto" : undefined,
               maxHeight: isStickyHeader ? maxHeight : undefined,
@@ -786,6 +905,7 @@ export function DataTable<TData>({
               {renderFooter && renderFooter(footerCtx)}
             </table>
           </div>
+          {renderMobileCards()}
           {!renderFooter && paginationMode === "client" && (
             <DataTablePagination
               pageIndex={safePageIndex}
