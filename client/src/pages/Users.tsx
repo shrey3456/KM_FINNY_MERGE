@@ -85,9 +85,9 @@ const userFormSchema = z.object({
 
 type UserFormValues = z.infer<typeof userFormSchema>;
 
-// Helper: parse JSON array field from user object
 const USERS_PAGE_SIZE = 15;
 
+// Helper: parse JSON array field from user object
 function parseJsonArray(val: string | null | undefined): string[] {
   try { return JSON.parse(val || "[]"); } catch { return []; }
 }
