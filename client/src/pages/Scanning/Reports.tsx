@@ -31,7 +31,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
-import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, DataTablePaginationNav, type DataTableColumn } from "@/components/ui/data-table";
 import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
@@ -1342,18 +1342,17 @@ const Reports = () => {
               <tfoot>
                 <tr>
                   <td colSpan={ctx.columnCount} className="border-t border-gray-300 bg-white px-4 py-2.5">
-                    <div className="flex items-center justify-between text-xs text-gray-500">
+                    <div className="grid grid-cols-1 items-center gap-2 text-xs text-gray-500 sm:grid-cols-[1fr_auto_1fr]">
                       <span>
                         {historyTotal > 0
                           ? `Showing ${historyOffset + 1}–${Math.min(historyOffset + historyItems.length, historyTotal)} of ${historyTotal.toLocaleString()} events`
                           : "No events"}
                       </span>
-                      <div className="flex gap-2">
-                        <Button variant="outline" size="sm" className="rounded-xl" disabled={historyPage <= 1}
-                          onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                        <Button variant="outline" size="sm" className="rounded-xl" disabled={!historyHasMore}
-                          onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
-                      </div>
+                      <DataTablePaginationNav
+                        pageIndex={historyPage - 1}
+                        pageCount={Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE))}
+                        onPageIndexChange={(idx) => setHistoryPage(idx + 1)}
+                      />
                     </div>
                   </td>
                 </tr>
@@ -1419,18 +1418,17 @@ const Reports = () => {
 
             {/* The table's pager lives in its <tfoot>, which is hidden with the table — so the
                 card list needs its own or a phone can only ever see page 1. */}
-            <div className="flex items-center justify-between gap-2 border-t border-gray-200 px-4 py-3">
+            <div className="flex flex-col gap-2 border-t border-gray-200 px-4 py-3">
               <span className="text-xs text-gray-500">
                 {historyTotal > 0
                   ? `${(historyOffset + 1).toLocaleString()}–${Math.min(historyOffset + historyItems.length, historyTotal).toLocaleString()} of ${historyTotal.toLocaleString()}`
                   : "No events"}
               </span>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" className="h-8 rounded-xl" disabled={historyPage <= 1}
-                  onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                <Button variant="outline" size="sm" className="h-8 rounded-xl" disabled={!historyHasMore}
-                  onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
-              </div>
+              <DataTablePaginationNav
+                pageIndex={historyPage - 1}
+                pageCount={Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE))}
+                onPageIndexChange={(idx) => setHistoryPage(idx + 1)}
+              />
             </div>
           </div>
         </TableCard>

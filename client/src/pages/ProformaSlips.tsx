@@ -58,7 +58,7 @@ import {
 } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, DataTablePaginationNav, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -179,46 +179,6 @@ function readSavedSlipFilters(): SavedSlipFilters {
     // Corrupt or unreadable (private-mode storage throws) — start clean rather than break the page.
     return {};
   }
-}
-
-/**
- * Which page numbers a pager should offer, given the current page and how many there are — all of
- * them when they fit, otherwise the first, the last, a window around the current page, and "gap"
- * where the run is broken. Both indexes are 0-based, matching DataTable's own pageIndex.
- *
- * e.g. page 1 of 442 → 1 2 3 … 442, and page 10 → 1 … 9 10 11 … 442.
- */
-function buildPageList(pageIndex: number, pageCount: number, window = 1): Array<number | "gap"> {
-  // Small enough to list in full — an ellipsis is never narrower than just showing the numbers.
-  const maxWithoutGaps = window * 2 + 5;
-  if (pageCount <= maxWithoutGaps) return Array.from({ length: pageCount }, (_, i) => i);
-
-  const last = pageCount - 1;
-  // Near either end the window would be clipped by the edge, leaving a stubby "1 2 … 442". Extend
-  // it inward instead so the run of numbers stays the same length wherever you are.
-  let from: number;
-  let to: number;
-  if (pageIndex <= window) {
-    from = 1;
-    to = Math.min(last - 1, window * 2);
-  } else if (pageIndex >= last - window) {
-    from = Math.max(1, last - window * 2);
-    to = last - 1;
-  } else {
-    from = pageIndex - window;
-    to = pageIndex + window;
-  }
-
-  const pages: Array<number | "gap"> = [0];
-  // A gap standing in for a single page would take as much room as the page itself, so only use
-  // one where at least two pages are actually being hidden — otherwise show that page.
-  if (from > 2) pages.push("gap");
-  else if (from === 2) pages.push(1);
-  for (let i = from; i <= to; i++) pages.push(i);
-  if (to < last - 2) pages.push("gap");
-  else if (to === last - 2) pages.push(last - 1);
-  pages.push(last);
-  return pages;
 }
 
 export default function ProformaSlips() {
@@ -1879,53 +1839,11 @@ export default function ProformaSlips() {
               </div>
               {/* Numbered pages rather than a bare "Page 1 of 442": with 442 pages you can now
                   see where you are, step a page at a time, or jump straight to the last one. */}
-              <nav className="flex items-center justify-center gap-1" aria-label="Pagination">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={() => ctx.setPageIndex(Math.max(0, ctx.pageIndex - 1))}
-                  disabled={ctx.pageIndex === 0}
-                  aria-label="Previous page"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </Button>
-
-                {buildPageList(ctx.pageIndex, ctx.pageCount).map((p, i) =>
-                  p === "gap" ? (
-                    // Not a button: it stands for pages that aren't offered, so it mustn't look
-                    // clickable. aria-hidden keeps it out of the screen-reader page list.
-                    <span key={`gap-${i}`} aria-hidden className="px-1 text-sm text-muted-foreground select-none">
-                      …
-                    </span>
-                  ) : (
-                    <Button
-                      key={p}
-                      variant={p === ctx.pageIndex ? "default" : "outline"}
-                      size="sm"
-                      className={`h-8 min-w-8 px-2 tabular-nums ${
-                        p === ctx.pageIndex ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""
-                      }`}
-                      onClick={() => ctx.setPageIndex(p)}
-                      aria-label={`Page ${p + 1}`}
-                      aria-current={p === ctx.pageIndex ? "page" : undefined}
-                    >
-                      {p + 1}
-                    </Button>
-                  ),
-                )}
-
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={() => ctx.setPageIndex(Math.min(ctx.pageCount - 1, ctx.pageIndex + 1))}
-                  disabled={ctx.pageIndex >= ctx.pageCount - 1}
-                  aria-label="Next page"
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-              </nav>
+              <DataTablePaginationNav
+                pageIndex={ctx.pageIndex}
+                pageCount={ctx.pageCount}
+                onPageIndexChange={ctx.setPageIndex}
+              />
 
               {/* Balances the left-hand track so the pager above lands dead centre. */}
               <div className="hidden sm:block" />
@@ -2385,41 +2303,11 @@ export default function ProformaSlips() {
                       {Math.min((pageIdx + 1) * entriesLimit, sorted.length).toLocaleString()} of{" "}
                       {sorted.length.toLocaleString()} entries
                     </span>
-                    <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
-                      <Button
-                        variant="outline" size="sm" className="h-8 w-8 p-0"
-                        onClick={() => setCurrentPage(Math.max(1, pageIdx))}
-                        disabled={pageIdx === 0}
-                        aria-label="Previous page"
-                      >
-                        <ChevronLeft className="h-4 w-4" />
-                      </Button>
-                      {buildPageList(pageIdx, pageCount).map((pg, i) =>
-                        pg === "gap" ? (
-                          <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-sm text-muted-foreground">…</span>
-                        ) : (
-                          <Button
-                            key={pg}
-                            variant={pg === pageIdx ? "default" : "outline"}
-                            size="sm"
-                            className={`h-8 min-w-8 px-2 tabular-nums ${pg === pageIdx ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
-                            onClick={() => setCurrentPage(pg + 1)}
-                            aria-label={`Page ${pg + 1}`}
-                            aria-current={pg === pageIdx ? "page" : undefined}
-                          >
-                            {pg + 1}
-                          </Button>
-                        ),
-                      )}
-                      <Button
-                        variant="outline" size="sm" className="h-8 w-8 p-0"
-                        onClick={() => setCurrentPage(Math.min(pageCount, pageIdx + 2))}
-                        disabled={pageIdx >= pageCount - 1}
-                        aria-label="Next page"
-                      >
-                        <ChevronRight className="h-4 w-4" />
-                      </Button>
-                    </nav>
+                    <DataTablePaginationNav
+                      pageIndex={pageIdx}
+                      pageCount={pageCount}
+                      onPageIndexChange={(p) => setCurrentPage(p + 1)}
+                    />
                   </div>
                 </>
               );

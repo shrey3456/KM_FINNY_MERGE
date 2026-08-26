@@ -11,6 +11,7 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import {
   DataTable,
   DataTableColumnToggle,
+  DataTablePaginationNav,
   type DataTableColumn,
 } from '@/components/ui/data-table';
 import {
@@ -85,44 +86,6 @@ const userFormSchema = z.object({
 type UserFormValues = z.infer<typeof userFormSchema>;
 
 // Helper: parse JSON array field from user object
-/**
- * Which page numbers a pager should offer, given the current page and how many there are — all of
- * them when they fit, otherwise the first, the last, a window around the current page, and "gap"
- * where the run is broken. Both indexes are 0-based, matching DataTable's own pageIndex.
- * Mirrors the pager on Proforma Slips so every pager in the app looks and behaves the same.
- */
-function buildPageList(pageIndex: number, pageCount: number, window = 1): Array<number | "gap"> {
-  const maxWithoutGaps = window * 2 + 5;
-  if (pageCount <= maxWithoutGaps) return Array.from({ length: pageCount }, (_, i) => i);
-
-  const last = pageCount - 1;
-  // Near either end the window would be clipped by the edge, leaving a stubby "1 2 … 42".
-  // Extend it inward so the run of numbers stays the same length wherever you are.
-  let from: number;
-  let to: number;
-  if (pageIndex <= window) {
-    from = 1;
-    to = Math.min(last - 1, window * 2);
-  } else if (pageIndex >= last - window) {
-    from = Math.max(1, last - window * 2);
-    to = last - 1;
-  } else {
-    from = pageIndex - window;
-    to = pageIndex + window;
-  }
-
-  const pages: Array<number | "gap"> = [0];
-  // A gap standing in for a single page takes as much room as the page itself, so only use one
-  // where at least two pages are hidden — otherwise show that page.
-  if (from > 2) pages.push("gap");
-  else if (from === 2) pages.push(1);
-  for (let i = from; i <= to; i++) pages.push(i);
-  if (to < last - 2) pages.push("gap");
-  else if (to === last - 2) pages.push(last - 1);
-  pages.push(last);
-  return pages;
-}
-
 const USERS_PAGE_SIZE = 15;
 
 function parseJsonArray(val: string | null | undefined): string[] {
@@ -998,41 +961,11 @@ const Users = () => {
                           {Math.min((pageIndex + 1) * USERS_PAGE_SIZE, filteredUsers.length).toLocaleString()} of{" "}
                           {filteredUsers.length.toLocaleString()}
                         </span>
-                        <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
-                          <Button
-                            variant="outline" size="sm" className="h-8 w-8 p-0"
-                            onClick={() => setPageIndex(Math.max(0, pageIndex - 1))}
-                            disabled={pageIndex === 0}
-                            aria-label="Previous page"
-                          >
-                            <ChevronLeft className="h-4 w-4" />
-                          </Button>
-                          {buildPageList(pageIndex, pageCount).map((pg, i) =>
-                            pg === "gap" ? (
-                              <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-sm text-gray-400">…</span>
-                            ) : (
-                              <Button
-                                key={pg}
-                                variant={pg === pageIndex ? "default" : "outline"}
-                                size="sm"
-                                className={`h-8 min-w-8 px-2 tabular-nums ${pg === pageIndex ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
-                                onClick={() => setPageIndex(pg)}
-                                aria-label={`Page ${pg + 1}`}
-                                aria-current={pg === pageIndex ? "page" : undefined}
-                              >
-                                {pg + 1}
-                              </Button>
-                            ),
-                          )}
-                          <Button
-                            variant="outline" size="sm" className="h-8 w-8 p-0"
-                            onClick={() => setPageIndex(Math.min(pageCount - 1, pageIndex + 1))}
-                            disabled={pageIndex >= pageCount - 1}
-                            aria-label="Next page"
-                          >
-                            <ChevronRight className="h-4 w-4" />
-                          </Button>
-                        </nav>
+                        <DataTablePaginationNav
+                          pageIndex={pageIndex}
+                          pageCount={pageCount}
+                          onPageIndexChange={setPageIndex}
+                        />
                       </div>
                     );
                   })()}
