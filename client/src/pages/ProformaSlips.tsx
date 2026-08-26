@@ -92,6 +92,7 @@ import {
   Calculator,
   RefreshCw,
   ListFilter,
+  Loader2,
 } from "lucide-react";
 import { format, isWithinInterval, startOfDay, endOfDay, parseISO } from "date-fns";
 import { type ProformaSlip, type ProformaSlipItem, type Product } from "@shared/schema";
@@ -2287,8 +2288,146 @@ export default function ProformaSlips() {
           </div>
         </div>
         <CardContent className="p-0">
+          {/* Nine columns total ~1020px — unreachable on a phone without swiping, and DataTable's
+              footer renders inside the table, so the pager was laid out across that full width
+              too. Below 480px (and in portrait) the rows become cards with their own pager. */}
+          <div className="min-[480px]:hidden landscape:hidden">
+            {(() => {
+              const sorted = getSortedSlips() as LockedProformaSlip[];
+              const pageCount = Math.max(1, Math.ceil(sorted.length / entriesLimit));
+              const pageIdx = Math.min(currentPage - 1, pageCount - 1);
+              const shown = sorted.slice(pageIdx * entriesLimit, (pageIdx + 1) * entriesLimit);
+              const actionsCol = slipColumns.find((c) => c.id === "actions");
+              const totalQty = sorted.reduce((sum, slip) => sum + (slip.totalQuantity || 0), 0);
+
+              if (isLoading) {
+                return (
+                  <div className="flex justify-center py-10">
+                    <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
+                  </div>
+                );
+              }
+              if (sorted.length === 0) {
+                return (
+                  <p className="py-10 text-center text-sm text-gray-400">
+                    No proforma slips found. Create your first one!
+                  </p>
+                );
+              }
+              return (
+                <>
+                  {shown.map((slip, idx) => {
+                    const isOpen = selectedSlip ? String(selectedSlip.id) === String(slip.id) : false;
+                    return (
+                      <div key={slip.id} className="border-b border-gray-100 last:border-b-0">
+                        <div
+                          className={`flex items-start gap-3 px-4 py-3 ${isOpen ? "bg-blue-50/40" : ""}`}
+                          onClick={() => toggleRowExpansion(slip)}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[15px] font-semibold text-gray-900">#{slip.orderNumber}</span>
+                              {slip.isPrintLocked ? (
+                                <span title="Locked after print"><Lock className="h-3.5 w-3.5 text-red-600" /></span>
+                              ) : (
+                                <span title="Unlocked"><Unlock className="h-3.5 w-3.5 text-emerald-600 opacity-40" /></span>
+                              )}
+                              <PlantBadge plant={slip.plant} />
+                            </div>
+                            <p className="mt-0.5 truncate text-sm text-gray-700">{slip.partyName}</p>
+                            <p className="mt-0.5 text-xs text-gray-400">{renderOrderDate(slip)}</p>
+                            {(slip.vehicleNumber || slip.driverName) && (
+                              <p className="mt-1 truncate text-xs text-gray-500">
+                                {slip.vehicleNumber || "—"}
+                                {slip.driverName && ` · ${slip.driverName}`}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex shrink-0 items-start gap-1">
+                            <span className="text-right text-sm tabular-nums">
+                              <span className="font-bold text-gray-900">{(slip.totalQuantity ?? 0).toLocaleString()}</span>
+                              <span className="block text-[10px] font-semibold uppercase tracking-wide text-gray-400">qty</span>
+                              {slip.totalVolume && (
+                                <span className="block text-[11px] text-gray-400">{slip.totalVolume}</span>
+                              )}
+                            </span>
+                            {/* Reuses the table's own actions cell, so the menu can never drift
+                                out of step with the desktop one. */}
+                            <span onClick={(e) => e.stopPropagation()}>
+                              {actionsCol?.render?.(slip, idx)}
+                            </span>
+                          </div>
+                        </div>
+                        {isOpen && renderSlipExpandedRow(slip)}
+                      </div>
+                    );
+                  })}
+
+                  {/* Same totals the table's footer shows, stated compactly. Over every filtered
+                      slip, not just this page — matching the desktop row. */}
+                  <div className="flex items-center justify-between gap-3 border-t-2 border-[#001d6e]/20 bg-[#f5f6f9] px-4 py-2.5 text-sm font-bold text-gray-900">
+                    <span>Total</span>
+                    <span className="flex items-center gap-4 tabular-nums">
+                      <span className="text-right">
+                        <span className="block leading-tight text-[#001d6e]">{sorted.length.toLocaleString()}</span>
+                        <span className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500">slips</span>
+                      </span>
+                      <span className="text-right">
+                        <span className="block leading-tight text-[#001d6e]">{totalQty.toLocaleString()}</span>
+                        <span className="block text-[10px] font-semibold uppercase tracking-wide text-gray-500">qty</span>
+                      </span>
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col gap-2 border-t border-gray-200 px-4 py-3">
+                    <span className="text-xs text-muted-foreground">
+                      Showing {(pageIdx * entriesLimit + 1).toLocaleString()} to{" "}
+                      {Math.min((pageIdx + 1) * entriesLimit, sorted.length).toLocaleString()} of{" "}
+                      {sorted.length.toLocaleString()} entries
+                    </span>
+                    <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
+                      <Button
+                        variant="outline" size="sm" className="h-8 w-8 p-0"
+                        onClick={() => setCurrentPage(Math.max(1, pageIdx))}
+                        disabled={pageIdx === 0}
+                        aria-label="Previous page"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </Button>
+                      {buildPageList(pageIdx, pageCount).map((pg, i) =>
+                        pg === "gap" ? (
+                          <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-sm text-muted-foreground">…</span>
+                        ) : (
+                          <Button
+                            key={pg}
+                            variant={pg === pageIdx ? "default" : "outline"}
+                            size="sm"
+                            className={`h-8 min-w-8 px-2 tabular-nums ${pg === pageIdx ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
+                            onClick={() => setCurrentPage(pg + 1)}
+                            aria-label={`Page ${pg + 1}`}
+                            aria-current={pg === pageIdx ? "page" : undefined}
+                          >
+                            {pg + 1}
+                          </Button>
+                        ),
+                      )}
+                      <Button
+                        variant="outline" size="sm" className="h-8 w-8 p-0"
+                        onClick={() => setCurrentPage(Math.min(pageCount, pageIdx + 2))}
+                        disabled={pageIdx >= pageCount - 1}
+                        aria-label="Next page"
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </nav>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+
           <DataTable<LockedProformaSlip>
-            className="space-y-0"
+            className="hidden space-y-0 min-[480px]:block landscape:block"
             containerClassName="rounded-none border-0"
             columns={slipColumns}
             data={getSortedSlips() as LockedProformaSlip[]}
