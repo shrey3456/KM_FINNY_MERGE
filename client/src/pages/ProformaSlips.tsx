@@ -376,11 +376,16 @@ export default function ProformaSlips() {
   // canAddSlips/canEditSlips (they were always the same check under two different names).
   const canWriteSlips = isAdminOrSuper || isReadWriteUser;
 
-  // Lock/Unlock: admin/super-admin, OR Write Access to BOTH "print-operations" AND
-  // "proforma" — needs both page grants, not just one. No more department/designation
-  // special-casing (IT/Management/Billing-Head are gone — grant Write Access on both of
-  // those page keys instead).
-  const canLockUnlockSlips = isAdminOrSuper || (hasPageWriteAccess('print-operations') && hasPageWriteAccess('proforma'));
+  // Lock: admin/super-admin, OR Write Access to EITHER "print-operations" OR "proforma" —
+  // deliberately looser than Unlock below, matching the server's requireLockAccess (see
+  // server/routes/proforma-api.ts) — more people should be able to lock a slip to protect it
+  // than can later reverse that.
+  const canLockSlips = isAdminOrSuper || hasPageWriteAccess('print-operations') || hasPageWriteAccess('proforma');
+  // Unlock: admin/super-admin, OR Write Access to BOTH "print-operations" AND "proforma" —
+  // needs both page grants, not just one. No more department/designation special-casing
+  // (IT/Management/Billing-Head are gone — grant Write Access on both of those page keys
+  // instead).
+  const canUnlockSlips = isAdminOrSuper || (hasPageWriteAccess('print-operations') && hasPageWriteAccess('proforma'));
 
   console.log('DEBUG PROFORMA PERMISSIONS:', {
     source: remoteUser ? 'remote' : 'local',
@@ -389,7 +394,8 @@ export default function ProformaSlips() {
     desig: userDesig,
     isAdminOrSuper,
     isReadWriteUser,
-    canLockUnlockSlips,
+    canLockSlips,
+    canUnlockSlips,
     canWriteSlips,
   });
 
@@ -1480,7 +1486,7 @@ export default function ProformaSlips() {
             <DropdownMenuLabel>Actions</DropdownMenuLabel>
             <DropdownMenuSeparator />
 
-            {!slip.isPrintLocked && canLockUnlockSlips && (
+            {!slip.isPrintLocked && canLockSlips && (
               <DropdownMenuItem
                 onClick={async () => {
                   try {
@@ -1503,7 +1509,7 @@ export default function ProformaSlips() {
               </DropdownMenuItem>
             )}
 
-            {slip.isPrintLocked && canLockUnlockSlips && (
+            {slip.isPrintLocked && canUnlockSlips && (
               <DropdownMenuItem
                 onClick={async () => {
                   try {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Camera, CheckCircle2, ChevronDown, ChevronRight, Keyboard, Link2, Loader2,
-  Lock, Package, Plus, RotateCcw, ScanLine, Search, Trash2, Truck, X,
+  Lock, Package, Plus, RotateCcw, ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
@@ -46,7 +46,7 @@ type LoadingRecord = {
   createdByCode: string | null; createdByName: string | null; createdAt: string;
   loadingCompletedAt: string | null;
 };
-type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; event: { barcode: string; itemName: string; totalQty: number; isExtra: boolean; remaining: number } };
+type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; event: { barcode: string; itemName: string; sapCode: string | null; totalQty: number; isExtra: boolean; remaining: number } };
 // One row of that order's own load-event history (the landing table's expand panel) — fetched
 // from the same Scan History endpoint the Reports page's Load Event tab uses, scoped to this
 // order (GET /api/scan-sessions/reports/scan-history?source=dispatch&order=X).
@@ -401,6 +401,21 @@ export default function LoadOperation() {
   }
 
   // ─── Item scanning — same barcode-matching / pallet-loose / auto-scan rules as Order Scan ──
+  // Auto Scan itself is Plant Management's existing per-plant toggle (plants.isAutoScanEnabled)
+  // — the SAME flag Order Scan reads, not a separate Loading-only setting. Off (or the plant not
+  // found) falls through to the always-confirm-with-a-dialog flow, exactly like Order Scan.
+  const { data: allPlants } = useQuery<any[]>({
+    queryKey: ["/api/plants"],
+    queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
+    staleTime: 60000,
+  });
+  const autoScanEnabled = (() => {
+    const plantName = (slip?.plant ?? "").toLowerCase();
+    if (!plantName) return false;
+    const p = (allPlants ?? []).find((pl: any) => String(pl.name ?? "").toLowerCase() === plantName);
+    return p?.isAutoScanEnabled === true;
+  })();
+
   const [itemScanMode, setItemScanMode] = useState<"camera" | "manual">("manual");
   const [itemBarcode, setItemBarcode] = useState("");
   const itemInputRef = useRef<HTMLInputElement>(null);
@@ -411,6 +426,13 @@ export default function LoadOperation() {
   const itemsRef = useRef<ProformaItem[]>(items);
   itemsRef.current = items;
   const scanLockRef = useRef(false);
+  // Same-barcode cooldown — mirrors Order Scan's own guard (SAME_BARCODE_COOLDOWN_MS in
+  // Scanning/Scan.tsx): a barcode gun that double-fires, or a box scanned twice by mistake,
+  // should not silently log a second scan of the same physical pallet. A repeat of the SAME
+  // barcode within the window is discarded (no beep, no dialog, no toast — stays silent, same
+  // as Order Scan); a DIFFERENT barcode is never affected.
+  const lastScanRef = useRef<{ barcode: string; at: number } | null>(null);
+  const SAME_BARCODE_COOLDOWN_MS = 5000;
 
   const locked = !!slip?.loadingCompletedAt;
 
@@ -424,14 +446,17 @@ export default function LoadOperation() {
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
 
-  // 5s non-blocking feedback after an auto-confirmed full-pallet scan — same idea as Order
-  // Scan's Auto Scan popup, minus the plant-level toggle (Loading always auto-scans full
-  // pallets; anything less than a full pallet still opens the confirm dialog below).
-  const [autoFeedback, setAutoFeedback] = useState<{ itemName: string; qty: number; remaining: number; isExtra: boolean } | null>(null);
+  // 5s non-blocking feedback popup after an auto-confirmed full-pallet scan — same popup Order
+  // Scan itself shows (product image + name/barcode/SAP + qty scanned/remaining), and gated by
+  // the same plant-level Auto Scan toggle (autoScanEnabled above); anything less than a full
+  // pallet, or Auto Scan being off for this plant, still opens the confirm dialog below.
+  const [autoFeedback, setAutoFeedback] = useState<
+    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean } | null
+  >(null);
   const autoFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  function showAutoFeedback(itemName: string, qty: number, remaining: number, isExtra: boolean) {
+  function showAutoFeedback(name: string, barcode: string, sapCode: string | null, scannedQty: number, remaining: number, isExtra: boolean) {
     if (autoFeedbackTimerRef.current) clearTimeout(autoFeedbackTimerRef.current);
-    setAutoFeedback({ itemName, qty, remaining, isExtra });
+    setAutoFeedback({ name, barcode, sapCode, scannedQty, remaining, isExtra });
     autoFeedbackTimerRef.current = setTimeout(() => setAutoFeedback(null), 5000);
   }
 
@@ -485,6 +510,22 @@ export default function LoadOperation() {
   function handleItemBarcode(rawBarcode: string) {
     const barcode = rawBarcode.trim();
     if (!barcode || !slip || locked || scanLockRef.current || pending) return;
+
+    // Vehicle must be linked before anything can be scanned onto this order — server enforces
+    // this too (POST /scan), but the Scan Items section is already hidden until a vehicle is
+    // linked, so reaching here without one only happens via a stale gun-scan queued before the
+    // section unmounted.
+    if (!slip.vehicleNumber) return;
+
+    // Same-barcode cooldown — a repeat of the exact barcode just accepted, within the window,
+    // is discarded before anything else (no beep, no dialog): see SAME_BARCODE_COOLDOWN_MS above.
+    const nb = normalize(barcode);
+    const last = lastScanRef.current;
+    if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) {
+      return;
+    }
+    lastScanRef.current = { barcode, at: Date.now() };
+
     const item = itemsRef.current.find((i) => normalize(i.barcode) === normalize(barcode)) ?? null;
 
     // Not on this slip at all is still allowed through to the server (it may be a real product,
@@ -497,14 +538,16 @@ export default function LoadOperation() {
 
     scanLockRef.current = true;
 
-    // Full pallet (or more) still remaining → auto-scan exactly one pallet, no dialog, 5s
-    // feedback popup — same shape as Order Scan's Auto Scan path.
+    // Full pallet (or more) still remaining → auto-scan exactly one pallet, no dialog, 5s image
+    // feedback popup — same shape as Order Scan's Auto Scan path, gated by the SAME plant-level
+    // Auto Scan toggle Order Scan reads. Auto Scan OFF → every scan opens the confirm dialog.
     const ipp = item?.itemsPerPallet ?? 0;
-    const canAutoScan = !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp && (item.stockAvailable ?? 0) >= ipp;
+    const canAutoScan = autoScanEnabled && !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp && (item.stockAvailable ?? 0) >= ipp;
     if (canAutoScan) {
       const qty = ipp;
       scanItemMutation.mutate({ barcode, qty }, {
-        onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.totalQty, data.event.remaining, data.event.isExtra),
+        onSuccess: (data) =>
+          showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra),
       });
       setItemBarcode("");
       return;
@@ -516,7 +559,7 @@ export default function LoadOperation() {
   }
 
   useEffect(() => {
-    if (view !== "create" || itemScanMode !== "camera" || !slip || locked) { stopItemCamera(); return; }
+    if (view !== "create" || itemScanMode !== "camera" || !slip || locked || !slip.vehicleNumber) { stopItemCamera(); return; }
     let cancelled = false;
     const scanner = new BarcodeScanner({
       onDetected: (result: Result) => { const code = result.getText(); if (code && !cancelled) handleItemBarcode(code); },
@@ -539,9 +582,9 @@ export default function LoadOperation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, itemScanMode, slip, locked]);
 
-  // Barcode gun for items — active once a slip is open and not yet complete.
+  // Barcode gun for items — active once a slip is open, a vehicle is linked, and not yet complete.
   useEffect(() => {
-    if (view !== "create" || !slip || locked) return;
+    if (view !== "create" || !slip || locked || !slip.vehicleNumber) return;
     const MAX_GAP_MS = 50;
     const BURST_END_MS = 80;
     let buffer = "";
@@ -1036,8 +1079,18 @@ export default function LoadOperation() {
                 )}
               </div>
 
-              {/* Scan items — hidden once locked; same Camera/Manual pattern as order search */}
-              {canWrite && !locked && (
+              {/* Vehicle must be linked before scanning starts — server enforces this too
+                  (POST /scan 400s without one); this replaces the Scan Items section entirely
+                  until then, rather than showing it disabled. */}
+              {canWrite && !locked && !slip?.vehicleNumber && (
+                <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-4 sm:px-5 py-4 text-center">
+                  <p className="text-sm font-medium text-gray-500">Link a vehicle above before scanning items.</p>
+                </div>
+              )}
+
+              {/* Scan items — hidden once locked or before a vehicle is linked; same
+                  Camera/Manual pattern as order search */}
+              {canWrite && !locked && slip?.vehicleNumber && (
                 <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                   <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
@@ -1090,15 +1143,6 @@ export default function LoadOperation() {
                       </div>
                     )}
 
-                    {/* 5s auto-scan feedback — non-blocking, replaced by the next auto-scan */}
-                    {autoFeedback && (
-                      <div className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs ${autoFeedback.isExtra ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>
-                        <CheckCircle2 className="h-4 w-4 shrink-0" />
-                        <div>
-                          <span className="font-semibold">{autoFeedback.itemName}</span> +{autoFeedback.qty}{autoFeedback.isExtra ? " (extra)" : ""} · {autoFeedback.remaining} remaining
-                        </div>
-                      </div>
-                    )}
                   </div>
                 </div>
               )}
@@ -1235,6 +1279,42 @@ export default function LoadOperation() {
           </div>
         )}
       </div>
+
+      {/* ── Auto Scan feedback popup — same popup Order Scan shows for 5s after an
+          auto-confirmed (full-pallet) scan: product image + name/barcode/SAP + how much was
+          scanned and what remains. Non-blocking (pointer-events-none) — operator keeps
+          scanning; no confirm needed. Rapid scans replace it and reset the 5s timer. ── */}
+      {autoFeedback && (
+        <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-4 pointer-events-none" role="status">
+          <div className="w-[calc(100%-2rem)] max-w-2xl sm:max-w-3xl min-h-[20rem] flex flex-col bg-white p-8 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2">
+            <div className={`flex items-center gap-2.5 ${autoFeedback.isExtra ? "text-amber-700" : "text-emerald-700"}`}>
+              <Zap className="h-7 w-7 shrink-0" />
+              <span className="text-2xl font-semibold">{autoFeedback.isExtra ? "Auto scanned (extra)" : "Auto scanned"}</span>
+            </div>
+            <div className="flex flex-1 gap-5 items-start pt-4">
+              <img
+                src={`/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`}
+                alt=""
+                className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+              />
+              <div className="flex-1 min-w-0 text-lg">
+                <p className="font-semibold text-gray-900 break-words text-xl">{autoFeedback.name}</p>
+                <p className="mt-1.5 font-mono text-base text-gray-400 break-all">
+                  {autoFeedback.barcode}{autoFeedback.sapCode && ` · SAP: ${autoFeedback.sapCode}`}
+                </p>
+                <p className="mt-4 text-2xl">
+                  <span className={`font-bold ${autoFeedback.isExtra ? "text-amber-600" : "text-emerald-600"}`}>+{autoFeedback.scannedQty}</span>
+                  <span className="text-gray-500"> scanned</span>
+                  {autoFeedback.remaining > 0 && (
+                    <span className="ml-2 font-semibold text-[#001d6e]">{autoFeedback.remaining} left</span>
+                  )}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirm dialog — loose/partial/extra scans, and anything not on this slip at all */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>

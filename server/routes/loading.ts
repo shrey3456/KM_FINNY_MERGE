@@ -292,6 +292,11 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     if ((slip as any).loadingCompletedAt) {
       return res.status(409).json({ message: 'This load is already marked complete — reopen it before scanning more.' });
     }
+    // Vehicle must be linked before any item can be scanned onto it — enforced here too, not
+    // just hidden client-side, so a stale/bypassed client can't scan against an unassigned slip.
+    if (!slip.vehicleNumber) {
+      return res.status(400).json({ message: 'Link a vehicle to this order before scanning items.' });
+    }
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(barcode));
@@ -383,7 +388,11 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
 
     res.json({
       slip: await withRto(finalSlip), items: progressItems, allComplete,
-      event: { barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode, totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty) },
+      event: {
+        barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
+        sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
+        totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty),
+      },
     });
   } catch (error) {
     console.error('Error scanning item for loading:', error);
