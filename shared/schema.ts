@@ -361,6 +361,14 @@ export const proformaSlips = pgTable("proforma_slips", {
   // server/routes/loading.ts's /link-vehicle, not just hidden client-side). Anyone with write
   // access to Loading may still perform the FIRST assignment (this column starts null).
   vehicleAssignedByCode: text("vehicle_assigned_by_code"),
+  // The EXACT vehicle_info row linked (soft reference — display always uses vehicleNumber above,
+  // matching every other snapshot field on this table). vehicleNumber alone stopped being
+  // unambiguous once Vehicle Master allowed the same number on more than one row (identity is
+  // now notionPageId, not vehicleNumber — see vehicleInfo's own comment); this is what lets RTO
+  // resolution (withRto, server/routes/loading.ts) find the SAME row that was actually picked
+  // in the Loading page's vehicle search, instead of re-guessing by number. Null on slips linked
+  // before this column existed — those fall back to a by-number lookup.
+  vehicleInfoId: integer("vehicle_info_id"),
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
@@ -371,6 +379,7 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
   createdByCode: true, notes: true, isBackedUp: true, isPrintLocked: true,
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
   loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,
+  vehicleInfoId: true,
 });
 
 // IMPORTANT: All fields below are IMMUTABLE SNAPSHOTS of product data at import
@@ -780,11 +789,19 @@ export type InsertPlantStv = z.infer<typeof insertPlantStvSchema>;
 
 export const vehicleInfo = pgTable("vehicle_info", {
   id: serial("id").primaryKey(),
-  notionPageId: text("notion_page_id"), // Notion page.id — drives detect/apply sync matching, like products.notionPageId
+  // The REAL identity for a Notion-synced row — each Notion page always maps to exactly one
+  // vehicle_info row (unique), matched/created purely by this id, never by vehicleNumber. A
+  // manually-added local vehicle (not from Notion) leaves this null; Postgres allows any number
+  // of NULLs under a UNIQUE constraint, so many local-only rows can coexist.
+  notionPageId: text("notion_page_id").unique(),
 
   // Identity
   srNo: integer("sr_no").notNull(),
-  vehicleNumber: text("vehicle_number").notNull().unique(), // Notion: "Vehicle No. :" (title)
+  // Deliberately NOT unique and NOT required: two different Notion pages (two different
+  // physical vehicles, or intentionally more than one page for the same one) can share the same
+  // vehicle number — that's normal, not a data problem, since notionPageId above is what makes
+  // each row distinct. See server/services/notionVehicleSync.ts's computeChanges.
+  vehicleNumber: text("vehicle_number"), // Notion: "Vehicle No. :" (title)
   rtoNumber: text("rto_number"), // Notion: "Link to RTO No. :" (plain text, despite the "Link to" name — not a relation)
   series: text("series"),
 

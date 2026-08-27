@@ -223,7 +223,8 @@ app.use((req, res, next) => {
       ALTER TABLE proforma_slips
         ADD COLUMN IF NOT EXISTS loading_completed_at TIMESTAMP,
         ADD COLUMN IF NOT EXISTS loading_completed_by_code TEXT,
-        ADD COLUMN IF NOT EXISTS vehicle_assigned_by_code TEXT
+        ADD COLUMN IF NOT EXISTS vehicle_assigned_by_code TEXT,
+        ADD COLUMN IF NOT EXISTS vehicle_info_id INTEGER
     `);
     // product_plant_stock/stock_movements previously linked to a product ONLY by barcode text.
     // A product's barcode can be edited later (most commonly via the Notion inventory sync,
@@ -292,6 +293,33 @@ app.use((req, res, next) => {
     // rto_number was NOT NULL in the original table — Vehicle Master's Notion sync can create
     // a row before that field is known, so this column needs to allow NULL going forward.
     await pool.query(`ALTER TABLE vehicle_info ALTER COLUMN rto_number DROP NOT NULL`);
+
+    // Vehicle Master's real identity is notionPageId now, not vehicleNumber — two different
+    // Notion pages (two vehicles, or intentionally more than one page for the same one) can
+    // legitimately share a vehicle number; that's no longer treated as a sync conflict (see
+    // server/services/notionVehicleSync.ts). Drop the old uniqueness/requiredness on
+    // vehicle_number, and make notion_page_id unique instead — that's what now guarantees one
+    // row per Notion page.
+    await pool.query(`ALTER TABLE vehicle_info DROP CONSTRAINT IF EXISTS vehicle_info_vehicle_number_unique`);
+    await pool.query(`ALTER TABLE vehicle_info ALTER COLUMN vehicle_number DROP NOT NULL`);
+    try {
+      await pool.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'vehicle_info_notion_page_id_unique'
+          ) THEN
+            ALTER TABLE vehicle_info ADD CONSTRAINT vehicle_info_notion_page_id_unique UNIQUE (notion_page_id);
+          END IF;
+        END $$;
+      `);
+    } catch (err) {
+      // Only fails if some past sync run already left two rows sharing a notion_page_id — should
+      // never happen (each page always resolved to at most one row even under the old logic),
+      // but this is a startup migration and must never crash the server over a pre-existing data
+      // issue; log it so it's visible/fixable instead.
+      console.error('Failed to add vehicle_info_notion_page_id_unique constraint — check for duplicate notion_page_id rows:', (err as Error)?.message);
+    }
 
     console.log('Database migrations completed successfully');
 

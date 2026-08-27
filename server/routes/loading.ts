@@ -65,11 +65,16 @@ function requireLoadingVoidAccess(req: Request, res: Response, next: NextFunctio
   return res.status(403).json({ message: 'Write access required' });
 }
 
-// Attaches the linked vehicle's RTO number to a slip response, resolved live through
-// vehicleNumber — never stored on proforma_slips itself (see file header comment).
+// Attaches the linked vehicle's RTO number to a slip response, resolved live — never stored on
+// proforma_slips itself (see file header comment). Resolved by the EXACT vehicle_info row
+// (vehicleInfoId) when known — vehicleNumber alone is no longer unique in Vehicle Master (two
+// Notion pages can share one), so a by-number lookup could return a different row than the one
+// actually linked. Falls back to by-number for slips linked before vehicleInfoId existed.
 async function withRto(slip: any) {
   if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null };
-  const vehicle = await storage.getVehicleInfoByVehicleNumber(slip.vehicleNumber);
+  const vehicle = slip.vehicleInfoId
+    ? await storage.getVehicleInfo(slip.vehicleInfoId)
+    : await storage.getVehicleInfoByVehicleNumber(slip.vehicleNumber);
   return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null };
 }
 
@@ -221,15 +226,22 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
   }
 });
 
-// POST /api/loading/proforma/:orderNumber/link-vehicle  — body: { vehicleNumber }
-// Writes vehicleNumber + totalVolume (from Vehicle Master) onto the proforma slip. The FIRST
-// assignment is open to anyone with write access to Loading; once a vehicle is assigned,
-// changing it again is restricted to whoever assigned it or an admin (see vehicleAssignedByCode
-// in shared/schema.ts) — enforced here, not just hidden client-side.
+// POST /api/loading/proforma/:orderNumber/link-vehicle  — body: { vehicleId } (preferred) or
+// { vehicleNumber } (fallback, for older callers).
+// Writes vehicleNumber + totalVolume (from Vehicle Master) onto the proforma slip, along with
+// vehicleInfoId — the EXACT row linked, since vehicleNumber alone stopped being unique once
+// Vehicle Master allowed two Notion pages to share one (identity is notionPageId now, not the
+// number — see vehicleInfo's own comment in shared/schema.ts). Picking by id is what lets
+// withRto (above) and any other read find the SAME row the user actually chose from the search
+// dropdown, instead of a plain by-number lookup landing on a different same-numbered row.
+// The FIRST assignment is open to anyone with write access to Loading; once a vehicle is
+// assigned, changing it again is restricted to whoever assigned it or an admin (see
+// vehicleAssignedByCode in shared/schema.ts) — enforced here, not just hidden client-side.
 router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loading'), async (req: Request, res: Response) => {
   try {
+    const vehicleId = req.body?.vehicleId != null ? Number(req.body.vehicleId) : null;
     const vehicleNumber = String(req.body?.vehicleNumber ?? '').trim();
-    if (!vehicleNumber) return res.status(400).json({ message: 'vehicleNumber is required' });
+    if (!vehicleId && !vehicleNumber) return res.status(400).json({ message: 'vehicleId or vehicleNumber is required' });
 
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
@@ -240,11 +252,14 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
       return res.status(403).json({ message: 'Only the person who assigned this vehicle, or an admin, can change it.' });
     }
 
-    const vehicle = await storage.getVehicleInfoByVehicleNumber(vehicleNumber);
-    if (!vehicle) return res.status(404).json({ message: `No vehicle found in Vehicle Master with number "${vehicleNumber}"` });
+    const vehicle = vehicleId
+      ? await storage.getVehicleInfo(vehicleId)
+      : await storage.getVehicleInfoByVehicleNumber(vehicleNumber);
+    if (!vehicle) return res.status(404).json({ message: `No vehicle found in Vehicle Master${vehicleNumber ? ` with number "${vehicleNumber}"` : ''}` });
 
     const updated = await storage.updateProformaSlip(slip.id, {
       vehicleNumber: vehicle.vehicleNumber,
+      vehicleInfoId: vehicle.id,
       totalVolume: vehicle.volume != null ? String(vehicle.volume) : slip.totalVolume,
       vehicleAssignedByCode: userCode ?? null,
     } as any);

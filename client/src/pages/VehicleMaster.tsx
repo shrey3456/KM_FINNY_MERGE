@@ -31,14 +31,10 @@ type VehicleFieldChange = {
 };
 type VehicleChange = { vehicleId: number; vehicleNumber: string; changes: VehicleFieldChange[] };
 type CreatedVehicle = { vehicleNumber: string; notionPageId: string };
-// A vehicle-number collision the sync couldn't auto-resolve (two Notion pages, or an existing
-// vehicle already linked elsewhere) — needs a human to fix it in Notion. See "Linked to Notion"
-// change entries elsewhere in a report for the auto-resolved case (Situation 1).
-type VehicleConflict = { vehicleNumber: string; notionPageId: string; notionPageUrl: string; reason: string };
 type VehicleSyncReport = {
   syncTime: string; total: number; created: number; updated: number; skipped: number; notFound: number;
   triggeredBy: string; appliedBy?: string;
-  changedVehicles: VehicleChange[]; createdVehicles: CreatedVehicle[]; conflicts: VehicleConflict[]; errors: string[];
+  changedVehicles: VehicleChange[]; createdVehicles: CreatedVehicle[]; errors: string[];
 };
 
 function isAdminOrSuper(): boolean {
@@ -134,7 +130,7 @@ export default function VehicleMaster() {
     },
   });
 
-  const statusQuery = useQuery<{ isSyncing: boolean; hasPending: boolean; autoApplyEnabled: boolean; conflictCount: number }>({
+  const statusQuery = useQuery<{ isSyncing: boolean; hasPending: boolean; autoApplyEnabled: boolean }>({
     queryKey: ["/api/notion-vehicle-sync/status"],
     queryFn: async () => (await apiRequest("GET", "/api/notion-vehicle-sync/status")).json(),
     enabled: admin,
@@ -147,31 +143,15 @@ export default function VehicleMaster() {
     enabled: admin,
   });
 
-  // Stays populated even after Pending clears (Apply doesn't resolve a conflict), so the badge
-  // in the action bar remains an accurate, persistent "still needs a human" signal.
-  const conflictsQuery = useQuery<{ conflicts: VehicleConflict[] }>({
-    queryKey: ["/api/notion-vehicle-sync/conflicts"],
-    queryFn: async () => (await apiRequest("GET", "/api/notion-vehicle-sync/conflicts")).json(),
-    enabled: admin,
-    refetchInterval: 5000,
-  });
-  const [showConflicts, setShowConflicts] = useState(false);
-
   const detectMutation = useMutation({
     mutationFn: async () => (await apiRequest("POST", "/api/notion-vehicle-sync/detect", {})).json(),
     onSuccess: (report: VehicleSyncReport) => {
       queryClient.invalidateQueries({ queryKey: ["/api/notion-vehicle-sync/pending"] });
       queryClient.invalidateQueries({ queryKey: ["/api/notion-vehicle-sync/status"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/notion-vehicle-sync/conflicts"] });
       const hasChanges = report.created + report.updated > 0;
-      const conflictCount = report.conflicts?.length ?? 0;
       toast({
         title: hasChanges ? "Changes detected" : "No changes",
-        description: [
-          hasChanges ? `${report.created} new, ${report.updated} changed — review below.` : "Vehicle Master is already up to date with Notion.",
-          conflictCount > 0 ? `${conflictCount} vehicle number(s) need attention in Notion.` : null,
-        ].filter(Boolean).join(" "),
-        variant: conflictCount > 0 && !hasChanges ? "destructive" : undefined,
+        description: hasChanges ? `${report.created} new, ${report.updated} changed — review below.` : "Vehicle Master is already up to date with Notion.",
       });
       if (hasChanges) setShowPending(true);
     },
@@ -193,15 +173,7 @@ export default function VehicleMaster() {
     mutationFn: async () => (await apiRequest("POST", "/api/notion-vehicle-sync/full-sync", {})).json(),
     onSuccess: (report: VehicleSyncReport) => {
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-info"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/notion-vehicle-sync/conflicts"] });
-      const conflictCount = report.conflicts?.length ?? 0;
-      toast({
-        title: "Full sync complete",
-        description: [
-          `${report.created} vehicles imported from Notion.`,
-          conflictCount > 0 ? `${conflictCount} vehicle number(s) need attention in Notion.` : null,
-        ].filter(Boolean).join(" "),
-      });
+      toast({ title: "Full sync complete", description: `${report.created} vehicles imported from Notion.` });
       setFullSyncConfirm(false);
     },
     onError: (err: any) => toast({ title: "Full sync failed", description: err?.message, variant: "destructive" }),
@@ -380,15 +352,6 @@ export default function VehicleMaster() {
               )}
               {/* Persistent — stays visible even after Pending clears, since applying the rest of
                   a batch doesn't fix a vehicle-number collision still sitting in Notion. */}
-              {(statusQuery.data?.conflictCount ?? 0) > 0 && (
-                <Button size="sm" variant="outline" className="h-8 border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 text-xs" onClick={() => setShowConflicts(true)}>
-                  <AlertTriangle className="mr-1.5 h-3.5 w-3.5" />
-                  Needs Attention
-                  <span className="ml-1.5 rounded-full bg-amber-500 text-white px-1.5 py-0.5 text-[10px] font-bold leading-none">
-                    {statusQuery.data?.conflictCount}
-                  </span>
-                </Button>
-              )}
               <Button size="sm" className={BTN} disabled={syncInProgress} onClick={() => detectMutation.mutate()}>
                 {detectMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
                 Check Sync
@@ -740,26 +703,6 @@ export default function VehicleMaster() {
                 </div>
               </div>
             )}
-            {/* Distinct from Errors below — these are data problems IN NOTION (a vehicle number
-                used by two pages, or already claimed by a different linked vehicle), not
-                failures in this app. Nothing here gets applied; each needs a person to open the
-                Notion page and fix the title before the next Check Sync will pick it up. */}
-            {pendingReport?.conflicts && pendingReport.conflicts.length > 0 && (
-              <div>
-                <h4 className="mb-1.5 text-xs font-semibold uppercase text-amber-600">Needs Attention ({pendingReport.conflicts.length})</h4>
-                <ul className="space-y-1 text-sm">
-                  {pendingReport.conflicts.map((c, i) => (
-                    <li key={i} className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5">
-                      <div className="font-semibold text-amber-900">{c.vehicleNumber}</div>
-                      <div className="text-xs text-amber-700">{c.reason}</div>
-                      <a href={c.notionPageUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-[#001d6e] hover:underline">
-                        Open in Notion →
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
             {pendingReport?.errors && pendingReport.errors.length > 0 && (
               <div>
                 <h4 className="mb-1.5 text-xs font-semibold uppercase text-red-500">Errors ({pendingReport.errors.length})</h4>
@@ -775,42 +718,6 @@ export default function VehicleMaster() {
               {applyMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />}
               Apply
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Standalone "Needs Attention" dialog — opened from the persistent action-bar badge, so
-          these stay reachable even when there's nothing pending to review (Apply doesn't clear
-          them; only fixing the row in Notion and re-running Check Sync does). */}
-      <Dialog open={showConflicts} onOpenChange={setShowConflicts}>
-        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle>Needs Attention in Notion</DialogTitle>
-            <DialogDescription>
-              These vehicle numbers collide in a way the sync can't resolve on its own — open each one in Notion, fix the title, then run Check Sync again.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            {conflictsQuery.isLoading ? (
-              <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
-            ) : (conflictsQuery.data?.conflicts ?? []).length === 0 ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">Nothing needs attention right now.</p>
-            ) : (
-              <ul className="space-y-1.5 text-sm">
-                {(conflictsQuery.data?.conflicts ?? []).map((c, i) => (
-                  <li key={i} className="rounded border border-amber-200 bg-amber-50 px-2.5 py-2">
-                    <div className="font-semibold text-amber-900">{c.vehicleNumber}</div>
-                    <div className="text-xs text-amber-700">{c.reason}</div>
-                    <a href={c.notionPageUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-[#001d6e] hover:underline">
-                      Open in Notion →
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowConflicts(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -6,7 +6,6 @@ import { requirePageAccess, requirePageWrite, requireAdminRole } from '../lib/pa
 import {
   detectVehicleChangesFromNotion, applyPendingVehicleChanges, fullSyncVehiclesFromNotion,
   getPendingReport, getSyncStatus, getSyncHistory, getAutoApplyEnabled, setAutoApplyEnabled,
-  getLastConflicts,
 } from '../services/notionVehicleSync';
 
 const router = Router();
@@ -219,13 +218,6 @@ router.get('/notion-vehicle-sync/status', requireAdminRole, async (_req: Request
 
 router.get('/notion-vehicle-sync/history', requireAdminRole, (_req: Request, res: Response) => {
   res.json({ history: getSyncHistory() });
-});
-
-// Vehicle-number collisions the last sync run couldn't auto-resolve — needs a human to fix the
-// row in Notion. Kept separate from /pending (which clears once Apply runs) since a conflict
-// isn't resolved just because the rest of the batch was.
-router.get('/notion-vehicle-sync/conflicts', requireAdminRole, (_req: Request, res: Response) => {
-  res.json({ conflicts: getLastConflicts() });
 });
 
 router.post('/notion-vehicle-sync/auto-apply', requireAdminRole, async (req: Request, res: Response) => {

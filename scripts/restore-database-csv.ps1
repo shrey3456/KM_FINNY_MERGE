@@ -25,6 +25,13 @@
   database the CSV came from - a plain positional COPY would then silently write values into
   the wrong columns instead of erroring.
 
+  After the import commits, every SERIAL/IDENTITY column's auto-increment counter is resynced
+  to MAX(id) for its table. \copy loads rows WITH their original id values already on them but
+  never touches the underlying sequence, so without this step the very first ordinary insert
+  the app makes into a restored table (e.g. importing a new Order Import CSV) asks for an id
+  that's already taken by a just-restored row and fails with "duplicate key value violates
+  unique constraint ..._pkey" - exactly what happened in production before this step existed.
+
   -DatabaseUrl is REQUIRED, on purpose: this script writes data, and defaulting to whatever
   DATABASE_URL happens to be in .env risks silently importing into your live database instead
   of the new one you meant. You have to name the target explicitly every time.
@@ -151,9 +158,64 @@ try {
     } finally {
         Remove-Item $importScriptPath -ErrorAction SilentlyContinue
     }
+
+    # -- Resync every SERIAL/IDENTITY column's auto-increment counter to match the data just
+    #    loaded --
+    # \copy inserts rows WITH their original id values already on them, but never touches the
+    # column's underlying sequence (the counter Postgres hands out for the NEXT plain INSERT
+    # that doesn't specify an id). Left alone, that counter stays wherever it was before this
+    # restore (usually 1) - so the very first ordinary insert the app makes into a restored
+    # table asks for an id that's already taken by a just-restored row, and Postgres rejects it:
+    #   duplicate key value violates unique constraint "<table>_pkey"
+    # This walks every table/column in the public schema that has an associated sequence and
+    # sets it to MAX(id) - exactly what production hit (order_import_items) before this fix
+    # existed. Safe to run every time: it only ever moves a counter FORWARD to match reality,
+    # never touches a single row of data.
+    Write-Host ""
+    Write-Host "Resyncing auto-increment sequences to match restored data..."
+    $seqScriptPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $seqSql = @'
+DO $$
+DECLARE
+    rec RECORD;
+    fixed_count INT := 0;
+BEGIN
+    FOR rec IN
+        SELECT
+            t.relname AS table_name,
+            a.attname AS column_name,
+            pg_get_serial_sequence('public.' || t.relname, a.attname) AS seq_name
+        FROM pg_class t
+        JOIN pg_attribute a ON a.attrelid = t.oid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relkind = 'r'
+          AND n.nspname = 'public'
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND pg_get_serial_sequence('public.' || t.relname, a.attname) IS NOT NULL
+    LOOP
+        EXECUTE format(
+            'SELECT setval(%L, COALESCE((SELECT MAX(%I) FROM public.%I), 1), true)',
+            rec.seq_name, rec.column_name, rec.table_name
+        );
+        fixed_count := fixed_count + 1;
+    END LOOP;
+    RAISE NOTICE 'Resynced % sequence(s)', fixed_count;
+END $$;
+'@
+        [System.IO.File]::WriteAllLines($seqScriptPath, @($seqSql), (New-Object System.Text.UTF8Encoding $false))
+        & $psql --host=$dbHost --port=$dbPort --username=$dbUser --dbname=$dbName `
+            --set=ON_ERROR_STOP=1 --file=$seqScriptPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "psql exited with code $LASTEXITCODE while resyncing sequences - the data import above already committed successfully, but auto-increment counters may still be stale. Safe to re-run just this script again (or run the sequence-resync SQL by hand)."
+        }
+    } finally {
+        Remove-Item $seqScriptPath -ErrorAction SilentlyContinue
+    }
 } finally {
     Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
 }
 
 Write-Host ""
-Write-Host "Import complete: $($csvFiles.Count) tables loaded into $dbName."
+Write-Host "Import complete: $($csvFiles.Count) tables loaded into $dbName, sequences resynced."

@@ -379,8 +379,14 @@ export default function LoadOperation() {
   const vehicleSuggestions = vehicleSuggestionsQuery.data?.results ?? [];
 
   const linkVehicleMutation = useMutation({
-    mutationFn: async (vehicleNumber: string) => {
-      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/link-vehicle`, { vehicleNumber });
+    // Sends the picked row's id, not just its number — Vehicle Master no longer guarantees a
+    // vehicle number is unique (two Notion pages can share one), so the id is what makes sure
+    // the server links the EXACT row shown/picked in the dropdown, not just "some" vehicle with
+    // a matching number.
+    mutationFn: async (vehicle: VehicleSuggestion) => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/link-vehicle`, {
+        vehicleId: vehicle.id, vehicleNumber: vehicle.vehicleNumber,
+      });
       return res.json() as Promise<{ slip: ProformaSlip; vehicle: VehicleSuggestion }>;
     },
     onSuccess: (data) => {
@@ -1069,7 +1075,7 @@ export default function LoadOperation() {
                         </div>
                         <Button size="sm" className="h-8 shrink-0 bg-[#001d6e] text-white hover:bg-[#001552]"
                           disabled={linkVehicleMutation.isPending}
-                          onClick={() => linkVehicleMutation.mutate(selectedVehicle.vehicleNumber)}>
+                          onClick={() => linkVehicleMutation.mutate(selectedVehicle)}>
                           {linkVehicleMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Link2 className="mr-1.5 h-3.5 w-3.5" />}
                           Link
                         </Button>

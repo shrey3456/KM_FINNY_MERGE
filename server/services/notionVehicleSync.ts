@@ -42,18 +42,6 @@ export interface CreatedVehicle {
   notionPageId: string;
 }
 
-// A vehicle number that collides between two things that can't be auto-resolved — either two
-// different Notion pages both claim it, or an already-linked local vehicle (different Notion
-// page) collides with a new one. Needs a human to fix the data in Notion. Distinct from
-// `errors` (which are real failures) so the UI can show this as "needs your attention" rather
-// than "something broke".
-export interface VehicleConflict {
-  vehicleNumber: string;
-  notionPageId: string;
-  notionPageUrl: string;
-  reason: string;
-}
-
 export interface VehicleSyncReport {
   syncTime: Date;
   total: number;
@@ -65,12 +53,7 @@ export interface VehicleSyncReport {
   appliedBy?: string;
   changedVehicles: VehicleChange[];
   createdVehicles: CreatedVehicle[];
-  conflicts: VehicleConflict[];
   errors: string[];
-}
-
-function notionPageUrl(pageId: string): string {
-  return `https://www.notion.so/${pageId.replace(/-/g, '')}`;
 }
 
 const syncHistory: VehicleSyncReport[] = [];
@@ -79,11 +62,6 @@ const MAX_HISTORY = 10;
 let pendingReport: VehicleSyncReport | null = null;
 const pendingUpdates = new Map<number, Record<string, any>>();
 const pendingCreates: Record<string, any>[] = [];
-// The most recent run's conflicts, kept around independent of pendingReport (which clears once
-// Apply runs) so the "needs attention" badge on the page stays accurate even after changes have
-// been applied — a conflict isn't resolved just because the rest of the batch was.
-let lastConflicts: VehicleConflict[] = [];
-export function getLastConflicts(): VehicleConflict[] { return lastConflicts; }
 
 // DB-persisted (notion_vehicle_sync_config, created in server/index.ts), not an in-memory
 // flag — same reasoning as notion_inventory_sync_config: off by default so a fresh install
@@ -104,7 +82,7 @@ export async function setAutoApplyEnabled(enabled: boolean, updatedBy: string | 
 
 export function getPendingReport(): VehicleSyncReport | null { return pendingReport; }
 export function getSyncHistory(): VehicleSyncReport[] { return syncHistory; }
-export function getSyncStatus() { return { isSyncing, hasPending: !!pendingReport, conflictCount: lastConflicts.length }; }
+export function getSyncStatus() { return { isSyncing, hasPending: !!pendingReport }; }
 
 // ─── Map Notion page → vehicle fields ────────────────────────────────────────
 // Property names confirmed against the real Notion database (schema-inspection run,
@@ -242,20 +220,17 @@ function diffFields(notionData: Record<string, any>, vehicle: VehicleInfo, compa
 }
 
 function computeChanges(notionPages: any[], allVehicles: VehicleInfo[]) {
+  // notionPageId is the ONLY thing that identifies a row now — vehicle_number is just a regular
+  // field, and two different Notion pages sharing one (two vehicles, or intentionally more than
+  // one page for the same physical vehicle) is normal, not a conflict. Every Notion page always
+  // maps to exactly its own row: already-linked → update it; not yet seen → create a new one.
+  // No cross-page duplicate checking of any kind.
   const byNotionPageId = new Map(allVehicles.filter((v) => v.notionPageId).map((v) => [v.notionPageId!, v]));
-  // Keyed by vehicle number (trimmed/lowercased) so a Notion page not yet linked by id can
-  // still be matched to an existing local row that has the same number. vehicle_number is
-  // unique in the DB, so this map is naturally 1:1 — no local duplicates possible already.
-  const byVehicleNumber = new Map(allVehicles.map((v) => [v.vehicleNumber.trim().toLowerCase(), v]));
-  // Tracks vehicle numbers claimed so far *within this same Notion batch* — catches two
-  // brand-new Notion pages (neither linked to any local row yet) colliding with each other.
-  const seenInBatch = new Map<string, string>(); // key -> notionPageId that claimed it
 
   const changedVehicles: VehicleChange[] = [];
   const toCreate: Record<string, any>[] = [];
   const createdVehicles: CreatedVehicle[] = [];
   const updatesMap = new Map<number, Record<string, any>>();
-  const conflicts: VehicleConflict[] = [];
   const errors: string[] = [];
   let skipped = 0;
   let notFound = 0;
@@ -271,7 +246,6 @@ function computeChanges(notionPages: any[], allVehicles: VehicleInfo[]) {
     try {
       const fields = mapNotionPageToVehicleFields(page);
       if (!fields.vehicleNumber) { notFound++; continue; }
-      const key = fields.vehicleNumber.trim().toLowerCase();
 
       const linkedVehicle = byNotionPageId.get(fields.notionPageId);
       const notionData = buildVehicleData(fields);
@@ -288,43 +262,8 @@ function computeChanges(notionPages: any[], allVehicles: VehicleInfo[]) {
         continue;
       }
 
-      const sameNumberVehicle = byVehicleNumber.get(key);
-
-      if (sameNumberVehicle) {
-        if (!sameNumberVehicle.notionPageId) {
-          // Situation 1 — same real vehicle, just never linked to Notion before. Adopt this
-          // Notion page as its source: link it and pull in whatever else differs, instead of
-          // discarding the Notion row as a "duplicate".
-          const { updates, fieldChanges } = diffFields(notionData, sameNumberVehicle, comparable);
-          updates.notionPageId = fields.notionPageId;
-          fieldChanges.unshift({ field: 'notionPageId', label: 'Linked to Notion', oldValue: 'Not linked', newValue: 'Linked' });
-          updatesMap.set(sameNumberVehicle.id, updates);
-          changedVehicles.push({ vehicleId: sameNumberVehicle.id, vehicleNumber: sameNumberVehicle.vehicleNumber, changes: fieldChanges });
-        } else {
-          // Situation 2 — this local vehicle is already linked to a DIFFERENT Notion page.
-          // Can't tell which one is right — needs a human to fix it in Notion.
-          conflicts.push({
-            vehicleNumber: fields.vehicleNumber, notionPageId: fields.notionPageId, notionPageUrl: notionPageUrl(fields.notionPageId),
-            reason: `Another vehicle already exists with this number, linked to a different Notion page.`,
-          });
-        }
-        continue;
-      }
-
-      const seenAsId = seenInBatch.get(key);
-      if (seenAsId) {
-        // Situation 2b — two (or more) brand-new Notion pages in this same sync both use this
-        // number (e.g. a blank/half-filled title like "S"). The first one is created normally;
-        // every later page with the same number is flagged here instead of also being created
-        // (which would just hit the unique constraint again) or silently dropped.
-        conflicts.push({
-          vehicleNumber: fields.vehicleNumber, notionPageId: fields.notionPageId, notionPageUrl: notionPageUrl(fields.notionPageId),
-          reason: `Another Notion page in this same sync also uses this vehicle number — check for a blank/duplicate title in Notion.`,
-        });
-        continue;
-      }
-
-      seenInBatch.set(key, fields.notionPageId);
+      // Never seen this Notion page before — always a new row, regardless of whether another
+      // row already has this same vehicle number.
       toCreate.push(notionData);
       createdVehicles.push({ vehicleNumber: fields.vehicleNumber, notionPageId: fields.notionPageId });
     } catch (err) {
@@ -333,7 +272,7 @@ function computeChanges(notionPages: any[], allVehicles: VehicleInfo[]) {
     }
   }
 
-  return { changedVehicles, toCreate, createdVehicles, updatesMap, conflicts, errors, skipped, notFound };
+  return { changedVehicles, toCreate, createdVehicles, updatesMap, errors, skipped, notFound };
 }
 
 // ─── Detect-only (dry-run): stores pending, no DB writes ─────────────────────
@@ -347,13 +286,13 @@ export async function detectVehicleChangesFromNotion(triggeredBy = 'system'): Pr
     console.log('[Notion Vehicle Sync] Detecting changes (dry-run)...');
     const notionPages = await fetchAllVehiclePages();
     const allVehicles = await storage.getAllVehicleInfo();
-    const { changedVehicles, toCreate, createdVehicles, updatesMap, conflicts, errors, skipped, notFound } =
+    const { changedVehicles, toCreate, createdVehicles, updatesMap, errors, skipped, notFound } =
       computeChanges(notionPages, allVehicles);
 
     const report: VehicleSyncReport = {
       syncTime: new Date(), total: notionPages.length,
       created: toCreate.length, updated: changedVehicles.length,
-      skipped, notFound, triggeredBy, changedVehicles, createdVehicles, conflicts, errors,
+      skipped, notFound, triggeredBy, changedVehicles, createdVehicles, errors,
     };
 
     pendingReport = report;
@@ -361,9 +300,8 @@ export async function detectVehicleChangesFromNotion(triggeredBy = 'system'): Pr
     pendingCreates.length = 0;
     for (const [id, upd] of updatesMap.entries()) pendingUpdates.set(id, upd);
     pendingCreates.push(...toCreate);
-    lastConflicts = conflicts;
 
-    console.log(`[Notion Vehicle Sync] Detected — new: ${toCreate.length}, changed: ${changedVehicles.length}, unchanged: ${skipped}, needs attention: ${conflicts.length}`);
+    console.log(`[Notion Vehicle Sync] Detected — new: ${toCreate.length}, changed: ${changedVehicles.length}, unchanged: ${skipped}`);
     return report;
   } finally {
     isSyncing = false;
@@ -443,26 +381,12 @@ export async function fullSyncVehiclesFromNotion(triggeredBy: string, triggeredB
     await storage.clearVehicleInfo();
     console.log('[Notion Vehicle Sync] vehicle_info cleared');
 
-    // Same duplicate-title guard as computeChanges (see its comment) — the table is empty at
-    // this point, so "Situation 1" (adopt an existing unlinked local vehicle) can't happen here;
-    // this only catches two-or-more Notion pages colliding with EACH OTHER within this run
-    // (e.g. several blank/placeholder rows all titled "S"), tracked as conflicts needing a
-    // human to fix in Notion, not silently dropped.
-    const seenVehicleNumbers = new Map<string, string>(); // key -> notionPageId that claimed it
-    const conflicts: VehicleConflict[] = [];
+    // One row per Notion page, unconditionally — vehicle_number is just a regular field here
+    // now, so two pages sharing a number is normal and both get their own row.
     for (const page of notionPages) {
       try {
         const fields = mapNotionPageToVehicleFields(page);
         if (!fields.vehicleNumber) continue;
-        const key = fields.vehicleNumber.trim().toLowerCase();
-        if (seenVehicleNumbers.has(key)) {
-          conflicts.push({
-            vehicleNumber: fields.vehicleNumber, notionPageId: fields.notionPageId, notionPageUrl: notionPageUrl(fields.notionPageId),
-            reason: `Another Notion page in this same sync also uses this vehicle number — check for a blank/duplicate title in Notion.`,
-          });
-          continue;
-        }
-        seenVehicleNumbers.set(key, fields.notionPageId);
         const data = buildVehicleData(fields);
         await storage.createVehicleInfo({
           ...data,
@@ -477,18 +401,17 @@ export async function fullSyncVehiclesFromNotion(triggeredBy: string, triggeredB
 
     const report: VehicleSyncReport = {
       syncTime: new Date(), total: notionPages.length, created, updated: 0,
-      skipped: 0, notFound: notionPages.length - created - errors.length - conflicts.length,
+      skipped: 0, notFound: notionPages.length - created - errors.length,
       triggeredBy, appliedBy: triggeredByCode ?? undefined,
-      changedVehicles: [], createdVehicles, conflicts, errors,
+      changedVehicles: [], createdVehicles, errors,
     };
     syncHistory.unshift(report);
     if (syncHistory.length > MAX_HISTORY) syncHistory.splice(MAX_HISTORY);
     pendingReport = null;
     pendingUpdates.clear();
     pendingCreates.length = 0;
-    lastConflicts = conflicts;
 
-    console.log(`[Notion Vehicle Sync] Full sync complete — created: ${created}, needs attention: ${conflicts.length}`);
+    console.log(`[Notion Vehicle Sync] Full sync complete — created: ${created}`);
     return report;
   } finally {
     isSyncing = false;
