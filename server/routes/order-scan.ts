@@ -373,14 +373,14 @@ async function seedSessionItemsWithClient(client: any, id: number, plant: string
     const prod = item.barcode ? productMap.get(normKey(item.barcode)) : null;
     const prodObj = prod ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt } : null;
     const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
-    vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
-    placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
-    pi += 7;
+    vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize, item.vehicle_number ?? null);
+    placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6},$${pi+7})`);
+    pi += 8;
   }
 
   await client.query(
     `INSERT INTO order_scan_items
-       (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+       (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet, vehicle_number)
      VALUES ${placeholders.join(',')}`,
     vals,
   );
@@ -1008,14 +1008,14 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'
         const prod = item.barcode ? productMap.get(item.barcode) : null;
         const prodObj = prod ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt } : null;
         const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
-        vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
-        placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
-        pi += 7;
+        vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize, item.vehicle_number ?? null);
+        placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6},$${pi+7})`);
+        pi += 8;
       }
 
       await client.query(
         `INSERT INTO order_scan_items
-           (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+           (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet, vehicle_number)
          VALUES ${placeholders.join(',')}`,
         vals,
       );
