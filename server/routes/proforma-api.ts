@@ -630,21 +630,20 @@ router.delete('/plants/:id', async (req: Request, res: Response) => {
 //      (e.g. a user with view-only access to Print Operations and Proforma) —
 //      printing would succeed but the lock would silently 403 and fail. This path
 //      is flagged by the client sending `autoLockFromPrint: true` in the body, and
-//      only needs READ access (allowedPages) to both pages, not write.
-//   2. A deliberate Lock/Unlock click on the Proforma Slips page itself (see
-//      ProformaSlips.tsx's lockSlip/unlockSlip) — a conscious administrative
-//      action, so this path (the default, no flag) keeps the stricter original
-//      rule: admin/super-admin, or Write Access to BOTH "print-operations" AND
-//      "proforma".
+//      only needs READ access (allowedPages) to EITHER page, not both.
+//   2. A deliberate Lock click on the Proforma Slips page itself (see
+//      ProformaSlips.tsx's lockSlip) — the default (no flag) path: admin/
+//      super-admin, or Write Access to EITHER "print-operations" OR "proforma"
+//      (not both — deliberately looser than Unlock below, so more people can lock
+//      a slip to protect it than can later reverse that).
 function requireLockAccess(req: Request, res: Response, next: () => void) {
   if (req.body?.autoLockFromPrint === true) {
-    // Read access to BOTH — requirePageAccess treats an array as "any one of these",
-    // not "all of these", so both keys must be checked in their own chained call
-    // (same reason the default branch below chains two requirePageWrite calls
-    // instead of passing an array to one).
-    return requirePageAccess('print-operations')(req, res, () => requirePageAccess('proforma')(req, res, next));
+    // A single call with an array is an OR across the keys (requirePageAccess treats
+    // it as "any one of these") — exactly what's wanted here, unlike the chained-call
+    // pattern that used to force an AND of both pages.
+    return requirePageAccess(['print-operations', 'proforma'])(req, res, next);
   }
-  return requirePageWrite('print-operations')(req, res, () => requirePageWrite('proforma')(req, res, next));
+  return requirePageWrite(['print-operations', 'proforma'])(req, res, next);
 }
 router.post('/proforma-slips/order/:orderNumber/lock', requireLockAccess, async (req: Request, res: Response) => {
   try {

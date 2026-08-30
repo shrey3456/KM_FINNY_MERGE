@@ -452,7 +452,7 @@
       <span class="mark">KM</span>
       <h1>Field Manual — Internal Platform Reference</h1>
     </div>
-    <div class="meta">14 modules · usage + API level</div>
+    <div class="meta">16 modules · usage + API level</div>
   </header>
 
   <nav class="toc" aria-label="Table of contents">
@@ -475,7 +475,9 @@
       <p class="group-label">Order Pipeline</p>
       <ul>
         <li><a href="#order-import">Order Management</a></li>
-        <li><a href="#order-reports">Order Reports</a></li>
+        <li><a href="#order-reports">Reports (Summary/Activity/Hourly)</a></li>
+        <li><a href="#scan-viewer">Scan Viewer</a></li>
+        <li><a href="#scan-history">Scan History</a></li>
       </ul>
     </div>
     <div class="group">
@@ -702,7 +704,7 @@
     </section>
 
     <section class="category" id="cat-pipeline">
-      <div class="category-head"><h2>Order Pipeline</h2><div class="rule"></div><span class="count">2 modules</span></div>
+      <div class="category-head"><h2>Order Pipeline</h2><div class="rule"></div><span class="count">4 modules</span></div>
 
       <article class="page" id="order-import">
         <div class="page-head">
@@ -723,6 +725,7 @@
           <li>Every CSV sharing the same Plant + Order Date is auto-grouped into one FIFO batch, ordered by upload sequence (<code class="mono">receivingSessionId</code> + <code class="mono">partIndex</code>) — this is entirely a server-side grouping, nothing the uploader has to configure.</li>
           <li>If the plant is idle, the first part auto-activates for scanning immediately; later parts wait and auto-advance as earlier ones complete.</li>
           <li>Sessions live in tabs — Available / Active / Completed / History — each with Load for Scan, Deactivate, Complete, Delete (soft-delete), and an expandable item list.</li>
+          <li>The History tab shows each session's Started / Completed / Active For (from <code class="mono">scanActivatedAt</code>/<code class="mono">scanCompletedAt</code>) alongside its Part badge — the same timing surfaced in Scan Viewer's header and every Reports export.</li>
         </ol>
 
         <h4 class="block-label">API</h4>
@@ -736,28 +739,92 @@
 
       <article class="page" id="order-reports">
         <div class="page-head">
-          <h3>Order Reports</h3>
-          <span class="page-route filepath">/order-reports → client/src/pages/OrderReports.tsx</span>
+          <h3>Reports</h3>
+          <span class="page-route filepath">Order Import → per-session "Reports" button → client/src/components/modals/ReportsDialog.tsx</span>
         </div>
-        <p class="page-purpose">What actually happened, after Order Scan ran — per-CSV and whole-batch reports, with the FIFO cross-part netting spelled out.</p>
+        <p class="page-purpose">What actually happened, after Order Scan ran — per-CSV and whole-batch reports, with the FIFO cross-part netting spelled out. Not a standalone page — opened as a dialog from a session row on the Order Management page.</p>
         <div class="badges">
           <span class="badge access">Same gate as Order Management</span>
         </div>
 
         <h4 class="block-label">How it works</h4>
         <ol class="steps">
-          <li>Sessions list splits into FIFO groups (by <code class="mono">receivingSessionId</code>, ordered by part) and standalone single-CSV imports.</li>
-          <li>Per group: a consolidated Summary (FIFO-adjusted), full group Activity log, and a per-part CSV-wise breakdown. Per standalone session: Summary and Activity.</li>
-          <li>Every report opens in-browser as a table, or downloads as CSV, Excel, or PDF.</li>
+          <li>Opened per-session ("This CSV") and, when that CSV is part of a FIFO batch, also for the whole group ("Whole Order") — three report kinds either way: <strong>Summary</strong> (expected/received/extra/missing per item, FIFO-adjusted for groups), <strong>Activity</strong> (every individual scan event, in order), and <strong>Hourly</strong>.</li>
+          <li><strong>Hourly</strong> buckets that same scan-activity data into rolling 1-hour windows anchored to the session's actual <code class="mono">scanActivatedAt</code> — a 2:30 start produces "2:30 – 3:30", "3:30 – 4:30", ..., not clock-hour boundaries. Every window from start to the last scan appears even when empty, so gaps in scanning read as gaps, not missing rows. For a group, the earliest part's start anchors every part's windows onto one shared timeline. Voided scans and system credit-transfer rows are excluded from the totals (not real physical arrivals), same rule the Summary report's Received total already follows.</li>
+          <li>Every report opens in-browser or downloads as CSV, Excel, or PDF. Hourly's in-browser view is its own expandable list — each hour collapses to a one-line count (scans/items/pallets) and expands to show its individual scans (time, barcode, item, scanned by, pallets, qty); a Download control sits inside that view too, and each expanded hour has its own "Download this hour" button for a single-window export.</li>
+          <li>Summary, Activity, and Hourly all show Started / Completed / Active For (from <code class="mono">order_import_sessions.scan_activated_at</code>/<code class="mono">scan_completed_at</code>) as a header block above the report — per part for a group, so a multi-day FIFO batch's timeline is visible at a glance.</li>
         </ol>
 
         <h4 class="block-label">API</h4>
         <div class="endpoints">
-          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/part-report</span></div>
-          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/group-report</span></div>
-          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/scan-activity?scope=part|group</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/part-report</span><span class="note">Summary</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/group-report</span><span class="note">Summary, group scope</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/scan-activity?scope=part|group</span><span class="note">backs both Activity and Hourly — Hourly is bucketed client-side from the same event list, no separate endpoint</span></div>
         </div>
-        <p>Computed read-time, on demand, by <code class="filepath">server/lib/orderGroupReport.ts</code> — <code>computeGroupReport</code> walks every part of a batch in sequence and nets an earlier <em>completed</em> part's leftover extra against a later part's shortfall for the same barcode, so a box that arrived early against the wrong part's CSV doesn't read as two unrelated discrepancies. It only reads <code class="filepath">orderScanItems</code>/<code class="filepath">orderScanEvents</code> — never rewrites them.</p>
+        <p>Summary/group figures are computed read-time, on demand, by <code class="filepath">server/lib/orderGroupReport.ts</code> — <code>computeGroupReport</code> walks every part of a batch in sequence and nets an earlier <em>completed</em> part's leftover extra against a later part's shortfall for the same barcode, so a box that arrived early against the wrong part's CSV doesn't read as two unrelated discrepancies. It only reads <code class="filepath">orderScanItems</code>/<code class="filepath">orderScanEvents</code> — never rewrites them.</p>
+      </article>
+
+      <article class="page" id="scan-viewer">
+        <div class="page-head">
+          <h3>Scan Viewer</h3>
+          <span class="page-route filepath">/scan-viewer → client/src/pages/ScanViewer.tsx</span>
+        </div>
+        <p class="page-purpose">A read-oriented sibling of Order Scan — pick any plant and any order date, including already-completed ones, to see that order's scan progress without touching the live scanning session on the Scan page.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: scan-viewer</span>
+          <span class="badge data">Tables: orderImportSessions, orderScanItems (read-only)</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Header row: a Plant dropdown, the session's "loaded by" user, Started / Completed / Active For (from the session's <code class="mono">scanActivatedAt</code>/<code class="mono">scanCompletedAt</code>), a date picker, and — when a plant+date has more than one FIFO part — a part picker, all in one row, plus a progress bar / "Complete" badge.</li>
+          <li>Same Master View (all parts for a plant+date merged, including Extras never on any CSV) and Part Order (per-file) views as the Scan page, re-implemented here read-only — no scan input, no camera, no keyboard-wedge listener.</li>
+          <li>Item-history drill-down (who scanned what, when) for any row, same as Scan page's Master View.</li>
+          <li>Void is available here too, gated by its own, narrower permission — see <a href="permissions-manual.html#scan-viewer">permissions-manual.html</a>.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions, /order-scan/sessions/:id/items, /extras</span><span class="note">same read endpoints Order Scan's Master View uses</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/master-view/item-history</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="note">requireVoidAccess — see permissions-manual.html</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>This page duplicates a fair amount of Scan.tsx's merge logic (<code>MvMergedItem</code>) rather than importing it — the two files' comments cross-reference each other, so a fix to how Master View merges extras/credits in one almost always needs the same fix mirrored in the other.</p>
+        </div>
+      </article>
+
+      <article class="page" id="scan-history">
+        <div class="page-head">
+          <h3>Scan History</h3>
+          <span class="page-route filepath">/reports → client/src/pages/Scanning/Reports.tsx</span>
+        </div>
+        <p class="page-purpose">The full, flat audit trail of every individual scan event across every plant/order — searchable, column-filterable, exportable, and correctable (void) if a mistake was made. Distinct from the per-order Reports dialog above: this is one continuous log, not scoped to a single CSV or FIFO group.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: scan-history</span>
+          <span class="badge data">Table: scan_history (backed by order_scan_events)</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Backend-paginated (20/page) table — barcode, item, pallets/qty/loose, Extra/Empty-Box/Exchange flags, STV, scanner, order, plant, void status.</li>
+          <li>Seven Excel-style per-column filters (STV, Time, Order Date, Plant, Barcode, Qty, Pallets), all enforced server-side via an explicit column allowlist (<code class="mono">SCAN_HISTORY_FILTER_COLUMNS</code> in <code class="filepath">server/routes/scan-sessions.ts</code>) and persisted to <code class="mono">sessionStorage</code> so filters survive a refresh.</li>
+          <li>Changing a filter or page resets to page 1 in the same render pass (not a follow-up effect), so switching filters can't briefly query with a stale page number against the new filter set. Auto-refresh (every 5s) only runs on page 1 — it's paused on later pages, since a live newest-first feed would otherwise shift every page's offset window under the reader mid-poll.</li>
+          <li>Void and Excel/PDF export are both write-gated; void reverses the scan out of stock the same way the underlying <code class="mono">/order-scan/events/:id/void</code> endpoint always has.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/scan-sessions/reports/scan-history</span><span class="note">LIMIT/OFFSET pagination + the 7-column filter allowlist above</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="note">requireVoidAccess — see permissions-manual.html</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>The column allowlist is a deliberate safety pattern (an unknown filter id is silently ignored rather than passed to SQL), but that same silence previously let 3 of the 7 UI filter columns (Barcode, Qty, Pallets) go unenforced server-side for a while without anyone noticing the UI was filtering nothing — worth grepping <code class="mono">SCAN_HISTORY_FILTER_COLUMNS</code> against the client's filterable-column list if you add a new column here.</p>
+        </div>
       </article>
     </section>
 
@@ -807,7 +874,7 @@
         <h4 class="block-label">How it works</h4>
         <ol class="steps">
           <li>Search or browse slips; add new items via the search-and-add panel (Add/Edit gated by write access).</li>
-          <li>Print locks the slip automatically; unlocking it again needs write access <em>and</em> (independently) one of: IT department, Management department, or Billing department with Head designation.</li>
+          <li>Print locks the slip automatically — this auto-lock deliberately only needs <em>read</em> access to Print Operations and Proforma (not write), so a view-only print user's slip still locks behind them. Unlocking it again needs write access <em>and</em> (independently) one of: IT department, Management department, or Billing department with Head designation. See <a href="permissions-manual.html#print-ops">permissions-manual.html</a> for the exact rule.</li>
           <li>Slips can also be pulled in directly from Notion via the Import dialog.</li>
         </ol>
 
@@ -829,7 +896,7 @@
 
         <h4 class="block-label">How it works</h4>
         <ol class="steps">
-          <li>Search by order number; the located slip prints directly, with a running print count and locked-after-first-print behavior when the plant has locking enabled.</li>
+          <li>Search by order number; the located slip prints directly, with a running print count and locked-after-first-print behavior when the plant has locking enabled. The lock this fires is read-gated, not write-gated — a user with only view access to Print Operations and Proforma can still print and have it lock correctly (a toast now surfaces if that lock call fails for any reason, instead of only a browser-console error).</li>
           <li>Unlocking a locked slip needs: admin/super-admin, IT department, Management department, Billing+Head designation, <em>or</em> a per-page write grant.</li>
           <li>Admins get a "Plant Management" shortcut button straight from this page.</li>
         </ol>

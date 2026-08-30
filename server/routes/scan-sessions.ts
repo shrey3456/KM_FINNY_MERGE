@@ -791,6 +791,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       ose.is_extra         AS "isExtra",
       (ose.barcode = 'EMPTY_BOX') AS "isEmptyBox",
       false AS "isExchange",
+      false AS "isDispatch",
       CASE WHEN ose.item_name LIKE 'Empty Box: %' THEN SUBSTRING(ose.item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
       ose.stv,
       ose.scanned_by_code  AS "scannedByCode",
@@ -828,6 +829,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isExtra",
       false AS "isEmptyBox",
       true AS "isExchange",
+      false AS "isDispatch",
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
@@ -845,6 +847,39 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       sm.plant AS "plant"
     FROM stock_movements sm
     WHERE sm.type = 'exchange'
+
+    UNION ALL
+
+    -- Loading page's item-scanning history (server/routes/loading.ts) — each row is a confirmed
+    -- scan that actually removed stock onto a vehicle for a proforma order ("Loaded"/"Loaded
+    -- Extra" in the Type column below), distinct from a receiving scan (which adds stock) or an
+    -- exchange correction. id offset (3000000000+) keeps it out of both other branches' id space,
+    -- since Void (order_scan_events-only) and any id-based lookup must never collide across them.
+    SELECT
+      (3000000000 + lse.id) AS id,
+      lse.barcode,
+      lse.item_name         AS "itemName",
+      lse.pallets,
+      lse.total_qty         AS "totalQty",
+      NULL::integer AS "itemsPerPallet",
+      lse.loose_qty         AS "looseQty",
+      lse.is_extra          AS "isExtra",
+      false AS "isEmptyBox",
+      false AS "isExchange",
+      true AS "isDispatch",
+      NULL::text AS "emptyBoxNote",
+      NULL::text AS stv,
+      lse.scanned_by_code   AS "scannedByCode",
+      lse.scanned_by_name   AS "scannedByName",
+      lse.scanned_at        AS "scannedAt",
+      COALESCE(lse.voided, false) AS voided,
+      lse.voided_at         AS "voidedAt",
+      lse.void_reason       AS "voidReason",
+      (SELECT p.new_sr FROM products p WHERE LOWER(p.barcode) = LOWER(lse.barcode) LIMIT 1) AS "srNo",
+      lse.order_number AS "orderName",
+      (SELECT ps.order_date::text FROM proforma_slips ps WHERE ps.order_number = lse.order_number LIMIT 1) AS "orderDate",
+      lse.plant AS "plant"
+    FROM loading_scan_events lse
   ) combined
 `;
 
@@ -966,6 +1001,15 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const toParam      = typeof req.query.to      === 'string' && req.query.to.trim()      ? req.query.to.trim()      : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
     const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange'].includes(req.query.type) ? req.query.type : null;
+    // Two distinct sections on the Scan History page (client tabs) — "Scan History" (receiving +
+    // exchange corrections, the original page) and "Load Event" (Loading's own item-scanning
+    // history, server/routes/loading.ts). Default stays 'receiving' so any older/other caller
+    // that never sends this param keeps seeing exactly what it always saw.
+    const sourceParam  = req.query.source === 'dispatch' ? 'dispatch' : 'receiving';
+    // Scopes to one proforma order's own events — used by the Loading page's own landing table
+    // (server/routes/loading.ts), whose "click a row to expand" panel re-uses this same endpoint
+    // rather than a dedicated one.
+    const orderParam   = typeof req.query.order   === 'string' && req.query.order.trim()    ? req.query.order.trim()   : null;
     const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
     const plantParam   = typeof req.query.plant   === 'string' && req.query.plant.trim()   ? req.query.plant.trim()   : null;
     const filtersParam = typeof req.query.filters === 'string' && req.query.filters.trim() ? req.query.filters.trim() : undefined;
@@ -990,6 +1034,11 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     if (fromParam)    { params.push(fromParam);    conditions.push(`DATE("scannedAt") >= $${params.length}::date`); }
     if (toParam)      { params.push(toParam);      conditions.push(`DATE("scannedAt") <= $${params.length}::date`); }
     if (scannerParam) { params.push(scannerParam); conditions.push(`"scannedByName" = $${params.length}`); }
+    if (orderParam)   { params.push(orderParam);   conditions.push(`"orderName" = $${params.length}`); }
+    // Section split — see sourceParam comment above. Applied before the Type filter below so
+    // 'regular'/'extra' inside the Load Event tab only ever match loading rows, never receiving
+    // ones (and vice versa), without either filter needing to know about the other.
+    conditions.push(sourceParam === 'dispatch' ? `"isDispatch" = true` : `NOT "isDispatch"`);
     // Empty boxes and exchanges ARE shown in scan history as their own distinct statuses, but
     // they're never product scans — so 'regular'/'extra' filters must exclude both, and the
     // box/pallet totals below exclude them too (they don't count toward order quantity). A
@@ -1010,9 +1059,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // Summary tiles are about genuine scanning activity — always exclude exchanges from them
     // regardless of the active type filter, so "Total Boxes"/"Total Pallets" never mix in a
     // stock-correction quantity.
-    const summaryWhere = where
-      ? `${where} AND NOT "isExchange"`
-      : `WHERE NOT "isExchange"`;
+    const summaryWhere = `${where} AND NOT "isExchange"`;
     const summaryFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${summaryWhere}`;
 
     // Destructuring order must track the array below: data, count, summary, column totals, scanners.
@@ -1052,6 +1099,8 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
            SELECT u.name FROM stock_movements sm
              JOIN users u ON u.user_code = sm.created_by_code
              WHERE sm.type = 'exchange' AND u.name IS NOT NULL
+           UNION
+           SELECT scanned_by_name AS name FROM loading_scan_events WHERE scanned_by_name IS NOT NULL
          ) s
          ORDER BY name`,
       ),
@@ -1092,7 +1141,11 @@ router.get('/reports/scan-history/filter-values', async (req: Request, res: Resp
       for (const id of Object.keys(SCAN_HISTORY_FILTER_COLUMNS)) empty[id] = [];
       return res.json(empty);
     }
-    const plantWhere = allowedPlants !== null ? `WHERE LOWER("plant") = ANY($1::text[])` : '';
+    // Same tab scoping as GET /reports/scan-history — Values checklists on the Load Event tab
+    // shouldn't offer barcodes/plants/etc. that only ever appear on receiving rows, and vice versa.
+    const sourceParam = req.query.source === 'dispatch' ? 'dispatch' : 'receiving';
+    const sourceCond = sourceParam === 'dispatch' ? `"isDispatch" = true` : `NOT "isDispatch"`;
+    const plantWhere = allowedPlants !== null ? `WHERE LOWER("plant") = ANY($1::text[]) AND ${sourceCond}` : `WHERE ${sourceCond}`;
     const plantParams = allowedPlants !== null ? [allowedPlants] : [];
 
     const entries = Object.entries(SCAN_HISTORY_FILTER_COLUMNS);
@@ -1100,16 +1153,21 @@ router.get('/reports/scan-history/filter-values', async (req: Request, res: Resp
       if (col.type === 'date') {
         const { rows } = await pool.query(
           `SELECT DISTINCT DATE(${col.sql})::text AS d
-           FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere ? `${plantWhere} AND ${col.sql} IS NOT NULL` : `WHERE ${col.sql} IS NOT NULL`}
+           FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere} AND ${col.sql} IS NOT NULL
            ORDER BY d DESC LIMIT 500`,
           plantParams,
         );
         return [id, rows.map((r: any) => ({ value: r.d, label: format(new Date(r.d), 'MMM d, yyyy') }))] as const;
       }
+      // SELECT DISTINCT requires ORDER BY to use the exact same expression as the select list —
+      // ordering by the raw (uncast) column while selecting its ::text cast is two different
+      // expressions to Postgres and errors (42P10). Number columns sort correctly on their own
+      // numeric value without casting; text/enum columns need the cast for the emptiness check.
+      const valueExpr = col.type === 'number' ? col.sql : `${col.sql}::text`;
       const { rows } = await pool.query(
-        `SELECT DISTINCT ${col.sql}::text AS v
-         FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere ? `${plantWhere} AND ${col.sql} IS NOT NULL AND ${col.sql}::text <> ''` : `WHERE ${col.sql} IS NOT NULL AND ${col.sql}::text <> ''`}
-         ORDER BY ${col.type === 'number' ? `${col.sql}` : 'v'} LIMIT 500`,
+        `SELECT DISTINCT ${valueExpr} AS v
+         FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere} AND ${col.sql} IS NOT NULL${col.type === 'number' ? '' : ` AND ${col.sql}::text <> ''`}
+         ORDER BY v LIMIT 500`,
         plantParams,
       );
       return [id, rows.map((r: any) => ({

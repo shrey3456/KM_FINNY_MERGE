@@ -34,6 +34,8 @@ import { initializeStatePreservation } from "./utils/statePreservationInit.tsx";
 import { useAuth, AuthProvider } from "@/hooks/use-auth";
 import PlantSettings from "./pages/PlantSettings";
 import OverallStock from "./pages/OverallStock";
+import VehicleMaster from "./pages/VehicleMaster";
+import LoadOperation from "./pages/Loading/LoadOperation";
 
 // Loading indicator component for Suspense fallback
 const LoadingIndicator = () => (
@@ -238,6 +240,7 @@ function Router() {
       <Switch>
         <Route path="/" component={Home} />
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} requiredPage="notion-inventory" />
+        <ProtectedRoute path="/vehicle-master" component={VehicleMaster} requiredPage="vehicle-master" />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
         <ProtectedRoute path="/load-operations" component={LoadOperations} requiredPage="load-operations" />
         <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />
@@ -249,6 +252,7 @@ function Router() {
         <ProtectedRoute path="/reports" component={Reports} requiredPage="scan-history" />
         <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
+        <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />
         <ProtectedRoute path="/scan-viewer" component={ScanViewer} requiredPage="scan-viewer" />
         <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
         <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />

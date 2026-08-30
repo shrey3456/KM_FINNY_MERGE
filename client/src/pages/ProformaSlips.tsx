@@ -236,6 +236,11 @@ export default function ProformaSlips() {
   const [slipSearchQuery, setSlipSearchQuery] = useState(() => readSavedSlipFilters().search ?? '');
   const [filteredProducts, setFilteredProducts] = useState<Product[] | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
+  // Inline "Edit SKU" on a single existing slip item — separate search state from the
+  // slip-level "Add Items" box above so editing one row's SKU doesn't fight over the same query.
+  const [editingSkuItemId, setEditingSkuItemId] = useState<number | null>(null);
+  const [skuEditQuery, setSkuEditQuery] = useState('');
+  const [filteredSkuProducts, setFilteredSkuProducts] = useState<Product[] | null>(null);
   const [selectedSlipIds, setSelectedSlipIds] = useState<number[]>([]);
   const [isMultipleDeleteDialogOpen, setIsMultipleDeleteDialogOpen] = useState(false);
   const [sortConfig, setSortConfig] = useState<{column: string, direction: 'asc' | 'desc'}>({
@@ -371,11 +376,16 @@ export default function ProformaSlips() {
   // canAddSlips/canEditSlips (they were always the same check under two different names).
   const canWriteSlips = isAdminOrSuper || isReadWriteUser;
 
-  // Lock/Unlock: admin/super-admin, OR Write Access to BOTH "print-operations" AND
-  // "proforma" — needs both page grants, not just one. No more department/designation
-  // special-casing (IT/Management/Billing-Head are gone — grant Write Access on both of
-  // those page keys instead).
-  const canLockUnlockSlips = isAdminOrSuper || (hasPageWriteAccess('print-operations') && hasPageWriteAccess('proforma'));
+  // Lock: admin/super-admin, OR Write Access to EITHER "print-operations" OR "proforma" —
+  // deliberately looser than Unlock below, matching the server's requireLockAccess (see
+  // server/routes/proforma-api.ts) — more people should be able to lock a slip to protect it
+  // than can later reverse that.
+  const canLockSlips = isAdminOrSuper || hasPageWriteAccess('print-operations') || hasPageWriteAccess('proforma');
+  // Unlock: admin/super-admin, OR Write Access to BOTH "print-operations" AND "proforma" —
+  // needs both page grants, not just one. No more department/designation special-casing
+  // (IT/Management/Billing-Head are gone — grant Write Access on both of those page keys
+  // instead).
+  const canUnlockSlips = isAdminOrSuper || (hasPageWriteAccess('print-operations') && hasPageWriteAccess('proforma'));
 
   console.log('DEBUG PROFORMA PERMISSIONS:', {
     source: remoteUser ? 'remote' : 'local',
@@ -384,7 +394,8 @@ export default function ProformaSlips() {
     desig: userDesig,
     isAdminOrSuper,
     isReadWriteUser,
-    canLockUnlockSlips,
+    canLockSlips,
+    canUnlockSlips,
     canWriteSlips,
   });
 
@@ -880,6 +891,17 @@ export default function ProformaSlips() {
   // Handle deleting an item
   const handleDeleteItem = (id: number) => {
     deleteSlipItemMutation.mutate(id);
+  };
+
+  // Handle editing an existing item's SKU — swaps which product this line points to. The server
+  // re-snapshots every product field (name, barcode, SAP code, price, etc.) onto the item, so
+  // this reflects everywhere the slip is read from: printing, Reports, and Loading's barcode
+  // matching (server/routes/loading.ts), which looks up items live off proforma_slip_items.
+  const handleEditSku = (itemId: number, product: Product) => {
+    handleSaveItem(itemId, { productId: product.id });
+    setEditingSkuItemId(null);
+    setSkuEditQuery('');
+    setFilteredSkuProducts(null);
   };
   
   // Toggle row expansion to show items
@@ -1464,7 +1486,7 @@ export default function ProformaSlips() {
             <DropdownMenuLabel>Actions</DropdownMenuLabel>
             <DropdownMenuSeparator />
 
-            {!slip.isPrintLocked && canLockUnlockSlips && (
+            {!slip.isPrintLocked && canLockSlips && (
               <DropdownMenuItem
                 onClick={async () => {
                   try {
@@ -1487,7 +1509,7 @@ export default function ProformaSlips() {
               </DropdownMenuItem>
             )}
 
-            {slip.isPrintLocked && canLockUnlockSlips && (
+            {slip.isPrintLocked && canUnlockSlips && (
               <DropdownMenuItem
                 onClick={async () => {
                   try {
@@ -1702,8 +1724,80 @@ export default function ProformaSlips() {
                 return (
                   <TableRow key={item.id}>
                     <TableCell>{item.srNo || ' '}</TableCell>
-                    <TableCell className="break-words">
-                      {item.barcode || ' '}
+                    <TableCell className="break-words relative">
+                      {editingSkuItemId === item.id ? (
+                        <div className="relative">
+                          <Input
+                            autoFocus
+                            type="text"
+                            placeholder="Search by name, Sr.No, or barcode..."
+                            value={skuEditQuery}
+                            onChange={(e) => {
+                              setSkuEditQuery(e.target.value);
+                              if (e.target.value.trim() !== '' && products) {
+                                setFilteredSkuProducts(products.filter(product =>
+                                  product.name?.toLowerCase().includes(e.target.value.toLowerCase()) ||
+                                  product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
+                                  product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
+                                ));
+                              } else {
+                                setFilteredSkuProducts(products ?? null);
+                              }
+                            }}
+                            className="h-8 text-xs w-full min-w-[180px]"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="absolute -right-8 top-0 h-8 w-8"
+                            onClick={() => { setEditingSkuItemId(null); setSkuEditQuery(''); setFilteredSkuProducts(null); }}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
+                          {filteredSkuProducts && filteredSkuProducts.length > 0 && (
+                            <div className="absolute z-20 w-[280px] mt-1 bg-white rounded-md shadow-lg max-h-60 overflow-auto border border-gray-300">
+                              <ul className="py-1">
+                                {filteredSkuProducts.slice(0, 30).map(product => (
+                                  <li
+                                    key={product.id}
+                                    className="px-3 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-100"
+                                    onClick={() => handleEditSku(item.id, product)}
+                                  >
+                                    <div className="flex flex-col">
+                                      <span className="font-medium text-sm">{product.name}</span>
+                                      <span className="text-xs text-muted-foreground">
+                                        Sr.No: {product.newSr || ' '} | Barcode: {product.barcode || ' '}
+                                      </span>
+                                    </div>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {skuEditQuery.trim() !== '' && (!filteredSkuProducts || filteredSkuProducts.length === 0) && (
+                            <div className="absolute z-20 w-[280px] mt-1 bg-white rounded-md shadow-lg border border-gray-300 px-3 py-3 text-center text-xs text-gray-500">
+                              No products found matching your search.
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <span>{item.barcode || ' '}</span>
+                          {canWriteSlips && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 shrink-0"
+                              title="Edit SKU"
+                              onClick={() => { setEditingSkuItemId(item.id); setSkuEditQuery(''); setFilteredSkuProducts(products ?? null); }}
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </Button>
+                          )}
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell className="max-w-[300px] break-words">
                       {item.itemName || `Product #${item.productId}`}

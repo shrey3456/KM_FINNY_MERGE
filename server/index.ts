@@ -159,6 +159,73 @@ app.use((req, res, next) => {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    // Same role as notion_inventory_sync_config above, for the Vehicle Master Notion sync
+    // (server/services/notionVehicleSync.ts) — kept as its own row/table rather than sharing
+    // the product one, since the two syncs are independent and shouldn't share an on/off switch.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notion_vehicle_sync_config (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        auto_apply_enabled BOOLEAN NOT NULL DEFAULT false,
+        updated_by TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // History log for the Loading page (server/routes/loading.ts) — one row per completed
+    // vehicle-link action, scoped per-user unless admin/super-admin (see requirePageAccess
+    // ('loading') + the createdByCode filter in listLoadingRecords).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loading_records (
+        id SERIAL PRIMARY KEY,
+        order_number TEXT NOT NULL,
+        proforma_slip_id INTEGER,
+        party_name TEXT,
+        plant TEXT,
+        vehicle_number TEXT NOT NULL,
+        rto_number TEXT,
+        volume TEXT,
+        created_by_code TEXT REFERENCES users(user_code),
+        created_by_name TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // Per-scan audit trail for Loading's item-loading step — see loadingScanEvents' comment in
+    // shared/schema.ts. Each confirmed row here is what actually decrements product_plant_stock.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loading_scan_events (
+        id SERIAL PRIMARY KEY,
+        order_number TEXT NOT NULL,
+        proforma_slip_id INTEGER,
+        barcode TEXT NOT NULL,
+        item_name TEXT,
+        sap_code TEXT,
+        pallets REAL DEFAULT 0,
+        loose_qty INTEGER DEFAULT 0,
+        total_qty INTEGER DEFAULT 0,
+        is_extra BOOLEAN DEFAULT false,
+        plant TEXT,
+        scanned_by_code TEXT REFERENCES users(user_code),
+        scanned_by_name TEXT,
+        scanned_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // Void support for loading_scan_events (server/routes/loading.ts's POST /events/:id/void) —
+    // same voided/voidedByCode/voidedAt/voidReason shape as order_scan_events.
+    await pool.query(`
+      ALTER TABLE loading_scan_events
+        ADD COLUMN IF NOT EXISTS voided BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS voided_by_code TEXT REFERENCES users(user_code),
+        ADD COLUMN IF NOT EXISTS voided_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS void_reason TEXT
+    `);
+    // Loading-completion state lives directly on the slip (loadingCompletedAt/By), same pattern
+    // as the existing print-lock fields (isPrintLocked/printedByCode/printedAt) on this table.
+    await pool.query(`
+      ALTER TABLE proforma_slips
+        ADD COLUMN IF NOT EXISTS loading_completed_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS loading_completed_by_code TEXT,
+        ADD COLUMN IF NOT EXISTS vehicle_assigned_by_code TEXT,
+        ADD COLUMN IF NOT EXISTS vehicle_info_id INTEGER
+    `);
     // product_plant_stock/stock_movements previously linked to a product ONLY by barcode text.
     // A product's barcode can be edited later (most commonly via the Notion inventory sync,
     // which matches/updates existing products by their stable Notion page id, not barcode, and
@@ -188,6 +255,71 @@ app.use((req, res, next) => {
       FROM products p
       WHERE sm.product_id IS NULL AND LOWER(p.barcode) = LOWER(sm.barcode)
     `);
+
+    // vehicle_info predates Vehicle Master and previously had a different, narrower column set
+    // (see shared/schema.ts's comment on the vehicleInfo table) — add whatever's missing rather
+    // than assuming a fresh table. Existing rows simply get NULL for these until synced/edited.
+    await pool.query(`
+      ALTER TABLE vehicle_info
+        ADD COLUMN IF NOT EXISTS notion_page_id TEXT,
+        ADD COLUMN IF NOT EXISTS series TEXT,
+        ADD COLUMN IF NOT EXISTS company_type TEXT,
+        ADD COLUMN IF NOT EXISTS ac_truck_url TEXT,
+        ADD COLUMN IF NOT EXISTS company TEXT,
+        ADD COLUMN IF NOT EXISTS manufacturer TEXT,
+        ADD COLUMN IF NOT EXISTS model_year TEXT,
+        ADD COLUMN IF NOT EXISTS engine TEXT,
+        ADD COLUMN IF NOT EXISTS volume REAL,
+        ADD COLUMN IF NOT EXISTS vehicle_percent REAL,
+        ADD COLUMN IF NOT EXISTS gps TEXT,
+        ADD COLUMN IF NOT EXISTS for_gps TEXT,
+        ADD COLUMN IF NOT EXISTS driver TEXT,
+        ADD COLUMN IF NOT EXISTS record_driver TEXT,
+        ADD COLUMN IF NOT EXISTS plant TEXT,
+        ADD COLUMN IF NOT EXISTS status TEXT,
+        ADD COLUMN IF NOT EXISTS remark TEXT,
+        ADD COLUMN IF NOT EXISTS vehicle_fitness TEXT,
+        ADD COLUMN IF NOT EXISTS latest_entry TEXT,
+        ADD COLUMN IF NOT EXISTS latest_order TEXT,
+        ADD COLUMN IF NOT EXISTS link_to_vehicle TEXT,
+        ADD COLUMN IF NOT EXISTS order_current TEXT,
+        ADD COLUMN IF NOT EXISTS order_backup TEXT,
+        DROP COLUMN IF EXISTS ac_truck,
+        DROP COLUMN IF EXISTS order_by,
+        DROP COLUMN IF EXISTS order_cl,
+        DROP COLUMN IF EXISTS link_to_rto,
+        DROP COLUMN IF EXISTS link_to_sr
+    `);
+    // rto_number was NOT NULL in the original table — Vehicle Master's Notion sync can create
+    // a row before that field is known, so this column needs to allow NULL going forward.
+    await pool.query(`ALTER TABLE vehicle_info ALTER COLUMN rto_number DROP NOT NULL`);
+
+    // Vehicle Master's real identity is notionPageId now, not vehicleNumber — two different
+    // Notion pages (two vehicles, or intentionally more than one page for the same one) can
+    // legitimately share a vehicle number; that's no longer treated as a sync conflict (see
+    // server/services/notionVehicleSync.ts). Drop the old uniqueness/requiredness on
+    // vehicle_number, and make notion_page_id unique instead — that's what now guarantees one
+    // row per Notion page.
+    await pool.query(`ALTER TABLE vehicle_info DROP CONSTRAINT IF EXISTS vehicle_info_vehicle_number_unique`);
+    await pool.query(`ALTER TABLE vehicle_info ALTER COLUMN vehicle_number DROP NOT NULL`);
+    try {
+      await pool.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'vehicle_info_notion_page_id_unique'
+          ) THEN
+            ALTER TABLE vehicle_info ADD CONSTRAINT vehicle_info_notion_page_id_unique UNIQUE (notion_page_id);
+          END IF;
+        END $$;
+      `);
+    } catch (err) {
+      // Only fails if some past sync run already left two rows sharing a notion_page_id — should
+      // never happen (each page always resolved to at most one row even under the old logic),
+      // but this is a startup migration and must never crash the server over a pre-existing data
+      // issue; log it so it's visible/fixable instead.
+      console.error('Failed to add vehicle_info_notion_page_id_unique constraint — check for duplicate notion_page_id rows:', (err as Error)?.message);
+    }
 
     console.log('Database migrations completed successfully');
 

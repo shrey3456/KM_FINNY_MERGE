@@ -22,7 +22,8 @@ import {
   activities, type Activity, type InsertActivity,
   plants, type Plant, type InsertPlant,
   plantStvs, type PlantStv, type InsertPlantStv,
-  vehicleInfo, type VehicleInfo, type InsertVehicleInfo
+  vehicleInfo, type VehicleInfo, type InsertVehicleInfo,
+  loadingRecords, type LoadingRecord, type InsertLoadingRecord
 } from "@shared/schema";
 import { and, gte, lte, lt, eq, asc, desc, sql, like, ilike, or, isNull, isNotNull, inArray, not } from "drizzle-orm";
 import nodePersist from 'node-persist';
@@ -213,6 +214,14 @@ export interface IStorage {
   updateVehicleInfo(id: number, vehicle: Partial<InsertVehicleInfo>): Promise<VehicleInfo | undefined>;
   deleteVehicleInfo(id: number): Promise<boolean>;
   listVehicleInfo(limit?: number, offset?: number): Promise<VehicleInfo[]>;
+  getAllVehicleInfo(): Promise<VehicleInfo[]>;
+  clearVehicleInfo(): Promise<void>;
+
+  // Loading records — history of vehicle-link actions from the Loading page.
+  createLoadingRecord(record: InsertLoadingRecord): Promise<LoadingRecord>;
+  // createdByCode: when set, scopes to just that user's own records (non-admin view);
+  // omitted returns everything, newest first (admin view).
+  listLoadingRecords(createdByCode?: string): Promise<LoadingRecord[]>;
 
   // Purchase Order operations
   createPurchaseOrder(purchaseOrder: InsertPurchaseOrder): Promise<PurchaseOrder>;
@@ -4260,6 +4269,37 @@ eq(loadingOperations.status, status),
       console.error("Error listing vehicle info:", error);
       return [];
     }
+  }
+
+  // Unpaginated — for Notion sync's own byNotionPageId comparison, not the page's own list view.
+  async getAllVehicleInfo(): Promise<VehicleInfo[]> {
+    try {
+      return await db.select().from(vehicleInfo).orderBy(asc(vehicleInfo.srNo));
+    } catch (error) {
+      console.error("Error in getAllVehicleInfo:", error);
+      return [];
+    }
+  }
+
+  async clearVehicleInfo(): Promise<void> {
+    try {
+      await db.delete(vehicleInfo);
+      console.log("All vehicle info deleted successfully");
+    } catch (error) {
+      console.error("Error in clearVehicleInfo:", error);
+      throw error;
+    }
+  }
+
+  async createLoadingRecord(record: InsertLoadingRecord): Promise<LoadingRecord> {
+    const [result] = await db.insert(loadingRecords).values(record).returning();
+    return result;
+  }
+
+  async listLoadingRecords(createdByCode?: string): Promise<LoadingRecord[]> {
+    const query = db.select().from(loadingRecords).orderBy(desc(loadingRecords.createdAt));
+    if (createdByCode) return query.where(eq(loadingRecords.createdByCode, createdByCode));
+    return query;
   }
 
   // Stock data operations for Stock Sheets

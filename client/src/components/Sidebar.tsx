@@ -196,6 +196,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "scan-order",
         },
         {
+          label: "Loading",
+          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/loading",
+          pageKey: "loading",
+        },
+        {
           label: "Scan Viewer",
           icon: <Eye className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/scan-viewer",
@@ -242,6 +248,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/notion-inventory",
           pageKey: "notion-inventory",
           permission: "canAccessInventory",
+        },
+        {
+          label: "Vehicle Master",
+          icon: <Truck className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/vehicle-master",
+          pageKey: "vehicle-master",
         },
       ],
     },

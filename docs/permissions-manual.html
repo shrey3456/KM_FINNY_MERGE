@@ -488,6 +488,7 @@
       <ul>
         <li><a href="#order-import">Order Management</a></li>
         <li><a href="#scan-order">Scan Order</a></li>
+        <li><a href="#scan-viewer">Scan Viewer</a></li>
         <li><a href="#scan-history">Scan History</a></li>
         <li><a href="#overall-stock">Overall Stock</a></li>
       </ul>
@@ -642,7 +643,7 @@
     </section>
 
     <section class="category" id="order-import-cat">
-      <div class="category-head"><h2>Order Pipeline</h2><div class="rule"></div><span class="count">4 pages</span></div>
+      <div class="category-head"><h2>Order Pipeline</h2><div class="rule"></div><span class="count">5 pages</span></div>
 
       <article class="page" id="order-import">
         <div class="page-head">
@@ -737,13 +738,13 @@
           <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/sessions/:id/scan</span><span class="guard">requirePageWrite("scan-order")</span></div>
           <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/sessions/:id/empty-box</span><span class="guard">requirePageWrite("scan-order")</span></div>
           <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/empty-box/:id/undo</span><span class="guard">requirePageWrite("scan-order")</span></div>
-          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="guard">requirePageWrite ×2</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="guard">requireVoidAccess</span></div>
           <div class="ep"><span class="m get">GET</span><span class="path">/order-scan/sessions/:id/ws-status</span><span class="note">no guard — status probe only</span></div>
         </div>
 
         <div class="note">
           <span class="tag">Worth knowing</span>
-          <p><span class="mono">POST /order-scan/events/:id/void</span> chains <em>two</em> <span class="mono">requirePageWrite</span> calls — <span class="mono">'scan-order'</span> then <span class="mono">'scan-history'</span> — as separate middlewares, which is what makes it AND rather than OR. Voiding also auto-backfills a resulting shortfall from any leftover Extra on the same item (own bookkeeping, not a permission concern, but changes what a void actually does server-side beyond the obvious).</p>
+          <p><span class="mono">POST /order-scan/events/:id/void</span> is guarded by <span class="mono">requireVoidAccess</span> (<span class="filepath">server/routes/order-scan.ts</span>), an OR-of-ANDs: admin, <em>or</em> write access to both <span class="mono">'scan-order'</span> AND <span class="mono">'scan-history'</span> (two separate <span class="mono">hasWriteAccess</span> checks ANDed together), <em>or</em> write access to <span class="mono">'scan-viewer'</span> alone — see <a href="#scan-viewer">Scan Viewer</a> below for why that third path exists. Voiding also auto-backfills a resulting shortfall from any leftover Extra on the same item (own bookkeeping, not a permission concern, but changes what a void actually does server-side beyond the obvious).</p>
         </div>
       </article>
 
@@ -768,7 +769,7 @@
         </table>
         </div>
         <p style="font-size:13px; color:var(--ink-soft);">
-          <span class="mono">canVoidScan = isAdminOrSuper || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"))</span> — same dual rule as Scan Order's Void, they're the same underlying action/endpoint viewed from two pages.<br/>
+          <span class="mono">canVoidScan = isAdminOrSuper || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"))</span> — this page's own client check only covers that one path; the server's <span class="mono">requireVoidAccess</span> also accepts write access to <span class="mono">'scan-viewer'</span> alone (see below), so a scan-viewer-only user can void from Scan Viewer even though this page's Void column stays hidden for them.<br/>
           <span class="mono">canUploadNotion = isAdminOrSuper || hasPageWriteAccess("scan-history")</span>
         </p>
 
@@ -776,7 +777,41 @@
         <div class="endpoints">
           <div class="ep"><span class="m get">GET</span><span class="path">/scan-sessions/reports/notion-config</span><span class="note">no guard — returns only a masked DB id, not a secret</span></div>
           <div class="ep"><span class="m post">POST</span><span class="path">/scan-sessions/reports/upload-to-notion</span><span class="guard">requirePageWrite("scan-history")</span></div>
-          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="note">same endpoint as Scan Order's Void — see above</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="note">same endpoint as Scan Order's Void — see requireVoidAccess above</span></div>
+        </div>
+      </article>
+
+      <article class="page" id="scan-viewer">
+        <div class="page-head">
+          <h3>Scan Viewer</h3>
+          <span class="page-route filepath">/scan-viewer → client/src/pages/ScanViewer.tsx</span>
+        </div>
+        <p class="page-purpose">Read-oriented sibling of Scan Order — browse any plant/date/part's scan progress (including already-completed ones) without touching the live scanning session. Void is available here too, under its own narrower grant.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: scan-viewer</span>
+        </div>
+
+        <h4 class="block-label">Buttons &amp; UI</h4>
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Element</th><th>Condition</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Void (Action column)</td><td class="cond">canVoidScan</td><td>Column hidden entirely when absent, not just the button</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p style="font-size:13px; color:var(--ink-soft);">
+          <span class="mono">canVoidScan = isAdminOrSuper || hasPageWriteAccess("scan-viewer")</span>
+        </p>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="guard">requireVoidAccess</span><span class="note">same endpoint as Scan Order/Scan History's Void</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>This page's own client check only looks at <span class="mono">hasPageWriteAccess("scan-viewer")</span> — it's narrower than what the server will actually accept. <span class="mono">requireVoidAccess</span> is an OR-of-ANDs across three paths (admin / scan-order+scan-history / scan-viewer alone), so a user with write access to Scan Order and Scan History but NOT Scan Viewer would have their void approved server-side, yet never sees the button here to trigger it — the whole point of the third, scan-viewer-alone path is the opposite case: someone trusted to correct a mistake from this read-only page specifically, without being handed full Scan Order access.</p>
         </div>
       </article>
 
@@ -846,7 +881,8 @@
         <div class="endpoints">
           <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips</span><span class="guard">requirePageWrite("proforma")</span></div>
           <div class="ep"><span class="m put">PUT</span><span class="path">/proforma-slips/:id</span><span class="guard">requirePageWrite("proforma")</span></div>
-          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/lock, /unlock</span><span class="guard">requirePageWrite ×2</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/lock</span><span class="guard">requireLockAccess</span><span class="note">requirePageWrite ×2 for a manual lock; drops to requirePageAccess ×2 (read-only) when the request body carries autoLockFromPrint:true — see Print Operations below</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/unlock</span><span class="guard">requirePageWrite ×2</span></div>
           <div class="ep"><span class="m get">GET</span><span class="path">/proforma-slips, /proforma-slips/:id, /proforma-slips/order/:orderNumber</span><span class="note">no guard beyond login — read access is intentionally open to any authenticated user</span></div>
         </div>
       </article>
@@ -878,12 +914,16 @@
         <h4 class="block-label">API</h4>
         <div class="endpoints">
           <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/unlock</span><span class="guard">requirePageWrite("print-operations") + requirePageWrite("proforma")</span></div>
-          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/lock</span><span class="guard">requirePageWrite ×2</span><span class="note">fires automatically on Print, same dual rule</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/proforma-slips/order/:orderNumber/lock</span><span class="guard">requireLockAccess</span><span class="note">fires automatically on Print with body.autoLockFromPrint=true — deliberately looser than a manual lock, see note below</span></div>
         </div>
 
         <div class="note">
           <span class="tag">Worth knowing</span>
-          <p>Unlock needs BOTH grants because it's really two different permissions being asked at once — "can operate Print Operations" and "can modify a Proforma Slip" — and the feature happens to sit on the print-operations page while mutating a proforma record. A user with only one of the two grants sees a fully clickable Unlock button that would 403 on click if the client check weren't kept in sync with this exact server rule.</p>
+          <p>Unlock needs BOTH write grants because it's really two different permissions being asked at once — "can operate Print Operations" and "can modify a Proforma Slip" — and the feature happens to sit on the print-operations page while mutating a proforma record. A user with only one of the two grants sees a fully clickable Unlock button that would 403 on click if the client check weren't kept in sync with this exact server rule.</p>
+        </div>
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Lock is intentionally looser than Unlock when it fires automatically from a Print action. <span class="mono">requireLockAccess</span> (<span class="filepath">server/routes/proforma-api.ts</span>) checks <span class="mono">req.body.autoLockFromPrint</span>: when true, it swaps both middleware calls from <span class="mono">requirePageWrite</span> to <span class="mono">requirePageAccess</span> — a view-only user can print a slip and have it lock behind them without needing edit rights on Proforma. The manual Lock/Unlock control on the Proforma Slips page never sends that flag, so it still goes through the full write ×2 path above. Before this split existed, a view-only user's auto-lock silently 403'd after a successful print (logged to the browser console only, no visible error) — the client now also shows a toast (<code>"Failed to lock previous slip"</code>) if a lock attempt fails for any reason.</p>
         </div>
       </article>
     </section>
