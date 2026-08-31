@@ -82,10 +82,6 @@ type OsScanItem = {
   expectedQty: number; itemsPerPallet: number;
   scannedPallets: number; scannedLooseQty: number; totalScannedQty: number;
   status: string; lastScannedAt: string | null;
-  // Optional — only set when the source CSV had a mapped Vehicle column (Order Import's
-  // column-mapping screen). Drives the "group by vehicle" view filter below; never affects
-  // scan matching itself.
-  vehicleNumber?: string | null;
 };
 
 type MvItem = {
@@ -93,11 +89,6 @@ type MvItem = {
   sapCode: string | null; quantity: number | null; expectedPallets: number | null;
   scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
   lastScannedAt?: string | null;
-  // Optional — only set when the source CSV had a mapped Vehicle column. Drives the same
-  // "group by vehicle" view filter the Scan tab has (shared osVehicleFilter state); since Master
-  // View merges the same barcode across multiple files, filtering by vehicle happens BEFORE that
-  // merge (see allMvItems) so a vehicle's view only ever sums its own contributing rows.
-  vehicleNumber?: string | null;
 };
 type MvFile = {
   sessionId: number; csvFileName: string; rowCount: number | null;
@@ -375,12 +366,6 @@ export default function ScanOrderPage() {
   // Clicking a totals box narrows the items table to just those rows. "" = show everything;
   // clicking the active box again clears it.
   const [osStatFilter, setOsStatFilter] = useState<"" | "done" | "remaining" | "extra">("");
-  // Optional "group by vehicle" view filter — only meaningful when the CSV had a mapped Vehicle
-  // column (Order Import's column-mapping screen). null = show every vehicle's items; a vehicle
-  // key (or "__none__" for items with no vehicle tag) narrows the list to just that group. Pure
-  // display narrowing, same as osStatFilter above — scanning a barcode from a different vehicle
-  // than the one currently selected still works normally; this never blocks a scan.
-  const [osVehicleFilter, setOsVehicleFilter] = useState<string | null>(null);
   // Draggable split between the totals card and the scanner column. Stored as a percent of the
   // row's width so it survives a reload and adapts to any window size.
   const totalsRowRef = useRef<HTMLDivElement | null>(null);
@@ -617,11 +602,6 @@ export default function ScanOrderPage() {
     }
     setOsSearch("");
     setMvSearch("");
-    // A vehicle tag is specific to whichever CSV/session it came from — carrying "T-01" over to
-    // a different plant's data almost never matches anything there, which looked like a real
-    // bug ("No items found") rather than what it actually was (a stale filter from the plant you
-    // just left). Reset it here, same as the search boxes above.
-    setOsVehicleFilter(null);
   };
 
   // Options for the plant-switch dropdown in the session header — always shown (not just
@@ -1965,11 +1945,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const groups = new Map<string, MvMergedItem>();
     mvData.files.forEach((f) => {
       f.items.forEach((item) => {
-        // Vehicle filter applies BEFORE the per-barcode merge below — the same barcode can
-        // legitimately arrive across more than one vehicle (split across trucks), so filtering
-        // has to narrow which ROWS get summed into a merged item, not filter the merged result
-        // afterward (which could show a vehicle's total including another vehicle's boxes).
-        if (osVehicleFilter && ((item.vehicleNumber ?? "").trim() || "__none__") !== osVehicleFilter) return;
         const key = item.barcode?.trim().toLowerCase()
           || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
@@ -2026,26 +2001,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     }
     return merged;
   })();
-  // Vehicle groups for Master View's own pill row — computed from the RAW per-file rows (before
-  // the barcode merge above), same "one bucket per vehicle, __none__ for untagged rows" shape as
-  // the Scan tab's osVehicleGroups. Shares osVehicleFilter/setOsVehicleFilter with the Scan tab
-  // (same convention osStatFilter already uses across both tabs) — Master View just computes its
-  // own group list/counts from its own (potentially multi-file) item set.
-  const mvVehicleGroups = (() => {
-    if (!mvData) return [];
-    const map = new Map<string, MvItem[]>();
-    mvData.files.forEach((f) => f.items.forEach((item) => {
-      const key = (item.vehicleNumber ?? "").trim() || "__none__";
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(item);
-    }));
-    return Array.from(map.entries()).map(([key, items]) => {
-      const csvItems = items.filter((i) => (i.quantity ?? 0) > 0);
-      const done = csvItems.filter((i) => (i.scannedQty ?? 0) >= (i.quantity ?? 0)).length;
-      return { key, label: key === "__none__" ? "No Vehicle" : key, total: csvItems.length, done };
-    });
-  })();
-  const mvHasVehicleGrouping = mvVehicleGroups.length > 1 || (mvVehicleGroups.length === 1 && mvVehicleGroups[0].key !== "__none__");
   // Recently-scanned items float to the top — and crucially the SAME order is visible to every
   // user/device, not just this browser. Two tiers:
   //   1. Items I scanned this session sort first, newest local scan on top (instant feedback via
@@ -2675,34 +2630,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       };
     };
 
-    // Groups this session's items by vehicle (Order Import's optional Vehicle CSV column,
-    // carried onto order_scan_items at seed time) — purely for the view filter below. "__none__"
-    // buckets items with no vehicle tag at all. Only worth showing a selector for when there's
-    // more than this one bucket; a CSV with no vehicle column at all always lands here as a
-    // single "__none__" group, so the page looks and behaves exactly as it always has.
-    const osVehicleGroups = (() => {
-      const map = new Map<string, OsScanItem[]>();
-      for (const item of osItems) {
-        const key = (item.vehicleNumber ?? "").trim() || "__none__";
-        if (!map.has(key)) map.set(key, []);
-        map.get(key)!.push(item);
-      }
-      return Array.from(map.entries()).map(([key, items]) => {
-        const csvItems = items.filter((i) => (i.expectedQty ?? 0) > 0);
-        return { key, label: key === "__none__" ? "No Vehicle" : key, total: csvItems.length, done: csvItems.filter(osIsItemFullyDone).length };
-      });
-    })();
-    const osHasVehicleGrouping = osVehicleGroups.length > 1 || (osVehicleGroups.length === 1 && osVehicleGroups[0].key !== "__none__");
-
     // Totals-box filter, applied after osRowState exists: Done = fully scanned, Remaining = still
     // owed, Extra = over-scanned. Runs last so it narrows the already-searched, already-sorted list.
-    // Vehicle filter composes with it (both just narrow the same list; neither affects what a
-    // scan actually matches against — see handleOsScan, which always reads the FULL item set).
-    const osVisible = (!osStatFilter && !osVehicleFilter)
+    const osVisible = !osStatFilter
       ? osFiltered
       : osFiltered.filter((i) => {
-          if (osVehicleFilter && ((i.vehicleNumber ?? "").trim() || "__none__") !== osVehicleFilter) return false;
-          if (!osStatFilter) return true;
           const { doneQty, rem, extra } = osRowState(i);
           // "Done" now means "has any Received qty" — a partial item can also still show
           // under "Remaining" if it has qty left, same change as Master View's mvVisible.
@@ -3562,10 +3494,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* List header — navy bar, same treatment as Master View's mobile header. Search
                   replaces the row's content in place (rather than wrapping onto an extra line
                   below), and there's no explicit close button — click outside to hide it. */}
-              {/* ref moved up to wrap the vehicle-pill row too — clicking a pill must NOT count
-                  as an "outside" click that collapses/clears the search (see useOutsideClick). */}
-              <div ref={osSearchMobileRef}>
-              <div className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
+              <div ref={osSearchMobileRef} className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
                 {osSearchOpen ? (
                   <div className="relative w-full">
                     <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
@@ -3599,37 +3528,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </div>
                   </>
                 )}
-              </div>
-
-              {/* Optional vehicle filter — same pill row as the desktop layout, only shown when
-                  this CSV had a mapped Vehicle column. */}
-              {osHasVehicleGrouping && (
-                <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-200 bg-gray-50 px-3 py-2">
-                  <button
-                    onClick={() => setOsVehicleFilter(null)}
-                    className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                      osVehicleFilter === null
-                        ? "border-[#001d6e] bg-[#001d6e] text-white"
-                        : "border-gray-200 bg-white text-gray-500"
-                    }`}
-                  >
-                    All
-                  </button>
-                  {osVehicleGroups.map((g) => (
-                    <button
-                      key={g.key}
-                      onClick={() => setOsVehicleFilter((cur) => (cur === g.key ? null : g.key))}
-                      className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                        osVehicleFilter === g.key
-                          ? "border-[#001d6e] bg-[#001d6e] text-white"
-                          : "border-gray-200 bg-white text-gray-500"
-                      }`}
-                    >
-                      {g.label} · {g.done}/{g.total}
-                    </button>
-                  ))}
-                </div>
-              )}
               </div>
 
               {/* Rows */}
@@ -3907,10 +3805,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         replaces the row's content in place (rather than wrapping onto an extra
                         line below), and there's no explicit close button — click outside to
                         hide it (see mvSearchMobileRef/useOutsideClick). */}
-                    {/* ref moved to wrap the vehicle-pill row below too — clicking a pill must NOT
-                        count as an "outside" click that collapses/clears the search. */}
-                    <div ref={mvSearchMobileRef}>
-                    <div className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
+                    <div ref={mvSearchMobileRef} className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
                       {mvSearchOpen ? (
                         <div className="relative w-full">
                           <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
@@ -3952,36 +3847,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           </div>
                         </>
                       )}
-                    </div>
-
-                    {/* Optional vehicle filter — same pill row/shared filter as the Scan tab. */}
-                    {mvHasVehicleGrouping && (
-                      <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-200 bg-gray-50 px-3 py-2">
-                        <button
-                          onClick={() => setOsVehicleFilter(null)}
-                          className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                            osVehicleFilter === null
-                              ? "border-[#001d6e] bg-[#001d6e] text-white"
-                              : "border-gray-200 bg-white text-gray-500"
-                          }`}
-                        >
-                          All
-                        </button>
-                        {mvVehicleGroups.map((g) => (
-                          <button
-                            key={g.key}
-                            onClick={() => setOsVehicleFilter((cur) => (cur === g.key ? null : g.key))}
-                            className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                              osVehicleFilter === g.key
-                                ? "border-[#001d6e] bg-[#001d6e] text-white"
-                                : "border-gray-200 bg-white text-gray-500"
-                            }`}
-                          >
-                            {g.label} · {g.done}/{g.total}
-                          </button>
-                        ))}
-                      </div>
-                    )}
                     </div>
 
                     {/* Below 480px, or when the device is physically turned to landscape,
@@ -4849,10 +4714,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {osTab === "scan" && (
                 <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
                   {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline. */}
-                  {/* ref moved to wrap the vehicle-pill row below too — clicking a pill must NOT
-                      count as an "outside" click that collapses/clears the search. */}
-                  <div ref={osSearchDesktopRef}>
-                  <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                  <div ref={osSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
                     <span className="text-xs font-medium text-gray-500">{osDoneCount} / {osTotalCount} received</span>
                     {/* No explicit close — clicking outside (osSearchDesktopRef) hides it. */}
                     <button
@@ -4888,38 +4750,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </div>
                     )}
                   </div>
-                  {/* Optional vehicle filter — only appears when this CSV had a mapped Vehicle
-                      column; a plain CSV never shows this row at all. Each pill's own count is
-                      just this vehicle's items filtered from the SAME data osDoneCount/osTotalCount
-                      already use — never a second, separately-tracked number that could drift. */}
-                  {osHasVehicleGrouping && (
-                    <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-200 px-4 py-2">
-                      <button
-                        onClick={() => setOsVehicleFilter(null)}
-                        className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                          osVehicleFilter === null
-                            ? "border-[#001d6e] bg-[#001d6e] text-white"
-                            : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
-                        }`}
-                      >
-                        All
-                      </button>
-                      {osVehicleGroups.map((g) => (
-                        <button
-                          key={g.key}
-                          onClick={() => setOsVehicleFilter((cur) => (cur === g.key ? null : g.key))}
-                          className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                            osVehicleFilter === g.key
-                              ? "border-[#001d6e] bg-[#001d6e] text-white"
-                              : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
-                          }`}
-                        >
-                          {g.label} · {g.done}/{g.total}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  </div>
                   <DataTable<OsScanItem>
                     className="space-y-0"
                     containerClassName="rounded-none border-0"
@@ -4930,7 +4760,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     loadingLabel="Loading items…"
                     emptyState="Loading items…"
                     noResultsState="No items match the search."
-                    hasActiveFilters={!!osSearch || !!osVehicleFilter}
+                    hasActiveFilters={!!osSearch}
                     enableZebraStripes
                     rowClassName={(item) => {
                       const { done, partial } = osRowState(item);
@@ -4971,10 +4801,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           border-b separating the header from the table, instead of a floating
                           row above a separately-bordered card. */}
                       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-                        {/* ref moved to wrap the vehicle-pill row below too — clicking a pill must
-                            NOT count as an "outside" click that collapses/clears the search. */}
-                        <div ref={mvSearchDesktopRef}>
-                        <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                        <div ref={mvSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
                           <span className="text-xs font-medium text-gray-500">{mvVisible.length} of {allMvItems.length} items</span>
                           <div className="ml-auto flex items-center gap-2">
                             {allMvItems.length > 0 && (
@@ -5018,34 +4845,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             )}
                           </div>
                         </div>
-                        {mvHasVehicleGrouping && (
-                          <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-200 px-4 py-2">
-                            <button
-                              onClick={() => setOsVehicleFilter(null)}
-                              className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                                osVehicleFilter === null
-                                  ? "border-[#001d6e] bg-[#001d6e] text-white"
-                                  : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
-                              }`}
-                            >
-                              All
-                            </button>
-                            {mvVehicleGroups.map((g) => (
-                              <button
-                                key={g.key}
-                                onClick={() => setOsVehicleFilter((cur) => (cur === g.key ? null : g.key))}
-                                className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                                  osVehicleFilter === g.key
-                                    ? "border-[#001d6e] bg-[#001d6e] text-white"
-                                    : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
-                                }`}
-                              >
-                                {g.label} · {g.done}/{g.total}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        </div>
                         <DataTable<MvMergedItem>
                           className="space-y-0"
                           containerClassName="rounded-none border-0"
@@ -5054,7 +4853,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           getRowId={(item) => mvRowKey(item)}
                           emptyState="No items found"
                           noResultsState="No items match your search."
-                          hasActiveFilters={!!mvSearch || !!osVehicleFilter}
+                          hasActiveFilters={!!mvSearch}
                           enableZebraStripes
                           rowClassName={(item) => {
                             if (item._isEmptyBox) return "bg-orange-50/60";

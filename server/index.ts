@@ -321,14 +321,6 @@ app.use((req, res, next) => {
       console.error('Failed to add vehicle_info_notion_page_id_unique constraint — check for duplicate notion_page_id rows:', (err as Error)?.message);
     }
 
-    // Optional per-row Vehicle tag for Order Import's CSV mapping — only populated when a CSV
-    // has a mapped Vehicle column (Order Import's column-mapping screen). Carried through to
-    // order_scan_items at seed time (seedSessionItemsWithClient, server/routes/order-scan.ts) so
-    // Scan Order can offer an optional "group by vehicle" view filter. Purely additive: any CSV
-    // that doesn't map this column leaves it null everywhere, with zero behavior change.
-    await pool.query(`ALTER TABLE order_import_items ADD COLUMN IF NOT EXISTS vehicle_number TEXT`);
-    await pool.query(`ALTER TABLE order_scan_items ADD COLUMN IF NOT EXISTS vehicle_number TEXT`);
-
     console.log('Database migrations completed successfully');
 
     // Auto-sync scan history to the configured Notion inventory DB every 30 minutes. No-ops

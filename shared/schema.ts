@@ -964,12 +964,6 @@ export const orderImportItems = pgTable("order_import_items", {
   expectedPallets: real("expected_pallets"),
   date: text("date"),
   plant: text("plant"),
-  // Optional — only populated when the source CSV had a mapped Vehicle column (Order Import's
-  // column-mapping screen). Purely a grouping label carried through to order_scan_items at seed
-  // time (see seedSessionItemsWithClient, server/routes/order-scan.ts); never required, never
-  // validated against Vehicle Master, and completely absent for any CSV that doesn't have it —
-  // existing imports/behavior are entirely unaffected.
-  vehicleNumber: text("vehicle_number"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -980,7 +974,7 @@ export const insertOrderImportSessionSchema = createInsertSchema(orderImportSess
 
 export const insertOrderImportItemSchema = createInsertSchema(orderImportItems).pick({
   sessionId: true, barcode: true, itemName: true, sapCode: true,
-  quantity: true, expectedPallets: true, date: true, plant: true, vehicleNumber: true,
+  quantity: true, expectedPallets: true, date: true, plant: true,
 });
 
 export type OrderImportSession = typeof orderImportSessions.$inferSelect;
@@ -1014,10 +1008,6 @@ export const orderScanItems = pgTable("order_scan_items", {
   status: text("status").default("pending"), // pending | partial | complete
   lastScannedAt: timestamp("last_scanned_at"),
   createdAt: timestamp("created_at").defaultNow(),
-  // Copied from the source order_import_items row at seed time (see seedSessionItemsWithClient)
-  // — purely a view-grouping label for Scan Order's optional "group by vehicle" filter. Null for
-  // any CSV that didn't have a mapped Vehicle column; never affects scan matching/validation.
-  vehicleNumber: text("vehicle_number"),
 });
 
 export const orderScanEvents = pgTable("order_scan_events", {
@@ -1073,7 +1063,7 @@ export const orderScanEvents = pgTable("order_scan_events", {
 
 export const insertOrderScanItemSchema = createInsertSchema(orderScanItems).pick({
   sessionId: true, orderImportItemId: true, barcode: true, itemName: true,
-  sapCode: true, expectedQty: true, itemsPerPallet: true, vehicleNumber: true,
+  sapCode: true, expectedQty: true, itemsPerPallet: true,
 });
 
 export const insertOrderScanEventSchema = createInsertSchema(orderScanEvents).pick({

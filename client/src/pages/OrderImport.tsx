@@ -77,10 +77,6 @@ const TARGET_FIELDS = [
   { key: "sapCode",         label: "SAP Code" },
   { key: "quantity",        label: "Quantity" },
   { key: "expectedPallets", label: "Expected Pallets" },
-  // Optional — entirely skippable, same as any other field here. Only used later to let Scan
-  // Order group its item list by vehicle (a view filter, not a validation rule); a CSV with no
-  // matching header just leaves every item's vehicleNumber null, with zero other effect.
-  { key: "vehicleNumber",   label: "Vehicle (optional)" },
 ] as const;
 type TargetKey = (typeof TARGET_FIELDS)[number]["key"];
 type Mapping = Record<TargetKey, string>;
@@ -145,11 +141,6 @@ function autoMatch(headers: string[]): Mapping {
     expectedPallets: best(
       "expected pallets", "expectedpallets", "expected pallet",
       "pallets", "pallet", "plt", "expected"
-    ),
-    // vehicle — optional; no match just leaves this on SKIP, same as any unmapped field
-    vehicleNumber: best(
-      "vehicle", "vehicle no", "vehicle number", "vehicleno", "vehicle_no",
-      "truck", "truck no", "truck number", "gadi", "gadi no", "vehicle name"
     ),
   };
 }
@@ -909,7 +900,6 @@ export default function OrderImport() {
         quantity:        parseInt(get("quantity")) || 0,
         expectedPallets: parseFloat(get("expectedPallets")) || null,
         date:            orderDate || null,
-        vehicleNumber:   get("vehicleNumber").trim() || null,
       };
     });
   }
