@@ -29,9 +29,10 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from 'react-hook-form';
 import { useEffect, useState } from 'react';
-import { Smartphone, Radio, QrCode, Zap, Shield, Database } from 'lucide-react';
+import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload } from 'lucide-react';
+import Papa from 'papaparse';
 import { apiRequest } from '@/lib/queryClient';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { hasPageWriteAccess } from '@/lib/permissions';
 import {
   AlertDialog,
@@ -43,6 +44,34 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+
+// ─── Opening Stock CSV column auto-detection — required: Barcode, Quantity ────────────────────
+const osNormHeader = (h: string) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+const OS_COLUMN_CANDIDATES: Record<"barcode" | "itemName" | "quantity", string[]> = {
+  barcode: ["barcode", "itemcode", "sku", "ean", "productbarcode", "code"],
+  itemName: ["itemname", "description", "productname", "item", "name", "material"],
+  quantity: ["quantity", "qty", "openingstock", "openingqty", "stock", "instock"],
+};
+function osMatchColumn(headers: string[], key: keyof typeof OS_COLUMN_CANDIDATES): string | null {
+  const normalized = headers.map((h) => ({ raw: h, norm: osNormHeader(h) }));
+  for (const c of OS_COLUMN_CANDIDATES[key]) {
+    const exact = normalized.find((h) => h.norm === c);
+    if (exact) return exact.raw;
+  }
+  for (const c of OS_COLUMN_CANDIDATES[key]) {
+    const partial = normalized.find((h) => h.norm.includes(c));
+    if (partial) return partial.raw;
+  }
+  return null;
+}
 
 const Settings = () => {
   const [location] = useLocation();
@@ -102,6 +131,152 @@ const Settings = () => {
     const d = queryClient.getQueryData(['/api/scans']) as any;
     return Array.isArray(d) ? d.length : 0;
   })();
+
+  // Clear Stock dialog state
+  const [showClearStockDialog, setShowClearStockDialog] = useState(false);
+  const [isClearingStock, setIsClearingStock] = useState(false);
+  const [csPlant, setCsPlant] = useState<string>('');
+  const [csMode, setCsMode] = useState<'void' | 'remove'>('void');
+  const [csConfirmText, setCsConfirmText] = useState('');
+
+  const { data: allPlants } = useQuery<any[]>({
+    queryKey: ['/api/plants'],
+    queryFn: () => apiRequest('GET', '/api/plants').then((r) => r.json()),
+    staleTime: 60000,
+  });
+
+  const { data: csPreview, isFetching: csPreviewLoading } = useQuery<{
+    productsWithStock: number;
+    importSessions: number;
+    receivingScanEvents: number;
+    loadingScanEvents: number;
+    loadingRecords: number;
+    unloadingSessions: number;
+    unloadingScanEvents: number;
+  }>({
+    queryKey: ['/api/settings/clear-stock/preview', csPlant],
+    queryFn: () =>
+      apiRequest('GET', `/api/settings/clear-stock/preview?plant=${encodeURIComponent(csPlant)}`).then((r) => r.json()),
+    enabled: showClearStockDialog && !!csPlant,
+  });
+
+  const handleClearStockDialogOpenChange = (open: boolean) => {
+    setShowClearStockDialog(open);
+    if (!open) {
+      setCsPlant('');
+      setCsMode('void');
+      setCsConfirmText('');
+    }
+  };
+
+  const expectedCsConfirmText = csPlant === 'all' ? 'CLEAR ALL' : `CLEAR ${csPlant}`.toUpperCase();
+
+  const clearStock = async () => {
+    if (!csPlant) return;
+    setIsClearingStock(true);
+    try {
+      const data = await apiRequest('POST', '/api/settings/clear-stock', { plant: csPlant, mode: csMode }, false, true);
+      toast({
+        title: 'Success',
+        description: `Stock cleared for ${csPlant === 'all' ? 'all plants' : csPlant}. `
+          + `${data.stockRowsCleared} stock row(s) zeroed, ${data.importSessionsAffected} import session(s), `
+          + `${data.receivingEventsAffected} receiving event(s), ${data.loadingEventsAffected} loading event(s), `
+          + `${data.unloadingSessionsAffected} unloading session(s), ${data.unloadingEventsAffected} unloading event(s) affected.`,
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/scans'] });
+    } catch (error: any) {
+      console.error('Error clearing stock:', error);
+      toast({ title: 'Error', description: error?.message || 'Failed to clear stock', variant: 'destructive' });
+    } finally {
+      setIsClearingStock(false);
+      handleClearStockDialogOpenChange(false);
+    }
+  };
+
+  // ── Opening Stock: bulk-SETS (overwrites) a plant's baseline stock from a CSV — distinct from
+  // Order Scan/Unloading (which ADD via scan events) and Clear Stock (which zeroes). Admin-only,
+  // same severity class as Clear Stock, so it gets the same impact-preview + type-to-confirm gate.
+  const [showOpeningStockDialog, setShowOpeningStockDialog] = useState(false);
+  const [osPlant, setOsPlant] = useState('');
+  const [osFile, setOsFile] = useState<File | null>(null);
+  const [osRows, setOsRows] = useState<{ barcode: string; itemName: string | null; quantity: number }[] | null>(null);
+  const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number } | null>(null);
+  const [osPreviewLoading, setOsPreviewLoading] = useState(false);
+  const [osImporting, setOsImporting] = useState(false);
+  const [osConfirmText, setOsConfirmText] = useState('');
+
+  const handleOpeningStockDialogOpenChange = (open: boolean) => {
+    setShowOpeningStockDialog(open);
+    if (!open) {
+      setOsPlant(''); setOsFile(null); setOsRows(null); setOsPreview(null); setOsConfirmText('');
+    }
+  };
+
+  async function handleOpeningStockFile(file: File) {
+    setOsFile(file);
+    setOsRows(null);
+    setOsPreview(null);
+    const parsed = await new Promise<Record<string, string>[]>((resolve, reject) => {
+      Papa.parse<Record<string, string>>(file, {
+        header: true, skipEmptyLines: true,
+        complete: (result) => resolve(result.data),
+        error: (err) => reject(err),
+      });
+    }).catch((err) => {
+      toast({ title: 'Could not parse CSV', description: err?.message, variant: 'destructive' });
+      return null;
+    });
+    if (!parsed || parsed.length === 0) {
+      toast({ title: 'Empty file', description: 'This CSV has no rows.', variant: 'destructive' });
+      return;
+    }
+    const headers = Object.keys(parsed[0]);
+    const barcodeCol = osMatchColumn(headers, 'barcode');
+    const itemNameCol = osMatchColumn(headers, 'itemName');
+    const qtyCol = osMatchColumn(headers, 'quantity');
+    if (!barcodeCol) { toast({ title: 'Could not find a "Barcode" column in this CSV.', variant: 'destructive' }); return; }
+    if (!qtyCol) { toast({ title: 'Could not find a "Quantity" column in this CSV.', variant: 'destructive' }); return; }
+
+    const rows = parsed.map((row) => ({
+      barcode: (row[barcodeCol] ?? '').trim(),
+      itemName: itemNameCol ? (row[itemNameCol] ?? '').trim() || null : null,
+      quantity: parseInt((row[qtyCol] ?? '0').replace(/[^0-9-]/g, ''), 10) || 0,
+    })).filter((r) => r.barcode);
+    if (rows.length === 0) {
+      toast({ title: 'No valid barcodes found in this CSV.', variant: 'destructive' });
+      return;
+    }
+    setOsRows(rows);
+  }
+
+  useEffect(() => {
+    if (!osPlant || !osRows) { setOsPreview(null); return; }
+    setOsPreviewLoading(true);
+    apiRequest('POST', '/api/opening-stock/preview', { plant: osPlant, items: osRows }, false, true)
+      .then((data) => setOsPreview(data))
+      .catch((err: any) => toast({ title: 'Failed to load preview', description: err?.message, variant: 'destructive' }))
+      .finally(() => setOsPreviewLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [osPlant, osRows]);
+
+  const osExpectedConfirmText = `SET ${osPlant}`.toUpperCase();
+
+  const importOpeningStock = async () => {
+    if (!osPlant || !osRows) return;
+    setOsImporting(true);
+    try {
+      const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows }, false, true);
+      toast({ title: 'Opening stock imported', description: `${data.rowsSet} barcode(s) set for ${osPlant}.` });
+      queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      handleOpeningStockDialogOpenChange(false);
+    } catch (error: any) {
+      console.error('Error importing opening stock:', error);
+      toast({ title: 'Error', description: error?.message || 'Failed to import opening stock', variant: 'destructive' });
+    } finally {
+      setOsImporting(false);
+    }
+  };
 
   // NEW: reset dialog when closed
   const handleClearDialogOpenChange = (open: boolean) => {
@@ -466,20 +641,30 @@ const Settings = () => {
                     </div>
                     
                     <div className="p-4 border rounded-lg bg-gray-50">
-                      <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Data Import</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">Import inventory data from CSV</p>
-                      <Button variant="outline" size="sm">Import Data</Button>
+                      <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Opening Stock</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">Bulk-set a plant's baseline stock from a CSV (Barcode + Quantity) — overwrites whatever's currently there, admin only.</p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => setShowOpeningStockDialog(true)}
+                        disabled={!isAdminUser}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        Import Opening Stock
+                      </Button>
                     </div>
                     
                     <div className="p-4 border border-red-200 rounded-lg bg-red-50">
                       <h4 className="font-medium text-[#001d6e] flex items-center"><Shield className="h-4 w-4 mr-2" /> Danger Zone</h4>
                       <p className="text-sm text-[#001d6e] mt-1 mb-3">These actions are irreversible</p>
                       <div className="flex flex-wrap gap-2">
-                        <Button 
-                          variant="destructive" 
+                        <Button
+                          variant="destructive"
                           size="sm"
+                          onClick={() => setShowClearStockDialog(true)}
+                          disabled={!isAdminUser}
+                          title={!isAdminUser ? "Admin access required" : undefined}
                         >
-                          Clear Scan History
+                          Clear Stock
                         </Button>
                         <Button
                           variant="destructive"
@@ -572,6 +757,201 @@ const Settings = () => {
               disabled={isClearing || confirmText !== 'CLEAR' || !acknowledge}
             >
               {isClearing ? "Clearing..." : "Clear Product Master"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showClearStockDialog} onOpenChange={handleClearStockDialogOpenChange}>
+        <AlertDialogContent className="max-h-[90vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clear Stock?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This zeroes stock for the selected plant and removes its CSV import + Loading + Unloading scan history.
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label htmlFor="csPlant">Plant</Label>
+              <Select value={csPlant} onValueChange={(v) => { setCsPlant(v); setCsConfirmText(''); }}>
+                <SelectTrigger id="csPlant">
+                  <SelectValue placeholder="Select a plant" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Plants</SelectItem>
+                  {(allPlants ?? []).map((p: any) => (
+                    <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {csPlant && (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm">
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Products w/ stock</div>
+                    <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.productsWithStock ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Import sessions</div>
+                    <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.importSessions ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Receiving events</div>
+                    <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.receivingScanEvents ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Loading events</div>
+                    <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.loadingScanEvents ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Loading records</div>
+                    <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.loadingRecords ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Unloading sessions</div>
+                    <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.unloadingSessions ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Unloading events</div>
+                    <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.unloadingScanEvents ?? 0}</div>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Scan history</Label>
+                  <RadioGroup value={csMode} onValueChange={(v) => { setCsMode(v as 'void' | 'remove'); setCsConfirmText(''); }}>
+                    <label className="flex items-start gap-2 text-sm p-2 rounded border cursor-pointer">
+                      <RadioGroupItem value="void" id="csModeVoid" className="mt-0.5" />
+                      <span>
+                        <span className="font-medium">Void</span> — rows stay in the database marked voided,
+                        excluded from totals and stock. Recoverable.
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-2 text-sm p-2 rounded border border-red-200 bg-red-50 cursor-pointer">
+                      <RadioGroupItem value="remove" id="csModeRemove" className="mt-0.5" />
+                      <span>
+                        <span className="font-medium text-red-700">Completely remove</span> — rows are permanently
+                        deleted from the database. Cannot be undone.
+                      </span>
+                    </label>
+                  </RadioGroup>
+                </div>
+
+                <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
+                  Stock for {csPlant === 'all' ? 'every plant' : csPlant} will be set to 0. Proforma slips, product
+                  master, and vehicle master are not affected.
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="csConfirmText">Type {expectedCsConfirmText} to confirm</Label>
+                  <Input
+                    id="csConfirmText"
+                    value={csConfirmText}
+                    onChange={(e) => setCsConfirmText(e.target.value)}
+                    placeholder={expectedCsConfirmText}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isClearingStock}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={clearStock}
+              className="bg-red-600 hover:bg-red-700"
+              disabled={isClearingStock || !csPlant || csConfirmText.toUpperCase() !== expectedCsConfirmText}
+            >
+              {isClearingStock ? "Clearing..." : "Clear Stock"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showOpeningStockDialog} onOpenChange={handleOpeningStockDialogOpenChange}>
+        <AlertDialogContent className="max-h-[90vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Import Opening Stock</AlertDialogTitle>
+            <AlertDialogDescription>
+              Sets the selected plant's stock to exactly what this CSV says for each barcode — overwrites
+              whatever's currently there. Every change is still logged to the stock ledger.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label htmlFor="osPlant">Plant</Label>
+              <Select value={osPlant} onValueChange={setOsPlant}>
+                <SelectTrigger id="osPlant"><SelectValue placeholder="Select a plant" /></SelectTrigger>
+                <SelectContent>
+                  {(allPlants ?? []).map((p: any) => (
+                    <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="osFile">CSV File (Barcode + Quantity required)</Label>
+              <Input
+                id="osFile" type="file" accept=".csv"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleOpeningStockFile(f); }}
+              />
+              {osFile && <div className="text-xs text-gray-500">{osFile.name}{osRows ? ` — ${osRows.length} row(s)` : ''}</div>}
+            </div>
+
+            {osPlant && osRows && (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Rows</div>
+                    <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.totalRows ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Distinct barcodes</div>
+                    <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.distinctBarcodes ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Already have stock</div>
+                    <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.barcodesWithExistingStock ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Total qty to set</div>
+                    <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.totalQtyToSet ?? 0}</div>
+                  </div>
+                </div>
+
+                {(osPreview?.barcodesWithExistingStock ?? 0) > 0 && (
+                  <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
+                    {osPreview?.barcodesWithExistingStock} barcode(s) already have stock at {osPlant} — this will overwrite it, not add to it.
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label htmlFor="osConfirmText">Type {osExpectedConfirmText} to confirm</Label>
+                  <Input
+                    id="osConfirmText"
+                    value={osConfirmText}
+                    onChange={(e) => setOsConfirmText(e.target.value)}
+                    placeholder={osExpectedConfirmText}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={osImporting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={importOpeningStock}
+              className="bg-red-600 hover:bg-red-700"
+              disabled={osImporting || !osPlant || !osRows || osConfirmText.toUpperCase() !== osExpectedConfirmText}
+            >
+              {osImporting ? (<><Loader2 className="mr-1.5 h-4 w-4 animate-spin inline" />Importing...</>) : (<><Upload className="mr-1.5 h-4 w-4 inline" />Import</>)}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

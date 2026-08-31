@@ -34,6 +34,7 @@ import {
   ChevronDown,
   LayoutList,
   Eye,
+  PackageOpen,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -200,6 +201,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/loading",
           pageKey: "loading",
+        },
+        {
+          label: "Unloading",
+          icon: <PackageOpen className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/unloading",
+          pageKey: "unloading",
         },
         {
           label: "Scan Viewer",

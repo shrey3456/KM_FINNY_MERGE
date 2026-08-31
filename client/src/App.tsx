@@ -36,6 +36,7 @@ import PlantSettings from "./pages/PlantSettings";
 import OverallStock from "./pages/OverallStock";
 import VehicleMaster from "./pages/VehicleMaster";
 import LoadOperation from "./pages/Loading/LoadOperation";
+import Unloading from "./pages/Unloading/Unloading";
 
 // Loading indicator component for Suspense fallback
 const LoadingIndicator = () => (
@@ -253,6 +254,7 @@ function Router() {
         <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
         <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />
+        <ProtectedRoute path="/unloading" component={Unloading} requiredPage="unloading" />
         <ProtectedRoute path="/scan-viewer" component={ScanViewer} requiredPage="scan-viewer" />
         <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
         <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />

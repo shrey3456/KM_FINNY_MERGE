@@ -3489,12 +3489,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "scan" && (
               <>
             {/* Items list — matches Master View's mobile treatment: card list on a phone,
-                the detailed table only for the rotated/kiosk view. */}
-            <div className="bg-white border border-gray-300 overflow-hidden rounded-xl">
+                the detailed table only for the rotated/kiosk view. ref (osSearchMobileRef) wraps
+                the search header AND the rows/table below it, not just the header — otherwise
+                useOutsideClick reads any tap on a row/the table as "outside" the search and
+                silently closes + clears it the moment you touch the list, same bug class fixed
+                once before on the vehicle-pill filter (see useOutsideClick's own comment). */}
+            <div ref={osSearchMobileRef} className="bg-white border border-gray-300 overflow-hidden rounded-xl">
               {/* List header — navy bar, same treatment as Master View's mobile header. Search
                   replaces the row's content in place (rather than wrapping onto an extra line
                   below), and there's no explicit close button — click outside to hide it. */}
-              <div ref={osSearchMobileRef} className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
+              <div className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
                 {osSearchOpen ? (
                   <div className="relative w-full">
                     <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
@@ -3800,12 +3804,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <div className="space-y-3">
                 {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
                 {mvData && (
-                  <div className="bg-white border border-gray-300 overflow-hidden rounded-xl">
+                  <div ref={mvSearchMobileRef} className="bg-white border border-gray-300 overflow-hidden rounded-xl">
                     {/* Navy header — same treatment as the Scan tab's mobile header. Search
                         replaces the row's content in place (rather than wrapping onto an extra
                         line below), and there's no explicit close button — click outside to
-                        hide it (see mvSearchMobileRef/useOutsideClick). */}
-                    <div ref={mvSearchMobileRef} className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
+                        hide it (see mvSearchMobileRef/useOutsideClick). ref wraps this header AND
+                        the rows/table below, not just the header — same fix as the Scan tab's own
+                        search (see its comment) applied here too. */}
+                    <div className="flex items-center gap-2 px-4 py-3 bg-[#001d6e]">
                       {mvSearchOpen ? (
                         <div className="relative w-full">
                           <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-gray-400" />
@@ -4712,9 +4718,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
             <div className="space-y-4">
               {osTab === "scan" && (
-                <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-                  {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline. */}
-                  <div ref={osSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                <div ref={osSearchDesktopRef} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                  {/* Headerless — the "Items" title is gone; the icon toggles a search bar inline.
+                      ref (osSearchDesktopRef) wraps this header AND the DataTable below it, not
+                      just the header — otherwise useOutsideClick reads a click on any row/the
+                      table itself as "outside" the search and clears it, same bug class fixed
+                      once before on the vehicle-pill filter. */}
+                  <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
                     <span className="text-xs font-medium text-gray-500">{osDoneCount} / {osTotalCount} received</span>
                     {/* No explicit close — clicking outside (osSearchDesktopRef) hides it. */}
                     <button
@@ -4800,8 +4810,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       {/* Same card+header treatment as the Scan tab: an item-count on the left,
                           border-b separating the header from the table, instead of a floating
                           row above a separately-bordered card. */}
-                      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-                        <div ref={mvSearchDesktopRef} className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
+                      <div ref={mvSearchDesktopRef} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                        {/* ref wraps this header AND the DataTable below it, not just the header —
+                            same fix as the Scan tab's own search (see its comment) applied here too. */}
+                        <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5">
                           <span className="text-xs font-medium text-gray-500">{mvVisible.length} of {allMvItems.length} items</span>
                           <div className="ml-auto flex items-center gap-2">
                             {allMvItems.length > 0 && (

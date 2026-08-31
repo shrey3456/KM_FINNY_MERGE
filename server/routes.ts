@@ -109,6 +109,9 @@ import loadingRoutes from "./routes/loading";
 import orderImportRoutes from "./routes/order-import";
 import orderImportEditRoutes from "./routes/order-import-edit";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
+import settingsAdminRoutes from "./routes/settings-admin";
+import unloadingRoutes from "./routes/unloading";
+import openingStockRoutes from "./routes/opening-stock";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
 import { requirePageWrite, requirePageAccess } from "./lib/pageAccess";
@@ -8143,6 +8146,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount order scan routes
   apiRouter.use(orderScanRoutes);
+
+  // Mount Settings > Clear Stock admin routes
+  apiRouter.use(settingsAdminRoutes);
+
+  // Mount Unloading routes (vehicle-wise receiving)
+  apiRouter.use(unloadingRoutes);
+
+  // Mount Settings > Opening Stock import routes
+  apiRouter.use(openingStockRoutes);
 
   // Mount the API router
   app.use("/api", apiRouter);

@@ -74,6 +74,22 @@ function canCompleteLoadClient(): boolean {
 
 const normalize = (v?: string | number | null) => String(v ?? "").trim().toLowerCase();
 
+// "Time taken" — wall-clock time from when the vehicle was linked (loading_records.createdAt)
+// to when the load was marked complete. Same measure used on Order Management's and Unloading's
+// own landing tables.
+function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
+  if (!startIso || !endIso) return null;
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalMinutes = Math.round(ms / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -313,7 +329,7 @@ export default function LoadOperation() {
     let cancelled = false;
     const scanner = new BarcodeScanner({
       onDetected: (result: Result) => {
-        const code = result.getText();
+        const code = result.getText().trim();
         if (code && !cancelled) { setOrderSearch(code); openOrder(code); }
       },
       onError: (err: Error) => { if (!cancelled) { setCameraError(err.message); setScanMode("manual"); } },
@@ -671,13 +687,14 @@ export default function LoadOperation() {
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Status</th>
                       {admin && <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Created By</th>}
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Created At</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</th>
                       <th className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {recordsItems.map((r, i) => {
                       const isExpanded = expandedRecordOrder === r.orderNumber;
-                      const colCount = admin ? 11 : 10;
+                      const colCount = admin ? 12 : 11;
                       return (
                         <>
                           <tr
@@ -710,6 +727,9 @@ export default function LoadOperation() {
                             </td>
                             {admin && <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{r.createdByName ?? r.createdByCode ?? "—"}</td>}
                             <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-500 whitespace-nowrap">{new Date(r.createdAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
+                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">
+                              {formatDuration(r.createdAt, r.loadingCompletedAt) ?? <span className="text-gray-300">—</span>}
+                            </td>
                             <td className="border-b border-gray-200 px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
                               <div className="flex items-center justify-end gap-1">
                                 {r.loadingCompletedAt && canComplete && canWrite && (

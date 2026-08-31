@@ -177,6 +177,23 @@ function fmtIST(dt: string | Date | null | undefined): string {
   return d.toLocaleString("en-IN", { timeZone: "UTC" });
 }
 
+// "Time taken" — wall-clock time from when a session was activated (opened for scanning) to
+// when it was marked complete. A constant timezone offset cancels out in a subtraction, so this
+// doesn't need fmtIST's UTC-relabeling trick — plain Date parsing is fine here. Same measure
+// used on Loading's and Unloading's own landing tables.
+function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
+  if (!startIso || !endIso) return null;
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalMinutes = Math.round(ms / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
 function getLocalISODate(date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -294,10 +311,10 @@ export default function OrderImport() {
   const [activePlant, setActivePlant] = useState("");
   const [activeDate, setActiveDate] = useState("");
 
-  // Completed Sessions card — own plant/date filters, collapsed by default
+  // Completed Sessions card — own plant filter, collapsed by default. No date filter (see the
+  // Completed tab's own comment — it can never reach past the server's 48h recent window anyway).
   const [showCompleted, setShowCompleted] = useState(false);
   const [completedPlant, setCompletedPlant] = useState("");
-  const [completedDate, setCompletedDate] = useState("");
 
   // Live-sync transport status. A successful WS handshake (joined-import) only
   // proves the upgrade succeeded — it does NOT prove that spontaneous server-push
@@ -1087,8 +1104,7 @@ export default function OrderImport() {
   const completedScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "completed" &&
     (!completedPlant || (s.plant ?? "").toLowerCase() === completedPlant.toLowerCase()) &&
-    (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
-    (!completedDate  || (s.orderDate ?? "").slice(0, 10) === completedDate)
+    (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase())
   );
   // Reopen is only ever offered for the SINGLE most-recently-completed session per plant —
   // computed over every completed session (unfiltered by the tab's own plant/date pickers,
@@ -1113,7 +1129,8 @@ export default function OrderImport() {
     ).length;
   const availableCount = countByStatus("available", scanDate);
   const activeCount    = countByStatus("active", activeDate);
-  const completedCount = countByStatus("completed", completedDate);
+  // No date filter on this tab anymore (see its own comment) — always the full recent-completed count.
+  const completedCount = countByStatus("completed", "");
 
   const activeId = activeSessionQuery.data?.id ?? null;
 
@@ -1328,7 +1345,7 @@ export default function OrderImport() {
                 [
                   { key: "available", label: "Available", count: availableCount },
                   { key: "active",    label: "Active",    count: activeCount },
-                  { key: "completed", label: "Completed", count: completedCount },
+                  { key: "completed", label: "Recent Complete", count: completedCount },
                   { key: "history",   label: "History",   count: filterPlant ? historyTotalAll : totalSessions },
                 ] as { key: "available" | "active" | "completed" | "history"; label: string; count: number }[]
               ).map((tab) => (
@@ -1718,23 +1735,12 @@ export default function OrderImport() {
           {/* ── Tab: Completed ── */}
           {activeTab === "completed" && (
             <div>
-              {/* Filters */}
-              <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                <Input type="date" value={completedDate} onChange={(e) => setCompletedDate(e.target.value)}
-                  className="h-8 w-[140px] text-xs rounded-full" />
-                {completedDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-full"
-                    onClick={() => setCompletedDate(todayStr)}>
-                    Today
-                  </Button>
-                )}
-                {completedDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-full"
-                    onClick={() => setCompletedDate("")}>
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-full"
+              {/* This tab only ever holds the last 48h (server-side, see /api/order-scan/sessions) —
+                  a date filter here can't reach further back than that no matter what's picked, so
+                  it's deliberately not offered. Use the History tab for anything older. */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-b border-gray-50">
+                <p className="text-xs text-gray-400">Last 48 hours · see History for everything</p>
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0 rounded-full"
                   onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
                   <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
@@ -1901,19 +1907,11 @@ export default function OrderImport() {
                                   {(session as any).scanCompletedAt && (
                                     <span className="text-xs text-gray-400">Completed: {fmtIST((session as any).scanCompletedAt)}</span>
                                   )}
-                                  {(session as any).scanActivatedAt && (session as any).scanCompletedAt && (() => {
-                                    const totalMinutes = Math.round(
-                                      (new Date((session as any).scanCompletedAt).getTime() - new Date((session as any).scanActivatedAt).getTime()) / 60000,
-                                    );
-                                    if (isNaN(totalMinutes) || totalMinutes < 0) return null;
-                                    const hours = Math.floor(totalMinutes / 60);
-                                    const minutes = totalMinutes % 60;
-                                    return (
-                                      <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
-                                        Completed In {hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`}
-                                      </span>
-                                    );
-                                  })()}
+                                  {formatDuration((session as any).scanActivatedAt, (session as any).scanCompletedAt) && (
+                                    <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                      Completed In {formatDuration((session as any).scanActivatedAt, (session as any).scanCompletedAt)}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                               </div>

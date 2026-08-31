@@ -217,6 +217,87 @@ app.use((req, res, next) => {
         ADD COLUMN IF NOT EXISTS voided_at TIMESTAMP,
         ADD COLUMN IF NOT EXISTS void_reason TEXT
     `);
+    // Unloading (server/routes/unloading.ts) — vehicle-wise receiving. See unloadImportSessions'
+    // comment in shared/schema.ts: FIFO grouping like order_import_sessions, but scoped one level
+    // deeper by vehicleNumber (plant + vehicleNumber + orderDate), so one CSV upload can span
+    // several vehicles and every vehicle+date group tracks its own active part independently.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS unload_import_sessions (
+        id SERIAL PRIMARY KEY,
+        plant TEXT NOT NULL,
+        vehicle_number TEXT NOT NULL,
+        order_date TEXT NOT NULL,
+        csv_file_name TEXT NOT NULL,
+        row_count INTEGER DEFAULT 0,
+        imported_by_code TEXT REFERENCES users(user_code),
+        created_at TIMESTAMP DEFAULT NOW(),
+        group_id INTEGER,
+        part_index INTEGER DEFAULT 1,
+        scan_status TEXT DEFAULT 'available',
+        scan_activated_by_code TEXT REFERENCES users(user_code),
+        scan_activated_at TIMESTAMP,
+        scan_completed_by_code TEXT REFERENCES users(user_code),
+        scan_completed_at TIMESTAMP
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS unload_import_items (
+        id SERIAL PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES unload_import_sessions(id) ON DELETE CASCADE,
+        plant TEXT,
+        vehicle_number TEXT,
+        barcode TEXT,
+        item_name TEXT,
+        sap_code TEXT,
+        quantity INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS unload_scan_events (
+        id SERIAL PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES unload_import_sessions(id) ON DELETE CASCADE,
+        barcode TEXT NOT NULL,
+        item_name TEXT,
+        sap_code TEXT,
+        pallets REAL DEFAULT 0,
+        loose_qty INTEGER DEFAULT 0,
+        total_qty INTEGER DEFAULT 0,
+        is_extra BOOLEAN DEFAULT false,
+        plant TEXT,
+        vehicle_number TEXT,
+        scanned_by_code TEXT REFERENCES users(user_code),
+        scanned_by_name TEXT,
+        scanned_at TIMESTAMP DEFAULT NOW(),
+        voided BOOLEAN DEFAULT false,
+        voided_by_code TEXT REFERENCES users(user_code),
+        voided_at TIMESTAMP,
+        void_reason TEXT
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_unload_import_sessions_group ON unload_import_sessions(group_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_unload_import_items_session ON unload_import_items(session_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_unload_scan_events_session ON unload_scan_events(session_id)`);
+    // Delete-with-rollback replacement flow for Unloading — same shape as order_import_sessions'
+    // own isDeleted/remappedToSessionId/replacesSessionId columns (see their comment there).
+    await pool.query(`
+      ALTER TABLE unload_import_sessions
+        ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT false NOT NULL,
+        ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS deleted_by_code TEXT REFERENCES users(user_code),
+        ADD COLUMN IF NOT EXISTS remapped_to_session_id INTEGER,
+        ADD COLUMN IF NOT EXISTS remapped_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS replaces_session_id INTEGER
+    `);
+    // Cross-part credit reconciliation for Unloading — same shape as order_scan_events' own
+    // isCredit/creditedQty/creditSourceEventId columns (see their comment there).
+    await pool.query(`
+      ALTER TABLE unload_scan_events
+        ADD COLUMN IF NOT EXISTS is_credit BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS credit_source_event_id INTEGER
+    `);
+
     // Loading-completion state lives directly on the slip (loadingCompletedAt/By), same pattern
     // as the existing print-lock fields (isPrintLocked/printedByCode/printedAt) on this table.
     await pool.query(`
@@ -226,6 +307,54 @@ app.use((req, res, next) => {
         ADD COLUMN IF NOT EXISTS vehicle_assigned_by_code TEXT,
         ADD COLUMN IF NOT EXISTS vehicle_info_id INTEGER
     `);
+    // Barcode text is compared across many tables (product name resolution, stock keys, the
+    // product_id backfill right below) using LOWER() — a barcode stored with stray leading/
+    // trailing whitespace (an old CSV export padded to a fixed width, a pre-fix Notion sync
+    // row, a barcode-gun double-fire captured before the trim-at-write fixes in storage.ts/
+    // order-scan.ts/loading.ts/unloading.ts existed) silently fails every one of those matches,
+    // and Overall Stock/Scan History fall back to showing the bare barcode instead of the
+    // resolved item name. Cleaned up once here, idempotently (WHERE barcode <> TRIM(barcode)
+    // is a no-op once everything's clean) — every write from here on is already trimmed at the
+    // source, so this can't reaccumulate.
+    await pool.query(`UPDATE products SET barcode = TRIM(barcode) WHERE barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE stock_movements SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE order_import_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE order_scan_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE order_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE loading_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE unload_import_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE unload_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+
+    // product_plant_stock is UNIQUE(barcode, plant) — unlike the tables above, blindly trimming
+    // its barcode can collide with a row that already exists under the trimmed barcode for the
+    // same plant. Same merge-or-rename dance as reconcileProductPlantStockBarcode.ts (which
+    // handles the equivalent collision for a live barcode edit), run once here for any row still
+    // holding a padded barcode from before the trim-at-write fixes existed.
+    {
+      const { rows: paddedRows } = await pool.query(
+        `SELECT id, barcode, plant, in_stock, extra_qty FROM product_plant_stock WHERE barcode <> TRIM(barcode)`
+      );
+      for (const row of paddedRows) {
+        const trimmed = row.barcode.trim();
+        const { rows: targetRows } = await pool.query(
+          `SELECT id FROM product_plant_stock WHERE barcode = $1 AND plant = $2`,
+          [trimmed, row.plant],
+        );
+        if (targetRows[0]) {
+          await pool.query(
+            `UPDATE product_plant_stock SET in_stock = in_stock + $1, extra_qty = extra_qty + $2, updated_at = NOW() WHERE id = $3`,
+            [row.in_stock, row.extra_qty, targetRows[0].id],
+          );
+          await pool.query(`DELETE FROM product_plant_stock WHERE id = $1`, [row.id]);
+        } else {
+          await pool.query(
+            `UPDATE product_plant_stock SET barcode = $1, updated_at = NOW() WHERE id = $2`,
+            [trimmed, row.id],
+          );
+        }
+      }
+    }
+
     // product_plant_stock/stock_movements previously linked to a product ONLY by barcode text.
     // A product's barcode can be edited later (most commonly via the Notion inventory sync,
     // which matches/updates existing products by their stable Notion page id, not barcode, and
@@ -236,7 +365,8 @@ app.use((req, res, next) => {
     // each row's CURRENT barcode below — only fixes rows that haven't drifted yet (nothing
     // remembers what a barcode used to be), but every write from here on populates product_id
     // directly, so this can't happen again going forward. WHERE product_id IS NULL makes this
-    // safe to run on every server start — a no-op once everything's backfilled.
+    // safe to run on every server start — a no-op once everything's backfilled. TRIM() here too,
+    // belt-and-braces alongside the cleanup above, in case a row was added between the two.
     await pool.query(`
       ALTER TABLE product_plant_stock
       ADD COLUMN IF NOT EXISTS product_id INTEGER
@@ -248,12 +378,12 @@ app.use((req, res, next) => {
     await pool.query(`
       UPDATE product_plant_stock pps SET product_id = p.id
       FROM products p
-      WHERE pps.product_id IS NULL AND LOWER(p.barcode) = LOWER(pps.barcode)
+      WHERE pps.product_id IS NULL AND LOWER(TRIM(p.barcode)) = LOWER(TRIM(pps.barcode))
     `);
     await pool.query(`
       UPDATE stock_movements sm SET product_id = p.id
       FROM products p
-      WHERE sm.product_id IS NULL AND LOWER(p.barcode) = LOWER(sm.barcode)
+      WHERE sm.product_id IS NULL AND LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode))
     `);
 
     // vehicle_info predates Vehicle Master and previously had a different, narrower column set

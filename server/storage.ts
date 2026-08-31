@@ -2366,7 +2366,7 @@ export class DBStorage implements IStorage {
   }
 
   async getProductByBarcode(barcode: string): Promise<Product | undefined> {
-    const result = await db.select().from(products).where(eq(products.barcode, barcode)).limit(1);
+    const result = await db.select().from(products).where(eq(products.barcode, barcode.trim())).limit(1);
     return result.length ? result[0] : undefined;
   }
 
@@ -2384,6 +2384,12 @@ export class DBStorage implements IStorage {
 
   async createProduct(product: InsertProduct): Promise<Product> {
     const productData: Record<string, any> = { ...product };
+
+    // Trimmed at the single low-level function every product write passes through (Notion sync,
+    // Product Master edits, CSV imports) — product_plant_stock/stock_movements key on the literal
+    // barcode string, so an untrimmed value here becomes a permanently different barcode as far
+    // as stock is concerned, silently orphaning quantity under a stray-whitespace variant.
+    if (typeof productData.barcode === 'string') productData.barcode = productData.barcode.trim();
 
     for (const key of ["lastUpdated", "createdAt", "updatedAt"]) {
       const value = productData[key];
@@ -2412,6 +2418,10 @@ export class DBStorage implements IStorage {
         if (key === 'volumeInCuFt') {
           // Make sure it's stored as string, even if empty
           updateData[key] = value === null ? '' : String(value);
+        } else if (key === 'barcode' && typeof value === 'string') {
+          // Trimmed here, before the change-detection below — see createProduct's comment for
+          // why (this is the single low-level function every barcode edit passes through).
+          updateData[key] = value.trim();
         } else {
           updateData[key] = value;
         }
@@ -2439,7 +2449,39 @@ export class DBStorage implements IStorage {
       // If no lastUpdated provided, use current date
       updateData.updatedAt = new Date();
     }
+    // Detect a barcode change BEFORE writing it, so the reconciliation below (which runs after)
+    // knows whether it actually needs to do anything — this is the single low-level place every
+    // barcode edit passes through (Notion sync, manual Product Master edits, anything else),
+    // so hooking in here catches all of them rather than each caller needing to remember to.
+    let barcodeChanged = false;
+    if (typeof updateData.barcode === 'string') {
+      const { rows: beforeRows } = await pool.query(`SELECT barcode FROM products WHERE id = $1`, [id]);
+      const oldBarcode = beforeRows[0]?.barcode ?? null;
+      barcodeChanged = oldBarcode != null && oldBarcode !== updateData.barcode;
+    }
+
     const result = await db.update(products).set(updateData).where(eq(products.id, id)).returning();
+
+    // Eagerly fold any plant-stock rows still parked under the OLD barcode onto the new one, for
+    // every plant this product has stock in — instead of waiting for the next scan to trigger
+    // the same lazy reconciliation (see stockBarcodeReconcile.ts's comment for the full
+    // rationale). Best-effort: a failure here must never fail the product update itself — the
+    // lazy path on the next scan is the fallback.
+    if (barcodeChanged && result.length && updateData.barcode) {
+      try {
+        const { reconcileProductPlantStockBarcode } = await import('./lib/stockBarcodeReconcile');
+        const { rows: plantRows } = await pool.query(
+          `SELECT DISTINCT plant FROM product_plant_stock WHERE product_id = $1`,
+          [id],
+        );
+        for (const p of plantRows) {
+          await reconcileProductPlantStockBarcode(pool, id, p.plant, updateData.barcode);
+        }
+      } catch (err) {
+        console.error(`Failed to reconcile product_plant_stock after barcode change for product ${id}:`, (err as Error)?.message);
+      }
+    }
+
     return result.length ? result[0] : undefined;
   }
 

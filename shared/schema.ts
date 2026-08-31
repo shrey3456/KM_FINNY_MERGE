@@ -1078,6 +1078,131 @@ export type OrderScanEvent = typeof orderScanEvents.$inferSelect;
 export type InsertOrderScanEvent = z.infer<typeof insertOrderScanEventSchema>;
 
 // ============================================================================
+// UNLOADING  (Vehicle-wise receiving — a CSV import can span multiple vehicles)
+// Purpose : Same "import a CSV, then scan against it to receive stock" idea as Order Import/
+//           Scan Order, but organized by (plant, vehicleNumber, orderDate) instead of just
+//           (plant, orderDate) — one uploaded CSV's rows can belong to several different
+//           vehicles at once, each becoming its own scannable group. A second upload for the
+//           same vehicle+date becomes the next queued FIFO part for that group (mirrors Order
+//           Import's receivingSessionId/partIndex, scoped one level deeper by vehicle), rather
+//           than merging or blocking. There is no single "active session" gate across the whole
+//           plant like Order Scan has — every vehicle+date group tracks its own active part
+//           independently, which is what lets the Unloading page be "pick a vehicle + date,
+//           it opens" instead of picking from one shared session list.
+//           Deliberately simpler than Order Import/Scan Order: no delete-with-rollback replace
+//           flow, no cross-part credit reconciliation, no Master View cross-file merge — a plain
+//           two-table shape (import items = the expected list, scan events = the audit trail),
+//           the same shape Loading already uses for its own scan side, with progress computed
+//           live by summing events rather than a separate progress-tracking table.
+// Used by : Unloading page (/unloading).
+// ============================================================================
+
+export const unloadImportSessions = pgTable("unload_import_sessions", {
+  id: serial("id").primaryKey(),
+  plant: text("plant").notNull(),
+  vehicleNumber: text("vehicle_number").notNull(),
+  orderDate: text("order_date").notNull(),
+  csvFileName: text("csv_file_name").notNull(),
+  rowCount: integer("row_count").default(0),
+  importedByCode: text("imported_by_code").references(() => users.userCode),
+  createdAt: timestamp("created_at").defaultNow(),
+  // FIFO grouping, scoped by (plant, vehicleNumber, orderDate): groupId is Part 1's own id;
+  // every later upload for the same vehicle+date joins as the next partIndex.
+  groupId: integer("group_id"),
+  partIndex: integer("part_index").default(1),
+  // available: queued behind another part of the same group that's still active.
+  // active: the group's current scannable part.
+  // completed: every item's expected quantity has been matched; locked, stock already applied.
+  scanStatus: text("scan_status").default("available"),
+  scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
+  scanActivatedAt: timestamp("scan_activated_at"),
+  scanCompletedByCode: text("scan_completed_by_code").references(() => users.userCode),
+  scanCompletedAt: timestamp("scan_completed_at"),
+  // Soft-delete + delete-with-rollback replacement flow — same convention as
+  // orderImportSessions (see its comment): a "replace" delete keeps scan history in place
+  // (isDeleted=true only) so a corrected re-upload for the same vehicle+date can carry it
+  // forward (remappedToSessionId/remappedAt set on THIS row once that happens; replacesSessionId
+  // set on the new session, pointing back). A "discard" delete additionally reverses stock,
+  // voids events, and self-resolves (remappedToSessionId = own id) so the next upload starts
+  // fresh instead of inheriting this one's history.
+  isDeleted: boolean("is_deleted").default(false).notNull(),
+  deletedAt: timestamp("deleted_at"),
+  deletedByCode: text("deleted_by_code").references(() => users.userCode),
+  remappedToSessionId: integer("remapped_to_session_id"),
+  remappedAt: timestamp("remapped_at"),
+  replacesSessionId: integer("replaces_session_id"),
+});
+
+export const unloadImportItems = pgTable("unload_import_items", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id")
+    .references(() => unloadImportSessions.id, { onDelete: "cascade" })
+    .notNull(),
+  plant: text("plant"),
+  vehicleNumber: text("vehicle_number"),
+  barcode: text("barcode"),
+  itemName: text("item_name"),
+  sapCode: text("sap_code"),
+  quantity: integer("quantity").default(0),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const unloadScanEvents = pgTable("unload_scan_events", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id")
+    .references(() => unloadImportSessions.id, { onDelete: "cascade" })
+    .notNull(),
+  barcode: text("barcode").notNull(),
+  itemName: text("item_name"),
+  sapCode: text("sap_code"),
+  pallets: real("pallets").default(0),
+  looseQty: integer("loose_qty").default(0),
+  totalQty: integer("total_qty").default(0),
+  isExtra: boolean("is_extra").default(false), // scanned beyond this item's expected quantity
+  plant: text("plant"),
+  vehicleNumber: text("vehicle_number"),
+  scannedByCode: text("scanned_by_code").references(() => users.userCode),
+  scannedByName: text("scanned_by_name"),
+  scannedAt: timestamp("scanned_at").defaultNow(),
+  // Same audit-preserving void pattern as order_scan_events/loading_scan_events — voiding
+  // reverses the stock this event added (product_plant_stock -= qty) and marks the row, never
+  // deletes it.
+  voided: boolean("voided").default(false),
+  voidedByCode: text("voided_by_code").references(() => users.userCode),
+  voidedAt: timestamp("voided_at"),
+  voidReason: text("void_reason"),
+  // Cross-part credit reconciliation — mirrors order_scan_events' isCredit/creditedQty/
+  // creditSourceEventId (see their comments there). When a part completes with leftover
+  // un-consumed "extra" scans, reconcileUnloadCredits (server/lib/unloadCredit.ts) hands them
+  // forward to a real shortfall on a later, not-yet-completed part of the SAME vehicle+date
+  // group, writing a system-generated credit row here (isCredit=true, creditSourceEventId
+  // pointing at the original extra event) instead of leaving it a display-only estimate.
+  // creditedQty on the SOURCE event caps how much of it has already been handed out, so the
+  // same physical boxes can never be credited twice.
+  isCredit: boolean("is_credit").default(false),
+  creditedQty: integer("credited_qty").default(0),
+  creditSourceEventId: integer("credit_source_event_id"),
+});
+
+export const insertUnloadImportSessionSchema = createInsertSchema(unloadImportSessions).pick({
+  plant: true, vehicleNumber: true, orderDate: true, csvFileName: true, rowCount: true, importedByCode: true,
+});
+export const insertUnloadImportItemSchema = createInsertSchema(unloadImportItems).pick({
+  sessionId: true, plant: true, vehicleNumber: true, barcode: true, itemName: true, sapCode: true, quantity: true,
+});
+export const insertUnloadScanEventSchema = createInsertSchema(unloadScanEvents).pick({
+  sessionId: true, barcode: true, itemName: true, sapCode: true, pallets: true, looseQty: true,
+  totalQty: true, isExtra: true, plant: true, vehicleNumber: true, scannedByCode: true, scannedByName: true,
+});
+
+export type UnloadImportSession = typeof unloadImportSessions.$inferSelect;
+export type InsertUnloadImportSession = z.infer<typeof insertUnloadImportSessionSchema>;
+export type UnloadImportItem = typeof unloadImportItems.$inferSelect;
+export type InsertUnloadImportItem = z.infer<typeof insertUnloadImportItemSchema>;
+export type UnloadScanEvent = typeof unloadScanEvents.$inferSelect;
+export type InsertUnloadScanEvent = z.infer<typeof insertUnloadScanEventSchema>;
+
+// ============================================================================
 // ACTIVITIES  (Global Audit Log)
 // Purpose : Records every significant user action across all pages — creates,
 //           updates, deletes, prints, etc. Used for the Activities admin page
