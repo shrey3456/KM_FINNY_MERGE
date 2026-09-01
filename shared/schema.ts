@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -341,6 +341,15 @@ export const proformaSlips = pgTable("proforma_slips", {
   totalVolume: text("total_volume"),
   vehicleNumber: text("vehicle_number"),
   driverName: text("driver_name"),
+  // Extra fields pulled from the Notion dispatch database on import — not set by manual creation.
+  invoiceNumber: text("invoice_number"),
+  partyState: text("party_state"),
+  notionStatus: text("notion_status"), // Notion's "+ / - Status :" property
+  storeKeeperInfo: text("storekeeper_info"),
+  // Full raw property map read off the Notion page at import time (property name -> extracted
+  // display value), so any Notion column not mapped to its own DB field above is still kept
+  // instead of silently dropped, and future columns can be surfaced without another migration.
+  notionRawData: jsonb("notion_raw_data").$type<Record<string, unknown>>(),
   createdByCode: text("created_by_code").references(() => users.userCode),
   createdAt: timestamp("created_at").defaultNow(),
   notes: text("notes"),
@@ -368,6 +377,7 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
 }).pick({
   orderDate: true, orderNumber: true, partyName: true, plant: true,
   totalQuantity: true, totalVolume: true, vehicleNumber: true, driverName: true,
+  invoiceNumber: true, partyState: true, notionStatus: true, storeKeeperInfo: true, notionRawData: true,
   createdByCode: true, notes: true, isBackedUp: true, isPrintLocked: true,
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
   loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,

@@ -96,6 +96,7 @@ function parseOrderDate(dateString: string): Date | null {
 
 import { setupAuth } from "./auth";
 import fastNotionImportRoutes from "./routes/fast-notion-import";
+import proformaNotionSyncRoutes from "./routes/proforma-notion-sync";
 import dispatchRoutes from "./routes/dispatch-simple";
 import dispatchOrdersRoutes from "./routes/dispatch-orders";
 import expenseVoucherRoutes from "./routes/expense-voucher";
@@ -112,6 +113,84 @@ import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
 import { requirePageWrite, requirePageAccess } from "./lib/pageAccess";
+
+// Builds the proforma-slips CSV export (one row per line item, snapshot fields only — never
+// re-fetches product data, so the export stays correct even if a product was later edited or
+// deleted) for whatever set of slips the caller has already selected/filtered. Shared by the
+// GET (query-param filters) and POST (arbitrary id list, for a client-side-filtered view too
+// large to fit in a query string) export routes so both produce identical output.
+async function buildProformaSlipsCsv(
+  filteredSlips: ProformaSlip[],
+  summaryText: string,
+  filenameSuffix: string,
+): Promise<{ csv: string; filename: string }> {
+  const csvRows: any[] = [];
+  let totalVolumeSum = 0;
+
+  for (const slip of filteredSlips) {
+    if (slip.totalVolume && !isNaN(parseFloat(slip.totalVolume))) {
+      totalVolumeSum += parseFloat(slip.totalVolume);
+    }
+
+    const slipItems = await storage.getProformaSlipItems(slip.id);
+
+    if (!slipItems || slipItems.length === 0) {
+      csvRows.push({
+        orderNumber: slip.orderNumber,
+        orderDate: slip.orderDate || "",
+        partyName: slip.partyName,
+        plant: slip.plant,
+        totalQuantity: slip.totalQuantity,
+        totalVolume: slip.totalVolume,
+        vehicleNumber: slip.vehicleNumber,
+        driverName: slip.driverName,
+        notes: slip.notes,
+        productId: "",
+        productSrNo: "",
+        productBarcode: "",
+        productName: "",
+        quantity: "",
+      });
+    } else {
+      // IMPORTANT: Use ONLY snapshot data from item to ensure immutability — DO NOT fetch
+      // product data, proforma slips must remain unchanged even if inventory is edited/deleted.
+      for (const item of slipItems) {
+        csvRows.push({
+          orderNumber: slip.orderNumber,
+          orderDate: slip.orderDate ? new Date(slip.orderDate).toISOString().split("T")[0] : "",
+          partyName: slip.partyName,
+          plant: slip.plant,
+          totalQuantity: slip.totalQuantity,
+          totalVolume: slip.totalVolume,
+          vehicleNumber: slip.vehicleNumber,
+          driverName: slip.driverName,
+          notes: slip.notes,
+          productId: item.sapCode || item.productId || "",
+          productSrNo: item.srNo || "",
+          productBarcode: item.barcode || "",
+          productName: item.itemName || "",
+          quantity: item.quantity,
+        });
+      }
+    }
+  }
+
+  let csv = `"${summaryText}","${totalVolumeSum.toFixed(2)}"\n\n`;
+
+  if (csvRows.length > 0) {
+    const headers = Object.keys(csvRows[0]);
+    csv += headers.join(",") + "\n";
+    csvRows.forEach((row) => {
+      const values = headers.map((header) => {
+        const value = row[header]?.toString().replace(/,/g, ";") || "";
+        return `"${value}"`;
+      });
+      csv += values.join(",") + "\n";
+    });
+  }
+
+  return { csv, filename: `proforma-slips-${filenameSuffix}` };
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -3528,6 +3607,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const filterDate = req.query.date as string;
         const startDate = req.query.startDate as string;
         const endDate = req.query.endDate as string;
+        // ids: comma-separated proforma_slips.id list — sent by the client when the table has
+        // an active search / plant tab / date range / column filter applied, so the export
+        // matches exactly what's on screen instead of always dumping every slip in the table
+        // regardless of what's currently filtered.
+        const idsParam = req.query.ids as string | undefined;
+        const idsFilter = idsParam
+          ? new Set(idsParam.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n)))
+          : null;
 
         // Get all proforma slips with very high limit for no practical limitation
         const slips = await storage.listProformaSlips(100000, 0);
@@ -3537,10 +3624,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
 
         // Filter slips by date if provided
-        let filteredSlips = slips;
+        let filteredSlips = idsFilter ? slips.filter((slip) => idsFilter.has(slip.id)) : slips;
         let dateFilter = "";
 
-        if (startDate && endDate) {
+        if (idsFilter) {
+          dateFilter = "filtered-view";
+          console.log(`Exporting ${filteredSlips.length} slips matching the current on-screen filter (${idsFilter.size} ids requested)`);
+        } else if (startDate && endDate) {
           // Filter by date range if both start and end dates are provided
           console.log(
             `Filtering slips by date range: ${startDate} to ${endDate}`,
@@ -3589,105 +3679,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
           );
         }
 
-        // Fetch items for each slip and products for each item
-        const csvRows: any[] = [];
-
-        // Calculate total volume sum for all matched slips
-        let totalVolumeSum = 0;
-
-        for (const slip of filteredSlips) {
-          // Add to total volume if it's a valid number
-          if (slip.totalVolume && !isNaN(parseFloat(slip.totalVolume))) {
-            totalVolumeSum += parseFloat(slip.totalVolume);
-          }
-
-          // Fetch items for this slip
-          const slipItems = await storage.getProformaSlipItems(slip.id);
-
-          // If slip has no items, still add one row for the slip header
-          if (!slipItems || slipItems.length === 0) {
-            csvRows.push({
-              orderNumber: slip.orderNumber,
-              orderDate: slip.orderDate || "",
-              partyName: slip.partyName,
-              plant: slip.plant,
-              totalQuantity: slip.totalQuantity,
-              totalVolume: slip.totalVolume,
-              vehicleNumber: slip.vehicleNumber,
-              driverName: slip.driverName,
-              notes: slip.notes,
-              productId: "",
-              productSrNo: "",
-              productBarcode: "",
-              productName: "",
-              quantity: "",
-            });
-          } else {
-            // Add a row for each item in the slip
-            // IMPORTANT: Use ONLY snapshot data from item to ensure immutability
-            // DO NOT fetch product data - proforma slips must remain unchanged even if inventory is edited/deleted
-            for (const item of slipItems) {
-              csvRows.push({
-                orderNumber: slip.orderNumber,
-                orderDate: slip.orderDate
-                  ? new Date(slip.orderDate).toISOString().split("T")[0]
-                  : "",
-                partyName: slip.partyName,
-                plant: slip.plant,
-                totalQuantity: slip.totalQuantity,
-                totalVolume: slip.totalVolume,
-                vehicleNumber: slip.vehicleNumber,
-                driverName: slip.driverName,
-                notes: slip.notes,
-                productId: item.sapCode || item.productId || "",
-                productSrNo: item.srNo || "",
-                productBarcode: item.barcode || "",
-                productName: item.itemName || "",
-                quantity: item.quantity,
-              });
-            }
-          }
-        }
-
-        // Convert to CSV
-        let csv = "";
-
-        // Add total volume summary at the beginning
-        let summaryText = "";
-        if (startDate && endDate) {
+        // Total volume summary label + filename suffix, covering the ids-filter case too.
+        let summaryText: string;
+        let filenameSuffix: string;
+        if (idsFilter) {
+          summaryText = "Total Volume Sum for the current filtered view";
+          filenameSuffix = "filtered-view";
+        } else if (startDate && endDate) {
           summaryText = `Total Volume Sum for date range ${startDate} to ${endDate}`;
+          filenameSuffix = `${startDate}-to-${endDate}`;
         } else if (filterDate) {
           summaryText = `Total Volume Sum for ${dateFilter}`;
+          filenameSuffix = dateFilter;
         } else {
           summaryText = "Total Volume Sum for all dates";
+          filenameSuffix = "all-dates";
         }
 
-        csv += `"${summaryText}","${totalVolumeSum.toFixed(2)}"\n\n`;
-
-        // Add headers
-        if (csvRows.length > 0) {
-          const headers = Object.keys(csvRows[0]);
-          csv += headers.join(",") + "\n";
-
-          // Add rows
-          csvRows.forEach((row) => {
-            const values = headers.map((header) => {
-              const value = row[header]?.toString().replace(/,/g, ";") || "";
-              return `"${value}"`;
-            });
-            csv += values.join(",") + "\n";
-          });
-        }
-
-        // Generate appropriate filename
-        let filename = "proforma-slips";
-        if (startDate && endDate) {
-          filename += `-${startDate}-to-${endDate}`;
-        } else if (dateFilter) {
-          filename += `-${dateFilter}`;
-        } else {
-          filename += "-all-dates";
-        }
+        const { csv, filename } = await buildProformaSlipsCsv(filteredSlips, summaryText, filenameSuffix);
 
         // Set headers and send response
         res.setHeader("Content-Type", "text/csv");
@@ -8103,6 +8112,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount fast import routes
   apiRouter.use(fastNotionImportRoutes);
+  apiRouter.use(proformaNotionSyncRoutes);
 
   // Mount dispatch routes
   apiRouter.use(dispatchRoutes);
