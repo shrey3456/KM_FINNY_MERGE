@@ -1,4 +1,4 @@
-import { Switch, Route, useLocation } from "wouter";
+import { Switch, Route, Redirect, useLocation } from "wouter";
 import { queryClient, handleUnauthorized } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -250,7 +250,10 @@ function Router() {
         <ProtectedRoute path="/expense-voucher" component={ExpenseVoucher} requiredPage="expense-voucher" />
         <ProtectedRoute path="/toll-voucher" component={TollVoucher} requiredPage="toll-voucher" />
         <Route path="/stock-sheets" component={StockSheets} />
-        <ProtectedRoute path="/reports" component={Reports} requiredPage="scan-history" />
+        <ProtectedRoute path="/scan-history" component={Reports} requiredPage="scan-history" />
+        {/* /reports was the old path for this page — kept as a redirect so any existing
+            bookmark/browser history still lands somewhere instead of 404ing. */}
+        <Route path="/reports"><Redirect to="/scan-history" /></Route>
         <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
         <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />

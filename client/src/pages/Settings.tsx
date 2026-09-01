@@ -153,6 +153,7 @@ const Settings = () => {
     loadingRecords: number;
     unloadingSessions: number;
     unloadingScanEvents: number;
+    stockMovements: number;
   }>({
     queryKey: ['/api/settings/clear-stock/preview', csPlant],
     queryFn: () =>
@@ -238,10 +239,18 @@ const Settings = () => {
     if (!barcodeCol) { toast({ title: 'Could not find a "Barcode" column in this CSV.', variant: 'destructive' }); return; }
     if (!qtyCol) { toast({ title: 'Could not find a "Quantity" column in this CSV.', variant: 'destructive' }); return; }
 
+    // parseFloat (not a strip-non-digits-then-parseInt) — stripping every non-digit character
+    // would remove the decimal point too, so a cell written as "200.00" (a common Excel export
+    // format for a whole-number column) would become "20000", 100x too large. Commas are still
+    // stripped first since those are a thousands separator, not part of the number.
+    const parseQty = (raw: string) => {
+      const n = parseFloat((raw ?? '0').replace(/,/g, '').trim());
+      return Number.isFinite(n) ? Math.round(n) : 0;
+    };
     const rows = parsed.map((row) => ({
       barcode: (row[barcodeCol] ?? '').trim(),
       itemName: itemNameCol ? (row[itemNameCol] ?? '').trim() || null : null,
-      quantity: parseInt((row[qtyCol] ?? '0').replace(/[^0-9-]/g, ''), 10) || 0,
+      quantity: parseQty(row[qtyCol] ?? '0'),
     })).filter((r) => r.barcode);
     if (rows.length === 0) {
       toast({ title: 'No valid barcodes found in this CSV.', variant: 'destructive' });
@@ -819,6 +828,10 @@ const Settings = () => {
                     <div className="font-medium">Unloading events</div>
                     <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.unloadingScanEvents ?? 0}</div>
                   </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium" title="Powers the 'click a product' arrival history on Overall Stock — only deleted by Completely remove, not Void">Stock movement history</div>
+                    <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.stockMovements ?? 0}</div>
+                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -835,7 +848,8 @@ const Settings = () => {
                       <RadioGroupItem value="remove" id="csModeRemove" className="mt-0.5" />
                       <span>
                         <span className="font-medium text-red-700">Completely remove</span> — rows are permanently
-                        deleted from the database. Cannot be undone.
+                        deleted from the database, including the arrival history Overall Stock shows when you click
+                        a product. Cannot be undone.
                       </span>
                     </label>
                   </RadioGroup>

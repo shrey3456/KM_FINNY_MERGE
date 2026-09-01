@@ -8,6 +8,7 @@ import {
   CheckCircle,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   FileBarChart,
   FileUp,
@@ -30,6 +31,7 @@ import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/Re
 import { PlantBadge } from "@/components/PlantBadge";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
+import { buildPageList } from "@/components/ui/data-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -1916,8 +1918,8 @@ export default function OrderImport() {
                               </div>
                               </div>
                               <div className="flex flex-wrap items-center gap-1 pl-6 sm:ml-1 sm:shrink-0 sm:pl-0">
-                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>
-                                  {session.rowCount}
+                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl tabular-nums" title={`${session.rowCount} rows`}>
+                                  {session.rowCount} rows
                                 </Badge>
                                 {/* Ordered quantity next to the row count — the row count says how
                                     many lines the CSV has, not how much was ordered. */}
@@ -2068,40 +2070,50 @@ export default function OrderImport() {
                       );
                     })}
                   </div>
-                  {/* Pagination */}
-                  {totalPages > 1 && (
+                  {/* Pagination — same numbered-page-button style used across the app (Overall
+                      Stock, Users, Unloading, etc.) instead of a bespoke "← Prev / Next →" pager,
+                      and always shown (not gated on totalPages > 1) so it's still there to orient
+                      you even on a single-page result. */}
+                  {totalSessions > 0 && (
                     <div className="flex flex-wrap items-center justify-between gap-2 border-t px-5 py-3">
                       <span className="text-xs text-gray-500">
-                        Page {safePage} of {totalPages} · {totalSessions} sessions
+                        Showing {(safePage - 1) * pageSize + 1} to {Math.min(safePage * pageSize, totalSessions)} of {totalSessions} entries
                       </span>
-                      <div className="flex items-center gap-1">
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-full"
-                          disabled={safePage <= 1} onClick={() => setCurrentPage(safePage - 1)}>
-                          ← Prev
+                      <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
+                        <Button
+                          variant="outline" size="sm" className="h-8 w-8 p-0"
+                          onClick={() => setCurrentPage(Math.max(1, safePage - 1))}
+                          disabled={safePage <= 1}
+                          aria-label="Previous page"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
                         </Button>
-                        {Array.from({ length: totalPages }, (_, i) => i + 1)
-                          .filter((p) => p === 1 || p === totalPages || Math.abs(p - safePage) <= 1)
-                          .reduce<(number | "…")[]>((acc, p, i, arr) => {
-                            if (i > 0 && (p as number) - (arr[i - 1] as number) > 1) acc.push("…");
-                            acc.push(p); return acc;
-                          }, [])
-                          .map((p, i) =>
-                            p === "…" ? (
-                              <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
-                            ) : (
-                              <Button key={p} size="sm"
-                                variant={p === safePage ? "default" : "outline"}
-                                className={`h-8 w-8 p-0 text-xs rounded-full ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
-                                onClick={() => setCurrentPage(p as number)}>
-                                {p}
-                              </Button>
-                            )
-                          )}
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-full"
-                          disabled={safePage >= totalPages} onClick={() => setCurrentPage(safePage + 1)}>
-                          Next →
+                        {buildPageList(safePage - 1, totalPages).map((pg, i) =>
+                          pg === "gap" ? (
+                            <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-sm text-gray-400">…</span>
+                          ) : (
+                            <Button
+                              key={pg}
+                              variant={pg === safePage - 1 ? "default" : "outline"}
+                              size="sm"
+                              className={`h-8 min-w-8 px-2 tabular-nums ${pg === safePage - 1 ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
+                              onClick={() => setCurrentPage(pg + 1)}
+                              aria-label={`Page ${pg + 1}`}
+                              aria-current={pg === safePage - 1 ? "page" : undefined}
+                            >
+                              {pg + 1}
+                            </Button>
+                          ),
+                        )}
+                        <Button
+                          variant="outline" size="sm" className="h-8 w-8 p-0"
+                          onClick={() => setCurrentPage(Math.min(totalPages, safePage + 1))}
+                          disabled={safePage >= totalPages}
+                          aria-label="Next page"
+                        >
+                          <ChevronRight className="h-4 w-4" />
                         </Button>
-                      </div>
+                      </nav>
                     </div>
                   )}
                 </>

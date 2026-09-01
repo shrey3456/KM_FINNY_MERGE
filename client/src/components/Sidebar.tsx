@@ -217,7 +217,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
         {
           label: "Scan History",
           icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/reports",
+          path: "/scan-history",
           pageKey: "scan-history",
         },
         {

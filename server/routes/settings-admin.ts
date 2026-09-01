@@ -21,7 +21,14 @@ import { requireAdminRole } from '../lib/pageAccess';
 //        constraints, not just declared in schema.ts) to order_import_items, order_scan_items,
 //        and order_scan_events automatically; deleting unload_import_sessions likewise cascades
 //        to unload_import_items and unload_scan_events. loading_scan_events/loading_records have
-//        no FK relationship to anything else, so they're deleted directly.
+//        no FK relationship to anything else, so they're deleted directly. stock_movements — the
+//        append-only ledger Overall Stock's "click a product" drill-down reads straight from (see
+//        /reports/stock-movements in scan-sessions.ts) — has NO FK link to any of the above, so
+//        it's deleted directly too, and unconditionally (every row for the plant, any type: a
+//        first pass only deleted 'receive'/'dispatch', but 'adjust' rows include a scan VOID's
+//        stock reversal too, not just Opening Stock — so that drill-down kept showing history
+//        after a "Completely remove" regardless). Step 1's own 'adjust' audit row is skipped in
+//        this mode for the same reason — no point logging a row that's about to be deleted anyway.
 // proforma_slips, product master, and vehicle master are never touched by this — they aren't
 // scan history.
 const router = Router();
@@ -74,6 +81,13 @@ router.get('/settings/clear-stock/preview', requireAdminRole, async (req: Reques
        WHERE voided IS NOT TRUE AND ($1::text IS NULL OR plant = $1)`,
       [plant],
     );
+    // Only counted here for information — 'void' mode never touches stock_movements (it's an
+    // append-only ledger, nothing to "void"); only 'Completely remove' deletes these rows.
+    const stockMovementsRes = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM stock_movements
+       WHERE $1::text IS NULL OR plant = $1`,
+      [plant],
+    );
 
     res.json({
       productsWithStock: stockRes.rows[0]?.n ?? 0,
@@ -83,6 +97,7 @@ router.get('/settings/clear-stock/preview', requireAdminRole, async (req: Reques
       loadingRecords: loadingRecordsRes.rows[0]?.n ?? 0,
       unloadingSessions: unloadSessionsRes.rows[0]?.n ?? 0,
       unloadingScanEvents: unloadEventsRes.rows[0]?.n ?? 0,
+      stockMovements: stockMovementsRes.rows[0]?.n ?? 0,
     });
   } catch (error) {
     console.error('Error building clear-stock preview:', error);
@@ -112,14 +127,18 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
        FOR UPDATE`,
       [plant],
     );
-    for (const row of stockRows) {
-      const qty = Number(row.in_stock ?? 0) + Number(row.extra_qty ?? 0);
-      if (qty <= 0) continue;
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-         VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
-        [row.barcode, row.product_id, row.plant, -qty, -Number(row.extra_qty ?? 0), 'Clear Stock (Settings)', userCode ?? null],
-      );
+    // Only logged in 'void' mode — stock_movements is wiped clean below for 'remove' mode, so
+    // inserting a fresh row here would just leave exactly one row behind, defeating the point.
+    if (mode === 'void') {
+      for (const row of stockRows) {
+        const qty = Number(row.in_stock ?? 0) + Number(row.extra_qty ?? 0);
+        if (qty <= 0) continue;
+        await client.query(
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
+           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
+          [row.barcode, row.product_id, row.plant, -qty, -Number(row.extra_qty ?? 0), 'Clear Stock (Settings)', userCode ?? null],
+        );
+      }
     }
     await client.query(
       `UPDATE product_plant_stock SET in_stock = 0, extra_qty = 0, updated_at = NOW()
@@ -141,6 +160,7 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
     let loadingRecordsAffected = 0;
     let unloadingSessionsAffected = 0;
     let unloadingEventsAffected = 0;
+    let stockMovementsAffected = 0;
 
     if (mode === 'void') {
       const receivingRes = await client.query(
@@ -227,6 +247,23 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
         `DELETE FROM unload_import_sessions WHERE $1::text IS NULL OR plant = $1`,
         [plant],
       );
+
+      // The append-only ledger Overall Stock's "click a product" drill-down reads straight from
+      // (GET /reports/stock-movements in scan-sessions.ts) — no FK link to anything deleted
+      // above, so without this the drill-down kept showing old history forever even after a
+      // "Completely remove". Originally scoped to type IN ('receive', 'dispatch') only, leaving
+      // 'adjust' rows (which cover more than Opening Stock — a scan VOID also reverses stock via
+      // an 'adjust' row, reason "Voided scan") still showing in that same drill-down. "Completely
+      // remove" means completely — every row for this plant goes, no type carve-out (Step 1 above
+      // already skips inserting its own 'adjust' row for this mode, so there's nothing of value
+      // left behind to preserve).
+      const stockMovementsRes = await client.query(
+        `DELETE FROM stock_movements
+         WHERE $1::text IS NULL OR plant = $1
+         RETURNING id`,
+        [plant],
+      );
+      stockMovementsAffected = stockMovementsRes.rowCount ?? 0;
     }
 
     await client.query('COMMIT');
@@ -241,7 +278,7 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
           + `${stockRows.length} stock row(s) zeroed, ${importSessionsAffected} import session(s), `
           + `${receivingEventsAffected} receiving scan event(s), ${loadingEventsAffected} loading scan event(s), `
           + `${unloadingSessionsAffected} unloading session(s), ${unloadingEventsAffected} unloading scan event(s)`
-          + (mode === 'remove' ? `, ${loadingRecordsAffected} loading record(s) deleted` : '') + '.',
+          + (mode === 'remove' ? `, ${loadingRecordsAffected} loading record(s), ${stockMovementsAffected} stock movement(s) deleted` : '') + '.',
         userCode,
         userName,
       });
@@ -258,6 +295,7 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
       loadingRecordsAffected,
       unloadingSessionsAffected,
       unloadingEventsAffected,
+      stockMovementsAffected,
     });
   } catch (error) {
     await client.query('ROLLBACK');

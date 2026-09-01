@@ -4,7 +4,7 @@ import Papa from "papaparse";
 import type { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Camera, ChevronDown, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Camera, ChevronLeft, ChevronRight, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, Upload, X, Zap,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
@@ -19,7 +19,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTable, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -112,7 +112,16 @@ const LEFT_COL_MAX = 640;
 // → 0°, remembered per browser since a mounted screen stays in the same orientation.
 const ROTATIONS = [0, 90, 180, 270] as const;
 type Rotation = (typeof ROTATIONS)[number];
+const SESSIONS_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const ROTATION_STORAGE_KEY = "unloadingRotation";
+
+// Radix renders dialogs into document.body, outside the rotated container, so each needs the
+// matching turn applied by hand (same fix as portalRotateClass in Scan.tsx) or it opens upright
+// while everything behind it is rotated — the opposite of what "rotated to match the physically
+// turned screen" should look like.
+function portalRotateClass(rotation: Rotation): string {
+  return rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : rotation === 270 ? "-rotate-90" : "";
+}
 
 // ─── CSV column mapping (mirrors client/src/pages/OrderImport.tsx's mapping dialog, plus a
 // mandatory Vehicle Number field) — parses the raw CSV client-side, auto-matches columns by
@@ -130,6 +139,17 @@ const SKIP = "__skip__";
 
 function cleanHeader(h: string): string {
   return h.replace(/^﻿/, "").replace(/[^\x20-\x7E]/g, "").trim();
+}
+
+// Reads a CSV quantity cell as a number, decimal-safely. The old approach stripped every
+// non-digit character (including the decimal point itself) before parsing — so a cell written
+// as "200.00" (a very common Excel export format for a whole-number column) became "20000" once
+// the "." was stripped, silently importing a quantity 100x too large. parseFloat (which
+// understands the decimal point) then a round is the correct way to read it; commas are still
+// stripped first since those are a thousands separator, not part of the number.
+function parseQtyCell(raw: string): number {
+  const n = parseFloat(raw.replace(/,/g, "").trim());
+  return Number.isFinite(n) ? Math.round(n) : 0;
 }
 
 function autoMatch(headers: string[]): Mapping {
@@ -152,13 +172,37 @@ function autoMatch(headers: string[]): Mapping {
     }
     return SKIP;
   };
+  // Exact-header-only match, no startsWith/includes fuzziness — for keywords too generic to
+  // safely substring-match (see quantity's "total"/"grand total" fallback below).
+  const bestExact = (...kws: string[]) => {
+    for (const kw of kws) {
+      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
+      const i = norm.findIndex((h) => h === k);
+      if (i !== -1) return headers[i];
+    }
+    return SKIP;
+  };
+  // "total"/"grand total" alone are too generic to substring-match safely — a CSV can easily
+  // have an unrelated "Total Amount"/"Total Value"/"Total Weight" column alongside the real
+  // quantity one, and best()'s startsWith/includes tiers would grab whichever "Total ..." column
+  // happens to come first, silently importing the wrong numbers as quantity. So they're only
+  // tried as an exact-header last resort, after every quantity-specific keyword (checked via the
+  // normal fuzzy best()) has already come up empty.
+  const quantityMatch = best("total qty", "total quantity", "quantity", "qty", "boxes", "nos", "pcs", "count", "units");
   return {
     vehicleNumber: best("vehicle no", "vehicle number", "vehicleno", "vehicle", "truck no", "truckno", "vehicle reg", "vehicle regno"),
     barcode: best("barcode", "bar code", "bar_code", "sku", "product code", "productcode", "item code", "itemcode", "code"),
     itemName: best("product name", "productname", "item name", "itemname", "description", "name", "item", "product", "material"),
     sapCode: best("sap code", "sapcode", "sap_code", "sap", "material code", "materialcode"),
-    quantity: best("total", "grand total", "total qty", "total quantity", "quantity", "qty", "boxes", "nos", "pcs", "count", "units"),
+    quantity: quantityMatch !== SKIP ? quantityMatch : bestExact("total", "grand total"),
   };
+}
+
+function getLocalISODate(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function parseCsvRaw(file: File, toast: (opts: any) => void): Promise<{ name: string; headers: string[]; rows: Record<string, string>[] } | null> {
@@ -216,6 +260,18 @@ function useOutsideClick(active: boolean, onOutside: () => void) {
   return ref;
 }
 
+// Same pattern as Loading's own vehicle/order search (client/src/pages/Loading/LoadOperation.tsx)
+// — waits for typing to pause before firing the filtered query, instead of refetching on every
+// keystroke.
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 export default function Unloading() {
   const { toast } = useToast();
   const canWrite = hasPageWriteAccess("unloading");
@@ -224,29 +280,39 @@ export default function Unloading() {
     try { return localStorage.getItem(LAST_SESSION_KEY) ? "scan" : "list"; } catch { return "list"; }
   });
   const [offset, setOffset] = useState(0);
-  const limit = 20;
-  const [expandedSessionId, setExpandedSessionId] = useState<number | null>(null);
+  const [limit, setLimit] = useState(20);
 
   const [sessionPlantFilter, setSessionPlantFilter] = useState("");
-  // Same four-tab pattern as Order Management (Available/Active/Completed/History) — History
-  // shows every status; the other three filter to exactly that one. "Time Taken" only ever
-  // shows a value on the History tab, matching Order Management's own restriction.
+  // Vehicle number search (debounced) and Order Date filter — same idea as Order Management's
+  // History tab (date + Today/clear) and Loading's own debounced vehicle search. Both are
+  // supported server-side already (vehicleNumber was, orderDate is new); this just exposes them.
+  const [sessionVehicleFilter, setSessionVehicleFilter] = useState("");
+  const debouncedVehicleFilter = useDebounced(sessionVehicleFilter, 300);
+  const [sessionDateFilter, setSessionDateFilter] = useState("");
+  // Two tabs — Available (which also holds in-progress "active" batches, marked green) and
+  // History (shows every status). "active"/"completed" stay valid values for the underlying
+  // query param but no longer have their own tab button. "Time Taken" only ever shows a value
+  // on the History tab, matching Order Management's own restriction.
   const [statusTab, setStatusTab] = useState<"available" | "active" | "completed" | "history">("available");
+  const sessionFilterParams =
+    (sessionPlantFilter ? `&plant=${encodeURIComponent(sessionPlantFilter)}` : "")
+    + (debouncedVehicleFilter.trim() ? `&vehicleNumber=${encodeURIComponent(debouncedVehicleFilter.trim())}` : "")
+    + (sessionDateFilter ? `&orderDate=${encodeURIComponent(sessionDateFilter)}` : "");
   const sessionsQuery = useQuery<{ sessions: SessionListItem[]; total: number }>({
-    queryKey: ["/api/unloading/sessions", offset, sessionPlantFilter, statusTab],
+    queryKey: ["/api/unloading/sessions", offset, limit, sessionPlantFilter, debouncedVehicleFilter, sessionDateFilter, statusTab],
     queryFn: () => apiRequest(
       "GET",
-      `/api/unloading/sessions?limit=${limit}&offset=${offset}${sessionPlantFilter ? `&plant=${encodeURIComponent(sessionPlantFilter)}` : ""}&status=${statusTab}`,
+      `/api/unloading/sessions?limit=${limit}&offset=${offset}${sessionFilterParams}&status=${statusTab}`,
     ).then((r) => r.json()),
   });
   const sessions = sessionsQuery.data?.sessions ?? [];
   const total = sessionsQuery.data?.total ?? 0;
 
   const statusCountsQuery = useQuery<{ available: number; active: number; completed: number; total: number }>({
-    queryKey: ["/api/unloading/sessions/status-counts", sessionPlantFilter],
+    queryKey: ["/api/unloading/sessions/status-counts", sessionPlantFilter, debouncedVehicleFilter, sessionDateFilter],
     queryFn: () => apiRequest(
       "GET",
-      `/api/unloading/sessions/status-counts${sessionPlantFilter ? `?plant=${encodeURIComponent(sessionPlantFilter)}` : ""}`,
+      `/api/unloading/sessions/status-counts${sessionFilterParams ? `?${sessionFilterParams.slice(1)}` : ""}`,
     ).then((r) => r.json()),
   });
   const statusCounts = statusCountsQuery.data ?? { available: 0, active: 0, completed: 0, total: 0 };
@@ -267,12 +333,6 @@ export default function Unloading() {
   const importablePlants = (allPlants ?? []).filter(
     (p: any) => userPlants === null || userPlants.includes(String(p.name ?? "").toLowerCase()),
   );
-
-  const eventsQuery = useQuery<{ events: ScanEventRow[] }>({
-    queryKey: ["/api/unloading/sessions", expandedSessionId, "events"],
-    queryFn: () => apiRequest("GET", `/api/unloading/sessions/${expandedSessionId}/events`).then((r) => r.json()),
-    enabled: expandedSessionId != null,
-  });
 
   // ─── Import: plant/date/file picker, then a column-mapping dialog ───────────────────────────
   const [showImport, setShowImport] = useState(false);
@@ -322,7 +382,7 @@ export default function Unloading() {
       barcode: get(row, "barcode").trim(),
       itemName: get(row, "itemName").trim() || null,
       sapCode: get(row, "sapCode").trim() || null,
-      quantity: parseInt(get(row, "quantity").replace(/[^0-9-]/g, ""), 10) || 0,
+      quantity: parseQtyCell(get(row, "quantity")),
     })).filter((it) => it.vehicleNumber || it.barcode);
 
     setIsImporting(true);
@@ -364,10 +424,7 @@ export default function Unloading() {
   const detail = activeSessionQuery.data;
   const locked = detail?.session?.scanStatus === "completed";
 
-  // Per-item scan history — powers each item row's expand panel in the table below (its own
-  // query, separate from the landing table's per-batch eventsQuery, since both can be relevant
-  // in the same render pass — the landing table's expand row stays mounted underneath while
-  // this page is in "scan" view).
+  // Per-item scan history — powers each item row's expand panel in the table below.
   const itemHistoryQuery = useQuery<{ events: ScanEventRow[] }>({
     queryKey: ["/api/unloading/sessions", activeSessionId, "events"],
     queryFn: () => apiRequest("GET", `/api/unloading/sessions/${activeSessionId}/events`).then((r) => r.json()),
@@ -400,6 +457,7 @@ export default function Unloading() {
   const rotateNext = () => setRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
+  const portalRotate = rotated ? portalRotateClass(rotation) : "";
   function handleColumnResizeStart(e: React.MouseEvent) {
     e.preventDefault();
     const startX = e.clientX;
@@ -670,15 +728,18 @@ export default function Unloading() {
     onSuccess: () => {
       toast({ title: "Voided" });
       if (activeSessionId != null) queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId] });
-      queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", expandedSessionId, "events"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
     onError: (error: any) => toast({ title: "Void failed", description: error?.message, variant: "destructive" }),
   });
 
+  // Confirmation dialog before completing — same "Complete this part?" pattern as Order Scan's
+  // showForceComplete/osCompleteMutation (client/src/pages/Scanning/Scan.tsx).
+  const [showCompleteConfirm, setShowCompleteConfirm] = useState(false);
   const completeMutation = useMutation({
     mutationFn: () => apiRequest("POST", `/api/unloading/sessions/${activeSessionId}/complete`, {}),
     onSuccess: () => {
+      setShowCompleteConfirm(false);
       toast({ title: "Marked complete" });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
@@ -718,7 +779,13 @@ export default function Unloading() {
   // "Locked" instead, since clicking it does nothing until that earlier batch completes.
   const statusBadge = (status: string, canActivate = true) => {
     if (status === "completed") return <span className="rounded-full bg-green-100 px-2 py-0.5 text-[11px] font-semibold text-green-700">Completed</span>;
-    if (status === "active") return <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold text-blue-700">Active</span>;
+    // In-progress batches live in the Available tab (no separate Active tab) — a distinct green
+    // dot + label is what makes them stand out from the plain amber "Available" ones in that list.
+    if (status === "active") return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Active
+      </span>
+    );
     if (!canActivate) return <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-500">Locked</span>;
     return <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">Available</span>;
   };
@@ -741,11 +808,11 @@ export default function Unloading() {
       minWidth: 140,
       render: (row) => (
         <div>
-          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug text-sm">{row.itemName ?? "—"}</p>
-          <p className="text-gray-400 font-mono whitespace-normal break-words text-xs">
+          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug text-base">{row.itemName ?? "—"}</p>
+          <p className="text-gray-400 font-mono whitespace-normal break-words text-sm">
             {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
           </p>
-          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold mt-0.5 text-xs">{row.itemsPerPallet} per pallet</p>}
+          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold mt-0.5 text-sm">{row.itemsPerPallet} per pallet</p>}
         </div>
       ),
     },
@@ -754,8 +821,8 @@ export default function Unloading() {
       accessor: (row) => row.expected,
       render: (row) => (
         <>
-          <span className="block text-base">{row.expected || "—"}</span>
-          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.expected, row.itemsPerPallet)} plt</span>
+          <span className="block text-lg font-semibold">{row.expected || "—"}</span>
+          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.expected, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
@@ -765,18 +832,18 @@ export default function Unloading() {
       cellClassName: "font-semibold text-gray-900",
       render: (row) => (
         <>
-          <span className="block text-base">{row.scanned}</span>
-          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.scanned, row.itemsPerPallet)} plt</span>
+          <span className="block text-lg">{row.scanned}</span>
+          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.scanned, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
     {
-      id: "left", header: "Left", align: "right", width: 80, minWidth: 60, sortable: true,
+      id: "left", header: "Remain", align: "right", width: 80, minWidth: 60, sortable: true,
       accessor: (row) => row.remaining,
       render: (row) => (
         <>
-          <span className={`block text-base font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
-          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.remaining, row.itemsPerPallet)} plt</span>
+          <span className={`block text-lg font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
+          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.remaining, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
@@ -787,8 +854,8 @@ export default function Unloading() {
         const extra = Math.max(0, row.scanned - row.expected);
         return (
           <>
-            <span className={`block text-base ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>
-            <span className="block text-xs font-semibold text-gray-400">{palletsOf(extra, row.itemsPerPallet)} plt</span>
+            <span className={`block text-lg ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>
+            <span className="block text-sm font-semibold text-gray-400">{palletsOf(extra, row.itemsPerPallet)} plt</span>
           </>
         );
       },
@@ -799,7 +866,7 @@ export default function Unloading() {
       render: (row) => {
         const status = row.isComplete ? "complete" : row.scanned > 0 ? "partial" : "pending";
         return (
-          <span className={`inline-block font-semibold px-2 py-1 text-xs rounded ${
+          <span className={`inline-block font-semibold px-2 py-1 text-sm rounded ${
             status === "complete" ? "bg-emerald-100 text-emerald-700" :
             status === "partial" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
           }`}>
@@ -898,15 +965,61 @@ export default function Unloading() {
               </div>
             </div>
 
-            {/* Status tab strip — Available/Active/History (no separate Completed tab; History
+            {/* Filters — vehicle number search (debounced) + Order Date, alongside the plant
+                picker above. Both are supported server-side (see /unloading/sessions). */}
+            <div className="flex flex-wrap items-center gap-2 px-4 sm:px-5 py-3 border-b border-gray-100">
+              <div className="relative w-full sm:w-56">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+                <Input
+                  value={sessionVehicleFilter}
+                  onChange={(e) => { setSessionVehicleFilter(e.target.value); setOffset(0); }}
+                  placeholder="Search vehicle number…"
+                  className="h-9 pl-8 pr-7 text-sm"
+                />
+                {sessionVehicleFilter && (
+                  <button
+                    type="button"
+                    onClick={() => { setSessionVehicleFilter(""); setOffset(0); }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+              <Input
+                type="date"
+                value={sessionDateFilter}
+                onChange={(e) => { setSessionDateFilter(e.target.value); setOffset(0); }}
+                className="h-9 w-auto text-sm"
+              />
+              {sessionDateFilter !== getLocalISODate() && (
+                <Button
+                  size="sm" variant="ghost" className="h-9 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                  onClick={() => { setSessionDateFilter(getLocalISODate()); setOffset(0); }}
+                >
+                  Today
+                </Button>
+              )}
+              {sessionDateFilter && (
+                <Button
+                  size="sm" variant="ghost" className="h-9 w-9 p-0 text-gray-400 hover:text-red-500"
+                  onClick={() => { setSessionDateFilter(""); setOffset(0); }}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+
+            {/* Status tab strip — Available/History (no separate Active or Completed tab: an
+                in-progress batch stays in Available, just marked green in the Status column
+                so it's easy to spot — see statusBadge's "active" case below — and History
                 already includes every completed batch, same reasoning Order Management's own
                 Completed tab didn't need duplicating there either). */}
             <div className="px-4 sm:px-5 py-3 border-b border-gray-100">
               <div className="flex gap-1 flex-wrap">
                 {(
                   [
-                    { key: "available", label: "Available", count: statusCounts.available },
-                    { key: "active", label: "Active", count: statusCounts.active },
+                    { key: "available", label: "Available", count: statusCounts.available + statusCounts.active },
                     { key: "history", label: "History", count: statusCounts.total },
                   ] as { key: "available" | "active" | "completed" | "history"; label: string; count: number }[]
                 ).map((tab) => (
@@ -951,7 +1064,6 @@ export default function Unloading() {
                 <table className="w-full min-w-full caption-bottom border-collapse text-xs">
                   <thead>
                     <tr className="bg-[#001d6e]">
-                      <th className="w-8 border-r border-[#1a3a9c] px-2 py-2.5"></th>
                       <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
@@ -969,24 +1081,12 @@ export default function Unloading() {
                   </thead>
                   <tbody>
                     {sessions.map((s, i) => {
-                      const isExpanded = expandedSessionId === s.id;
                       return (
-                        <>
                           <tr
                             key={s.id}
                             onClick={() => openSession(s)}
-                            className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${isExpanded ? "bg-[#001d6e]/[0.04]" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
+                            className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${s.scanStatus === "active" ? "bg-emerald-50/60" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                           >
-                            <td className="border-r border-b border-gray-200 px-2 py-2 text-center">
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); setExpandedSessionId((cur) => (cur === s.id ? null : s.id)); }}
-                                className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-[#001d6e]"
-                                title="View scan history"
-                              >
-                                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
-                              </button>
-                            </td>
                             <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-400 tabular-nums">{offset + i + 1}</td>
                             <td className="border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
                             <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{s.orderDate}</td>
@@ -1024,57 +1124,6 @@ export default function Unloading() {
                               </div>
                             </td>
                           </tr>
-                          {isExpanded && (
-                            <tr>
-                              <td colSpan={10} className="border-b border-gray-200 bg-gray-50 px-6 py-3">
-                                {eventsQuery.isLoading ? (
-                                  <div className="flex justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
-                                ) : (eventsQuery.data?.events?.length ?? 0) === 0 ? (
-                                  <div className="py-2 text-xs text-gray-400">No scans recorded yet.</div>
-                                ) : (
-                                  <table className="w-full text-[11px]">
-                                    <thead>
-                                      <tr className="text-left text-gray-500">
-                                        <th className="py-1 pr-3">Barcode</th>
-                                        <th className="py-1 pr-3">Item</th>
-                                        <th className="py-1 pr-3">Qty</th>
-                                        <th className="py-1 pr-3">By</th>
-                                        <th className="py-1 pr-3">At</th>
-                                        <th className="py-1 pr-3">Status</th>
-                                        {canWrite && <th className="py-1 pr-3"></th>}
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {eventsQuery.data!.events.map((ev) => (
-                                        <tr key={ev.id} className={ev.voided ? "opacity-50" : ""}>
-                                          <td className="py-1 pr-3">{ev.barcode}</td>
-                                          <td className="py-1 pr-3">{ev.itemName}</td>
-                                          <td className="py-1 pr-3 tabular-nums">{ev.totalQty}{ev.isExtra ? " (extra)" : ""}{ev.isCredit ? " (credit)" : ""}</td>
-                                          <td className="py-1 pr-3">{ev.scannedByName ?? ev.scannedByCode}</td>
-                                          <td className="py-1 pr-3">{new Date(ev.scannedAt).toLocaleString()}</td>
-                                          <td className="py-1 pr-3">{ev.voided ? <span className="text-red-500">Voided</span> : <span className="text-green-600">OK</span>}</td>
-                                          {canWrite && (
-                                            <td className="py-1 pr-3">
-                                              {!ev.voided && (
-                                                <button
-                                                  className="text-red-500 hover:underline"
-                                                  onClick={() => voidMutation.mutate(ev.id)}
-                                                  disabled={voidMutation.isPending}
-                                                >
-                                                  Void
-                                                </button>
-                                              )}
-                                            </td>
-                                          )}
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                )}
-                              </td>
-                            </tr>
-                          )}
-                        </>
                       );
                     })}
                   </tbody>
@@ -1082,15 +1131,66 @@ export default function Unloading() {
               </div>
             )}
 
-            {total > limit && (
-              <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 text-xs text-gray-500">
-                <span>{offset + 1}–{Math.min(offset + limit, total)} of {total}</span>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="outline" className="h-7 text-xs" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Previous</Button>
-                  <Button size="sm" variant="outline" className="h-7 text-xs" disabled={offset + limit >= total} onClick={() => setOffset(offset + limit)}>Next</Button>
+            {total > 0 && (() => {
+              const pageIndex = Math.floor(offset / limit);
+              const pageCount = Math.max(1, Math.ceil(total / limit));
+              return (
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 px-4 py-3">
+                  <span className="text-xs text-muted-foreground">
+                    Showing {offset + 1} to {Math.min(offset + limit, total)} of {total} entries
+                  </span>
+                  <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
+                    <Button
+                      variant="outline" size="sm" className="h-8 w-8 p-0"
+                      onClick={() => setOffset(Math.max(0, offset - limit))}
+                      disabled={pageIndex === 0}
+                      aria-label="Previous page"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </Button>
+                    {buildPageList(pageIndex, pageCount).map((pg, i) =>
+                      pg === "gap" ? (
+                        <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-sm text-gray-400">…</span>
+                      ) : (
+                        <Button
+                          key={pg}
+                          variant={pg === pageIndex ? "default" : "outline"}
+                          size="sm"
+                          className={`h-8 min-w-8 px-2 tabular-nums ${pg === pageIndex ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
+                          onClick={() => setOffset(pg * limit)}
+                          aria-label={`Page ${pg + 1}`}
+                          aria-current={pg === pageIndex ? "page" : undefined}
+                        >
+                          {pg + 1}
+                        </Button>
+                      ),
+                    )}
+                    <Button
+                      variant="outline" size="sm" className="h-8 w-8 p-0"
+                      onClick={() => setOffset(Math.min((pageCount - 1) * limit, offset + limit))}
+                      disabled={pageIndex >= pageCount - 1}
+                      aria-label="Next page"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                  </nav>
+
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs whitespace-nowrap text-muted-foreground">Show:</span>
+                    <select
+                      className="h-7 rounded border bg-background px-1 text-xs"
+                      value={limit}
+                      onChange={(e) => { setLimit(Number(e.target.value)); setOffset(0); }}
+                      aria-label="Rows per page"
+                    >
+                      {SESSIONS_PAGE_SIZE_OPTIONS.map((size) => (
+                        <option key={size} value={size}>{size}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         )}
 
@@ -1130,8 +1230,12 @@ export default function Unloading() {
                     </Button>
                   )}
                   {canWrite && detail.session.scanStatus !== "completed" && (
-                    <Button size="sm" variant="outline" onClick={() => completeMutation.mutate()} disabled={completeMutation.isPending}>
-                      Mark Complete
+                    <Button
+                      size="sm"
+                      className="h-8 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
+                      onClick={() => setShowCompleteConfirm(true)}
+                    >
+                      Complete
                     </Button>
                   )}
                 </div>
@@ -1300,7 +1404,7 @@ export default function Unloading() {
                   </div>
                   <DataTable<SessionItem>
                     containerClassName="rounded-none border-0"
-                    headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+                    headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-sm"
                     columns={itemColumns}
                     data={filteredItems}
                     getRowId={(row) => String(row.id)}
@@ -1316,49 +1420,56 @@ export default function Unloading() {
                     hasActiveFilters={!!itemStatusFilter || !!itemSearchText}
                   />
                 </div>
+
+                {/* ── Auto Scan feedback popup — same popup Order Scan/Loading show for 5s after
+                    an auto-confirmed (full-pallet) scan. Non-blocking; rapid scans reset the 5s
+                    timer. Deliberately kept INSIDE the rotated wrapper (not a sibling further
+                    down the page) so it picks up the same transform as everything else — a plain
+                    fixed div only rotates along with an ancestor that's actually transformed. ── */}
+                {autoFeedback && (
+                  <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-4 pointer-events-none" role="status">
+                    <div className="w-[calc(100%-2rem)] max-w-2xl sm:max-w-3xl min-h-[20rem] flex flex-col bg-white p-8 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2">
+                      <div className={`flex items-center gap-2.5 ${autoFeedback.isExtra ? "text-amber-700" : "text-emerald-700"}`}>
+                        <Zap className="h-7 w-7 shrink-0" />
+                        <span className="text-2xl font-semibold">{autoFeedback.isExtra ? "Auto scanned (extra)" : "Auto scanned"}</span>
+                      </div>
+                      <div className="flex flex-1 gap-5 items-start pt-4">
+                        <img
+                          src={`/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`}
+                          alt=""
+                          className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
+                          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                        />
+                        <div className="flex-1 min-w-0 text-lg">
+                          <p className="font-semibold text-gray-900 break-words text-xl">{autoFeedback.name}</p>
+                          <p className="mt-1.5 font-mono text-base text-gray-400 break-all">
+                            {autoFeedback.barcode}{autoFeedback.sapCode && ` · SAP: ${autoFeedback.sapCode}`}
+                          </p>
+                          <p className="mt-4 text-2xl">
+                            <span className={`font-bold ${autoFeedback.isExtra ? "text-amber-600" : "text-emerald-600"}`}>+{autoFeedback.scannedQty}</span>
+                            <span className="text-gray-500"> scanned</span>
+                            {autoFeedback.remaining > 0 && (
+                              <span className="ml-2 font-semibold text-[#001d6e]">{autoFeedback.remaining} left</span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </div>
         )}
       </div>
 
-      {/* ── Auto Scan feedback popup — same popup Order Scan/Loading show for 5s after an
-          auto-confirmed (full-pallet) scan. Non-blocking; rapid scans reset the 5s timer. ── */}
-      {autoFeedback && (
-        <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-4 pointer-events-none" role="status">
-          <div className="w-[calc(100%-2rem)] max-w-2xl sm:max-w-3xl min-h-[20rem] flex flex-col bg-white p-8 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2">
-            <div className={`flex items-center gap-2.5 ${autoFeedback.isExtra ? "text-amber-700" : "text-emerald-700"}`}>
-              <Zap className="h-7 w-7 shrink-0" />
-              <span className="text-2xl font-semibold">{autoFeedback.isExtra ? "Auto scanned (extra)" : "Auto scanned"}</span>
-            </div>
-            <div className="flex flex-1 gap-5 items-start pt-4">
-              <img
-                src={`/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`}
-                alt=""
-                className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
-                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-              />
-              <div className="flex-1 min-w-0 text-lg">
-                <p className="font-semibold text-gray-900 break-words text-xl">{autoFeedback.name}</p>
-                <p className="mt-1.5 font-mono text-base text-gray-400 break-all">
-                  {autoFeedback.barcode}{autoFeedback.sapCode && ` · SAP: ${autoFeedback.sapCode}`}
-                </p>
-                <p className="mt-4 text-2xl">
-                  <span className={`font-bold ${autoFeedback.isExtra ? "text-amber-600" : "text-emerald-600"}`}>+{autoFeedback.scannedQty}</span>
-                  <span className="text-gray-500"> scanned</span>
-                  {autoFeedback.remaining > 0 && (
-                    <span className="ml-2 font-semibold text-[#001d6e]">{autoFeedback.remaining} left</span>
-                  )}
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Confirm dialog — anything not a clean full-pallet auto-scan */}
+      {/* Confirm dialog — anything not a clean full-pallet auto-scan. Radix portals DialogContent
+          to document.body, escaping the rotated wrapper no matter where this is declared in JSX,
+          so it needs the compensating turn applied by hand via portalRotate (same fix as
+          portalRotateClass in Scan.tsx) — otherwise it opens upright while the page behind it is
+          rotated. */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className={`max-w-sm ${portalRotate}`}>
           <DialogHeader>
             <DialogTitle>{pending?.item?.itemName ?? pending?.barcode ?? "Confirm scan"}</DialogTitle>
             <DialogDescription>
@@ -1414,6 +1525,40 @@ export default function Unloading() {
             >
               {scanMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
               Confirm
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Manual "Complete" confirm — works regardless of scan % (a shortfall can be reconciled
+          against a later part via reconcileUnloadCredits), same "Complete this part?" pattern and
+          copy as Order Scan's own showForceComplete dialog. */}
+      <Dialog open={showCompleteConfirm} onOpenChange={(open) => { if (!open) setShowCompleteConfirm(false); }}>
+        <DialogContent className={`max-w-sm ${portalRotate}`}>
+          <DialogHeader>
+            <DialogTitle>Complete this batch?</DialogTitle>
+            <DialogDescription className="space-y-1 pt-1">
+              <p>
+                <span className="font-semibold text-gray-900">{detail?.session?.vehicleNumber}</span> — {itemTotals.received.toLocaleString()} of {itemTotals.expected.toLocaleString()} received.
+              </p>
+              {itemTotals.remaining > 0 && (
+                <p className="text-amber-600 text-sm">
+                  {itemTotals.remaining.toLocaleString()} unit(s) are still short. Completing now is fine if the remainder is expected in a later batch — it'll be reconciled automatically.
+                </p>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setShowCompleteConfirm(false)} disabled={completeMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => completeMutation.mutate()}
+              disabled={completeMutation.isPending}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+            >
+              {completeMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Complete
             </Button>
           </DialogFooter>
         </DialogContent>

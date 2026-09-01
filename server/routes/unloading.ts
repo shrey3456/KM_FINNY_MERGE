@@ -190,13 +190,35 @@ router.post('/unloading/import', requirePageWrite('unloading'), async (req: Requ
         groupId = session.id;
       }
 
-      const rows = vehicleItems.map((item) => ({
+      // Merge duplicate barcodes within this vehicle's rows (a manifest listing the same SKU
+      // across multiple lines — different pallets/batches, or just a re-listed line — is common)
+      // into ONE item with the summed quantity. Without this, each duplicate landed as its own
+      // separate unload_import_items row, but /scan (below) matches a barcode to only the FIRST
+      // such row via .find() and caps "regular vs extra" against THAT row's own quantity alone —
+      // so scans past the first row's (partial) quantity were wrongly logged as Extra even though
+      // the manifest's true combined total for that barcode hadn't been reached yet, and the item
+      // table showed the SAME running scanned total against every duplicate row's own smaller
+      // expected figure. One row per barcode with the true total sidesteps both problems.
+      const mergedByBarcode = new Map<string, { barcode: string; itemName: string | null; sapCode: string | null; quantity: number }>();
+      for (const item of vehicleItems) {
+        const barcode = typeof item.barcode === 'string' ? item.barcode.trim() : String(item.barcode ?? '').trim();
+        const key = barcode.toLowerCase();
+        const existing = mergedByBarcode.get(key);
+        if (existing) {
+          existing.quantity += item.quantity ?? 0;
+          if (!existing.itemName && item.itemName) existing.itemName = item.itemName;
+          if (!existing.sapCode && item.sapCode) existing.sapCode = item.sapCode;
+        } else {
+          mergedByBarcode.set(key, { barcode, itemName: item.itemName || null, sapCode: item.sapCode || null, quantity: item.quantity ?? 0 });
+        }
+      }
+      const rows = Array.from(mergedByBarcode.values()).map((item) => ({
         sessionId: session.id,
         plant, vehicleNumber,
-        barcode: typeof item.barcode === 'string' ? item.barcode.trim() || null : item.barcode || null,
-        itemName: item.itemName || null,
-        sapCode: item.sapCode || null,
-        quantity: item.quantity ?? 0,
+        barcode: item.barcode,
+        itemName: item.itemName,
+        sapCode: item.sapCode,
+        quantity: item.quantity,
       }));
       const values: any[] = [];
       const placeholders = rows.map((r, i) => {
@@ -300,10 +322,19 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
       params.push(`%${req.query.vehicleNumber.trim()}%`);
       conditions.push(`s.vehicle_number ILIKE $${params.length}`);
     }
-    // Status tab — 'available' | 'active' | 'completed' filters to exactly that status; 'history'
-    // (or omitted) shows every status, same as Order Management's own History tab.
+    if (typeof req.query.orderDate === 'string' && req.query.orderDate.trim()) {
+      params.push(req.query.orderDate.trim());
+      conditions.push(`s.order_date = $${params.length}`);
+    }
+    // Status tab — the client no longer has a separate "Active" tab (an in-progress batch just
+    // shows green within Available, see statusBadge in Unloading.tsx), so 'available' here means
+    // both 'available' AND 'active'. 'completed' still filters to exactly that (kept for any
+    // other caller); 'history' (or omitted) shows every status, same as Order Management's own
+    // History tab.
     const statusParam = typeof req.query.status === 'string' ? req.query.status.trim() : '';
-    if (['available', 'active', 'completed'].includes(statusParam)) {
+    if (statusParam === 'available') {
+      conditions.push(`s.scan_status IN ('available', 'active')`);
+    } else if (['active', 'completed'].includes(statusParam)) {
       params.push(statusParam);
       conditions.push(`s.scan_status = $${params.length}`);
     }
@@ -338,8 +369,8 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
 });
 
 // GET /api/unloading/sessions/status-counts — badge counts for the Available/Active/Completed/
-// History tab strip (client/src/pages/Unloading/Unloading.tsx), same plant scoping as the list
-// endpoint above.
+// History tab strip (client/src/pages/Unloading/Unloading.tsx), same plant/vehicleNumber/
+// orderDate scoping as the list endpoint above, so the badges reflect whatever's filtered.
 router.get('/unloading/sessions/status-counts', requirePageAccess('unloading'), async (req: Request, res: Response) => {
   try {
     const userPlants = getUserPlants(req.user);
@@ -352,6 +383,14 @@ router.get('/unloading/sessions/status-counts', requirePageAccess('unloading'), 
     if (typeof req.query.plant === 'string' && req.query.plant.trim()) {
       params.push(req.query.plant.trim());
       conditions.push(`LOWER(plant) = LOWER($${params.length})`);
+    }
+    if (typeof req.query.vehicleNumber === 'string' && req.query.vehicleNumber.trim()) {
+      params.push(`%${req.query.vehicleNumber.trim()}%`);
+      conditions.push(`vehicle_number ILIKE $${params.length}`);
+    }
+    if (typeof req.query.orderDate === 'string' && req.query.orderDate.trim()) {
+      params.push(req.query.orderDate.trim());
+      conditions.push(`order_date = $${params.length}`);
     }
     const where = `WHERE ${conditions.join(' AND ')}`;
 

@@ -58,7 +58,7 @@ import {
 } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, buildPageList, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -178,46 +178,6 @@ function readSavedSlipFilters(): SavedSlipFilters {
     // Corrupt or unreadable (private-mode storage throws) — start clean rather than break the page.
     return {};
   }
-}
-
-/**
- * Which page numbers a pager should offer, given the current page and how many there are — all of
- * them when they fit, otherwise the first, the last, a window around the current page, and "gap"
- * where the run is broken. Both indexes are 0-based, matching DataTable's own pageIndex.
- *
- * e.g. page 1 of 442 → 1 2 3 … 442, and page 10 → 1 … 9 10 11 … 442.
- */
-function buildPageList(pageIndex: number, pageCount: number, window = 1): Array<number | "gap"> {
-  // Small enough to list in full — an ellipsis is never narrower than just showing the numbers.
-  const maxWithoutGaps = window * 2 + 5;
-  if (pageCount <= maxWithoutGaps) return Array.from({ length: pageCount }, (_, i) => i);
-
-  const last = pageCount - 1;
-  // Near either end the window would be clipped by the edge, leaving a stubby "1 2 … 442". Extend
-  // it inward instead so the run of numbers stays the same length wherever you are.
-  let from: number;
-  let to: number;
-  if (pageIndex <= window) {
-    from = 1;
-    to = Math.min(last - 1, window * 2);
-  } else if (pageIndex >= last - window) {
-    from = Math.max(1, last - window * 2);
-    to = last - 1;
-  } else {
-    from = pageIndex - window;
-    to = pageIndex + window;
-  }
-
-  const pages: Array<number | "gap"> = [0];
-  // A gap standing in for a single page would take as much room as the page itself, so only use
-  // one where at least two pages are actually being hidden — otherwise show that page.
-  if (from > 2) pages.push("gap");
-  else if (from === 2) pages.push(1);
-  for (let i = from; i <= to; i++) pages.push(i);
-  if (to < last - 2) pages.push("gap");
-  else if (to === last - 2) pages.push(last - 1);
-  pages.push(last);
-  return pages;
 }
 
 export default function ProformaSlips() {
