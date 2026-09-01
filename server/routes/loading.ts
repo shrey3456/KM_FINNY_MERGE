@@ -100,8 +100,13 @@ async function withProgress(slip: any, items: any[]) {
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     let stockAvailable: number | null = null;
     if (item.barcode) {
+      // Case/whitespace-insensitive plant match — proforma_slips.plant comes from whatever
+      // casing the source (e.g. Notion's "Plant :"/"Stk Plant :") used ("VALSAD"), which won't
+      // exact-match product_plant_stock's canonical casing ("Valsad") otherwise, causing a false
+      // "no stock" even though Stock Overview (which already matches case-insensitively — see
+      // server/routes/scan-sessions.ts) shows stock for the same plant.
       const { rows } = await pool.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2`,
+        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
         [item.barcode, slip.plant],
       );
       stockAvailable = rows[0]?.inStock ?? 0;
@@ -326,8 +331,11 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
 
     // Stock check — the actual ask: an item already at zero (or short) for this plant cannot
     // be loaded. Checked against the live ledger, not the proforma's planned quantity.
+    // Case/whitespace-insensitive match — see the comment on the identical query in
+    // withProgress() above for why (Notion-imported slip.plant casing vs. canonical
+    // product_plant_stock.plant casing).
     const { rows: stockRows } = await client.query(
-      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2`,
+      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
       [barcode, slip.plant],
     );
     const inStock = stockRows[0]?.inStock ?? 0;
@@ -381,7 +389,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
       // see stockBarcodeReconcile.ts.
       await reconcileProductPlantStockBarcode(client, product?.id, slip.plant, barcode);
       await client.query(
-        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
+        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
         [qty, barcode, slip.plant],
       );
       await client.query(
@@ -516,7 +524,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
         await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
         await client.query(
           `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
-           WHERE barcode = $2 AND plant = $3`,
+           WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
           [qty, event.barcode, event.plant],
         );
         await client.query(
@@ -599,7 +607,7 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
       await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
       await client.query(
         `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
-         WHERE barcode = $2 AND plant = $3`,
+         WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
         [qty, event.barcode, event.plant],
       );
       await client.query(
@@ -618,6 +626,22 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
     );
 
     await client.query('COMMIT');
+
+    // A voided scan can drop an order below fully-loaded again — if it had auto- or manually-
+    // completed, clear that now rather than leaving the list showing "Complete" for an order
+    // that's actually short again. Mirrors the auto-complete side effect in /scan the other way
+    // around; done after COMMIT so it reads the just-voided row rather than a stale snapshot.
+    const slip = await storage.getProformaSlipByOrderNumber(event.order_number);
+    if (slip && (slip as any).loadingCompletedAt) {
+      const rawItems = await storage.getProformaSlipItems(slip.id);
+      const { allComplete } = await withProgress(slip, rawItems);
+      if (!allComplete) {
+        await storage.updateProformaSlip(slip.id, {
+          loadingCompletedAt: null, loadingCompletedByCode: null,
+        } as any);
+      }
+    }
+
     res.json({ event: voidRows[0] });
   } catch (error) {
     await client.query('ROLLBACK');

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
 import { ProformaSlipAPIImport } from "@/components/ProformaSlipAPIImport";
+import { ProformaSlipNotionSync } from "@/components/ProformaSlipNotionSync";
 import PageHeader from "../components/PageHeader";
 import { Lock, Unlock } from "lucide-react";
 
@@ -209,7 +210,7 @@ export default function ProformaSlips() {
   });
 
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
-    () => new Set(['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'actions']),
+    () => new Set(['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'invoiceNumber', 'actions']),
   );
 
   // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
@@ -910,27 +911,38 @@ export default function ProformaSlips() {
   // Handle CSV export
   const handleExportCSV = async () => {
     try {
-      const response = await fetch('/api/proforma-slips/export-csv');
-      
+      // Export exactly what's currently on screen — search text, plant tab, date range, and any
+      // Excel-style column filters — instead of always dumping every slip regardless of what the
+      // user has filtered down to.
+      const filtered = getFilteredSlips();
+      const isFiltered = !!proformaSlips && filtered.length !== proformaSlips.length;
+      const url = isFiltered
+        ? `/api/proforma-slips/export-csv?ids=${filtered.map((s) => s.id).join(',')}`
+        : '/api/proforma-slips/export-csv';
+
+      const response = await fetch(url);
+
       if (!response.ok) {
         throw new Error('Failed to export CSV');
       }
-      
+
       const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
+      const blobUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url;
+      a.href = blobUrl;
       a.download = 'proforma-slips.csv';
-      
+
       document.body.appendChild(a);
       a.click();
-      
-      window.URL.revokeObjectURL(url);
+
+      window.URL.revokeObjectURL(blobUrl);
       document.body.removeChild(a);
-      
+
       toast({
         title: "Success",
-        description: "All proforma slips exported successfully",
+        description: isFiltered
+          ? `Exported ${filtered.length} filtered proforma slip(s)`
+          : "All proforma slips exported successfully",
       });
     } catch (error: any) {
       console.error("Export error:", error);
@@ -1034,6 +1046,10 @@ export default function ProformaSlips() {
       { id: "totalVolume", label: "Total Volume", filterType: "text", options: textOptions((s) => s.totalVolume), accessor: (s) => s.totalVolume },
       { id: "vehicleNumber", label: "Vehicle No.", filterType: "text", options: textOptions((s) => s.vehicleNumber), accessor: (s) => s.vehicleNumber },
       { id: "driverName", label: "Driver", filterType: "text", options: textOptions((s) => s.driverName), accessor: (s) => s.driverName },
+      { id: "invoiceNumber", label: "Invoice No.", filterType: "text", options: textOptions((s) => s.invoiceNumber), accessor: (s) => s.invoiceNumber },
+      { id: "partyState", label: "State", filterType: "enum", options: textOptions((s) => s.partyState), accessor: (s) => s.partyState },
+      { id: "notionStatus", label: "Notion Status", filterType: "enum", options: textOptions((s) => s.notionStatus), accessor: (s) => s.notionStatus },
+      { id: "storeKeeperInfo", label: "StoreKeeper Info", filterType: "text", options: textOptions((s) => s.storeKeeperInfo), accessor: (s) => s.storeKeeperInfo },
     ];
   }, [proformaSlips]);
 
@@ -1173,7 +1189,7 @@ export default function ProformaSlips() {
     const q = slipSearchQuery.trim().toLowerCase();
     return (proformaSlips as LockedProformaSlip[]).filter((slip) => {
       if (q) {
-        const hit = [slip.orderNumber, slip.partyName, slip.plant, slip.vehicleNumber, slip.driverName]
+        const hit = [slip.orderNumber, slip.partyName, slip.plant, slip.vehicleNumber, slip.driverName, slip.invoiceNumber]
           .some((v) => v && v.toLowerCase().includes(q));
         if (!hit) return false;
       }
@@ -1427,6 +1443,30 @@ export default function ProformaSlips() {
       header: columnHeader('driverName', 'Driver'),
       width: 120,
       render: (slip) => slip.driverName || ' ',
+    },
+    {
+      id: 'invoiceNumber',
+      header: columnHeader('invoiceNumber', 'Invoice No.'),
+      width: 120,
+      render: (slip) => slip.invoiceNumber || ' ',
+    },
+    {
+      id: 'partyState',
+      header: columnHeader('partyState', 'State'),
+      width: 90,
+      render: (slip) => slip.partyState || ' ',
+    },
+    {
+      id: 'notionStatus',
+      header: columnHeader('notionStatus', 'Notion Status'),
+      width: 110,
+      render: (slip) => slip.notionStatus || ' ',
+    },
+    {
+      id: 'storeKeeperInfo',
+      header: columnHeader('storeKeeperInfo', 'StoreKeeper Info'),
+      width: 140,
+      render: (slip) => slip.storeKeeperInfo || ' ',
     },
     {
       id: 'actions',
@@ -2029,8 +2069,20 @@ export default function ProformaSlips() {
 
           {/* Export button - Visible to Read-Only AND Admin/Super */}
           {(isread || isAdminOrSuper || isReadWriteUser) && (
-            <Button variant="outline" size="sm" onClick={() => handleExportCSV()}>
-              <FileDown className="mr-2 h-4 w-4" /> Export All
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleExportCSV()}
+              title={
+                proformaSlips && getFilteredSlips().length !== proformaSlips.length
+                  ? `Export the ${getFilteredSlips().length} filtered slip(s) currently shown`
+                  : "Export all proforma slips"
+              }
+            >
+              <FileDown className="mr-2 h-4 w-4" />
+              {proformaSlips && getFilteredSlips().length !== proformaSlips.length
+                ? `Export Filtered (${getFilteredSlips().length})`
+                : "Export All"}
             </Button>
           )}
 
@@ -2050,10 +2102,31 @@ export default function ProformaSlips() {
                       Fetch proforma slip data directly from your Notion database.
                     </DialogDescription>
                   </DialogHeader>
-                  <ProformaSlipAPIImport 
+                  <ProformaSlipAPIImport
                     onImportSuccess={() => {
                       queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
-                    }} 
+                    }}
+                  />
+                </DialogContent>
+              </Dialog>
+
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    <RefreshCw className="mr-2 h-4 w-4" /> Sync from Notion
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-2xl">
+                  <DialogHeader>
+                    <DialogTitle>Sync Proforma Slips from Notion</DialogTitle>
+                    <DialogDescription>
+                      Check what's changed in Notion for a date range, review it, then apply.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <ProformaSlipNotionSync
+                    onApplySuccess={() => {
+                      queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
+                    }}
                   />
                 </DialogContent>
               </Dialog>

@@ -92,18 +92,25 @@ router.post('/proforma-slips/import-api', async (req, res) => {
           database_id: databaseId,
           page_size: 100,
           start_cursor: nextCursor,
+          // "Ord Date :" is a rollup (not a plain date property), so the filter must be wrapped
+          // in `rollup: { date: ... }` — a bare `date: {...}` filter is rejected by the Notion
+          // API with a type-mismatch error.
           filter: {
             and: [
               {
                 property: 'Ord Date :',
-                date: {
-                  on_or_after: startDate
+                rollup: {
+                  date: {
+                    on_or_after: startDate
+                  }
                 }
               },
               {
                 property: 'Ord Date :',
-                date: {
-                  on_or_before: endDate
+                rollup: {
+                  date: {
+                    on_or_before: endDate
+                  }
                 }
               }
             ]

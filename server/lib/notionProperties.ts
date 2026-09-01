@@ -13,9 +13,20 @@ export function extractText(prop: any): string {
     case 'multi_select':return prop.multi_select?.map((s: any) => s.name).join(', ') || '';
     case 'number':      return prop.number != null ? String(prop.number) : '';
     case 'checkbox':    return prop.checkbox != null ? String(prop.checkbox) : '';
+    case 'date':        return prop.date?.start ?? '';
+    case 'email':       return prop.email ?? '';
+    case 'phone_number':return prop.phone_number ?? '';
+    case 'people':       return (prop.people ?? []).map((p: any) => p.name).filter(Boolean).join(', ') || '';
+    case 'created_time': return prop.created_time ?? '';
+    case 'last_edited_time': return prop.last_edited_time ?? '';
+    case 'created_by':  return prop.created_by?.name ?? '';
+    case 'last_edited_by': return prop.last_edited_by?.name ?? '';
+    case 'files':        return extractFileUrl(prop);
     case 'formula':
       if (prop.formula?.type === 'string') return prop.formula.string || '';
       if (prop.formula?.type === 'number') return prop.formula.number != null ? String(prop.formula.number) : '';
+      if (prop.formula?.type === 'date') return prop.formula.date?.start ?? '';
+      if (prop.formula?.type === 'boolean') return prop.formula.boolean != null ? String(prop.formula.boolean) : '';
       return '';
     case 'rollup':
       if (prop.rollup?.type === 'number') return prop.rollup.number != null ? String(prop.rollup.number) : '';
