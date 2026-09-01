@@ -8,6 +8,7 @@ import {
   CheckCircle,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   FileBarChart,
   FileUp,
@@ -30,6 +31,7 @@ import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/Re
 import { PlantBadge } from "@/components/PlantBadge";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
+import { buildPageList } from "@/components/ui/data-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -77,10 +79,6 @@ const TARGET_FIELDS = [
   { key: "sapCode",         label: "SAP Code" },
   { key: "quantity",        label: "Quantity" },
   { key: "expectedPallets", label: "Expected Pallets" },
-  // Optional — entirely skippable, same as any other field here. Only used later to let Scan
-  // Order group its item list by vehicle (a view filter, not a validation rule); a CSV with no
-  // matching header just leaves every item's vehicleNumber null, with zero other effect.
-  { key: "vehicleNumber",   label: "Vehicle (optional)" },
 ] as const;
 type TargetKey = (typeof TARGET_FIELDS)[number]["key"];
 type Mapping = Record<TargetKey, string>;
@@ -146,11 +144,6 @@ function autoMatch(headers: string[]): Mapping {
       "expected pallets", "expectedpallets", "expected pallet",
       "pallets", "pallet", "plt", "expected"
     ),
-    // vehicle — optional; no match just leaves this on SKIP, same as any unmapped field
-    vehicleNumber: best(
-      "vehicle", "vehicle no", "vehicle number", "vehicleno", "vehicle_no",
-      "truck", "truck no", "truck number", "gadi", "gadi no", "vehicle name"
-    ),
   };
 }
 
@@ -184,6 +177,23 @@ function fmtIST(dt: string | Date | null | undefined): string {
   const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
   if (isNaN(d.getTime())) return "—";
   return d.toLocaleString("en-IN", { timeZone: "UTC" });
+}
+
+// "Time taken" — wall-clock time from when a session was activated (opened for scanning) to
+// when it was marked complete. A constant timezone offset cancels out in a subtraction, so this
+// doesn't need fmtIST's UTC-relabeling trick — plain Date parsing is fine here. Same measure
+// used on Loading's and Unloading's own landing tables.
+function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
+  if (!startIso || !endIso) return null;
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalMinutes = Math.round(ms / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 }
 
 function getLocalISODate(date = new Date()): string {
@@ -303,10 +313,10 @@ export default function OrderImport() {
   const [activePlant, setActivePlant] = useState("");
   const [activeDate, setActiveDate] = useState("");
 
-  // Completed Sessions card — own plant/date filters, collapsed by default
+  // Completed Sessions card — own plant filter, collapsed by default. No date filter (see the
+  // Completed tab's own comment — it can never reach past the server's 48h recent window anyway).
   const [showCompleted, setShowCompleted] = useState(false);
   const [completedPlant, setCompletedPlant] = useState("");
-  const [completedDate, setCompletedDate] = useState("");
 
   // Live-sync transport status. A successful WS handshake (joined-import) only
   // proves the upgrade succeeded — it does NOT prove that spontaneous server-push
@@ -909,7 +919,6 @@ export default function OrderImport() {
         quantity:        parseInt(get("quantity")) || 0,
         expectedPallets: parseFloat(get("expectedPallets")) || null,
         date:            orderDate || null,
-        vehicleNumber:   get("vehicleNumber").trim() || null,
       };
     });
   }
@@ -1097,8 +1106,7 @@ export default function OrderImport() {
   const completedScanSessions = _allScanSessions.filter(s =>
     s.scanStatus === "completed" &&
     (!completedPlant || (s.plant ?? "").toLowerCase() === completedPlant.toLowerCase()) &&
-    (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
-    (!completedDate  || (s.orderDate ?? "").slice(0, 10) === completedDate)
+    (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase())
   );
   // Reopen is only ever offered for the SINGLE most-recently-completed session per plant —
   // computed over every completed session (unfiltered by the tab's own plant/date pickers,
@@ -1123,7 +1131,8 @@ export default function OrderImport() {
     ).length;
   const availableCount = countByStatus("available", scanDate);
   const activeCount    = countByStatus("active", activeDate);
-  const completedCount = countByStatus("completed", completedDate);
+  // No date filter on this tab anymore (see its own comment) — always the full recent-completed count.
+  const completedCount = countByStatus("completed", "");
 
   const activeId = activeSessionQuery.data?.id ?? null;
 
@@ -1338,7 +1347,7 @@ export default function OrderImport() {
                 [
                   { key: "available", label: "Available", count: availableCount },
                   { key: "active",    label: "Active",    count: activeCount },
-                  { key: "completed", label: "Completed", count: completedCount },
+                  { key: "completed", label: "Recent Complete", count: completedCount },
                   { key: "history",   label: "History",   count: filterPlant ? historyTotalAll : totalSessions },
                 ] as { key: "available" | "active" | "completed" | "history"; label: string; count: number }[]
               ).map((tab) => (
@@ -1728,23 +1737,12 @@ export default function OrderImport() {
           {/* ── Tab: Completed ── */}
           {activeTab === "completed" && (
             <div>
-              {/* Filters */}
-              <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                <Input type="date" value={completedDate} onChange={(e) => setCompletedDate(e.target.value)}
-                  className="h-8 w-[140px] text-xs rounded-full" />
-                {completedDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-full"
-                    onClick={() => setCompletedDate(todayStr)}>
-                    Today
-                  </Button>
-                )}
-                {completedDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-full"
-                    onClick={() => setCompletedDate("")}>
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-                <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-full"
+              {/* This tab only ever holds the last 48h (server-side, see /api/order-scan/sessions) —
+                  a date filter here can't reach further back than that no matter what's picked, so
+                  it's deliberately not offered. Use the History tab for anything older. */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-b border-gray-50">
+                <p className="text-xs text-gray-400">Last 48 hours · see History for everything</p>
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0 rounded-full"
                   onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
                   <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
@@ -1911,25 +1909,17 @@ export default function OrderImport() {
                                   {(session as any).scanCompletedAt && (
                                     <span className="text-xs text-gray-400">Completed: {fmtIST((session as any).scanCompletedAt)}</span>
                                   )}
-                                  {(session as any).scanActivatedAt && (session as any).scanCompletedAt && (() => {
-                                    const totalMinutes = Math.round(
-                                      (new Date((session as any).scanCompletedAt).getTime() - new Date((session as any).scanActivatedAt).getTime()) / 60000,
-                                    );
-                                    if (isNaN(totalMinutes) || totalMinutes < 0) return null;
-                                    const hours = Math.floor(totalMinutes / 60);
-                                    const minutes = totalMinutes % 60;
-                                    return (
-                                      <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
-                                        Completed In {hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`}
-                                      </span>
-                                    );
-                                  })()}
+                                  {formatDuration((session as any).scanActivatedAt, (session as any).scanCompletedAt) && (
+                                    <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                      Completed In {formatDuration((session as any).scanActivatedAt, (session as any).scanCompletedAt)}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                               </div>
                               <div className="flex flex-wrap items-center gap-1 pl-6 sm:ml-1 sm:shrink-0 sm:pl-0">
-                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl" title={`${session.rowCount} rows`}>
-                                  {session.rowCount}
+                                <Badge className="bg-[#001d6e]/10 text-[#001d6e] hover:bg-[#001d6e]/10 text-xs px-1.5 rounded-xl tabular-nums" title={`${session.rowCount} rows`}>
+                                  {session.rowCount} rows
                                 </Badge>
                                 {/* Ordered quantity next to the row count — the row count says how
                                     many lines the CSV has, not how much was ordered. */}
@@ -2080,40 +2070,50 @@ export default function OrderImport() {
                       );
                     })}
                   </div>
-                  {/* Pagination */}
-                  {totalPages > 1 && (
+                  {/* Pagination — same numbered-page-button style used across the app (Overall
+                      Stock, Users, Unloading, etc.) instead of a bespoke "← Prev / Next →" pager,
+                      and always shown (not gated on totalPages > 1) so it's still there to orient
+                      you even on a single-page result. */}
+                  {totalSessions > 0 && (
                     <div className="flex flex-wrap items-center justify-between gap-2 border-t px-5 py-3">
                       <span className="text-xs text-gray-500">
-                        Page {safePage} of {totalPages} · {totalSessions} sessions
+                        Showing {(safePage - 1) * pageSize + 1} to {Math.min(safePage * pageSize, totalSessions)} of {totalSessions} entries
                       </span>
-                      <div className="flex items-center gap-1">
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-full"
-                          disabled={safePage <= 1} onClick={() => setCurrentPage(safePage - 1)}>
-                          ← Prev
+                      <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
+                        <Button
+                          variant="outline" size="sm" className="h-8 w-8 p-0"
+                          onClick={() => setCurrentPage(Math.max(1, safePage - 1))}
+                          disabled={safePage <= 1}
+                          aria-label="Previous page"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
                         </Button>
-                        {Array.from({ length: totalPages }, (_, i) => i + 1)
-                          .filter((p) => p === 1 || p === totalPages || Math.abs(p - safePage) <= 1)
-                          .reduce<(number | "…")[]>((acc, p, i, arr) => {
-                            if (i > 0 && (p as number) - (arr[i - 1] as number) > 1) acc.push("…");
-                            acc.push(p); return acc;
-                          }, [])
-                          .map((p, i) =>
-                            p === "…" ? (
-                              <span key={`e${i}`} className="px-1 text-xs text-gray-400">…</span>
-                            ) : (
-                              <Button key={p} size="sm"
-                                variant={p === safePage ? "default" : "outline"}
-                                className={`h-8 w-8 p-0 text-xs rounded-full ${p === safePage ? "bg-[#001d6e] text-white" : ""}`}
-                                onClick={() => setCurrentPage(p as number)}>
-                                {p}
-                              </Button>
-                            )
-                          )}
-                        <Button size="sm" variant="outline" className="h-8 px-2 text-xs rounded-full"
-                          disabled={safePage >= totalPages} onClick={() => setCurrentPage(safePage + 1)}>
-                          Next →
+                        {buildPageList(safePage - 1, totalPages).map((pg, i) =>
+                          pg === "gap" ? (
+                            <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-sm text-gray-400">…</span>
+                          ) : (
+                            <Button
+                              key={pg}
+                              variant={pg === safePage - 1 ? "default" : "outline"}
+                              size="sm"
+                              className={`h-8 min-w-8 px-2 tabular-nums ${pg === safePage - 1 ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
+                              onClick={() => setCurrentPage(pg + 1)}
+                              aria-label={`Page ${pg + 1}`}
+                              aria-current={pg === safePage - 1 ? "page" : undefined}
+                            >
+                              {pg + 1}
+                            </Button>
+                          ),
+                        )}
+                        <Button
+                          variant="outline" size="sm" className="h-8 w-8 p-0"
+                          onClick={() => setCurrentPage(Math.min(totalPages, safePage + 1))}
+                          disabled={safePage >= totalPages}
+                          aria-label="Next page"
+                        >
+                          <ChevronRight className="h-4 w-4" />
                         </Button>
-                      </div>
+                      </nav>
                     </div>
                   )}
                 </>

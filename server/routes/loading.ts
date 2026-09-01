@@ -3,6 +3,7 @@ import { storage } from '../storage';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty } from './order-scan';
+import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
 
 // Loading — two things happen here:
 //   1. Link a vehicle (from Vehicle Master) onto a Proforma Slip: sets the slip's vehicleNumber,
@@ -375,6 +376,10 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
       if (regularQty > 0) await insertEvent(regularQty, false);
       if (extraQty > 0) await insertEvent(extraQty, true);
 
+      // If this product's barcode changed since stock was received under an old one (e.g. the
+      // Notion sync overwriting it), fold any stock still parked there onto this barcode first —
+      // see stockBarcodeReconcile.ts.
+      await reconcileProductPlantStockBarcode(client, product?.id, slip.plant, barcode);
       await client.query(
         `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
         [qty, barcode, slip.plant],
@@ -508,6 +513,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
       const qty = Number(event.total_qty ?? 0);
       if (qty > 0 && event.plant && event.barcode) {
         const product = await storage.getProductByBarcode(event.barcode);
+        await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
         await client.query(
           `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
            WHERE barcode = $2 AND plant = $3`,
@@ -590,6 +596,7 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
     const qty = Number(event.total_qty ?? 0);
     if (qty > 0 && event.plant && event.barcode) {
       const product = await storage.getProductByBarcode(event.barcode);
+      await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
       await client.query(
         `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
          WHERE barcode = $2 AND plant = $3`,

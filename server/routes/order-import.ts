@@ -237,10 +237,6 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
         sapCode?: string;
         quantity?: number;
         expectedPallets?: number;
-        // Optional — only present when the CSV had a mapped Vehicle column (OrderImport.tsx's
-        // column-mapping screen). Carried through to order_scan_items at seed time below so
-        // Scan Order can offer its "group by vehicle" view filter; absent/null otherwise.
-        vehicleNumber?: string | null;
       }>;
       // "Order Date" chosen at upload (YYYY-MM-DD). FIFO grouping is derived from it:
       // every CSV with the same plant + orderDate is one group, in upload order.
@@ -371,7 +367,6 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
       sapCode: item.sapCode || null,
       quantity: item.quantity ?? 0,
       expectedPallets: item.expectedPallets ?? null,
-      vehicleNumber: typeof item.vehicleNumber === 'string' ? item.vehicleNumber.trim() || null : null,
     }));
 
     await db.insert(orderImportItems).values(rows);
@@ -518,7 +513,6 @@ router.get('/order-import/sessions/:id/items', requireImportViewAccess, async (r
         oi.sap_code     AS "sapCode",
         oi.quantity,
         oi.expected_pallets AS "expectedPallets",
-        oi.vehicle_number AS "vehicleNumber",
         (SELECT total_scanned_qty FROM order_scan_items osi
           WHERE osi.order_import_item_id = oi.id
              OR (osi.order_import_item_id IS NULL
@@ -720,7 +714,6 @@ router.put('/order-import/sessions/:id', requireOrderImportWrite, async (req: Re
         sapCode?: string;
         quantity?: number;
         expectedPallets?: number;
-        vehicleNumber?: string | null;
       }>;
     };
 
@@ -744,7 +737,6 @@ router.put('/order-import/sessions/:id', requireOrderImportWrite, async (req: Re
       sapCode: item.sapCode || null,
       quantity: item.quantity ?? 0,
       expectedPallets: item.expectedPallets ?? null,
-      vehicleNumber: typeof item.vehicleNumber === 'string' ? item.vehicleNumber.trim() || null : null,
     }));
 
     await db.insert(orderImportItems).values(rows);
@@ -1106,7 +1098,6 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         oi.sap_code     AS "sapCode",
         oi.quantity,
         oi.expected_pallets AS "expectedPallets",
-        oi.vehicle_number AS "vehicleNumber",
         (SELECT total_scanned_qty FROM order_scan_items osi
           WHERE osi.order_import_item_id = oi.id
              OR (osi.order_import_item_id IS NULL

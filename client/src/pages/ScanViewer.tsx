@@ -1415,6 +1415,27 @@ export default function ScanViewer() {
                   })}
                 </SelectContent>
               </Select>
+              {/* Date/part pickers — right after the plant switcher, same row, so every control
+                  needed to pick which order is being viewed sits together instead of being split
+                  across a separate row below. */}
+              <Input
+                type="date"
+                className="h-7 w-auto rounded-full text-xs"
+                value={date}
+                onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
+              />
+              {sessionOptions.length > 1 && (
+                <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
+                  <SelectTrigger className="h-7 w-36 rounded-full text-xs"><SelectValue placeholder="Select part…" /></SelectTrigger>
+                  <SelectContent>
+                    {sessionOptions.map((so) => (
+                      <SelectItem key={so.id} value={String(so.id)}>
+                        Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
               {selectedSession?.importedByName && <span>· {selectedSession.importedByName}</span>}
               {/* Scan start/end — set once each, when the part is activated and when it's
                   marked complete (order_import_sessions.scanActivatedAt/scanCompletedAt).
@@ -1475,29 +1496,6 @@ export default function ScanViewer() {
             );
           })()}
         </div>
-
-          {/* Which order is being viewed — its own row, so the controls read as controls rather
-              than as part of the sentence above them. */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Input
-              type="date"
-              className="h-8 w-auto rounded-full text-xs"
-              value={date}
-              onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
-            />
-            {sessionOptions.length > 1 && (
-              <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
-                <SelectTrigger className="h-8 w-36 rounded-full text-xs"><SelectValue placeholder="Select part…" /></SelectTrigger>
-                <SelectContent>
-                  {sessionOptions.map((so) => (
-                    <SelectItem key={so.id} value={String(so.id)}>
-                      Part {so.partIndex ?? "—"} · {so.scanStatus ?? "—"}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
         </div>
 
         {/* Master View / Part View tabs — same split the Scan Order page has: Master View

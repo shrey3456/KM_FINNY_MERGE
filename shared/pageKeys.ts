@@ -8,6 +8,7 @@ export const CONTROLLABLE_PAGES = [
   { key: "toll-voucher", label: "Toll Voucher" },
   { key: "scan-order", label: "Scan Order" },
   { key: "loading", label: "Loading" },
+  { key: "unloading", label: "Unloading" },
   { key: "scan-viewer", label: "Scan Viewer" },
   { key: "overall-stock", label: "Overall Stock" },
   { key: "scan-history", label: "Scan History" },

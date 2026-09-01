@@ -207,10 +207,9 @@ const Home = () => {
             </Link>
           </div>
 
-          {/* Scan History Button — points at Reports, which is where Scan History actually
-              lives (/scan-history was never wired up as a real route and 404'd). */}
+          {/* Scan History Button */}
           <div className="flex flex-col items-center">
-            <Link href="/reports" className="flex flex-col items-center">
+            <Link href="/scan-history" className="flex flex-col items-center">
               <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
                 <History className="h-7 w-7 text-[#001d6e]" />
               </div>

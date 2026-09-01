@@ -1,6 +1,7 @@
 import { db, pool } from '../db';
 import { orderImportSessions, orderImportItems } from '../../shared/schema';
 import { eq, and, asc, inArray } from 'drizzle-orm';
+import { reconcileProductPlantStockBarcode } from './stockBarcodeReconcile';
 
 // Shared by order-import.ts (the report endpoint) and order-scan.ts (the live
 // "already covered by an earlier part" credit shown while scanning) — kept in its
@@ -458,6 +459,12 @@ export async function applyLiveScanStock(
     [totalQty, barcode],
   );
   const productId = productRows[0]?.id ?? null;
+
+  // If this product's barcode changed since an earlier scan (e.g. the Notion sync overwriting
+  // it), fold any stock still parked under the old barcode onto this one first — otherwise the
+  // upsert below would start a second, disconnected pile under the new barcode instead of
+  // adding to what's already there. See stockBarcodeReconcile.ts.
+  await reconcileProductPlantStockBarcode(client, productId, plant, barcode);
 
   await client.query(
     `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)

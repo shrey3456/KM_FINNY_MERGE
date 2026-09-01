@@ -1,0 +1,902 @@
+import { Router, Request, Response } from 'express';
+import { storage } from '../storage';
+import { pool } from '../db';
+import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
+import { getPlantStateCode, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
+import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
+import { reconcileUnloadCredits } from '../lib/unloadCredit';
+import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
+
+// Unloading — vehicle-wise receiving. See unloadImportSessions' comment in shared/schema.ts:
+// same "import a CSV, scan against it to receive stock" idea as Order Import/Scan Order, but
+// grouped by (plant, vehicleNumber, orderDate) instead of just (plant, orderDate) — one CSV
+// upload can span several vehicles, each becoming its own independently-scannable FIFO group.
+// Deliberately simpler than Order Import/Scan Order (no delete/replace flow, no cross-part
+// credit reconciliation, no Master View merge) — same lean two-table shape Loading uses for its
+// own scan side (an "expected items" table + a "scan events" audit trail), progress computed
+// live by summing events.
+const router = Router();
+
+function actor(req: Request): { userCode?: string; userName?: string } {
+  const u = req.user as any;
+  return { userCode: u?.userCode, userName: u?.name || u?.username || u?.userCode };
+}
+
+function isAdmin(req: Request): boolean {
+  const role = ((req.user as any)?.role ?? '').toString().toLowerCase();
+  return WRITE_ADMIN_ROLES.includes(role);
+}
+
+const normalize = (value?: string | number | null) => String(value ?? '').trim().toLowerCase();
+
+function canAccessPlant(req: Request, plant: string): boolean {
+  const userPlants = getUserPlants(req.user);
+  if (userPlants === null) return true;
+  return userPlants.includes(normalize(plant));
+}
+
+// Same "write access to both Unloading and Scan History" rule Loading's void/reset uses.
+function hasWriteAccess(user: any, pageKey: string): boolean {
+  const role = (user?.role ?? '').toString().toLowerCase();
+  if (WRITE_ADMIN_ROLES.includes(role)) return true;
+  let writable: string[] = [];
+  try { writable = JSON.parse(user?.pageWriteAccess || '[]'); } catch { /* default [] */ }
+  return writable.includes(pageKey);
+}
+function requireUnloadingVoidAccess(req: Request, res: Response, next: any) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  const user = req.user as any;
+  if (isAdmin(req)) return next();
+  if (hasWriteAccess(user, 'unloading') && hasWriteAccess(user, 'scan-history')) return next();
+  return res.status(403).json({ message: 'Write access required' });
+}
+
+// Attaches live progress to a session's expected items (expected/scanned/remaining/pallet size),
+// the same shape both GET (open) and POST /scan responses return.
+async function withProgress(session: any) {
+  const state = await getPlantStateCode(pool, session.plant ?? '');
+  const { rows: items } = await pool.query(
+    `SELECT id, barcode, item_name AS "itemName", sap_code AS "sapCode", quantity
+     FROM unload_import_items WHERE session_id = $1 ORDER BY id ASC`,
+    [session.id],
+  );
+  const { rows: scannedRows } = await pool.query(
+    `SELECT barcode, COALESCE(SUM(total_qty), 0)::int AS "scannedQty"
+     FROM unload_scan_events WHERE session_id = $1 AND voided IS NOT TRUE GROUP BY barcode`,
+    [session.id],
+  );
+  const scannedByBarcode = new Map<string, number>(scannedRows.map((r: any) => [normalize(r.barcode), r.scannedQty]));
+
+  const progressItems = await Promise.all(items.map(async (item: any) => {
+    const product = item.barcode ? await storage.getProductByBarcode(item.barcode) : undefined;
+    const expected = item.quantity ?? 0;
+    const scanned = scannedByBarcode.get(normalize(item.barcode)) ?? 0;
+    const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
+    return {
+      ...item, expected, scanned, remaining: Math.max(0, expected - scanned),
+      itemsPerPallet, isComplete: expected > 0 && scanned >= expected,
+    };
+  }));
+
+  const allComplete = progressItems.length > 0 && progressItems.every((i) => i.isComplete);
+  return { items: progressItems, allComplete };
+}
+
+// A batch only becomes "active" when a user actually opens it to scan (POST .../activate below)
+// — never automatically on import or when an earlier batch completes, mirroring Order Import's
+// CSV lifecycle (available -> active -> completed, the "active" flip is its own explicit step).
+// It's eligible to be clicked into, though, only once every earlier batch in the same FIFO group
+// is completed — this is what keeps batches strictly sequential without a separate "is anything
+// else active" lock: the earliest not-yet-completed, non-deleted batch in the group is always
+// the only one eligible.
+async function isEligibleToActivate(session: { id: number; groupId: number; partIndex: number }): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT id FROM unload_import_sessions
+     WHERE group_id = $1 AND is_deleted = false AND scan_status <> 'completed'
+     ORDER BY part_index ASC, id ASC LIMIT 1`,
+    [session.groupId],
+  );
+  return rows[0]?.id === session.id;
+}
+
+// POST /api/unloading/import — body: { plant, orderDate, csvFileName, items }
+// items: [{ vehicleNumber, barcode, itemName, sapCode, quantity }] — Vehicle Number is
+// mandatory per row; rows are grouped by distinct vehicle number into separate FIFO groups.
+router.post('/unloading/import', requirePageWrite('unloading'), async (req: Request, res: Response) => {
+  try {
+    const { plant, orderDate, csvFileName, items } = req.body as {
+      plant: string; orderDate: string; csvFileName: string;
+      items: Array<{ vehicleNumber?: string; barcode?: string; itemName?: string; sapCode?: string; quantity?: number }>;
+    };
+
+    if (!plant || !String(plant).trim()) return res.status(400).json({ message: 'Plant is required' });
+    if (!orderDate || !String(orderDate).trim()) return res.status(400).json({ message: 'Order Date is required' });
+    if (!csvFileName) return res.status(400).json({ message: 'csvFileName is required' });
+    if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ message: 'CSV has no rows' });
+    if (!canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const normOrderDate = String(orderDate).trim();
+    const missingVehicle = items.findIndex((it) => !it.vehicleNumber || !String(it.vehicleNumber).trim());
+    if (missingVehicle !== -1) {
+      return res.status(400).json({ message: `Row ${missingVehicle + 1} is missing a Vehicle Number — every row must have one.` });
+    }
+    const missingBarcode = items.findIndex((it) => !it.barcode || !String(it.barcode).trim());
+    if (missingBarcode !== -1) {
+      return res.status(400).json({ message: `Row ${missingBarcode + 1} is missing a barcode.` });
+    }
+
+    const { userCode, userName } = actor(req);
+    const byVehicle = new Map<string, typeof items>();
+    for (const item of items) {
+      const key = String(item.vehicleNumber).trim();
+      if (!byVehicle.has(key)) byVehicle.set(key, []);
+      byVehicle.get(key)!.push(item);
+    }
+
+    const summary: Array<{
+      vehicleNumber: string; sessionId: number; groupId: number; partIndex: number; rowCount: number;
+      replacesSessionId: number | null; remapSummary: any;
+    }> = [];
+
+    for (const [vehicleNumber, vehicleItems] of byVehicle.entries()) {
+      // ── Delete-with-rollback replacement: reclaim an unresolved "replace" delete's slot ────
+      // Same idea as order-import.ts's own upload handler: a "replace" delete (see DELETE
+      // /unloading/sessions/:id below) leaves remapped_to_session_id NULL so the next upload for
+      // the exact same (plant, vehicleNumber, orderDate) is treated as its correction, carrying
+      // the deleted session's scan history forward instead of starting over.
+      const { rows: replacementRows } = await pool.query(
+        `SELECT id, group_id AS "groupId", part_index AS "partIndex", csv_file_name AS "csvFileName"
+         FROM unload_import_sessions
+         WHERE LOWER(plant) = LOWER($1) AND LOWER(vehicle_number) = LOWER($2) AND order_date = $3
+           AND is_deleted = true AND remapped_to_session_id IS NULL
+         ORDER BY deleted_at ASC LIMIT 1`,
+        [plant, vehicleNumber, normOrderDate],
+      );
+      const replacementFor = replacementRows[0] ?? null;
+
+      let groupIdForInsert: number | null = null;
+      let partIndex = 1;
+      let joinedExistingGroup = false;
+      if (replacementFor) {
+        groupIdForInsert = replacementFor.groupId;
+        partIndex = replacementFor.partIndex ?? 1;
+        joinedExistingGroup = true;
+      } else {
+        // Every session that ever existed for this slot (deleted or not) — a discarded part's
+        // slot number is retired, never reused, same reasoning as order-import.ts.
+        const { rows: existingRows } = await pool.query(
+          `SELECT id, group_id AS "groupId", part_index AS "partIndex" FROM unload_import_sessions
+           WHERE LOWER(plant) = LOWER($1) AND LOWER(vehicle_number) = LOWER($2) AND order_date = $3
+           ORDER BY part_index DESC LIMIT 1`,
+          [plant, vehicleNumber, normOrderDate],
+        );
+        const existing = existingRows[0];
+        if (existing) {
+          groupIdForInsert = existing.groupId;
+          partIndex = (existing.partIndex ?? 1) + 1;
+          joinedExistingGroup = true;
+        }
+      }
+
+      const { rows: sessionRows } = await pool.query(
+        `INSERT INTO unload_import_sessions (plant, vehicle_number, order_date, csv_file_name, row_count, imported_by_code, group_id, part_index)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, group_id AS "groupId"`,
+        [plant, vehicleNumber, normOrderDate, csvFileName, vehicleItems.length, userCode ?? null, groupIdForInsert, partIndex],
+      );
+      let session = sessionRows[0];
+      let groupId = session.groupId as number | null;
+      if (!groupId) {
+        await pool.query(`UPDATE unload_import_sessions SET group_id = $1 WHERE id = $1`, [session.id]);
+        groupId = session.id;
+      }
+
+      // Merge duplicate barcodes within this vehicle's rows (a manifest listing the same SKU
+      // across multiple lines — different pallets/batches, or just a re-listed line — is common)
+      // into ONE item with the summed quantity. Without this, each duplicate landed as its own
+      // separate unload_import_items row, but /scan (below) matches a barcode to only the FIRST
+      // such row via .find() and caps "regular vs extra" against THAT row's own quantity alone —
+      // so scans past the first row's (partial) quantity were wrongly logged as Extra even though
+      // the manifest's true combined total for that barcode hadn't been reached yet, and the item
+      // table showed the SAME running scanned total against every duplicate row's own smaller
+      // expected figure. One row per barcode with the true total sidesteps both problems.
+      const mergedByBarcode = new Map<string, { barcode: string; itemName: string | null; sapCode: string | null; quantity: number }>();
+      for (const item of vehicleItems) {
+        const barcode = typeof item.barcode === 'string' ? item.barcode.trim() : String(item.barcode ?? '').trim();
+        const key = barcode.toLowerCase();
+        const existing = mergedByBarcode.get(key);
+        if (existing) {
+          existing.quantity += item.quantity ?? 0;
+          if (!existing.itemName && item.itemName) existing.itemName = item.itemName;
+          if (!existing.sapCode && item.sapCode) existing.sapCode = item.sapCode;
+        } else {
+          mergedByBarcode.set(key, { barcode, itemName: item.itemName || null, sapCode: item.sapCode || null, quantity: item.quantity ?? 0 });
+        }
+      }
+      const rows = Array.from(mergedByBarcode.values()).map((item) => ({
+        sessionId: session.id,
+        plant, vehicleNumber,
+        barcode: item.barcode,
+        itemName: item.itemName,
+        sapCode: item.sapCode,
+        quantity: item.quantity,
+      }));
+      const values: any[] = [];
+      const placeholders = rows.map((r, i) => {
+        const base = i * 6;
+        values.push(r.sessionId, r.plant, r.vehicleNumber, r.barcode, r.itemName, r.sapCode);
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},${r.quantity ?? 0})`;
+      });
+      await pool.query(
+        `INSERT INTO unload_import_items (session_id, plant, vehicle_number, barcode, item_name, sap_code, quantity)
+         VALUES ${placeholders.join(',')}`,
+        values,
+      );
+
+      // Carry the deleted session's scan history forward onto this replacement, before
+      // auto-activate below so a fully-carried-forward part can immediately show as complete.
+      let remapSummary: any = null;
+      if (replacementFor) {
+        const remapClient = await pool.connect();
+        try {
+          await remapClient.query('BEGIN');
+          remapSummary = await remapDeletedUnloadSessionEvents(remapClient, replacementFor.id, session.id);
+          await remapClient.query('COMMIT');
+        } catch (err) {
+          await remapClient.query('ROLLBACK');
+          throw err;
+        } finally {
+          remapClient.release();
+        }
+        console.log(`[unloading] session ${session.id} (${csvFileName}) auto-linked as replacement for deleted session ${replacementFor.id} (${replacementFor.csvFileName}) — ${remapSummary?.qtyCarriedForward ?? 0} qty carried forward`);
+      }
+
+      // If this CSV joined an EXISTING group, any earlier part that already completed may have
+      // leftover un-consumed extra scans that never got a chance to credit THIS part (it didn't
+      // exist yet when that part completed — reconcileUnloadCredits only ever runs once, at
+      // completion time). Re-run it now against every already-completed part in the group.
+      if (joinedExistingGroup && groupId) {
+        const { rows: completedParts } = await pool.query(
+          `SELECT id FROM unload_import_sessions WHERE group_id = $1 AND is_deleted = false AND scan_status = 'completed'`,
+          [groupId],
+        );
+        if (completedParts.length > 0) {
+          const creditClient = await pool.connect();
+          try {
+            await creditClient.query('BEGIN');
+            for (const p of completedParts) {
+              await reconcileUnloadCredits(creditClient, p.id, groupId);
+            }
+            await creditClient.query('COMMIT');
+          } catch (e) {
+            await creditClient.query('ROLLBACK');
+            console.error('[unloading] credit reconciliation against new part failed:', e);
+          } finally {
+            creditClient.release();
+          }
+        }
+      }
+
+      // Stays 'available' — a batch only becomes 'active' once a user opens it to scan (see
+      // POST /unloading/sessions/:id/activate below), never automatically on import.
+      summary.push({
+        vehicleNumber, sessionId: session.id, groupId: groupId!, partIndex, rowCount: vehicleItems.length,
+        replacesSessionId: replacementFor?.id ?? null, remapSummary,
+      });
+    }
+
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Unloading', action: 'create', entityType: 'unload_import', entityId: csvFileName,
+        details: `Imported ${csvFileName} for ${plant} (${normOrderDate}) by ${userName ?? userCode} — ${summary.length} vehicle(s): `
+          + summary.map((s) => `${s.vehicleNumber} (${s.rowCount})`).join(', '),
+        userCode, userName,
+      });
+    }
+
+    res.status(201).json({ success: true, vehicles: summary, totalRows: items.length });
+  } catch (error) {
+    console.error('Error importing unloading CSV:', error);
+    res.status(500).json({ message: 'Failed to import CSV' });
+  }
+});
+
+// GET /api/unloading/sessions — the landing table: one row per part, newest first. Non-admins
+// are limited to their assigned plants (same rule every other page's plant scoping uses).
+router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const limit = Math.max(1, Math.min(100, parseInt(String(req.query.limit ?? '20'), 10) || 20));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+    const userPlants = getUserPlants(req.user);
+
+    const conditions: string[] = ['s.is_deleted = false'];
+    const params: any[] = [];
+    if (userPlants !== null) {
+      params.push(userPlants);
+      conditions.push(`LOWER(s.plant) = ANY($${params.length})`);
+    }
+    if (typeof req.query.plant === 'string' && req.query.plant.trim()) {
+      params.push(req.query.plant.trim());
+      conditions.push(`LOWER(s.plant) = LOWER($${params.length})`);
+    }
+    if (typeof req.query.vehicleNumber === 'string' && req.query.vehicleNumber.trim()) {
+      params.push(`%${req.query.vehicleNumber.trim()}%`);
+      conditions.push(`s.vehicle_number ILIKE $${params.length}`);
+    }
+    if (typeof req.query.orderDate === 'string' && req.query.orderDate.trim()) {
+      params.push(req.query.orderDate.trim());
+      conditions.push(`s.order_date = $${params.length}`);
+    }
+    // Status tab — the client no longer has a separate "Active" tab (an in-progress batch just
+    // shows green within Available, see statusBadge in Unloading.tsx), so 'available' here means
+    // both 'available' AND 'active'. 'completed' still filters to exactly that (kept for any
+    // other caller); 'history' (or omitted) shows every status, same as Order Management's own
+    // History tab.
+    const statusParam = typeof req.query.status === 'string' ? req.query.status.trim() : '';
+    if (statusParam === 'available') {
+      conditions.push(`s.scan_status IN ('available', 'active')`);
+    } else if (['active', 'completed'].includes(statusParam)) {
+      params.push(statusParam);
+      conditions.push(`s.scan_status = $${params.length}`);
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(
+        `SELECT s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+                s.csv_file_name AS "csvFileName", s.row_count AS "rowCount", s.group_id AS "groupId",
+                s.part_index AS "partIndex", s.scan_status AS "scanStatus", s.created_at AS "createdAt",
+                s.scan_activated_at AS "scanActivatedAt", s.scan_completed_at AS "scanCompletedAt",
+                (SELECT COUNT(*) FROM unload_import_sessions g WHERE g.group_id = s.group_id AND g.is_deleted = false) AS "partsCount",
+                COALESCE((SELECT SUM(quantity) FROM unload_import_items WHERE session_id = s.id), 0)::int AS "expectedQty",
+                COALESCE((SELECT SUM(total_qty) FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE), 0)::int AS "scannedQty",
+                ((SELECT g.id FROM unload_import_sessions g
+                  WHERE g.group_id = s.group_id AND g.is_deleted = false AND g.scan_status <> 'completed'
+                  ORDER BY g.part_index ASC, g.id ASC LIMIT 1) = s.id) AS "canActivate"
+         FROM unload_import_sessions s
+         ${where}
+         ORDER BY s.created_at DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limit, offset],
+      ),
+      pool.query(`SELECT COUNT(*) AS total FROM unload_import_sessions s ${where}`, params),
+    ]);
+
+    res.json({ sessions: dataRes.rows, total: parseInt(countRes.rows[0]?.total ?? '0', 10), limit, offset });
+  } catch (error) {
+    console.error('Error listing unloading sessions:', error);
+    res.status(500).json({ message: 'Failed to fetch unloading sessions' });
+  }
+});
+
+// GET /api/unloading/sessions/status-counts — badge counts for the Available/Active/Completed/
+// History tab strip (client/src/pages/Unloading/Unloading.tsx), same plant/vehicleNumber/
+// orderDate scoping as the list endpoint above, so the badges reflect whatever's filtered.
+router.get('/unloading/sessions/status-counts', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const userPlants = getUserPlants(req.user);
+    const conditions: string[] = ['is_deleted = false'];
+    const params: any[] = [];
+    if (userPlants !== null) {
+      params.push(userPlants);
+      conditions.push(`LOWER(plant) = ANY($${params.length})`);
+    }
+    if (typeof req.query.plant === 'string' && req.query.plant.trim()) {
+      params.push(req.query.plant.trim());
+      conditions.push(`LOWER(plant) = LOWER($${params.length})`);
+    }
+    if (typeof req.query.vehicleNumber === 'string' && req.query.vehicleNumber.trim()) {
+      params.push(`%${req.query.vehicleNumber.trim()}%`);
+      conditions.push(`vehicle_number ILIKE $${params.length}`);
+    }
+    if (typeof req.query.orderDate === 'string' && req.query.orderDate.trim()) {
+      params.push(req.query.orderDate.trim());
+      conditions.push(`order_date = $${params.length}`);
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE scan_status = 'available')::int AS available,
+         COUNT(*) FILTER (WHERE scan_status = 'active')::int AS active,
+         COUNT(*) FILTER (WHERE scan_status = 'completed')::int AS completed,
+         COUNT(*)::int AS total
+       FROM unload_import_sessions ${where}`,
+      params,
+    );
+    res.json(rows[0] ?? { available: 0, active: 0, completed: 0, total: 0 });
+  } catch (error) {
+    console.error('Error fetching unloading status counts:', error);
+    res.status(500).json({ message: 'Failed to fetch status counts' });
+  }
+});
+
+// GET /api/unloading/sessions/:id/events — this part's scan history (audit trail + Void panel).
+router.get('/unloading/sessions/:id/events', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows: sessRows } = await pool.query(`SELECT plant FROM unload_import_sessions WHERE id = $1`, [id]);
+    if (!sessRows[0]) return res.status(404).json({ message: 'Session not found' });
+    if (!canAccessPlant(req, sessRows[0].plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const { rows } = await pool.query(
+      `SELECT id, barcode, item_name AS "itemName", sap_code AS "sapCode", pallets, loose_qty AS "looseQty",
+              total_qty AS "totalQty", is_extra AS "isExtra", scanned_by_code AS "scannedByCode",
+              scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
+              voided, voided_by_code AS "voidedByCode", voided_at AS "voidedAt", void_reason AS "voidReason"
+       FROM unload_scan_events WHERE session_id = $1 ORDER BY scanned_at DESC`,
+      [id],
+    );
+    res.json({ events: rows });
+  } catch (error) {
+    console.error('Error fetching unloading scan history:', error);
+    res.status(500).json({ message: 'Failed to fetch scan history' });
+  }
+});
+
+// GET /api/unloading/sessions/:id — open a specific part for scanning.
+router.get('/unloading/sessions/:id', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows } = await pool.query(`SELECT * FROM unload_import_sessions WHERE id = $1`, [id]);
+    const session = rows[0];
+    if (!session || session.is_deleted) return res.status(404).json({ message: 'Unloading session not found' });
+    if (!canAccessPlant(req, session.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const { items, allComplete } = await withProgress({ id: session.id, plant: session.plant });
+    res.json({
+      session: {
+        id: session.id, plant: session.plant, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
+        csvFileName: session.csv_file_name, groupId: session.group_id, partIndex: session.part_index,
+        scanStatus: session.scan_status, scanCompletedAt: session.scan_completed_at,
+      },
+      items, allComplete,
+    });
+  } catch (error) {
+    console.error('Error fetching unloading session:', error);
+    res.status(500).json({ message: 'Failed to fetch unloading session' });
+  }
+});
+
+// POST /api/unloading/sessions/:id/activate — the explicit available -> active step, fired when
+// the user clicks "Scan" on a batch that hasn't been opened yet. Mirrors Order Import's CSV
+// lifecycle: import lands as 'available' (nothing auto-activates), and a batch only becomes
+// 'active' the moment someone actually starts working it. Only the earliest not-yet-completed
+// batch in a vehicle+date's FIFO group is eligible — this is what keeps batches strictly
+// sequential (see isEligibleToActivate above) without a separate "one active at a time" lock.
+router.post('/unloading/sessions/:id/activate', requirePageWrite('unloading'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows } = await pool.query(`SELECT * FROM unload_import_sessions WHERE id = $1`, [id]);
+    const session = rows[0];
+    if (!session || session.is_deleted) return res.status(404).json({ message: 'Unloading session not found' });
+    if (!canAccessPlant(req, session.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if (session.scan_status === 'completed') {
+      return res.status(409).json({ message: 'This batch is already complete.' });
+    }
+    if (session.scan_status === 'active') {
+      return res.json({ scanStatus: 'active' }); // already active — idempotent, e.g. resuming from a saved session id
+    }
+
+    const eligible = await isEligibleToActivate({ id: session.id, groupId: session.group_id, partIndex: session.part_index });
+    if (!eligible) {
+      const { rows: blockingRows } = await pool.query(
+        `SELECT part_index AS "partIndex" FROM unload_import_sessions
+         WHERE group_id = $1 AND is_deleted = false AND scan_status <> 'completed'
+         ORDER BY part_index ASC, id ASC LIMIT 1`,
+        [session.group_id],
+      );
+      const blockingPart = blockingRows[0]?.partIndex ?? null;
+      return res.status(409).json({
+        message: blockingPart ? `Complete Batch ${blockingPart} for this vehicle first.` : 'Another batch for this vehicle must complete first.',
+      });
+    }
+
+    const { userCode } = actor(req);
+    await pool.query(
+      `UPDATE unload_import_sessions SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = NOW() WHERE id = $2`,
+      [userCode ?? null, id],
+    );
+    res.json({ scanStatus: 'active' });
+  } catch (error) {
+    console.error('Error activating unloading session:', error);
+    res.status(500).json({ message: 'Failed to activate' });
+  }
+});
+
+// POST /api/unloading/sessions/:id/scan — body: { barcode, qty }. Adds stock (receiving).
+router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+  const client = await pool.connect();
+  try {
+    const barcode = String(req.body?.barcode ?? '').trim();
+    const qty = Math.round(Number(req.body?.qty));
+    if (!barcode) return res.status(400).json({ message: 'barcode is required' });
+    if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be a positive number' });
+
+    const { rows: sessionRows } = await client.query(`SELECT * FROM unload_import_sessions WHERE id = $1`, [id]);
+    const session = sessionRows[0];
+    if (!session) return res.status(404).json({ message: 'Unloading session not found' });
+    if (!canAccessPlant(req, session.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if (session.scan_status === 'completed') {
+      return res.status(409).json({ message: 'This part is already complete — reopen it before scanning more.' });
+    }
+    // Self-healing: normally the client already called POST .../activate when "Scan" was
+    // clicked, but if a scan somehow lands here while still 'available' (e.g. an older client),
+    // activate transparently rather than rejecting it outright — as long as it's still eligible.
+    if (session.scan_status === 'available') {
+      const eligible = await isEligibleToActivate({ id: session.id, groupId: session.group_id, partIndex: session.part_index });
+      if (!eligible) return res.status(409).json({ message: 'Another batch for this vehicle must complete first.' });
+      const { userCode: activatorCode } = actor(req);
+      await client.query(
+        `UPDATE unload_import_sessions SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = NOW() WHERE id = $2`,
+        [activatorCode ?? null, id],
+      );
+      session.scan_status = 'active';
+    }
+
+    const { rows: itemRows } = await client.query(
+      `SELECT * FROM unload_import_items WHERE session_id = $1`,
+      [id],
+    );
+    const matchedItem = itemRows.find((i: any) => normalize(i.barcode) === normalize(barcode));
+    const product = await storage.getProductByBarcode(barcode);
+    if (!matchedItem && !product) {
+      return res.status(400).json({ message: 'Barcode not in system — not on this vehicle\'s manifest and not in Product Master.' });
+    }
+
+    const { rows: scannedRows } = await client.query(
+      `SELECT COALESCE(SUM(total_qty), 0)::int AS "scanned" FROM unload_scan_events
+       WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+      [id, barcode],
+    );
+    const alreadyScanned = scannedRows[0]?.scanned ?? 0;
+    const expected = matchedItem?.quantity ?? 0;
+    const remainingBefore = matchedItem ? Math.max(0, expected - alreadyScanned) : 0;
+    const regularQty = matchedItem ? Math.min(qty, remainingBefore) : 0;
+    const extraQty = qty - regularQty;
+
+    const state = await getPlantStateCode(client, session.plant ?? '');
+    const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
+    const { userCode, userName } = actor(req);
+
+    await client.query('BEGIN');
+    try {
+      const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
+        `INSERT INTO unload_scan_events
+           (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, vehicle_number, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [
+          id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
+          itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
+          itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
+          totalQty, isExtra, session.plant, session.vehicle_number, userCode ?? null, userName ?? null,
+        ],
+      );
+      if (regularQty > 0) await insertEvent(regularQty, false);
+      if (extraQty > 0) await insertEvent(extraQty, true);
+
+      // If this product's barcode changed since stock was last received under an old one, fold
+      // it onto this barcode first — see stockBarcodeReconcile.ts.
+      await reconcileProductPlantStockBarcode(client, product?.id, session.plant, barcode);
+      await client.query(
+        `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty)
+         VALUES ($1,$2,$3,$4,0)
+         ON CONFLICT (barcode, plant) DO UPDATE SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
+        [barcode, product?.id ?? null, session.plant, qty],
+      );
+      await client.query(
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
+         VALUES ($1,$2,$3,$4,$5,'receive',$6,$7,$8)`,
+        [barcode, product?.id ?? null, session.plant, qty, extraQty, `Unloaded vehicle ${session.vehicle_number} (${session.order_date})`, id, userCode ?? null],
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    }
+
+    const { items: progressItems, allComplete } = await withProgress({ id: session.id, plant: session.plant });
+
+    let finalStatus = session.scan_status;
+    if (allComplete && session.scan_status !== 'completed') {
+      await pool.query(
+        `UPDATE unload_import_sessions SET scan_status = 'completed', scan_completed_by_code = $1, scan_completed_at = NOW() WHERE id = $2`,
+        [userCode ?? null, id],
+      );
+      finalStatus = 'completed';
+
+      if (session.group_id) {
+        const creditClient = await pool.connect();
+        try {
+          await creditClient.query('BEGIN');
+          await reconcileUnloadCredits(creditClient, id, session.group_id);
+          await creditClient.query('COMMIT');
+        } catch (e) {
+          await creditClient.query('ROLLBACK');
+          console.error('[unloading] credit reconciliation failed:', e);
+        } finally {
+          creditClient.release();
+        }
+      }
+
+      if (userCode) {
+        await storage.logActivity({
+          pageName: 'Unloading', action: 'update', entityType: 'unload_import_session', entityId: id,
+          details: `Vehicle ${session.vehicle_number} (${session.order_date}) part ${session.part_index} completed by ${userName ?? userCode}`,
+          userCode, userName,
+        });
+      }
+    }
+
+    res.json({
+      session: {
+        id: session.id, plant: session.plant, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
+        scanStatus: finalStatus, groupId: session.group_id, partIndex: session.part_index,
+      },
+      items: progressItems, allComplete,
+      event: {
+        barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
+        sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
+        totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty),
+      },
+    });
+  } catch (error) {
+    console.error('Error scanning item for unloading:', error);
+    res.status(500).json({ message: 'Failed to record scan' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/unloading/sessions/:id/complete — manual override, same admin/designation rule
+// Order Scan/Loading use for "force complete even if short".
+router.post('/unloading/sessions/:id/complete', requirePageWrite('unloading'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows } = await pool.query(`SELECT * FROM unload_import_sessions WHERE id = $1`, [id]);
+    const session = rows[0];
+    if (!session) return res.status(404).json({ message: 'Unloading session not found' });
+    if (!canAccessPlant(req, session.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const { userCode, userName } = actor(req);
+    await pool.query(
+      `UPDATE unload_import_sessions SET scan_status = 'completed', scan_completed_by_code = $1, scan_completed_at = NOW() WHERE id = $2`,
+      [userCode ?? null, id],
+    );
+    if (session.group_id) {
+      const creditClient = await pool.connect();
+      try {
+        await creditClient.query('BEGIN');
+        await reconcileUnloadCredits(creditClient, id, session.group_id);
+        await creditClient.query('COMMIT');
+      } catch (e) {
+        await creditClient.query('ROLLBACK');
+        console.error('[unloading] credit reconciliation failed:', e);
+      } finally {
+        creditClient.release();
+      }
+    }
+
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Unloading', action: 'update', entityType: 'unload_import_session', entityId: id,
+        details: `Vehicle ${session.vehicle_number} (${session.order_date}) part ${session.part_index} manually completed by ${userName ?? userCode}`,
+        userCode, userName,
+      });
+    }
+
+    const { items, allComplete } = await withProgress({ id, plant: session.plant });
+    res.json({ items, allComplete });
+  } catch (error) {
+    console.error('Error completing unloading session:', error);
+    res.status(500).json({ message: 'Failed to complete' });
+  }
+});
+
+// POST /api/unloading/sessions/:id/reopen — undo complete (same void/write access rule).
+router.post('/unloading/sessions/:id/reopen', requireUnloadingVoidAccess, async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows } = await pool.query(`SELECT * FROM unload_import_sessions WHERE id = $1`, [id]);
+    const session = rows[0];
+    if (!session) return res.status(404).json({ message: 'Unloading session not found' });
+    if (!canAccessPlant(req, session.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const { userCode, userName } = actor(req);
+    await pool.query(
+      `UPDATE unload_import_sessions SET scan_status = 'active', scan_completed_by_code = NULL, scan_completed_at = NULL WHERE id = $1`,
+      [id],
+    );
+    // If reopening pulled this part back into play while a later part in the same group had
+    // already auto-activated, that later part steps back down to queued — only one active part
+    // per group at a time.
+    if (session.group_id) {
+      await pool.query(
+        `UPDATE unload_import_sessions SET scan_status = 'available', scan_activated_by_code = NULL, scan_activated_at = NULL
+         WHERE group_id = $1 AND id <> $2 AND scan_status = 'active' AND is_deleted = false`,
+        [session.group_id, id],
+      );
+    }
+
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Unloading', action: 'update', entityType: 'unload_import_session', entityId: id,
+        details: `Vehicle ${session.vehicle_number} (${session.order_date}) part ${session.part_index} reopened by ${userName ?? userCode}`,
+        userCode, userName,
+      });
+    }
+
+    const { items, allComplete } = await withProgress({ id, plant: session.plant });
+    res.json({ items, allComplete });
+  } catch (error) {
+    console.error('Error reopening unloading session:', error);
+    res.status(500).json({ message: 'Failed to reopen' });
+  }
+});
+
+// GET /api/unloading/sessions/:id/delete-preview — powers the delete confirmation dialog.
+router.get('/unloading/sessions/:id/delete-preview', requireUnloadingVoidAccess, async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows: sessRows } = await pool.query(`SELECT id, plant FROM unload_import_sessions WHERE id = $1`, [id]);
+    if (!sessRows[0]) return res.status(404).json({ message: 'Session not found' });
+    if (!canAccessPlant(req, sessRows[0].plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const { rows: scanRows } = await pool.query(
+      `SELECT COUNT(DISTINCT barcode)::int AS "scannedBarcodeCount", COALESCE(SUM(total_qty), 0)::int AS "scannedQtyTotal"
+       FROM unload_scan_events WHERE session_id = $1 AND voided IS NOT TRUE AND total_qty > 0`,
+      [id],
+    );
+    const { rows: extraRows } = await pool.query(
+      `SELECT COALESCE(SUM(GREATEST(0, total_qty - COALESCE(credited_qty, 0))), 0)::int AS "extraQtyTotal"
+       FROM unload_scan_events WHERE session_id = $1 AND is_extra = true AND voided IS NOT TRUE`,
+      [id],
+    );
+    res.json({
+      scannedBarcodeCount: scanRows[0]?.scannedBarcodeCount ?? 0,
+      scannedQtyTotal: scanRows[0]?.scannedQtyTotal ?? 0,
+      extraQtyTotal: extraRows[0]?.extraQtyTotal ?? 0,
+      stockApplied: (scanRows[0]?.scannedQtyTotal ?? 0) > 0,
+    });
+  } catch (error) {
+    console.error('Error computing unloading delete preview:', error);
+    res.status(500).json({ message: 'Failed to compute delete preview' });
+  }
+});
+
+// DELETE /api/unloading/sessions/:id?mode=replace|discard — same two-intent delete order-import
+// uses (see the comment on its own DELETE handler):
+//   mode=replace (default): soft-delete only. Scan events stay pointed at this (now-deleted)
+//     session and stock is LEFT in place — the physical boxes are real and get carried forward
+//     onto whichever corrected CSV is next uploaded for this exact vehicle+date (see
+//     remapDeletedUnloadSessionEvents, invoked from POST /unloading/import).
+//   mode=discard: the boxes were never real for this vehicle+date. Reverse the stock its scans
+//     added, void its events, and self-resolve (remapped_to_session_id = own id) so the next
+//     upload for this slot starts fresh instead of inheriting this deleted CSV's history.
+router.delete('/unloading/sessions/:id', requireUnloadingVoidAccess, async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+  const discard = String(req.query.mode ?? 'replace') === 'discard';
+  const { userCode, userName } = actor(req);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: sessRows } = await client.query(`SELECT * FROM unload_import_sessions WHERE id = $1 FOR UPDATE`, [id]);
+    const session = sessRows[0];
+    if (!session) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Session not found' }); }
+    if (!canAccessPlant(req, session.plant)) { await client.query('ROLLBACK'); return res.status(403).json({ message: 'Access denied for this plant' }); }
+
+    const stockReversed: Array<{ barcode: string; qty: number }> = [];
+    if (discard) {
+      const { rows: received } = await client.query(
+        `SELECT barcode, SUM(total_qty)::int AS qty
+         FROM unload_scan_events WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
+         GROUP BY barcode HAVING SUM(total_qty) <> 0`,
+        [id],
+      );
+      for (const r of received) {
+        const { rows: plantRows } = await client.query(
+          `SELECT in_stock, product_id FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
+          [r.barcode, session.plant],
+        );
+        const actualQty = Math.min(r.qty, Number(plantRows[0]?.in_stock ?? 0));
+        if (actualQty <= 0) continue;
+        const productId = plantRows[0]?.product_id ?? null;
+        await client.query(
+          `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
+          [actualQty, r.barcode, session.plant],
+        );
+        await client.query(
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
+           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7)`,
+          [r.barcode, productId, session.plant, -actualQty, 'Unloading CSV deleted — rollback', id, userCode ?? null],
+        );
+        stockReversed.push({ barcode: r.barcode, qty: actualQty });
+      }
+      await client.query(`UPDATE unload_scan_events SET voided = true WHERE session_id = $1 AND voided IS NOT TRUE`, [id]);
+    }
+
+    await client.query(
+      `UPDATE unload_import_sessions
+       SET is_deleted = true, deleted_at = NOW(), deleted_by_code = $1, scan_status = 'available',
+           remapped_to_session_id = CASE WHEN $2 THEN id ELSE remapped_to_session_id END,
+           remapped_at = CASE WHEN $2 THEN NOW() ELSE remapped_at END
+       WHERE id = $3`,
+      [userCode ?? null, discard, id],
+    );
+    await client.query('COMMIT');
+
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Unloading', action: discard ? 'delete-discard' : 'delete-for-replace',
+        entityType: 'unload_import_session', entityId: id,
+        details: `Vehicle ${session.vehicle_number} (${session.order_date}) part ${session.part_index} deleted (${discard ? 'discard' : 'replace'}) by ${userName ?? userCode}`
+          + (stockReversed.length ? ` — stock reversed for ${stockReversed.length} barcode(s)` : ''),
+        userCode, userName,
+      });
+    }
+
+    res.json({ success: true, mode: discard ? 'discard' : 'replace', stockReversed });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error deleting unloading session:', error);
+    res.status(500).json({ message: 'Failed to delete' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/unloading/events/:id/void — reverses the stock this scan added and marks it voided.
+router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req: Request, res: Response) => {
+  const eventId = parseInt(req.params.id);
+  if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : null;
+  const { userCode } = actor(req);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: eventRows } = await client.query(`SELECT * FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const event = eventRows[0];
+    if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Scan event not found' }); }
+    if (!canAccessPlant(req, event.plant)) { await client.query('ROLLBACK'); return res.status(403).json({ message: 'Access denied for this plant' }); }
+    if (event.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This scan is already voided' }); }
+
+    const qty = Number(event.total_qty ?? 0);
+    if (qty > 0 && event.plant && event.barcode) {
+      const product = await storage.getProductByBarcode(event.barcode);
+      await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+      await client.query(
+        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
+        [qty, event.barcode, event.plant],
+      );
+      await client.query(
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7)`,
+        [event.barcode, product?.id ?? null, event.plant, -qty, reason ?? 'Unloading scan voided', event.session_id, userCode ?? null],
+      );
+    }
+    await client.query(
+      `UPDATE unload_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
+      [userCode ?? null, reason, eventId],
+    );
+    await client.query('COMMIT');
+    res.json({ success: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error voiding unloading scan event:', error);
+    res.status(500).json({ message: 'Failed to void scan' });
+  } finally {
+    client.release();
+  }
+});
+
+export default router;

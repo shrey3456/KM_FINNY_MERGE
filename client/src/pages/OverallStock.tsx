@@ -22,7 +22,7 @@ import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/hooks/use-auth";
 import { hasPageWriteAccess } from "@/lib/permissions";
-import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
 import { StatsBar } from "@/components/ui/stats-bar";
 import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
@@ -229,43 +229,6 @@ function downloadPdf(
   doc.save(filename);
 }
 
-/**
- * Which page numbers a pager should offer, given the current page and how many there are — all of
- * them when they fit, otherwise the first, the last, a window around the current page, and "gap"
- * where the run is broken. Both indexes are 0-based, matching DataTable's own pageIndex.
- * Mirrors the pager on Proforma Slips so the two look and behave the same.
- */
-function buildPageList(pageIndex: number, pageCount: number, window = 1): Array<number | "gap"> {
-  const maxWithoutGaps = window * 2 + 5;
-  if (pageCount <= maxWithoutGaps) return Array.from({ length: pageCount }, (_, i) => i);
-
-  const last = pageCount - 1;
-  // Near either end the window would be clipped by the edge, leaving a stubby "1 2 … 442".
-  // Extend it inward so the run of numbers stays the same length wherever you are.
-  let from: number;
-  let to: number;
-  if (pageIndex <= window) {
-    from = 1;
-    to = Math.min(last - 1, window * 2);
-  } else if (pageIndex >= last - window) {
-    from = Math.max(1, last - window * 2);
-    to = last - 1;
-  } else {
-    from = pageIndex - window;
-    to = pageIndex + window;
-  }
-
-  const pages: Array<number | "gap"> = [0];
-  // A gap standing in for a single page takes as much room as the page itself, so only use one
-  // where at least two pages are hidden — otherwise show that page.
-  if (from > 2) pages.push("gap");
-  else if (from === 2) pages.push(1);
-  for (let i = from; i <= to; i++) pages.push(i);
-  if (to < last - 2) pages.push("gap");
-  else if (to === last - 2) pages.push(last - 1);
-  pages.push(last);
-  return pages;
-}
 
 const PAGE_SIZE = 20;
 
@@ -1994,7 +1957,7 @@ export default function OverallStock() {
             {displayRows.length > PAGE_SIZE && (() => {
               const pageCount = Math.ceil(displayRows.length / PAGE_SIZE);
               return (
-                <div className="flex flex-col gap-2 border-t border-gray-200 px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-200 px-4 py-3">
                   <span className="text-xs text-gray-500">
                     Showing {(pageIndex * PAGE_SIZE + 1).toLocaleString()}–
                     {Math.min((pageIndex + 1) * PAGE_SIZE, displayRows.length).toLocaleString()} of{" "}
