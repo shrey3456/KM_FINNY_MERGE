@@ -100,11 +100,14 @@ function getUserPlantsClient(): string[] | null {
 // pattern as LAST_ORDER_KEY in client/src/pages/Loading/LoadOperation.tsx.
 const LAST_SESSION_KEY = "unloading_active_session_id";
 
-// Remembers the Vehicle Details / Scan Items split width, per browser, so a dragged layout
-// survives a refresh.
+// Remembers the totals / Scan Items split width, per browser, so a dragged layout survives a
+// refresh.
 const LEFT_COL_WIDTH_KEY = "unloading_left_col_width";
-const LEFT_COL_MIN = 260;
-const LEFT_COL_MAX = 640;
+const LEFT_COL_MIN = 320;
+const LEFT_COL_MAX = 760;
+// Below this the four totals tiles stop fitting on one row and fold to 2x2 — a 4-digit box
+// count at text-2xl plus its "1136.79 plt" line needs ~115px of tile to itself.
+const TOTALS_ONE_ROW_MIN = 460;
 
 // Remembers the operator's STV pick across page navigations — same reasoning and key pattern as
 // Order Scan's OS_STV_STORAGE_KEY (client/src/pages/Scanning/Scan.tsx): this page unmounts on
@@ -283,13 +286,13 @@ export default function Unloading() {
   });
   const [expandedItemId, setExpandedItemId] = useState<number | null>(null);
 
-  // Draggable Vehicle Details / Scan Items split — desktop (lg) only; stacks to one column
-  // below that, same breakpoint Tailwind's own lg: prefix uses elsewhere on this page.
+  // Draggable totals / Scan Items split — desktop (lg) only; stacks to one column below that,
+  // same breakpoint Tailwind's own lg: prefix uses elsewhere on this page.
   const [leftColWidth, setLeftColWidth] = useState<number>(() => {
     try {
       const saved = parseInt(localStorage.getItem(LEFT_COL_WIDTH_KEY) || "", 10);
-      return Number.isFinite(saved) ? Math.min(LEFT_COL_MAX, Math.max(LEFT_COL_MIN, saved)) : 340;
-    } catch { return 340; }
+      return Number.isFinite(saved) ? Math.min(LEFT_COL_MAX, Math.max(LEFT_COL_MIN, saved)) : 520;
+    } catch { return 520; }
   });
   const [isDesktop, setIsDesktop] = useState(false);
   useEffect(() => {
@@ -309,6 +312,24 @@ export default function Unloading() {
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
   const quarterTurn = rotation === 90 || rotation === 270;
+  // Natural portrait (window taller than wide) — a tablet or laptop turned upright should get the
+  // same single-column layout as manual Rotate, just without the 90° CSS turn, since the screen is
+  // already the right way up. Same pair Order Scan uses (isPortrait/bigView in Scan.tsx).
+  const [isPortrait, setIsPortrait] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(orientation: portrait)");
+    const onChange = () => setIsPortrait(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  // Drives the single-column layout; the actual 90° rotation stays tied to `rotated` alone. The
+  // two-column split can't just be left to Tailwind's lg: prefix here — those breakpoints key off
+  // the REAL (unrotated) window width, not the rotated container's effective width, so a rotated
+  // kiosk kept getting the desktop grid crammed into a narrow band. Same reason Order Scan forces
+  // its own single-column layout on for bigView instead of relying on breakpoints.
+  const bigView = rotated || isPortrait;
   // Bounded, self-scrolling frame for tables in rotated mode — mirrors Order Scan's own
   // kioskTableBoxClass exactly (client/src/pages/Scanning/Scan.tsx). Without this, a table left
   // to flow naturally inside the rotated box has no cap of its own and no scrollbar to fall back
@@ -317,7 +338,7 @@ export default function Unloading() {
   // "cramped, not responsive" look reported. The %-of-viewport cap flips units on a quarter turn:
   // that turns the subtree 90°, so content-space height runs along the viewport's WIDTH (vw)
   // instead of its height (vh).
-  const kioskTableBoxClass = rotated
+  const kioskTableBoxClass = bigView
     ? `overflow-auto kiosk-scroll ${quarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
     : "";
   const portalRotate = rotated ? portalRotateClass(rotation) : "";
@@ -876,6 +897,90 @@ export default function Unloading() {
     );
   }
 
+  // ─── Scan-view header pieces ─────────────────────────────────────────────────────────
+  // Shared because they render in two different places. Normally they hang off the page's own
+  // PageHeader: Back to list above the title, the vehicle beside it, status + Complete opposite
+  // it. But PageHeader is hidden in rotated kiosk mode (the fixed rotate overlay covers it), so
+  // the rotated layout folds these same three pieces into its own batch bar instead.
+  const scanSession = detail?.session;
+
+  const scanBackButton = canWrite ? (
+    <Button variant="outline" size="sm" onClick={backToList}>&larr; Back to list</Button>
+  ) : null;
+
+  // While a vehicle is on the bay it IS the page — so the truck and its number take the title
+  // slot where "Unloading" sits on the list, and this carries the rest of the identity beside it.
+  const scanVehicleTitle = scanSession ? (
+    <div className="flex shrink-0 items-center gap-1.5 text-[#001d6e]">
+      <Truck className="h-5 w-5" />
+      <span className="text-2xl font-bold">{scanSession.vehicleNumber}</span>
+    </div>
+  ) : null;
+
+  // Replaces the old Vehicle Details card, whose column the totals tiles now occupy. The vehicle
+  // number moved up into the title above, so this is just what's left: when, and which plant.
+  const scanVehicleSummary = scanSession ? (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
+      <span className="font-medium text-gray-600">{scanSession.orderDate}</span>
+      <span className="text-gray-300">&middot;</span>
+      <PlantBadge plant={scanSession.plant} className="px-2 py-0 text-[11px]" />
+    </div>
+  ) : null;
+
+  // STV picker. Rides in the title row's action group next to Complete rather than on a line of
+  // its own: it's a batch-level control like Complete is, and parked below the description on its
+  // own it just read as one stray dropdown floating in whitespace.
+  const scanStvControl = canWrite && !locked ? (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
+      {stvs.length > 0 ? (
+        <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
+          {/* Amber when nothing is picked — scanning is blocked until it is (see
+              handleItemBarcode's "Select an STV before scanning" toast), so the control has to
+              read as needing attention, not as an idle dropdown. */}
+          <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
+            selectedStv
+              ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
+              : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+          }`}>
+            <SelectValue placeholder="Select STV…" />
+          </SelectTrigger>
+          <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
+            <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+            {stvs.map((st) => (
+              <SelectItem key={st} value={st}>{st}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : !stvsQuery.isLoading && (
+        <span className="rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
+          No STV — create one in Plant Settings
+        </span>
+      )}
+    </div>
+  ) : null;
+
+  const scanStatusActions = scanSession ? (
+    <>
+      {statusBadge(scanSession.scanStatus)}
+      {scanStvControl}
+      {canWrite && scanSession.scanStatus === "completed" && (
+        <Button size="sm" variant="outline" onClick={() => reopenMutation.mutate()} disabled={reopenMutation.isPending}>
+          <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reopen
+        </Button>
+      )}
+      {canWrite && scanSession.scanStatus !== "completed" && (
+        <Button
+          size="sm"
+          className="h-8 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
+          onClick={() => setShowCompleteConfirm(true)}
+        >
+          Complete
+        </Button>
+      )}
+    </>
+  ) : null;
+
   return (
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
@@ -884,11 +989,24 @@ export default function Unloading() {
             rotated box's own header (the "Unloading" eyebrow above "Vehicles") instead, so the
             title stays visible rather than sitting hidden behind the fixed overlay. */}
         {!rotated && (
-          <PageHeader
-            icon={PackageOpen}
-            title="Unloading"
-            description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
-          />
+          <div className="space-y-2">
+            {/* Back to list sits above the title so the title row itself stays one clean identity
+                line: the vehicle on the bay and when/where, with status, STV and Complete
+                opposite it. */}
+            {view === "scan" && scanBackButton}
+            <PageHeader
+              // On the list this is the page; on a batch it's the vehicle, which is what the
+              // operator is actually looking at.
+              icon={view === "scan" ? Truck : PackageOpen}
+              title={view === "scan" && scanSession ? scanSession.vehicleNumber : "Unloading"}
+              // Only on the list, where it's the instruction for what to do next. Once a vehicle
+              // is on the bay it's stale advice taking a line under the batch you're scanning.
+              description={view === "list" ? "Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock." : undefined}
+              actions={view === "scan" ? scanStatusActions : undefined}
+            >
+              {view === "scan" ? scanVehicleSummary : undefined}
+            </PageHeader>
+          </div>
         )}
 
         {view === "list" && (
@@ -1084,7 +1202,7 @@ export default function Unloading() {
               // inside kioskTableBoxClass (same treatment as the item table's own DataTable) —
               // rather than a different, cut-down card view, so what an operator sees rotated is
               // the same table as everywhere else in the app, only fitted to the rotated screen.
-              <div className={rotated ? kioskTableBoxClass : "overflow-x-auto"}>
+              <div className={bigView ? kioskTableBoxClass : "overflow-x-auto"}>
                 <table className="w-full min-w-full caption-bottom border-collapse text-xs">
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">
@@ -1236,44 +1354,26 @@ export default function Unloading() {
             >
               <RotateCw className="h-5 w-5" />
             </button>
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              {canWrite ? (
-                <Button variant="outline" size="sm" onClick={backToList}>&larr; Back to list</Button>
-              ) : <span />}
-              {detail?.session && (
-                <div className="flex items-center gap-2 flex-wrap justify-end">
-                  {statusBadge(detail.session.scanStatus)}
-                  {itemTotals.expected > 0 && (
-                    <div
-                      className="flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1"
-                      title={`Batch progress: ${itemTotals.received.toLocaleString()} / ${itemTotals.expected.toLocaleString()} (${itemPct}%)`}
-                    >
-                      <div className="h-1.5 w-14 rounded-full bg-gray-200 overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all ${itemPct >= 100 ? "bg-emerald-500" : "bg-[#001d6e]"}`}
-                          style={{ width: `${itemPct}%` }}
-                        />
-                      </div>
-                      <span className="text-[11px] font-semibold text-gray-600 whitespace-nowrap">{itemPct}%</span>
-                    </div>
-                  )}
-                  {canWrite && detail.session.scanStatus === "completed" && (
-                    <Button size="sm" variant="outline" onClick={() => reopenMutation.mutate()} disabled={reopenMutation.isPending}>
-                      <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reopen
-                    </Button>
-                  )}
-                  {canWrite && detail.session.scanStatus !== "completed" && (
-                    <Button
-                      size="sm"
-                      className="h-8 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
-                      onClick={() => setShowCompleteConfirm(true)}
-                    >
-                      Complete
-                    </Button>
-                  )}
+            {/* ── Rotated kiosk mode only. Unrotated, this whole header lives on the page's
+                PageHeader above; rotated, the fixed rotate overlay covers that, so the back
+                button, vehicle identity and the STV/status/Complete group fold into a card here
+                instead — same order, so the two orientations read the same. ── */}
+            {rotated && (
+              <div className="space-y-2 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
+                {/* Same order the unrotated PageHeader uses: Back to list on its own line at the
+                    top, then one identity line — the vehicle and when/where — with status, STV
+                    and Complete opposite it. */}
+                {scanBackButton}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    {scanVehicleTitle}
+                    {scanVehicleSummary && <span className="text-gray-300">&middot;</span>}
+                    {scanVehicleSummary}
+                  </div>
+                  <div className="flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             {activeSessionQuery.isLoading || !detail ? (
               <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
@@ -1281,38 +1381,99 @@ export default function Unloading() {
               <>
                 <div
                   className="grid grid-cols-1 gap-4 items-start"
-                  // Same row either way, but the split needs different math once rotated: the
-                  // draggable leftColWidth is a fixed PIXEL the user set against a real desktop
-                  // window, which can easily be wider than the rotated box's own available width
-                  // (tied to the screen's HEIGHT, often much smaller on a laptop) — squeezing
-                  // Scan Items down to nothing instead of just being proportioned wrong. Rotated
-                  // mode uses a %-based split instead, so it always fits whatever width the
-                  // rotated box actually has, on any screen.
+                  // Two columns only on a real landscape desktop. bigView (rotated kiosk, or a
+                  // naturally portrait screen) stacks instead: the draggable leftColWidth is a
+                  // fixed PIXEL the operator set against a real desktop window, and it's easily
+                  // wider than the room a rotated box actually has — that width is tied to the
+                  // screen's SHORT side — so holding a split there squeezed Scan Items down to
+                  // nothing. Full-width stacked cards give both the room they need.
                   style={
-                    rotated
-                      ? { gridTemplateColumns: "minmax(200px, 38%) 1fr" }
-                      : isDesktop && canWrite && !locked
+                    !bigView && isDesktop && canWrite && !locked
                       ? { gridTemplateColumns: `${leftColWidth}px 10px 1fr` }
                       : undefined
                   }
                 >
-                  <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-                    <div className="flex items-center gap-2 px-4 sm:px-5 py-3 border-b border-gray-100">
-                      <Truck className="h-4 w-4 text-[#001d6e]" />
-                      <span className="text-sm font-semibold text-gray-900">Vehicle Details</span>
+                  {/* ── Batch totals — the left column of the split (where Vehicle Details used to
+                      be, now summarised up in the header). Same card Order Scan builds for its
+                      own Order Totals (client/src/pages/Scanning/Scan.tsx): a percent on the
+                      right, four dotted stat boxes on one row, and a progress bar with
+                      received/remaining under it. Each box filters the item table below to
+                      its own rows; Total is the "show everything" box, so it doubles as Clear. ── */}
+                  <div className={`flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm ${bigView ? "order-2" : ""}`}>
+                    {/* No title — the four labelled tiles under it already say what this is. */}
+                    <div className="flex items-baseline justify-end gap-2">
+                      {itemTotals.expected <= 0 ? (
+                        <p className="text-sm font-medium text-gray-400">&mdash;</p>
+                      ) : itemPct >= 100 ? (
+                        <p className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+                          <CheckCircle2 className="h-4 w-4" /> Complete
+                        </p>
+                      ) : (
+                        <p className="text-sm font-medium text-gray-400">{itemPct}% complete</p>
+                      )}
                     </div>
-                    <div className="grid grid-cols-2 gap-3 text-sm px-4 sm:px-5 py-4">
-                      <div><div className="text-xs text-gray-400">Vehicle</div><div className="font-semibold text-[#001d6e]">{detail.session.vehicleNumber}</div></div>
-                      <div><div className="text-xs text-gray-400">Order Date</div><div className="font-semibold">{detail.session.orderDate}</div></div>
-                      <div><div className="text-xs text-gray-400">Plant</div><div className="font-semibold"><PlantBadge plant={detail.session.plant} /></div></div>
-                      <div>
-                        <div className="text-xs text-gray-400" title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">Batch</div>
-                        <div className="font-semibold">{detail.session.partIndex}</div>
+
+                    {/* In the desktop split this column is a dragged PIXEL width, not a viewport
+                        one, so the fold to 2×2 keys off that width rather than a sm: breakpoint —
+                        which would keep four across in a 320px column and overflow every tile.
+                        Stacked (bigView, mobile, or no Scan Items card) the card spans the full
+                        width, so the ordinary viewport breakpoint is the right call again. */}
+                    <div
+                      className={`grid gap-2 ${
+                        !bigView && isDesktop && canWrite && !locked
+                          ? leftColWidth >= TOTALS_ONE_ROW_MIN ? "grid-cols-4" : "grid-cols-2"
+                          : "grid-cols-2 sm:grid-cols-4"
+                      }`}
+                    >
+                      {([
+                        { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                        { key: "done" as const, label: "Received", value: itemTotals.received, plt: itemTotals.pltReceived, dot: "bg-emerald-500", text: "text-emerald-600" },
+                        { key: "remaining" as const, label: "Remaining", value: itemTotals.remaining, plt: itemTotals.pltRemaining, dot: "bg-red-500", text: "text-red-600" },
+                        { key: "extra" as const, label: "Extra", value: itemTotals.extra, plt: itemTotals.pltExtra, dot: "bg-orange-500", text: itemTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                      ]).map((s) => {
+                        const isActive = itemStatusFilter === s.key;
+                        return (
+                          <button
+                            key={s.label}
+                            type="button"
+                            onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
+                            aria-pressed={isActive}
+                            title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                            className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                              isActive
+                                ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
+                                : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                            }`}
+                          >
+                            <div className="flex items-center justify-center gap-1.5">
+                              <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                            </div>
+                            <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                            <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="space-y-1">
+                      {/* itemPct, not received/expected raw: received here already includes extras
+                          (it sums item.scanned, which can exceed expected), so an over-received
+                          batch would otherwise push the bar past its own track. */}
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                        <div
+                          className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                          style={{ width: `${itemPct}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[10px] font-medium text-gray-400">
+                        <span>{itemTotals.received} received</span>
+                        <span>{itemTotals.remaining} remaining</span>
                       </div>
                     </div>
                   </div>
 
-                  {isDesktop && canWrite && !locked && !rotated && (
+                  {isDesktop && canWrite && !locked && !bigView && (
                     <div
                       onMouseDown={handleColumnResizeStart}
                       title="Drag to resize"
@@ -1323,7 +1484,10 @@ export default function Unloading() {
                   )}
 
                   {canWrite && !locked && (
-                    <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+                    // order-1 stacked: the barcode box is what the operator reaches for first, so
+                    // it leads and the totals read as the result underneath. Side by side the
+                    // source order already puts totals on the left, so no ordering is needed.
+                    <div className={`rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden ${bigView ? "order-1" : ""}`}>
                       <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                         <ScanLine className="h-4 w-4 text-[#001d6e]" />
                         <span className="text-sm font-semibold text-gray-900">Scan Items</span>
@@ -1344,31 +1508,6 @@ export default function Unloading() {
                             <Keyboard className="h-3.5 w-3.5" /> Manual
                           </button>
                         </div>
-
-                        {/* Main STV selector — same per-plant picker Order Scan has; sets the
-                            default for the next scan confirmation too (see the dialog's own STV
-                            select below). */}
-                        {stvs.length > 0 && (
-                          <div className="flex items-center gap-2">
-                            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
-                            <Select
-                              value={selectedStv || NO_STV}
-                              onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}
-                            >
-                              <SelectTrigger className={`h-8 w-44 justify-center rounded-xl border-2 text-center text-sm font-semibold ${
-                                selectedStv ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-500"
-                              }`}>
-                                <SelectValue placeholder="Select STV…" />
-                              </SelectTrigger>
-                              <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
-                                <SelectItem value={NO_STV}>— Select STV —</SelectItem>
-                                {stvs.map((s) => (
-                                  <SelectItem key={s} value={s}>{s}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        )}
 
                         <div className="relative w-full bg-black rounded-2xl overflow-hidden" style={{ display: itemScanMode === "camera" ? "block" : "none", height: "clamp(190px, 40vw, 260px)" }}>
                           <video ref={itemVideoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
@@ -1403,34 +1542,6 @@ export default function Unloading() {
                       </div>
                     </div>
                   )}
-                </div>
-
-                {/* ── Totals strip — same "4 clickable stat tiles with a pallet count under each
-                    number" pattern as Order Scan's own item table (client/src/pages/Scanning/
-                    Scan.tsx). Clicking a tile filters the table below to just that bucket. ── */}
-                <div className="grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white">
-                  {([
-                    { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, text: "text-gray-900" },
-                    { key: "done" as const, label: "Received", value: itemTotals.received, plt: itemTotals.pltReceived, text: "text-emerald-600" },
-                    { key: "remaining" as const, label: "Remaining", value: itemTotals.remaining, plt: itemTotals.pltRemaining, text: "text-red-600" },
-                    { key: "extra" as const, label: "Extra", value: itemTotals.extra, plt: itemTotals.pltExtra, text: itemTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
-                  ]).map((s) => {
-                    const isActive = itemStatusFilter === s.key;
-                    return (
-                      <button
-                        key={s.label}
-                        type="button"
-                        onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
-                        aria-pressed={isActive}
-                        title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                        className={`text-center px-2 py-1.5 transition-colors ${isActive ? "bg-[#001d6e]/[0.06] ring-1 ring-inset ring-[#001d6e]/30" : "hover:bg-gray-50"}`}
-                      >
-                        <p className="uppercase tracking-wide text-gray-400 text-xs">{s.label}</p>
-                        <p className={`font-bold text-2xl ${s.text}`}>{s.value}</p>
-                        <p className={`font-bold text-sm ${s.text}`}>{s.plt.toFixed(2)} plt</p>
-                      </button>
-                    );
-                  })}
                 </div>
 
                 <div ref={itemSearchRef} className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
@@ -1489,8 +1600,8 @@ export default function Unloading() {
                     emptyState="No items on this batch."
                     noResultsState="No items match your search."
                     hasActiveFilters={!!itemStatusFilter || !!itemSearchText}
-                    isStickyHeader={rotated}
-                    maxHeight={rotated ? (quarterTurn ? "62vw" : "62vh") : undefined}
+                    isStickyHeader={bigView}
+                    maxHeight={bigView ? (quarterTurn ? "62vw" : "62vh") : undefined}
                   />
                 </div>
 

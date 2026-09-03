@@ -21,14 +21,18 @@ interface CurrentUser {
   department?: string;
 }
 
+// Pages that scan at a fixed station, where the header is worth trading away for table height.
+const HEADER_HIDEABLE_PATHS = ['/scan', '/unloading'];
+
 const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   const [location] = useLocation();
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  // Scan page only: let the operator collapse the "Welcome" header to reclaim vertical space for
-  // the items table. Remembered across reloads since a scanning station keeps the same preference.
-  const isScanPage = location === '/scan';
+  // Scanning pages: let the operator collapse the "Welcome" header to reclaim vertical space for
+  // the items table. Remembered across reloads since a scanning station keeps the same preference
+  // — one shared key rather than one per page, because it's the same physical station either way.
+  const isScanPage = HEADER_HIDEABLE_PATHS.includes(location);
   const [scanHeaderHidden, setScanHeaderHidden] = useState(
     () => localStorage.getItem('scanHeaderHidden') === 'true',
   );
