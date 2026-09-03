@@ -4,6 +4,7 @@ import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty } from './order-scan';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
+import { pushOrderStatusToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
 
 // Loading — two things happen here:
 //   1. Link a vehicle (from Vehicle Master) onto a Proforma Slip: sets the slip's vehicleNumber,
@@ -44,6 +45,16 @@ function canCompleteLoad(user: any): boolean {
 function requireCompleteLoadAccess(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
   if (!canCompleteLoad(req.user)) return res.status(403).json({ message: 'You do not have permission to complete this load.' });
+  next();
+}
+
+// Reopening (undoing Complete) is admin-only — deliberately stricter than completing a load.
+// Completing is a routine step anyone with load-completion rights can do; reopening un-does a
+// finished, audited state (and re-enables scanning/stock changes against it), so it's reserved
+// for admin/super-admin rather than everyone canCompleteLoad() already allows.
+function requireReopenAccess(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Only an admin can reopen a completed load.' });
   next();
 }
 
@@ -149,8 +160,21 @@ router.get('/loading/proforma/search', requirePageAccess('loading'), async (req:
 // gun) or an Enter/suggestion-pick resolves to a specific order number.
 router.get('/loading/proforma/:orderNumber', requirePageAccess('loading'), async (req: Request, res: Response) => {
   try {
-    const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    let slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+
+    // Successfully opening an order for loading IS "starting to load it" — flip to LOADING right
+    // here, not only on the later explicit Link-vehicle click (which can be skipped entirely
+    // when a vehicle number already arrived pre-filled from Notion, letting scanning — and even
+    // full completion — happen without it). Guarded so this only fires once per order (skips if
+    // already LOADING or already complete) and only for someone who could actually change it, so
+    // a read-only viewer opening the order doesn't silently write to Notion.
+    if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS && hasWriteAccess(req.user, 'loading')) {
+      const withStatus = await storage.updateProformaSlip(slip.id, { notionStatus: NOTION_LOADING_STATUS } as any);
+      if (withStatus) slip = withStatus;
+      void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
+    }
+
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete } = await withProgress(slip, rawItems);
     res.json({ slip: await withRto(slip), items, allComplete });
@@ -268,6 +292,10 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
       vehicleInfoId: vehicle.id,
       totalVolume: vehicle.volume != null ? String(vehicle.volume) : slip.totalVolume,
       vehicleAssignedByCode: userCode ?? null,
+      // Kept in lockstep with the Notion push below (NOTION_LOADING_STATUS) rather than waiting
+      // for the next Notion sync/import to pull it back — so the app's own notionStatus column
+      // reflects "loading started" immediately too.
+      notionStatus: NOTION_LOADING_STATUS,
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to link vehicle to proforma slip' });
 
@@ -290,6 +318,10 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
     });
 
     res.json({ slip: await withRto(updated), vehicle });
+
+    // Best-effort, after the response — linking a vehicle means loading has started. Never
+    // blocks/fails the request itself (see notionOrderStatusSync.ts).
+    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_STATUS);
   } catch (error) {
     console.error('Error linking vehicle to proforma slip:', error);
     res.status(500).json({ message: 'Failed to link vehicle' });
@@ -411,6 +443,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     if (allComplete && !(slip as any).loadingCompletedAt) {
       finalSlip = await storage.updateProformaSlip(slip.id, {
         loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null,
+        notionStatus: NOTION_LOADING_COMPLETE_STATUS,
       } as any) ?? slip;
     }
 
@@ -422,6 +455,11 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
         totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty),
       },
     });
+
+    // Best-effort, after the response — only when this scan is what just auto-completed it.
+    if (allComplete && finalSlip !== slip) {
+      void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
+    }
   } catch (error) {
     console.error('Error scanning item for loading:', error);
     res.status(500).json({ message: 'Failed to record scan' });
@@ -441,6 +479,7 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
     const { userCode, userName } = actor(req);
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null,
+      notionStatus: NOTION_LOADING_COMPLETE_STATUS,
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to complete load' });
 
@@ -455,6 +494,8 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete } = await withProgress(updated, rawItems);
     res.json({ slip: await withRto(updated), items, allComplete });
+
+    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
   } catch (error) {
     console.error('Error completing load:', error);
     res.status(500).json({ message: 'Failed to complete load' });
@@ -464,7 +505,7 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
 // POST /api/loading/proforma/:orderNumber/reopen — undoes Complete (auto or manual), same
 // permission as Complete itself. Purely a status flip: clears loadingCompletedAt/By so the order
 // can be scanned again; nothing else about the load (items already scanned, vehicle) is touched.
-router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading'), requireCompleteLoadAccess, async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading'), requireReopenAccess, async (req: Request, res: Response) => {
   try {
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
@@ -472,6 +513,7 @@ router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading')
     const { userCode, userName } = actor(req);
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingCompletedAt: null, loadingCompletedByCode: null,
+      notionStatus: NOTION_LOADING_STATUS,
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to reopen load' });
 
@@ -486,6 +528,9 @@ router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading')
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete } = await withProgress(updated, rawItems);
     res.json({ slip: await withRto(updated), items, allComplete });
+
+    // Symmetric with completing — reopening un-does "DISPATCHED" back to "LOADING" in Notion too.
+    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_STATUS);
   } catch (error) {
     console.error('Error reopening load:', error);
     res.status(500).json({ message: 'Failed to reopen load' });
@@ -638,7 +683,9 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
       if (!allComplete) {
         await storage.updateProformaSlip(slip.id, {
           loadingCompletedAt: null, loadingCompletedByCode: null,
+          notionStatus: NOTION_LOADING_STATUS,
         } as any);
+        void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
       }
     }
 
