@@ -1581,8 +1581,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // parent row), not the item, so every item in a slip is grouped under that one slip's plant.
     // Reliable sales tracking only starts SALES_TRACKING_START — earlier proforma data is not
     // dependable, so unlike Expected Qty's true all-time sum, the "all dates" default floors
-    // there instead of summing everything that ever existed.
-    const SALES_TRACKING_START = '2026-08-01';
+    // there instead of summing everything that ever existed. Admin-editable on the Settings page
+    // (sales_settings — see server/index.ts's migration / server/routes/settings-admin.ts's
+    // GET/PUT /settings/sales-tracking-start) rather than a hardcoded constant.
+    const { rows: salesSettingsRows } = await pool.query(
+      `SELECT sales_tracking_start_date AS "salesTrackingStartDate" FROM sales_settings ORDER BY id LIMIT 1`,
+    );
+    const SALES_TRACKING_START = salesSettingsRows[0]?.salesTrackingStartDate ?? '2026-08-01';
     const saleByKey = new Map<string, number>();
     let saleTotal = 0;
     const saleOnlyRows: typeof items = [];
@@ -1725,8 +1730,10 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       // "all dates" mode, where expectedTotal is a sum across every order ever uploaded instead.
       expectedDate: singleDate, expectedTotal: hasExpected ? expectedTotal : null,
       // saleDate mirrors expectedDate — null in "all dates" mode, where saleTotal is a sum from
-      // SALES_TRACKING_START onward rather than one explicit date's sales.
-      saleDate: singleDate, saleTotal: hasSale ? saleTotal : null,
+      // SALES_TRACKING_START onward rather than one explicit date's sales. salesTrackingStart is
+      // sent along so the client can label that "since ..." text with the real, admin-editable
+      // date (Settings > Sales Tracking Start) instead of hardcoding it.
+      saleDate: singleDate, saleTotal: hasSale ? saleTotal : null, salesTrackingStart: SALES_TRACKING_START,
     });
   } catch (error) {
     console.error('Error generating plant stock report:', error);

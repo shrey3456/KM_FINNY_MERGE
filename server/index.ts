@@ -301,6 +301,19 @@ app.use((req, res, next) => {
     // records (order_scan_events.stv, backed by plant_stvs).
     await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS stv TEXT`);
 
+    // Single-row admin-editable settings (see shared/schema.ts's salesSettings comment) — starts
+    // with just the Sales tracking start date, previously a hardcoded constant. Seeded with that
+    // same default so behavior doesn't change until an admin edits it on the Settings page.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sales_settings (
+        id SERIAL PRIMARY KEY,
+        sales_tracking_start_date TEXT NOT NULL DEFAULT '2026-08-01',
+        updated_at TIMESTAMP DEFAULT NOW(),
+        updated_by_code TEXT REFERENCES users(user_code)
+      )
+    `);
+    await pool.query(`INSERT INTO sales_settings (sales_tracking_start_date) SELECT '2026-08-01' WHERE NOT EXISTS (SELECT 1 FROM sales_settings)`);
+
     // Loading-completion state lives directly on the slip (loadingCompletedAt/By), same pattern
     // as the existing print-lock fields (isPrintLocked/printedByCode/printedAt) on this table.
     await pool.query(`

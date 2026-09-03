@@ -66,8 +66,9 @@ type PlantStockRow = {
   expectedQty?: number | null;
   expectedPallets?: number | null;
   // Sum of Proforma Slip quantities for this barcode+plant — same date scoping as expectedQty,
-  // except the "all dates" default floors at Aug 1, 2026 (see saleDate below) instead of truly
-  // summing every slip ever raised. null when Sale Qty isn't populated at all.
+  // except the "all dates" default floors at the configured Sales Tracking Start date (see
+  // salesTrackingStart below, Settings > Data Management) instead of truly summing every slip
+  // ever raised. null when Sale Qty isn't populated at all.
   saleQty?: number | null;
   salePallets?: number | null;
   // Only populated when a single explicit date is selected — the running physical balance as
@@ -102,6 +103,10 @@ type PlantStockResponse = {
   // Same shape as expectedDate/expectedTotal, for Sale Qty (sourced from Proforma Slips).
   saleDate?: string | null;
   saleTotal?: number | null;
+  // The "all dates" floor Sale Qty sums from — admin-editable on Settings (Sales Tracking Start),
+  // sent along so the "since ..." label below always shows the real configured date instead of a
+  // hardcoded one.
+  salesTrackingStart?: string | null;
 };
 
 // One dated entry from the stock_movements ledger for a single (barcode, plant) — powers the
@@ -529,11 +534,14 @@ export default function OverallStock() {
   const expectedTotal = stockData?.expectedTotal ?? 0;
   const hasExpected = stockData?.expectedTotal != null;
   // Sale Qty (sum of Proforma Slip quantities) — same date scoping as Expected Qty, except the
-  // "all dates" default only counts sales from Aug 1, 2026 onward (reliable sales tracking's
-  // actual start), not truly every slip ever raised.
+  // "all dates" default only counts sales from the configured Sales Tracking Start date onward
+  // (Settings > Data Management), not truly every slip ever raised.
   const saleDate = stockData?.saleDate ?? null;
   const saleTotal = stockData?.saleTotal ?? 0;
   const hasSale = stockData?.saleTotal != null;
+  const salesTrackingStartLabel = stockData?.salesTrackingStart
+    ? new Date(`${stockData.salesTrackingStart}T00:00:00`).toLocaleDateString("en-IN", { year: "numeric", month: "short", day: "numeric" })
+    : null;
 
   const rows = stockData?.items ?? [];
   // null = admin (may pick any plant). Array = restricted user → lock the switcher to these.
@@ -1245,7 +1253,7 @@ export default function OverallStock() {
       cellClassName: cellBorder,
       render: (row) =>
         row.isEmptyBox || row.saleQty == null ? dash : (
-          <span title={saleDate ? `Sum of Proforma Slip quantity for ${saleDate}` : "Sum of Proforma Slip quantity since Aug 1, 2026"}>
+          <span title={saleDate ? `Sum of Proforma Slip quantity for ${saleDate}` : `Sum of Proforma Slip quantity since ${salesTrackingStartLabel ?? "the configured start date"}`}>
             {stackedCell(row.saleQty, row.salePallets, "text-emerald-600")}
           </span>
         ),
@@ -1517,11 +1525,12 @@ export default function OverallStock() {
               icon: ShoppingCart,
               tone: "emerald" as const,
               value: saleTotal.toLocaleString(),
-              // Same explicit-date-vs-all-dates split as Expected above, except "all dates"
-              // here means "since Aug 1, 2026" — sales tracking isn't reliable before that.
+              // Same explicit-date-vs-all-dates split as Expected above, except "all dates" here
+              // means "since the configured Sales Tracking Start date" (Settings > Data
+              // Management) — sales tracking isn't reliable before that.
               label: saleDate
                 ? `Sale (${saleDate}) · ${salePalletsTotal.toFixed(2)} plt`
-                : `Sale (Since Aug 1, 2026) · ${salePalletsTotal.toFixed(2)} plt`,
+                : `Sale (Since ${salesTrackingStartLabel ?? "start"}) · ${salePalletsTotal.toFixed(2)} plt`,
             }] : []),
             // Closing Stock (date-filter view) replaces Remain (all-dates view) — same math
             // (Opening + Purchase − Sale, or Purchase − Sale with no Opening), just labeled for

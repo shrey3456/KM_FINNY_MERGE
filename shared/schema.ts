@@ -1287,6 +1287,24 @@ export const insertBackupSettingsSchema = createInsertSchema(backupSettings).pic
   lastBackupDate: true, autoBackupEnabled: true, backupFrequencyHours: true,
 });
 
+// Single-row settings table — same pattern as backupSettings above. Currently holds just the
+// Sales tracking start date (Overall Stock's ledger: proforma data before this date isn't
+// reliable, so the "all dates" Sales total starts counting from here instead of the true
+// beginning — see SALES_TRACKING_START's old hardcoded home in server/routes/scan-sessions.ts).
+// Room to grow if another admin-editable, no-code-change setting shows up later.
+export const salesSettings = pgTable("sales_settings", {
+  id: serial("id").primaryKey(),
+  salesTrackingStartDate: text("sales_tracking_start_date").notNull().default('2026-08-01'),
+  updatedAt: timestamp("updated_at").defaultNow(),
+  updatedByCode: text("updated_by_code").references(() => users.userCode),
+});
+
+export const insertSalesSettingsSchema = createInsertSchema(salesSettings).pick({
+  salesTrackingStartDate: true, updatedByCode: true,
+});
+export type SalesSettings = typeof salesSettings.$inferSelect;
+export type InsertSalesSettings = z.infer<typeof insertSalesSettingsSchema>;
+
 export type BackupSettings = typeof backupSettings.$inferSelect;
 export type InsertBackupSettings = z.infer<typeof insertBackupSettingsSchema>;
 
