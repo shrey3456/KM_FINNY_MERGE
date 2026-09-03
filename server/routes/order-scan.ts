@@ -2125,6 +2125,141 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
   }
 });
 
+// PUT /api/order-scan/events/:id — body: { totalQty?, stv? }. Corrects a mistake in an already-
+// recorded scan without touching Scan History's Void button (a different action — Void removes
+// the scan; this corrects it).
+//
+// STV-only change: a plain field update, no side effects (STV never drives quantity/stock logic).
+//
+// Qty change: NOT an in-place UPDATE of total_qty. order_scan_events sits underneath a FIFO
+// credit-transfer system (an over-scan on one part can be automatically "credited" forward to
+// cover a shortfall on a later part — see reconcileCredits/the void handler above's is_credit
+// branches), and safely reproducing all of that for an arbitrary in-place qty change would mean
+// duplicating ~150 lines of extremely delicate logic. Instead this composes the two paths that
+// already handle it correctly: void the old event (same simple stock-reversal branch the void
+// handler above takes) then write a fresh one for the corrected qty via writeScanEvents (the same
+// function /scan itself uses) — two audit rows instead of a silently-edited one, matching how
+// every other correction in this app works. Deliberately narrower than Void: refuses to touch an
+// event that has ever been part of the credit system (credited_qty > 0, or is_credit itself) —
+// Void has the same credited_qty guard; this adds is_credit on top since a credit-transfer row
+// isn't a physical scan to begin with, there's no "corrected quantity" for it to become.
+router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res: Response) => {
+  const eventId = parseInt(req.params.id);
+  if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+
+  const hasQty = req.body?.totalQty !== undefined && req.body?.totalQty !== null;
+  const newQty = hasQty ? Math.round(Number(req.body.totalQty)) : null;
+  if (hasQty && (!Number.isFinite(newQty) || (newQty as number) <= 0)) {
+    return res.status(400).json({ message: 'totalQty must be a positive number' });
+  }
+  const hasStv = req.body?.stv !== undefined;
+  const newStv = hasStv ? (String(req.body.stv ?? '').trim() || null) : null;
+  if (!hasQty && !hasStv) return res.status(400).json({ message: 'Nothing to update' });
+
+  const editorCode = (req.user as any)?.userCode ?? null;
+  const editorName = (req.user as any)?.name ?? null;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const eventResult = await client.query(`SELECT * FROM order_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const event = eventResult.rows[0];
+    if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Scan event not found' }); }
+    if (event.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This scan is voided — nothing to edit' }); }
+
+    if (!hasQty || newQty === Number(event.total_qty)) {
+      // STV-only (or a qty "change" to the same value) — no stock/credit implications at all.
+      const { rows } = await client.query(
+        `UPDATE order_scan_events SET stv = $1 WHERE id = $2 RETURNING *`,
+        [hasStv ? newStv : event.stv, eventId],
+      );
+      await client.query('COMMIT');
+      return res.json({ event: rows[0] });
+    }
+
+    if (Number(event.credited_qty ?? 0) > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Part of this scan has already been credited to a later part — void it instead, then rescan the corrected quantity.' });
+    }
+    if (event.is_credit) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'This is a system-generated credit entry, not a direct scan — it has no quantity of its own to correct.' });
+    }
+
+    const sessResult = await client.query(`SELECT plant FROM order_import_sessions WHERE id = $1`, [event.session_id]);
+    const plant = sessResult.rows[0]?.plant as string | undefined;
+    const oldQty = Number(event.total_qty ?? 0);
+
+    // Reverse the old qty's stock — same simple branch the void handler above takes once
+    // is_credit/credited_qty have been ruled out (the two blocks above this one guarantee that).
+    if (plant && event.barcode) {
+      await reverseLiveScanStock(client, plant, event.barcode, event.is_extra ? 0 : oldQty, event.is_extra ? oldQty : 0, event.session_id);
+    }
+
+    // Un-book the old qty from order_scan_items (a plain Extra event was never added there to
+    // begin with — see writeScanEvents' own comment on that convention).
+    let item: any = null;
+    if (event.scan_item_id) {
+      const itemResult = await client.query(`SELECT * FROM order_scan_items WHERE id = $1 FOR UPDATE`, [event.scan_item_id]);
+      item = itemResult.rows[0] ?? null;
+      if (item && !event.is_extra) {
+        const newTotal = Math.max(0, Number(item.total_scanned_qty ?? 0) - oldQty);
+        const updateResult = await client.query(
+          `UPDATE order_scan_items
+           SET scanned_pallets   = GREATEST(0, COALESCE(scanned_pallets, 0) - $1),
+               scanned_loose_qty = GREATEST(0, COALESCE(scanned_loose_qty, 0) - $2),
+               total_scanned_qty = $3,
+               status            = CASE
+                 WHEN $3 >= expected_qty AND expected_qty > 0 THEN 'complete'
+                 WHEN $3 > 0                                  THEN 'partial'
+                 ELSE 'pending'
+               END
+           WHERE id = $4
+           RETURNING *`,
+          [event.pallets, event.loose_qty, newTotal, item.id],
+        );
+        item = updateResult.rows[0];
+      }
+    }
+
+    await client.query(
+      `UPDATE order_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
+      [editorCode, `Qty corrected: ${oldQty} -> ${newQty} (edited by ${editorName ?? editorCode ?? 'unknown'})`, eventId],
+    );
+
+    // Write the corrected event(s) the same way a live scan would — preserves the original
+    // scanner's identity (this is still their scan, just corrected), lands the new event(s)
+    // against the exact same session/item the original one already resolved to (no re-running
+    // the FIFO group's front-part/cross-part barcode resolution — that already happened once,
+    // correctly, when this was first scanned).
+    const r = await writeScanEvents(client, {
+      sessionId: event.session_id,
+      scanItem: item,
+      totalQty: newQty as number,
+      itemsPerPallet: Number(event.items_per_pallet ?? 0),
+      barcode: event.barcode,
+      resolvedItemName: event.item_name,
+      stv: hasStv ? newStv : event.stv,
+      userCode: event.scanned_by_code,
+      userName: event.scanned_by_name,
+      forceAllExtra: false,
+    });
+
+    if (plant) {
+      await applyLiveScanStock(client, plant, event.barcode, r.orderQty, r.extraQty, event.session_id);
+    }
+
+    await client.query('COMMIT');
+    res.json({ events: r.events, updatedItem: r.updatedItem });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to edit scan' });
+  } finally {
+    client.release();
+  }
+});
+
 // ── Empty Box (order-scan) ───────────────────────────────────────────────────
 // An "Empty Box" is a box the operator receives with no item/barcode to scan. It's logged as
 // an ordinary order_scan_events row — NOT a separate table and with NO dedicated flag column —

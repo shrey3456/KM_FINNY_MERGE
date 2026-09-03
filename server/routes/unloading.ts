@@ -1150,4 +1150,132 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
   }
 });
 
+// PUT /api/unloading/events/:id — body: { totalQty?, stv? }. Corrects a mistake in an already-
+// recorded scan. STV-only: a plain field update. Qty change: void the old event (same stock-
+// reversal branch the void handler above uses) then insert a fresh one for the corrected qty,
+// same regular/extra split /scan itself computes — two audit rows instead of a silently-edited
+// one. Refuses to touch an event that's part of the cross-part credit system (credited_qty > 0,
+// or is_credit itself — see unloadCredit.ts) — same guard Order Scan's own qty-edit endpoint
+// uses, since unload_scan_events carries the identical isCredit/creditedQty columns even though
+// Unloading's void handler above doesn't itself reason about them.
+router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Request, res: Response) => {
+  const eventId = parseInt(req.params.id);
+  if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+
+  const hasQty = req.body?.totalQty !== undefined && req.body?.totalQty !== null;
+  const newQty = hasQty ? Math.round(Number(req.body.totalQty)) : null;
+  if (hasQty && (!Number.isFinite(newQty) || (newQty as number) <= 0)) {
+    return res.status(400).json({ message: 'totalQty must be a positive number' });
+  }
+  const hasStv = req.body?.stv !== undefined;
+  const newStv = hasStv ? (String(req.body.stv ?? '').trim() || null) : null;
+  if (!hasQty && !hasStv) return res.status(400).json({ message: 'Nothing to update' });
+
+  const { userCode, userName } = actor(req);
+  const editorLabel = userName ?? userCode ?? 'unknown';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: eventRows } = await client.query(`SELECT * FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const event = eventRows[0];
+    if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Scan event not found' }); }
+    if (!canAccessPlant(req, event.plant)) { await client.query('ROLLBACK'); return res.status(403).json({ message: 'Access denied for this plant' }); }
+    if (event.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This scan is voided — nothing to edit' }); }
+
+    if (!hasQty || newQty === Number(event.total_qty)) {
+      const { rows } = await client.query(
+        `UPDATE unload_scan_events SET stv = $1 WHERE id = $2 RETURNING *`,
+        [hasStv ? newStv : event.stv, eventId],
+      );
+      await client.query('COMMIT');
+      return res.json({ event: rows[0] });
+    }
+
+    if (Number(event.credited_qty ?? 0) > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Part of this scan has already been credited to a later part — void it instead, then rescan the corrected quantity.' });
+    }
+    if (event.is_credit) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'This is a system-generated credit entry, not a direct scan — it has no quantity of its own to correct.' });
+    }
+
+    const oldQty = Number(event.total_qty ?? 0);
+    const product = await storage.getProductByBarcode(event.barcode);
+
+    // Reverse the old qty's stock — same direction the void handler above uses.
+    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+    await client.query(
+      `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
+      [oldQty, event.barcode, event.plant],
+    );
+    await client.query(
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
+       VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7)`,
+      [event.barcode, product?.id ?? null, event.plant, -oldQty, `Qty correction — old scan reversed (edited by ${editorLabel})`, event.session_id, userCode ?? null],
+    );
+
+    await client.query(
+      `UPDATE unload_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
+      [userCode ?? null, `Qty corrected: ${oldQty} -> ${newQty} (edited by ${editorLabel})`, eventId],
+    );
+
+    // Same regular/extra split /scan itself computes, against expected qty minus whatever's
+    // still received for this barcode (now excluding the just-voided old event).
+    const { rows: expectedRows } = await client.query(
+      `SELECT COALESCE(SUM(quantity), 0)::int AS expected FROM unload_import_items WHERE session_id = $1 AND barcode = $2`,
+      [event.session_id, event.barcode],
+    );
+    const expected = expectedRows[0]?.expected ?? 0;
+    const { rows: scannedRows } = await client.query(
+      `SELECT COALESCE(SUM(total_qty), 0)::int AS scanned FROM unload_scan_events WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+      [event.session_id, event.barcode],
+    );
+    const alreadyScanned = scannedRows[0]?.scanned ?? 0;
+    const remainingBefore = Math.max(0, expected - alreadyScanned);
+    const regularQty = Math.min(newQty as number, remainingBefore);
+    const extraQty = (newQty as number) - regularQty;
+
+    const state = await getPlantStateCode(client, event.plant ?? '');
+    const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
+    const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
+      `INSERT INTO unload_scan_events
+         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [
+        event.session_id, event.barcode, event.item_name, event.sap_code,
+        itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
+        itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
+        totalQty, isExtra, hasStv ? newStv : event.stv, event.plant, event.vehicle_number,
+        event.scanned_by_code, event.scanned_by_name,
+      ],
+    );
+    if (regularQty > 0) await insertEvent(regularQty, false);
+    if (extraQty > 0) await insertEvent(extraQty, true);
+
+    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+    await client.query(
+      `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
+       VALUES ($1,$2,$3,$4,0,NOW())
+       ON CONFLICT (barcode, plant) DO UPDATE SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
+      [event.barcode, product?.id ?? null, event.plant, newQty],
+    );
+    await client.query(
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
+       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,$8)`,
+      [event.barcode, product?.id ?? null, event.plant, newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, event.session_id, userCode ?? null],
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, regularQty, extraQty });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error editing unloading scan event:', error);
+    res.status(500).json({ message: 'Failed to edit scan' });
+  } finally {
+    client.release();
+  }
+});
+
 export default router;

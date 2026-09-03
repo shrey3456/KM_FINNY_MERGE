@@ -281,6 +281,39 @@ const Reports = () => {
     },
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
+  // Edit — corrects a mistake in an already-recorded scan (Qty, and STV where the source has
+  // one) without voiding it outright. Same permission pairs as Void above (editing is at least
+  // as sensitive) and the same per-source id-offset stripping. Load Event has no STV field at
+  // all (server/routes/loading.ts's PUT only accepts totalQty) — see editStvSupported below.
+  const [editTarget, setEditTarget] = useState<ScanHistoryItem | null>(null);
+  const [editQty, setEditQty] = useState("");
+  const [editStv, setEditStv] = useState("");
+  const editStvSupported = !editTarget?.isDispatch;
+  const editMutation = useMutation({
+    mutationFn: (payload: { id: number; totalQty?: number; stv?: string | null; isDispatch?: boolean; isUnload?: boolean }) => {
+      const body: Record<string, unknown> = {};
+      if (payload.totalQty !== undefined) body.totalQty = payload.totalQty;
+      if (payload.stv !== undefined) body.stv = payload.stv;
+      return apiRequest(
+        "PUT",
+        payload.isUnload
+          ? `/api/unloading/events/${payload.id}`
+          : payload.isDispatch
+          ? `/api/loading/events/${payload.id}`
+          : `/api/order-scan/events/${payload.id}`,
+        body,
+      ).then((r) => r.json());
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/load-events"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      setEditTarget(null);
+      toast({ title: "Scan updated" });
+    },
+    onError: (err: any) => toast({ title: "Failed to edit scan", description: err?.message, variant: "destructive" }),
+  });
   // Four sections — "all" (every source merged, the default so nothing's hidden by accident),
   // receiving history (the original page), Loading's own item-scanning history
   // (server/routes/loading.ts), and Unloading's own scan history (server/routes/unloading.ts).
@@ -986,6 +1019,22 @@ const Reports = () => {
     ...(canVoidScan || canVoidLoadEvent || canVoidUnloadEvent
       ? [
           {
+            id: "edit",
+            header: "Edit",
+            hideable: false,
+            width: 48,
+            align: "center" as const,
+            render: (row: ScanHistoryItem) =>
+              // Same permission-pair-per-source and exchange-row exclusion as Void below.
+              !row.voided && !row.isExchange && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
+                <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
+                  onClick={() => { setEditTarget(row); setEditQty(String(row.totalQty ?? 0)); setEditStv(row.stv ?? ""); }}
+                  title="Edit this scan">
+                  <Pencil className="h-3.5 w-3.5" />
+                </Button>
+              ),
+          } as DataTableColumn<ScanHistoryItem>,
+          {
             id: "void",
             header: "Void",
             hideable: false,
@@ -1685,6 +1734,64 @@ const Reports = () => {
           >
             {voidMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Void Scan
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* Edit scan — corrects Qty (and STV, where the source has one) on an already-recorded scan.
+        A qty change is never an in-place edit server-side: it voids the original event and writes
+        a fresh one for the corrected quantity, so the row you're looking at right now stays
+        exactly as it is here — you'll see it flip to "Voided" and a new corrected row appear once
+        this saves. */}
+    <Dialog open={!!editTarget} onOpenChange={(o) => { if (!o) { setEditTarget(null); setEditQty(""); setEditStv(""); } }}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Edit this scan</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-gray-600">
+          <span className="font-semibold text-gray-900">{editTarget?.itemName ?? editTarget?.barcode}</span> — scanned by {editTarget?.scannedByName ?? "—"}.
+        </p>
+        <div className="space-y-1.5">
+          <Label className="text-sm">Qty</Label>
+          <Input type="number" min="1" value={editQty} onChange={(e) => setEditQty(e.target.value)} />
+        </div>
+        {editStvSupported && (
+          <div className="space-y-1.5">
+            <Label className="text-sm">STV</Label>
+            <Input value={editStv} onChange={(e) => setEditStv(e.target.value)} placeholder="e.g. PLT-08" />
+          </div>
+        )}
+        {Number(editQty) !== (editTarget?.totalQty ?? 0) && (
+          <p className="text-xs text-amber-600">
+            Changing Qty voids this scan and records a new one for {editQty || 0} — stock and totals are adjusted by the difference.
+          </p>
+        )}
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={() => { setEditTarget(null); setEditQty(""); setEditStv(""); }} disabled={editMutation.isPending}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => {
+              if (!editTarget) return;
+              const id = editTarget.isDispatch ? editTarget.id - LOADING_EVENT_ID_OFFSET
+                : editTarget.isUnload ? editTarget.id - UNLOAD_EVENT_ID_OFFSET
+                : editTarget.id;
+              const qtyChanged = Number(editQty) !== (editTarget.totalQty ?? 0);
+              const stvChanged = editStvSupported && editStv.trim() !== (editTarget.stv ?? "");
+              editMutation.mutate({
+                id,
+                isDispatch: editTarget.isDispatch,
+                isUnload: editTarget.isUnload,
+                ...(qtyChanged ? { totalQty: Number(editQty) } : {}),
+                ...(stvChanged ? { stv: editStv.trim() || null } : {}),
+              });
+            }}
+            disabled={editMutation.isPending || !editQty || Number(editQty) <= 0 || (Number(editQty) === (editTarget?.totalQty ?? 0) && (!editStvSupported || editStv.trim() === (editTarget?.stv ?? "")))}
+            className="bg-[#001d6e] hover:bg-[#00154b] text-white"
+          >
+            {editMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Save
           </Button>
         </DialogFooter>
       </DialogContent>

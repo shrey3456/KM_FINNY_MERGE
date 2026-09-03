@@ -652,4 +652,124 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
   }
 });
 
+// PUT /api/loading/events/:id — body: { totalQty }. Corrects a mistake in an already-recorded
+// load scan (Load Event has no STV concept — see Unloading/Order Scan for that). No cached
+// progress table here (loaded-so-far is always summed live from loading_scan_events, same as
+// Unloading), and no cross-part credit system like Order Scan's — so unlike that one, this is a
+// direct in-place-feeling correction: reverse the old qty's stock, void the old event, then
+// re-run the same regular/extra split and stock application /scan itself does for the new qty.
+// Two audit rows (old voided, new corrected) instead of a silently-edited one, same as everywhere
+// else in this app.
+router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request, res: Response) => {
+  const eventId = parseInt(req.params.id);
+  if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+
+  const newQty = Math.round(Number(req.body?.totalQty));
+  if (!Number.isFinite(newQty) || newQty <= 0) return res.status(400).json({ message: 'totalQty must be a positive number' });
+
+  const { userCode, userName } = actor(req);
+  const editorLabel = userName ?? userCode ?? 'unknown';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: eventRows } = await client.query(`SELECT * FROM loading_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const event = eventRows[0];
+    if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Load event not found' }); }
+    if (event.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This scan is voided — nothing to edit' }); }
+
+    const oldQty = Number(event.total_qty ?? 0);
+    if (newQty === oldQty) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'That is already the current quantity' }); }
+
+    const slip = await storage.getProformaSlipByOrderNumber(event.order_number);
+    if (!slip) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Proforma slip not found' }); }
+
+    // Reverse the old qty's stock (Loading REMOVES stock, so reversing adds it back — same
+    // direction the void handler above uses) before checking whether the new qty actually fits.
+    const product = await storage.getProductByBarcode(event.barcode);
+    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+    await client.query(
+      `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
+       WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+      [oldQty, event.barcode, event.plant],
+    );
+
+    const { rows: stockRows } = await client.query(
+      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
+      [event.barcode, event.plant],
+    );
+    const inStock = stockRows[0]?.inStock ?? 0;
+    if (newQty > inStock) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: `Only ${inStock} in stock at ${event.plant} — cannot correct to ${newQty}.` });
+    }
+
+    await client.query(
+      `UPDATE loading_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
+      [userCode ?? null, `Qty corrected: ${oldQty} -> ${newQty} (edited by ${editorLabel})`, eventId],
+    );
+
+    // Same regular/extra split /scan itself computes, against expected qty minus whatever's
+    // still loaded (now excluding the just-voided old event).
+    const rawItems = await storage.getProformaSlipItems(slip.id);
+    const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(event.barcode));
+    const { rows: loadedRows } = await client.query(
+      `SELECT COALESCE(SUM(total_qty), 0)::int AS "loaded" FROM loading_scan_events
+       WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+      [slip.orderNumber, event.barcode],
+    );
+    const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
+    const expected = matchedItem?.quantity ?? 0;
+    const remainingBefore = matchedItem ? Math.max(0, expected - alreadyLoaded) : 0;
+    const regularQty = matchedItem ? Math.min(newQty, remainingBefore) : 0;
+    const extraQty = newQty - regularQty;
+
+    const state = await getPlantStateCode(client, event.plant ?? '');
+    const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
+    const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
+      `INSERT INTO loading_scan_events
+         (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        slip.orderNumber, slip.id, event.barcode, event.item_name, event.sap_code,
+        itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
+        itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
+        totalQty, isExtra, event.plant, event.scanned_by_code, event.scanned_by_name,
+      ],
+    );
+    if (regularQty > 0) await insertEvent(regularQty, false);
+    if (extraQty > 0) await insertEvent(extraQty, true);
+
+    await client.query(
+      `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+      [newQty, event.barcode, event.plant],
+    );
+    await client.query(
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
+       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
+      [event.barcode, product?.id ?? null, event.plant, -newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, userCode ?? null],
+    );
+
+    await client.query('COMMIT');
+
+    // Same completion-flip-in-either-direction reasoning as the void handler above, just checked
+    // both ways since an edit can push an order past complete OR pull it back short of complete.
+    const { allComplete } = await withProgress(slip, rawItems);
+    if (allComplete && !(slip as any).loadingCompletedAt) {
+      await storage.updateProformaSlip(slip.id, { loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null } as any);
+    } else if (!allComplete && (slip as any).loadingCompletedAt) {
+      await storage.updateProformaSlip(slip.id, { loadingCompletedAt: null, loadingCompletedByCode: null } as any);
+    }
+
+    res.json({ success: true, regularQty, extraQty });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error editing load event:', error);
+    res.status(500).json({ message: 'Failed to edit load event' });
+  } finally {
+    client.release();
+  }
+});
+
 export default router;
