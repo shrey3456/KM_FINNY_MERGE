@@ -893,6 +893,48 @@ router.get('/order-scan/sessions', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/order-scan/sessions/recent-complete — one row per PLANT: whichever session completed
+// most recently there, no matter how long ago (unlike the endpoint above, not limited to the
+// last 48h) — and ignores any plant filter, showing every plant the user can see at once. This
+// is deliberately the same set Reopen actually allows: the reopen rule is "only the most-
+// recently-completed session per plant/group is eligible" (see POST
+// /order-scan/sessions/:id/reopen), so every row here is guaranteed reopenable right now. Same
+// idea as Unloading's own /unloading/sessions/recent-complete.
+router.get('/order-scan/sessions/recent-complete', async (req: Request, res: Response) => {
+  try {
+    const userPlants = getUserPlants(req.user);
+    const conditions: string[] = ["s.is_deleted = false", "s.scan_status = 'completed'"];
+    const params: any[] = [];
+    if (userPlants !== null) {
+      params.push(userPlants);
+      conditions.push(`LOWER(s.plant) = ANY($${params.length})`);
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (s.plant)
+         s.id, s.plant, s.csv_file_name AS "csvFileName", s.row_count AS "rowCount",
+         s.imported_by_code AS "importedByCode", ib.name AS "importedByName",
+         s.created_at AS "createdAt", s.order_date AS "orderDate", s.scan_status AS "scanStatus",
+         s.scan_activated_by_code AS "scanActivatedByCode", ab.name AS "scanActivatedByName",
+         s.scan_activated_at AS "scanActivatedAt", s.scan_completed_at AS "scanCompletedAt",
+         s.receiving_session_id AS "receivingSessionId", s.part_index AS "partIndex",
+         COALESCE((SELECT SUM(oii.quantity) FROM order_import_items oii WHERE oii.session_id = s.id), 0)::int AS "totalQty",
+         COALESCE((SELECT SUM(oii.expected_pallets) FROM order_import_items oii WHERE oii.session_id = s.id), 0)::float AS "totalPallets"
+       FROM order_import_sessions s
+       LEFT JOIN users ib ON ib.user_code = s.imported_by_code
+       LEFT JOIN users ab ON ab.user_code = s.scan_activated_by_code
+       ${where}
+       ORDER BY s.plant, s.scan_completed_at DESC`,
+      params,
+    );
+
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch recent-complete list' });
+  }
+});
+
 // ── POST /api/order-scan/sessions/:id/activate ───────────────────────────────
 // Activates a session for scanning. Pre-populates orderScanItems from import items.
 // Only one active session per plant at a time. This is an Order Management page action

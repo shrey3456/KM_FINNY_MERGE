@@ -5,6 +5,7 @@ import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/p
 import { getPlantStateCode, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
 import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
+import { computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId } from '../lib/unloadGroupReport';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
 
 // Unloading — vehicle-wise receiving. See unloadImportSessions' comment in shared/schema.ts:
@@ -47,7 +48,21 @@ function requireUnloadingVoidAccess(req: Request, res: Response, next: any) {
   if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
   const user = req.user as any;
   if (isAdmin(req)) return next();
-  if (hasWriteAccess(user, 'unloading') && hasWriteAccess(user, 'scan-history')) return next();
+  // Deliberately unloading-only (not also requiring scan-history write, unlike the equivalent
+  // Loading/Order Scan void gates) — a user with unloading write access should be able to
+  // reopen/void within Unloading on its own.
+  if (hasWriteAccess(user, 'unloading')) return next();
+  return res.status(403).json({ message: 'Write access required' });
+}
+// Delete/delete-preview specifically (not reopen/void — those stay unloading-only above) also
+// accept order-import write access: a CSV's delete action now lives on the Order Import page's
+// own "Unloading" mode (client/src/pages/OrderImport.tsx) alongside its own delete, same as
+// POST /unloading/import and GET /unloading/csv-history already do.
+function requireUnloadingDeleteAccess(req: Request, res: Response, next: any) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  const user = req.user as any;
+  if (isAdmin(req)) return next();
+  if (hasWriteAccess(user, 'unloading') || hasWriteAccess(user, 'order-import')) return next();
   return res.status(403).json({ message: 'Write access required' });
 }
 
@@ -102,7 +117,10 @@ async function isEligibleToActivate(session: { id: number; groupId: number; part
 // POST /api/unloading/import — body: { plant, orderDate, csvFileName, items }
 // items: [{ vehicleNumber, barcode, itemName, sapCode, quantity }] — Vehicle Number is
 // mandatory per row; rows are grouped by distinct vehicle number into separate FIFO groups.
-router.post('/unloading/import', requirePageWrite('unloading'), async (req: Request, res: Response) => {
+// Also reachable with just order-import write access — the import UI for this now lives on the
+// Order Import page's own "Unloading" mode (client/src/pages/OrderImport.tsx), not the Unloading
+// page itself, so a user who can only reach that page still needs to be able to call this.
+router.post('/unloading/import', requirePageWrite(['unloading', 'order-import']), async (req: Request, res: Response) => {
   try {
     const { plant, orderDate, csvFileName, items } = req.body as {
       plant: string; orderDate: string; csvFileName: string;
@@ -410,6 +428,124 @@ router.get('/unloading/sessions/status-counts', requirePageAccess('unloading'), 
   }
 });
 
+// GET /api/unloading/csv-history — one row per uploaded CSV file, not per vehicle/batch like the
+// list endpoint above. A single CSV upload lands as one unload_import_sessions row PER VEHICLE
+// (one POST /unloading/import call, one plant/orderDate/csvFileName shared across all of them —
+// see that handler), so "which CSV was this" isn't visible anywhere in the existing Available/
+// History tabs. Grouped by (csv_file_name, plant, order_date, imported_by_code, and created_at
+// truncated to the minute — the per-vehicle inserts in one upload all land within the same
+// request, so same-minute is a safe, simple way to tell two uploads of an identically-named file
+// apart without needing a dedicated "import batch id" column).
+// Also reachable with just order-import view access — see POST /unloading/import's comment above.
+router.get('/unloading/csv-history', requirePageAccess(['unloading', 'order-import']), async (req: Request, res: Response) => {
+  try {
+    const limit = Math.max(1, Math.min(100, parseInt(String(req.query.limit ?? '20'), 10) || 20));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+    const userPlants = getUserPlants(req.user);
+
+    const conditions: string[] = ['s.is_deleted = false'];
+    const params: any[] = [];
+    if (userPlants !== null) {
+      params.push(userPlants);
+      conditions.push(`LOWER(s.plant) = ANY($${params.length})`);
+    }
+    if (typeof req.query.plant === 'string' && req.query.plant.trim()) {
+      params.push(req.query.plant.trim());
+      conditions.push(`LOWER(s.plant) = LOWER($${params.length})`);
+    }
+    if (typeof req.query.orderDate === 'string' && req.query.orderDate.trim()) {
+      params.push(req.query.orderDate.trim());
+      conditions.push(`s.order_date = $${params.length}`);
+    }
+    if (typeof req.query.search === 'string' && req.query.search.trim()) {
+      params.push(`%${req.query.search.trim()}%`);
+      conditions.push(`s.csv_file_name ILIKE $${params.length}`);
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+
+    const groupedFrom = `
+      FROM unload_import_sessions s
+      LEFT JOIN users u ON u.user_code = s.imported_by_code
+      ${where}
+      GROUP BY s.csv_file_name, s.plant, s.order_date, s.imported_by_code, date_trunc('minute', s.created_at)
+    `;
+
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(
+        `SELECT
+           s.csv_file_name AS "csvFileName",
+           s.plant,
+           s.order_date AS "orderDate",
+           s.imported_by_code AS "importedByCode",
+           MAX(u.name) AS "importedByName",
+           MIN(s.created_at) AS "uploadedAt",
+           COUNT(DISTINCT s.vehicle_number)::int AS "vehicleCount",
+           SUM(s.row_count)::int AS "totalRows",
+           array_agg(DISTINCT s.vehicle_number ORDER BY s.vehicle_number) AS "vehicleNumbers",
+           array_agg(s.id ORDER BY s.id) AS "sessionIds",
+           -- Paired vehicle->session mapping (each vehicle has exactly one session row per
+           -- upload) — vehicleNumbers/sessionIds above are separately-ordered arrays that can't
+           -- be zipped by index; this is what the CSV History UI's per-vehicle Edit action uses
+           -- to resolve which session a clicked vehicle chip actually opens.
+           json_agg(jsonb_build_object('vehicleNumber', s.vehicle_number, 'sessionId', s.id) ORDER BY s.vehicle_number) AS "vehicles"
+         ${groupedFrom}
+         ORDER BY MIN(s.created_at) DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limit, offset],
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS total FROM (SELECT 1 ${groupedFrom}) grouped`,
+        params,
+      ),
+    ]);
+
+    res.json({ uploads: dataRes.rows, total: countRes.rows[0]?.total ?? 0, limit, offset });
+  } catch (error) {
+    console.error('Error fetching unloading CSV history:', error);
+    res.status(500).json({ message: 'Failed to fetch CSV history' });
+  }
+});
+
+// GET /api/unloading/sessions/recent-complete — one row per PLANT: whichever batch completed
+// most recently there. Not the same as the History tab's "every completed batch" — this is
+// deliberately narrowed to exactly the set of batches Reopen actually allows (the reopen rule is
+// itself "only the most-recently-completed session per plant/group is eligible" — see POST
+// .../reopen below), so every row this returns is guaranteed reopenable right now. Always shows
+// every plant the user can see at once (ignores any plant filter) — the point of this tab is a
+// one-glance "what just finished, what can I reopen" view across plants, not a filtered list.
+router.get('/unloading/sessions/recent-complete', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const userPlants = getUserPlants(req.user);
+    const conditions: string[] = ["s.is_deleted = false", "s.scan_status = 'completed'"];
+    const params: any[] = [];
+    if (userPlants !== null) {
+      params.push(userPlants);
+      conditions.push(`LOWER(s.plant) = ANY($${params.length})`);
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (s.plant)
+         s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+         s.csv_file_name AS "csvFileName", s.group_id AS "groupId", s.part_index AS "partIndex",
+         s.scan_status AS "scanStatus", s.scan_activated_at AS "scanActivatedAt",
+         s.scan_completed_at AS "scanCompletedAt",
+         (SELECT COUNT(*) FROM unload_import_sessions g WHERE g.group_id = s.group_id AND g.is_deleted = false) AS "partsCount",
+         COALESCE((SELECT SUM(quantity) FROM unload_import_items WHERE session_id = s.id), 0)::int AS "expectedQty",
+         COALESCE((SELECT SUM(total_qty) FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE), 0)::int AS "scannedQty"
+       FROM unload_import_sessions s
+       ${where}
+       ORDER BY s.plant, s.scan_completed_at DESC`,
+      params,
+    );
+
+    res.json({ sessions: rows, total: rows.length });
+  } catch (error) {
+    console.error('Error fetching unloading recent-complete list:', error);
+    res.status(500).json({ message: 'Failed to fetch recent-complete list' });
+  }
+});
+
 // GET /api/unloading/sessions/:id/events — this part's scan history (audit trail + Void panel).
 router.get('/unloading/sessions/:id/events', requirePageAccess('unloading'), async (req: Request, res: Response) => {
   try {
@@ -421,7 +557,7 @@ router.get('/unloading/sessions/:id/events', requirePageAccess('unloading'), asy
 
     const { rows } = await pool.query(
       `SELECT id, barcode, item_name AS "itemName", sap_code AS "sapCode", pallets, loose_qty AS "looseQty",
-              total_qty AS "totalQty", is_extra AS "isExtra", scanned_by_code AS "scannedByCode",
+              total_qty AS "totalQty", is_extra AS "isExtra", stv, scanned_by_code AS "scannedByCode",
               scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
               voided, voided_by_code AS "voidedByCode", voided_at AS "voidedAt", void_reason AS "voidReason"
        FROM unload_scan_events WHERE session_id = $1 ORDER BY scanned_at DESC`,
@@ -431,6 +567,120 @@ router.get('/unloading/sessions/:id/events', requirePageAccess('unloading'), asy
   } catch (error) {
     console.error('Error fetching unloading scan history:', error);
     res.status(500).json({ message: 'Failed to fetch scan history' });
+  }
+});
+
+// GET /api/unloading/sessions/:id/part-report — single-vehicle-part Summary report, with
+// cross-part FIFO adjustments folded in when it's part of a multi-CSV group. Mirrors GET
+// /api/order-import/sessions/:id/part-report (see server/lib/unloadGroupReport.ts).
+router.get('/unloading/sessions/:id/part-report', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows: sessRows } = await pool.query(`SELECT plant FROM unload_import_sessions WHERE id = $1`, [id]);
+    if (!sessRows[0]) return res.status(404).json({ message: 'Session not found' });
+    if (!canAccessPlant(req, sessRows[0].plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const report = await computeUnloadPartReport(id);
+    if (!report) return res.status(404).json({ message: 'Session not found' });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build part report' });
+  }
+});
+
+// GET /api/unloading/sessions/:id/group-report — whole vehicle+date FIFO group's consolidated
+// report. :id can be any part in the group. Mirrors GET /api/order-import/sessions/:id/group-report.
+router.get('/unloading/sessions/:id/group-report', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows: sessRows } = await pool.query(`SELECT plant FROM unload_import_sessions WHERE id = $1`, [id]);
+    if (!sessRows[0]) return res.status(404).json({ message: 'Session not found' });
+    if (!canAccessPlant(req, sessRows[0].plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const groupId = await resolveUnloadGroupId(id);
+    if (!groupId) return res.status(404).json({ message: 'Group not found' });
+    const report = await computeUnloadGroupReport(groupId);
+    if (!report) return res.status(404).json({ message: 'Group not found' });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build group report' });
+  }
+});
+
+// GET /api/unloading/sessions/:id/scan-activity — every scan event for this part (?scope=group
+// for the whole vehicle+date group, each tagged with its Part # + file). Mirrors GET
+// /api/order-import/sessions/:id/scan-activity.
+router.get('/unloading/sessions/:id/scan-activity', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
+    const { rows: sessRows } = await pool.query(`SELECT plant FROM unload_import_sessions WHERE id = $1`, [id]);
+    if (!sessRows[0]) return res.status(404).json({ message: 'Session not found' });
+    if (!canAccessPlant(req, sessRows[0].plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const scope = String(req.query.scope ?? 'part');
+
+    let sessionIds: number[] = [id];
+    const labelBySession = new Map<number, { partIndex: number | null; csvFileName: string; scanActivatedAt: Date | null; scanCompletedAt: Date | null }>();
+
+    if (scope === 'group') {
+      const groupId = (await resolveUnloadGroupId(id)) ?? id;
+      const { rows: partsRows } = await pool.query(
+        `SELECT id, part_index AS "partIndex", csv_file_name AS "csvFileName",
+                scan_activated_at AS "scanActivatedAt", scan_completed_at AS "scanCompletedAt"
+         FROM unload_import_sessions
+         WHERE group_id = $1 AND is_deleted = false
+         ORDER BY part_index ASC, id ASC`,
+        [groupId],
+      );
+      if (partsRows.length > 0) {
+        sessionIds = partsRows.map((p: any) => p.id);
+        partsRows.forEach((p: any) => labelBySession.set(p.id, {
+          partIndex: p.partIndex, csvFileName: p.csvFileName, scanActivatedAt: p.scanActivatedAt, scanCompletedAt: p.scanCompletedAt,
+        }));
+      }
+    }
+    if (labelBySession.size === 0) {
+      const { rows: selfRows } = await pool.query(
+        `SELECT id, part_index AS "partIndex", csv_file_name AS "csvFileName",
+                scan_activated_at AS "scanActivatedAt", scan_completed_at AS "scanCompletedAt"
+         FROM unload_import_sessions WHERE id = $1`,
+        [id],
+      );
+      const self = selfRows[0];
+      if (self) { sessionIds = [self.id]; labelBySession.set(self.id, { partIndex: self.partIndex, csvFileName: self.csvFileName, scanActivatedAt: self.scanActivatedAt, scanCompletedAt: self.scanCompletedAt }); }
+    }
+
+    const { rows: events } = await pool.query(
+      `SELECT session_id AS "sessionId", barcode, item_name AS "itemName", sap_code AS "sapCode",
+              pallets, loose_qty AS "looseQty", total_qty AS "totalQty",
+              is_extra AS "isExtra", stv, scanned_by_code AS "scannedByCode",
+              scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
+              voided, voided_at AS "voidedAt", void_reason AS "voidReason",
+              is_credit AS "isCredit"
+       FROM unload_scan_events
+       WHERE session_id = ANY($1::int[])
+       ORDER BY scanned_at ASC, id ASC`,
+      [sessionIds],
+    );
+
+    const withLabels = events.map((e: any) => ({
+      ...e,
+      partIndex: labelBySession.get(e.sessionId)?.partIndex ?? null,
+      csvFileName: labelBySession.get(e.sessionId)?.csvFileName ?? null,
+    }));
+
+    const sessions = Array.from(labelBySession.entries()).map(([sid, info]) => ({
+      id: sid, partIndex: info.partIndex, csvFileName: info.csvFileName,
+      scanActivatedAt: info.scanActivatedAt ? new Date(info.scanActivatedAt).toISOString() : null,
+      scanCompletedAt: info.scanCompletedAt ? new Date(info.scanCompletedAt).toISOString() : null,
+    }));
+
+    res.json({ scope, totalEvents: withLabels.length, events: withLabels, sessions });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch scan activity' });
   }
 });
 
@@ -514,6 +764,7 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
   try {
     const barcode = String(req.body?.barcode ?? '').trim();
     const qty = Math.round(Number(req.body?.qty));
+    const stv = req.body?.stv ? String(req.body.stv).trim() : null;
     if (!barcode) return res.status(400).json({ message: 'barcode is required' });
     if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be a positive number' });
 
@@ -567,13 +818,13 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     try {
       const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
         `INSERT INTO unload_scan_events
-           (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, vehicle_number, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+           (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
           id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
           itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
           itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-          totalQty, isExtra, session.plant, session.vehicle_number, userCode ?? null, userName ?? null,
+          totalQty, isExtra, stv, session.plant, session.vehicle_number, userCode ?? null, userName ?? null,
         ],
       );
       if (regularQty > 0) await insertEvent(regularQty, false);
@@ -741,7 +992,7 @@ router.post('/unloading/sessions/:id/reopen', requireUnloadingVoidAccess, async 
 });
 
 // GET /api/unloading/sessions/:id/delete-preview — powers the delete confirmation dialog.
-router.get('/unloading/sessions/:id/delete-preview', requireUnloadingVoidAccess, async (req: Request, res: Response) => {
+router.get('/unloading/sessions/:id/delete-preview', requireUnloadingDeleteAccess, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
@@ -780,7 +1031,7 @@ router.get('/unloading/sessions/:id/delete-preview', requireUnloadingVoidAccess,
 //   mode=discard: the boxes were never real for this vehicle+date. Reverse the stock its scans
 //     added, void its events, and self-resolve (remapped_to_session_id = own id) so the next
 //     upload for this slot starts fresh instead of inheriting this deleted CSV's history.
-router.delete('/unloading/sessions/:id', requireUnloadingVoidAccess, async (req: Request, res: Response) => {
+router.delete('/unloading/sessions/:id', requireUnloadingDeleteAccess, async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session id' });
   const discard = String(req.query.mode ?? 'replace') === 'discard';

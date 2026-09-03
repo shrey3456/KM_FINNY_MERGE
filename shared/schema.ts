@@ -1169,6 +1169,10 @@ export const unloadScanEvents = pgTable("unload_scan_events", {
   looseQty: integer("loose_qty").default(0),
   totalQty: integer("total_qty").default(0),
   isExtra: boolean("is_extra").default(false), // scanned beyond this item's expected quantity
+  // Sub-transfer voucher code (see plantStvs above) — same per-plant STV concept Order Scan
+  // already records per event; picked once for the vehicle before scanning (see the STV
+  // selector in client/src/pages/Unloading/Unloading.tsx), stored on every event.
+  stv: text("stv"),
   plant: text("plant"),
   vehicleNumber: text("vehicle_number"),
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
@@ -1202,7 +1206,7 @@ export const insertUnloadImportItemSchema = createInsertSchema(unloadImportItems
 });
 export const insertUnloadScanEventSchema = createInsertSchema(unloadScanEvents).pick({
   sessionId: true, barcode: true, itemName: true, sapCode: true, pallets: true, looseQty: true,
-  totalQty: true, isExtra: true, plant: true, vehicleNumber: true, scannedByCode: true, scannedByName: true,
+  totalQty: true, isExtra: true, stv: true, plant: true, vehicleNumber: true, scannedByCode: true, scannedByName: true,
 });
 
 export type UnloadImportSession = typeof unloadImportSessions.$inferSelect;

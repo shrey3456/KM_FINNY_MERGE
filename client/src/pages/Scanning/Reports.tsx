@@ -248,9 +248,10 @@ const Reports = () => {
   // server/routes/loading.ts.
   const canVoidScan = isAdmin || (hasPageWriteAccess("scan-order") && hasPageWriteAccess("scan-history"));
   const canVoidLoadEvent = isAdmin || (hasPageWriteAccess("loading") && hasPageWriteAccess("scan-history"));
-  // Same idea again, "unloading" swapped in — see requireUnloadingVoidAccess in
-  // server/routes/unloading.ts.
-  const canVoidUnloadEvent = isAdmin || (hasPageWriteAccess("unloading") && hasPageWriteAccess("scan-history"));
+  // Unlike canVoidScan/canVoidLoadEvent above, requireUnloadingVoidAccess in
+  // server/routes/unloading.ts is deliberately unloading-write-only — it does NOT also require
+  // scan-history write.
+  const canVoidUnloadEvent = isAdmin || hasPageWriteAccess("unloading");
   const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const voidMutation = useMutation({
@@ -280,10 +281,12 @@ const Reports = () => {
     },
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
   });
-  // The page's two sections — receiving history (the original page) and Loading's own
-  // item-scanning history (server/routes/loading.ts). Same table/filters/export/void shell for
-  // both; only the server-side `source` scoping (isDispatch) and a couple of labels differ.
-  const [historySource, setHistorySource] = useState<"receiving" | "dispatch" | "unload">("receiving");
+  // Four sections — "all" (every source merged, the default so nothing's hidden by accident),
+  // receiving history (the original page), Loading's own item-scanning history
+  // (server/routes/loading.ts), and Unloading's own scan history (server/routes/unloading.ts).
+  // Same table/filters/export/void shell for all four; only the server-side `source` scoping
+  // (isDispatch/isUnload) and a couple of labels differ.
+  const [historySource, setHistorySource] = useState<"all" | "receiving" | "dispatch" | "unload">("all");
   // Seeded from whatever was left applied last time — see HISTORY_FILTERS_KEY.
   const [historySearch,  setHistorySearch]  = useState(() => readSavedHistoryFilters().search ?? "");
   const [historyPage,    setHistoryPage]    = useState(1);
@@ -1016,35 +1019,28 @@ const Reports = () => {
               ? "Every item loaded onto a vehicle — who scanned what, when, and for which order."
               : historySource === "unload"
               ? "Every item unloaded for a vehicle + date batch — who scanned what, when, and for which vehicle."
+              : historySource === "all"
+              ? "Every scan event across receiving, Loading, and Unloading — who scanned what, when, and where."
               : "Every individual receiving scan event — who scanned what, when, and on which order."
           }
         />
 
-        {/* Three sections, same table/filters/export/void shell underneath — only the server-side
-            `source` scoping (isDispatch/isUnload) and a couple of labels differ between them. */}
-        <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white w-fit">
-          <button
-            type="button"
-            onClick={() => { setHistorySource("receiving"); clearSimpleFilter("type"); }}
-            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold transition-colors ${historySource === "receiving" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
-          >
-            Scan History
-          </button>
-          <button
-            type="button"
-            onClick={() => { setHistorySource("dispatch"); clearSimpleFilter("type"); }}
-            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold transition-colors ${historySource === "dispatch" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
-          >
-            Load Event
-          </button>
-          <button
-            type="button"
-            onClick={() => { setHistorySource("unload"); clearSimpleFilter("type"); }}
-            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold transition-colors ${historySource === "unload" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
-          >
-            Unload Event
-          </button>
-        </div>
+        {/* Four sections, same table/filters/export/void shell underneath — only the server-side
+            `source` scoping (isDispatch/isUnload, or none at all for "all") and a couple of
+            labels differ between them. A dropdown rather than tab buttons since there are now
+            four options and "All" (the default) needs to read as just one more choice among
+            them, not a separate concept bolted on top of three tabs. */}
+        <Select value={historySource} onValueChange={(v) => { setHistorySource(v as typeof historySource); clearSimpleFilter("type"); }}>
+          <SelectTrigger className="h-9 w-[200px] rounded-full border-gray-300 bg-white text-sm font-semibold">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All</SelectItem>
+            <SelectItem value="receiving">Scan History</SelectItem>
+            <SelectItem value="dispatch">Load Event</SelectItem>
+            <SelectItem value="unload">Unload Event</SelectItem>
+          </SelectContent>
+        </Select>
 
         {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/
             hideable columns, zebra stripes, mobile swipe hint. No pagination — the whole filtered
@@ -1052,7 +1048,7 @@ const Reports = () => {
             Master View. */}
         <TableCard
           icon={History}
-          title={historySource === "dispatch" ? "Load Events" : historySource === "unload" ? "Unload Events" : "Scan Events"}
+          title={historySource === "dispatch" ? "Load Events" : historySource === "unload" ? "Unload Events" : historySource === "all" ? "All Events" : "Scan Events"}
           subtitle={
             <span className="inline-flex items-center gap-1.5">
               <span>{historyTotal > 0 ? `${historyTotal.toLocaleString()} events` : "0 events"}</span>
@@ -1421,8 +1417,8 @@ const Reports = () => {
             getRowId={(row) => String(row.id)}
             isLoading={historyLoading}
             loadingLabel="Loading scan history…"
-            emptyState={`No ${historySource === "dispatch" ? "load" : historySource === "unload" ? "unload" : "scan"} events found${selectedDate ? " for this date" : ""}.`}
-            noResultsState={`No ${historySource === "dispatch" ? "load" : historySource === "unload" ? "unload" : "scan"} events match your search.`}
+            emptyState={`No ${historySource === "dispatch" ? "load " : historySource === "unload" ? "unload " : historySource === "all" ? "" : "scan "}events found${selectedDate ? " for this date" : ""}.`}
+            noResultsState={`No ${historySource === "dispatch" ? "load " : historySource === "unload" ? "unload " : historySource === "all" ? "" : "scan "}events match your search.`}
             hasActiveFilters={!!historySearch || activeFilters.length > 0 || Object.keys(columnConditions).length > 0}
             rowClassName={(row) => {
               // Stripe by the row's stable id (not its position), so a new scan landing at the

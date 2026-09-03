@@ -2243,10 +2243,17 @@ export class DBStorage implements IStorage {
       createTableIfMissing: true,
       tableName: 'session',
       // Add error handling for deployment
-      errorLog: (err: Error) => {
+      // connect-pg-simple calls this as errorLog('some prefix:', err) — a STRING first, the
+      // actual Error second (see pruneSessions/pool.on('error') in its own source) — not a
+      // single Error argument. Treating the first arg as the Error and reading .message off it
+      // crashed the whole process (TypeError: Cannot read properties of undefined) the moment
+      // session pruning hit any failure, since a string has no .message property.
+      errorLog: (...args: unknown[]) => {
+        const err = args.find((a): a is Error => a instanceof Error);
+        const message = err?.message ?? '';
         // Only log unexpected errors (not relation already exists)
-        if (!err.message.includes('already exists') && !err.message.includes('session_pkey')) {
-          console.error('Session store error:', err.message);
+        if (!message.includes('already exists') && !message.includes('session_pkey')) {
+          console.error('Session store error:', ...args);
         }
       }
     });

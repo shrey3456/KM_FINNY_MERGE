@@ -904,7 +904,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isDispatch",
       true AS "isUnload",
       NULL::text AS "emptyBoxNote",
-      NULL::text AS stv,
+      use.stv,
       use.scanned_by_code   AS "scannedByCode",
       use.scanned_by_name   AS "scannedByName",
       use.scanned_at        AS "scannedAt",
@@ -1038,12 +1038,13 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const toParam      = typeof req.query.to      === 'string' && req.query.to.trim()      ? req.query.to.trim()      : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
     const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange'].includes(req.query.type) ? req.query.type : null;
-    // Three distinct sections on the Scan History page (client tabs) — "Scan History" (receiving
-    // + exchange corrections, the original page), "Load Event" (Loading's own item-scanning
-    // history, server/routes/loading.ts), and "Unload Event" (Unloading's own scan history,
-    // server/routes/unloading.ts). Default stays 'receiving' so any older/other caller that never
-    // sends this param keeps seeing exactly what it always saw.
-    const sourceParam  = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : 'receiving';
+    // Three distinct sections on the Scan History page (client dropdown) — "Scan History"
+    // (receiving + exchange corrections, the original page), "Load Event" (Loading's own
+    // item-scanning history, server/routes/loading.ts), and "Unload Event" (Unloading's own scan
+    // history, server/routes/unloading.ts) — plus 'all', which merges all three (no source
+    // condition added below at all). Default stays 'receiving' so any older/other caller that
+    // never sends this param keeps seeing exactly what it always saw.
+    const sourceParam  = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'all' ? 'all' : 'receiving';
     // Scopes to one proforma order's own events — used by the Loading page's own landing table
     // (server/routes/loading.ts), whose "click a row to expand" panel re-uses this same endpoint
     // rather than a dedicated one.
@@ -1076,11 +1077,14 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // Section split — see sourceParam comment above. Applied before the Type filter below so
     // 'regular'/'extra' inside the Load/Unload Event tabs only ever match their own rows, never
     // receiving ones (and vice versa), without any filter needing to know about the others.
-    conditions.push(
-      sourceParam === 'dispatch' ? `"isDispatch" = true`
-      : sourceParam === 'unload' ? `"isUnload" = true`
-      : `NOT "isDispatch" AND NOT "isUnload"`,
-    );
+    // 'all' adds no condition here at all — every source's rows pass through together.
+    if (sourceParam !== 'all') {
+      conditions.push(
+        sourceParam === 'dispatch' ? `"isDispatch" = true`
+        : sourceParam === 'unload' ? `"isUnload" = true`
+        : `NOT "isDispatch" AND NOT "isUnload"`,
+      );
+    }
     // Empty boxes and exchanges ARE shown in scan history as their own distinct statuses, but
     // they're never product scans — so 'regular'/'extra' filters must exclude both, and the
     // box/pallet totals below exclude them too (they don't count toward order quantity). A
@@ -1101,7 +1105,10 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // Summary tiles are about genuine scanning activity — always exclude exchanges from them
     // regardless of the active type filter, so "Total Boxes"/"Total Pallets" never mix in a
     // stock-correction quantity.
-    const summaryWhere = `${where} AND NOT "isExchange"`;
+    // where can be '' (no conditions at all — e.g. an admin with source=all and no other filter
+    // picked), so this can't unconditionally append "AND ..." onto it — that leaves a bare "AND"
+    // with no WHERE before it, a SQL syntax error.
+    const summaryWhere = where ? `${where} AND NOT "isExchange"` : `WHERE NOT "isExchange"`;
     const summaryFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${summaryWhere}`;
 
     // Destructuring order must track the array below: data, count, summary, column totals, scanners.
@@ -1184,13 +1191,20 @@ router.get('/reports/scan-history/filter-values', async (req: Request, res: Resp
       return res.json(empty);
     }
     // Same tab scoping as GET /reports/scan-history — Values checklists on the Load/Unload Event
-    // tabs shouldn't offer barcodes/plants/etc. that only ever appear on other rows, and vice versa.
-    const sourceParam = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : 'receiving';
+    // tabs shouldn't offer barcodes/plants/etc. that only ever appear on other rows, and vice
+    // versa. 'all' merges every source, so no source condition at all.
+    const sourceParam = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'all' ? 'all' : 'receiving';
     const sourceCond =
       sourceParam === 'dispatch' ? `"isDispatch" = true`
       : sourceParam === 'unload' ? `"isUnload" = true`
+      : sourceParam === 'all' ? null
       : `NOT "isDispatch" AND NOT "isUnload"`;
-    const plantWhere = allowedPlants !== null ? `WHERE LOWER("plant") = ANY($1::text[]) AND ${sourceCond}` : `WHERE ${sourceCond}`;
+    // Always starts with WHERE (falling back to the no-op "WHERE TRUE") — every call site below
+    // unconditionally appends "AND ..." after this, which is a syntax error if this were ever ''
+    // (an admin with source=all and no plant restriction has nothing else to put here).
+    const plantWhere = allowedPlants !== null
+      ? (sourceCond ? `WHERE LOWER("plant") = ANY($1::text[]) AND ${sourceCond}` : `WHERE LOWER("plant") = ANY($1::text[])`)
+      : (sourceCond ? `WHERE ${sourceCond}` : 'WHERE TRUE');
     const plantParams = allowedPlants !== null ? [allowedPlants] : [];
 
     const entries = Object.entries(SCAN_HISTORY_FILTER_COLUMNS);

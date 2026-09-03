@@ -297,6 +297,9 @@ app.use((req, res, next) => {
         ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0,
         ADD COLUMN IF NOT EXISTS credit_source_event_id INTEGER
     `);
+    // STV (sub-transfer voucher) per scan — same per-plant STV concept Order Scan already
+    // records (order_scan_events.stv, backed by plant_stvs).
+    await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS stv TEXT`);
 
     // Loading-completion state lives directly on the slip (loadingCompletedAt/By), same pattern
     // as the existing print-lock fields (isPrintLocked/printedByCode/printedAt) on this table.
