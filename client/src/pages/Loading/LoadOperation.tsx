@@ -747,7 +747,11 @@ export default function LoadOperation() {
                             <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-500 whitespace-nowrap">{new Date(r.createdAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
                             <td className="border-b border-gray-200 px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
                               <div className="flex items-center justify-end gap-1">
-                                {r.loadingCompletedAt && canComplete && canWrite && (
+                                  {/* Reopening is admin-only (server-enforced too, see
+                                    requireReopenAccess in server/routes/loading.ts) —
+                                    deliberately stricter than completing a load, since it
+                                    un-does a finished, audited state. */}
+                                {r.loadingCompletedAt && admin && (
                                   <Button
                                     size="sm" variant="ghost"
                                     className="h-7 px-2 text-[11px] text-amber-600 hover:bg-amber-50 hover:text-amber-700"

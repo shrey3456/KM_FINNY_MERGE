@@ -61,6 +61,20 @@ function normalizeToISODate(dateString: string, fallback: string): string {
   return fallback;
 }
 
+// The dispatch DB's "Vehi No:" rollup renders as "<vehicleNumber> {<rtoNumber>}" — e.g.
+// "87 {GJ-15-AV-5725}" — matching vehicle_info.link_to_vehicle's format (confirmed live: that's
+// literally the field it rolls up from), NOT vehicle_info.vehicle_number ("87" alone). Loading's
+// vehicle lookups (getVehicleInfoByVehicleNumber, and the Loading page's own vehicle search) all
+// key on the bare vehicle_number, so storing the raw "87 {GJ-15-AV-5725}" string here meant it
+// could never actually match a Vehicle Master row — the Link/Confirm step silently had nothing
+// to select, so a slip could look like it already had a vehicle without one ever really being
+// linkable. Strip the " {...}" suffix so proforma_slips.vehicleNumber matches Vehicle Master's
+// own vehicle_number column.
+function extractVehicleCode(raw: string): string {
+  const idx = raw.indexOf(' {');
+  return (idx >= 0 ? raw.slice(0, idx) : raw).trim();
+}
+
 // Fetches every order in [startDate, endDate] from the dispatch DB, cross-referenced with the
 // (much larger, separately-paged) ORDER database for the fields authoritative there — Plant,
 // Status, and total Quantity. See server/routes/fast-notion-import.ts's original comments for
@@ -157,7 +171,7 @@ export async function fetchProformaOrdersFromNotion(
         const orderInfo = orderInfoMap.get(orderNo);
         const plant = orderInfo?.plant || row['Plant :'] || row['Plant'] || 'VALSAD';
         const notionStatus = orderInfo?.status || row['+ / - Status :'] || '';
-        const vehicleNumber = row['Vehi No:'] || row['Vehi No :'] || row['Vehicle No.'] || '';
+        const vehicleNumber = extractVehicleCode(row['Vehi No:'] || row['Vehi No :'] || row['Vehicle No.'] || '');
         const invoiceNumber = row['Invoice No. :'] || row['For Invoice No. :'] || '';
         const partyState = row['Party State :'] || row['For State :'] || '';
         const storeKeeperInfo = row['StoreKeeper & Platform info :'] || '';
