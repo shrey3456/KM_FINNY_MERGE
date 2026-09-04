@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import Papa from "papaparse";
 import type { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Camera, ChevronLeft, ChevronRight, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
-  ScanLine, Search, Trash2, Truck, Upload, X, Zap,
+  AlertTriangle, Camera, CheckCircle2, ChevronLeft, ChevronRight, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
+  ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
+import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
+import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
+import { matchProductMasterMissingError } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -45,7 +47,7 @@ type SessionDetail = {
 };
 type ScanEventRow = {
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
-  pallets: number; looseQty: number; totalQty: number; isExtra: boolean; isCredit?: boolean;
+  pallets: number; looseQty: number; totalQty: number; isExtra: boolean; isCredit?: boolean; stv: string | null;
   scannedByCode: string | null; scannedByName: string | null; scannedAt: string;
   voided: boolean | null; voidedByCode: string | null; voidedAt: string | null; voidReason: string | null;
 };
@@ -100,11 +102,20 @@ function getUserPlantsClient(): string[] | null {
 // pattern as LAST_ORDER_KEY in client/src/pages/Loading/LoadOperation.tsx.
 const LAST_SESSION_KEY = "unloading_active_session_id";
 
-// Remembers the Vehicle Details / Scan Items split width, per browser, so a dragged layout
-// survives a refresh.
+// Remembers the totals / Scan Items split width, per browser, so a dragged layout survives a
+// refresh.
 const LEFT_COL_WIDTH_KEY = "unloading_left_col_width";
-const LEFT_COL_MIN = 260;
-const LEFT_COL_MAX = 640;
+const LEFT_COL_MIN = 320;
+const LEFT_COL_MAX = 760;
+// Below this the four totals tiles stop fitting on one row and fold to 2x2 — a 4-digit box
+// count at text-2xl plus its "1136.79 plt" line needs ~115px of tile to itself.
+const TOTALS_ONE_ROW_MIN = 460;
+
+// Remembers the operator's STV pick across page navigations — same reasoning and key pattern as
+// Order Scan's OS_STV_STORAGE_KEY (client/src/pages/Scanning/Scan.tsx): this page unmounts on
+// navigation, which would otherwise clear the selection and re-trigger "Select an STV".
+const UNLOADING_STV_STORAGE_KEY = "km-finny.unloading.selectedStv";
+const NO_STV = "__none__";
 
 // Kiosk rotation — same idea and CSS mechanics as Order Scan's own rotate view
 // (client/src/pages/Scanning/Scan.tsx, .kiosk-rotate-* in index.css): for a screen physically
@@ -123,124 +134,11 @@ function portalRotateClass(rotation: Rotation): string {
   return rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : rotation === 270 ? "-rotate-90" : "";
 }
 
-// ─── CSV column mapping (mirrors client/src/pages/OrderImport.tsx's mapping dialog, plus a
-// mandatory Vehicle Number field) — parses the raw CSV client-side, auto-matches columns by
-// common header names, then lets the user review/override the mapping before importing. ──────
-const TARGET_FIELDS = [
-  { key: "vehicleNumber", label: "Vehicle Number" },
-  { key: "barcode", label: "Barcode / SKU" },
-  { key: "itemName", label: "Item Name" },
-  { key: "sapCode", label: "SAP Code" },
-  { key: "quantity", label: "Quantity" },
-] as const;
-type TargetKey = (typeof TARGET_FIELDS)[number]["key"];
-type Mapping = Record<TargetKey, string>;
-const SKIP = "__skip__";
-
-function cleanHeader(h: string): string {
-  return h.replace(/^﻿/, "").replace(/[^\x20-\x7E]/g, "").trim();
-}
-
-// Reads a CSV quantity cell as a number, decimal-safely. The old approach stripped every
-// non-digit character (including the decimal point itself) before parsing — so a cell written
-// as "200.00" (a very common Excel export format for a whole-number column) became "20000" once
-// the "." was stripped, silently importing a quantity 100x too large. parseFloat (which
-// understands the decimal point) then a round is the correct way to read it; commas are still
-// stripped first since those are a thousands separator, not part of the number.
-function parseQtyCell(raw: string): number {
-  const n = parseFloat(raw.replace(/,/g, "").trim());
-  return Number.isFinite(n) ? Math.round(n) : 0;
-}
-
-function autoMatch(headers: string[]): Mapping {
-  const norm = headers.map((h) => h.toLowerCase().replace(/[\s_\-+*]/g, ""));
-  const best = (...kws: string[]) => {
-    for (const kw of kws) {
-      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
-      const i = norm.findIndex((h) => h === k);
-      if (i !== -1) return headers[i];
-    }
-    for (const kw of kws) {
-      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
-      const i = norm.findIndex((h) => h.startsWith(k));
-      if (i !== -1) return headers[i];
-    }
-    for (const kw of kws) {
-      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
-      const i = norm.findIndex((h) => h.includes(k));
-      if (i !== -1) return headers[i];
-    }
-    return SKIP;
-  };
-  // Exact-header-only match, no startsWith/includes fuzziness — for keywords too generic to
-  // safely substring-match (see quantity's "total"/"grand total" fallback below).
-  const bestExact = (...kws: string[]) => {
-    for (const kw of kws) {
-      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
-      const i = norm.findIndex((h) => h === k);
-      if (i !== -1) return headers[i];
-    }
-    return SKIP;
-  };
-  // "total"/"grand total" alone are too generic to substring-match safely — a CSV can easily
-  // have an unrelated "Total Amount"/"Total Value"/"Total Weight" column alongside the real
-  // quantity one, and best()'s startsWith/includes tiers would grab whichever "Total ..." column
-  // happens to come first, silently importing the wrong numbers as quantity. So they're only
-  // tried as an exact-header last resort, after every quantity-specific keyword (checked via the
-  // normal fuzzy best()) has already come up empty.
-  const quantityMatch = best("total qty", "total quantity", "quantity", "qty", "boxes", "nos", "pcs", "count", "units");
-  return {
-    vehicleNumber: best("vehicle no", "vehicle number", "vehicleno", "vehicle", "truck no", "truckno", "vehicle reg", "vehicle regno"),
-    barcode: best("barcode", "bar code", "bar_code", "sku", "product code", "productcode", "item code", "itemcode", "code"),
-    itemName: best("product name", "productname", "item name", "itemname", "description", "name", "item", "product", "material"),
-    sapCode: best("sap code", "sapcode", "sap_code", "sap", "material code", "materialcode"),
-    quantity: quantityMatch !== SKIP ? quantityMatch : bestExact("total", "grand total"),
-  };
-}
-
 function getLocalISODate(date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
-}
-
-function parseCsvRaw(file: File, toast: (opts: any) => void): Promise<{ name: string; headers: string[]; rows: Record<string, string>[] } | null> {
-  return new Promise((resolve) => {
-    Papa.parse<string[]>(file, {
-      header: false, skipEmptyLines: true, delimiter: "", encoding: "UTF-8",
-      complete: (result) => {
-        const rawRows = result.data as string[][];
-        if (rawRows.length === 0) {
-          toast({ title: "Empty file", description: `"${file.name}" has no rows.`, variant: "destructive" });
-          resolve(null);
-          return;
-        }
-        let headerRowIdx = 0;
-        let maxCols = 0;
-        for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
-          const nonEmpty = rawRows[i].filter((c) => c.trim() !== "").length;
-          if (nonEmpty > maxCols) { maxCols = nonEmpty; headerRowIdx = i; }
-        }
-        const headers = rawRows[headerRowIdx].map((h) => cleanHeader(h)).filter((h) => h !== "");
-        if (headers.length === 0) {
-          toast({ title: "No columns found", description: `Could not detect column headers in "${file.name}".`, variant: "destructive" });
-          resolve(null);
-          return;
-        }
-        const rows = rawRows.slice(headerRowIdx + 1).map((row) => {
-          const obj: Record<string, string> = {};
-          headers.forEach((h, i) => { obj[h] = row[i] ?? ""; });
-          return obj;
-        });
-        resolve({ name: file.name, headers, rows });
-      },
-      error: (err) => {
-        toast({ title: "Could not parse CSV", description: `"${file.name}": ${err.message}`, variant: "destructive" });
-        resolve(null);
-      },
-    });
-  });
 }
 
 // Same pattern as Scan.tsx's useOutsideClick — the ref must wrap both the search header AND the
@@ -274,6 +172,10 @@ function useDebounced<T>(value: T, delayMs: number): T {
 
 export default function Unloading() {
   const { toast } = useToast();
+  // hasPageWriteAccess already bypasses for admin/super-admin internally — also matches the
+  // server's requireUnloadingVoidAccess rule for POST /unloading/sessions/:id/reopen and
+  // /unloading/events/:id/void, which is deliberately unloading-write-only (no scan-history
+  // write also required, unlike the equivalent Loading/Order Scan void gates).
   const canWrite = hasPageWriteAccess("unloading");
 
   const [view, setView] = useState<"list" | "scan">(() => {
@@ -289,11 +191,16 @@ export default function Unloading() {
   const [sessionVehicleFilter, setSessionVehicleFilter] = useState("");
   const debouncedVehicleFilter = useDebounced(sessionVehicleFilter, 300);
   const [sessionDateFilter, setSessionDateFilter] = useState("");
-  // Two tabs — Available (which also holds in-progress "active" batches, marked green) and
-  // History (shows every status). "active"/"completed" stay valid values for the underlying
-  // query param but no longer have their own tab button. "Time Taken" only ever shows a value
-  // on the History tab, matching Order Management's own restriction.
-  const [statusTab, setStatusTab] = useState<"available" | "active" | "completed" | "history">("available");
+  // Three tabs — Available (which also holds in-progress "active" batches, marked green),
+  // History (shows every status), and Recent Complete (one row per PLANT — whichever batch
+  // finished there most recently; see /unloading/sessions/recent-complete's own comment for why
+  // this is the "what can I reopen right now" view, not a duplicate of History). Importing a CSV
+  // and browsing CSV upload history both moved to the Order Import page's own "Unloading" mode
+  // (client/src/pages/OrderImport.tsx) — this page is scan-workflow only now. "active"/"completed"
+  // stay valid values for the underlying query param but no longer have their own tab button.
+  // "Time Taken" only ever shows a value on the History tab, matching Order Management's own
+  // restriction.
+  const [statusTab, setStatusTab] = useState<"available" | "active" | "completed" | "history" | "recent-complete">("available");
   const sessionFilterParams =
     (sessionPlantFilter ? `&plant=${encodeURIComponent(sessionPlantFilter)}` : "")
     + (debouncedVehicleFilter.trim() ? `&vehicleNumber=${encodeURIComponent(debouncedVehicleFilter.trim())}` : "")
@@ -304,6 +211,7 @@ export default function Unloading() {
       "GET",
       `/api/unloading/sessions?limit=${limit}&offset=${offset}${sessionFilterParams}&status=${statusTab}`,
     ).then((r) => r.json()),
+    enabled: statusTab !== "recent-complete",
   });
   const sessions = sessionsQuery.data?.sessions ?? [];
   const total = sessionsQuery.data?.total ?? 0;
@@ -317,7 +225,28 @@ export default function Unloading() {
   });
   const statusCounts = statusCountsQuery.data ?? { available: 0, active: 0, completed: 0, total: 0 };
 
-  function selectStatusTab(key: "available" | "active" | "completed" | "history") {
+  // Recent Complete — one row per plant, ignores the plant filter/pagination on purpose (see the
+  // tab's own comment in the JSX below and the endpoint's comment in server/routes/unloading.ts).
+  const recentCompleteQuery = useQuery<{ sessions: SessionListItem[]; total: number }>({
+    queryKey: ["/api/unloading/sessions/recent-complete"],
+    queryFn: () => apiRequest("GET", "/api/unloading/sessions/recent-complete").then((r) => r.json()),
+    enabled: statusTab === "recent-complete",
+  });
+  const recentCompleteSessions = recentCompleteQuery.data?.sessions ?? [];
+  // Separate from reopenMutation above — that one always reopens activeSessionId (the batch
+  // currently open in the scan view). This tab lets you reopen straight from the list without
+  // opening the batch first, so it needs to take the id explicitly instead.
+  const recentCompleteReopenMutation = useMutation({
+    mutationFn: (id: number) => apiRequest("POST", `/api/unloading/sessions/${id}/reopen`, {}),
+    onSuccess: () => {
+      toast({ title: "Reopened" });
+      queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions/recent-complete"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
+    },
+    onError: (error: any) => toast({ title: "Failed to reopen", description: error?.message, variant: "destructive" }),
+  });
+
+  function selectStatusTab(key: "available" | "active" | "completed" | "history" | "recent-complete") {
     setStatusTab(key);
     setOffset(0);
   }
@@ -333,79 +262,6 @@ export default function Unloading() {
   const importablePlants = (allPlants ?? []).filter(
     (p: any) => userPlants === null || userPlants.includes(String(p.name ?? "").toLowerCase()),
   );
-
-  // ─── Import: plant/date/file picker, then a column-mapping dialog ───────────────────────────
-  const [showImport, setShowImport] = useState(false);
-  const [importPlant, setImportPlant] = useState("");
-  const [importDate, setImportDate] = useState("");
-  const [importFile, setImportFile] = useState<File | null>(null);
-  const [isImporting, setIsImporting] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  const [csvData, setCsvData] = useState<{ name: string; headers: string[]; rows: Record<string, string>[] } | null>(null);
-  const [mapping, setMapping] = useState<Mapping>({ vehicleNumber: SKIP, barcode: SKIP, itemName: SKIP, sapCode: SKIP, quantity: SKIP });
-  const [showMappingDialog, setShowMappingDialog] = useState(false);
-
-  function resetImportDialog() {
-    setImportPlant(""); setImportDate(""); setImportFile(null);
-    if (fileRef.current) fileRef.current.value = "";
-  }
-
-  async function handleFileChosen(file: File) {
-    const parsed = await parseCsvRaw(file, toast);
-    if (!parsed) return;
-    setCsvData(parsed);
-    setMapping(autoMatch(parsed.headers));
-    setShowImport(false);
-    setShowMappingDialog(true);
-  }
-
-  function handleImportNext() {
-    if (!importPlant.trim()) { toast({ title: "Select a plant first", variant: "destructive" }); return; }
-    if (!importDate.trim()) { toast({ title: "Select an Order Date first", variant: "destructive" }); return; }
-    if (!importFile) { toast({ title: "Select a CSV file first", variant: "destructive" }); return; }
-    handleFileChosen(importFile);
-  }
-
-  async function handleConfirmImport() {
-    if (!csvData) return;
-    const get = (row: Record<string, string>, key: TargetKey) => {
-      const col = mapping[key];
-      return col && col !== SKIP ? (row[col] ?? "") : "";
-    };
-    if (mapping.vehicleNumber === SKIP) { toast({ title: "Map the Vehicle Number column", variant: "destructive" }); return; }
-    if (mapping.barcode === SKIP) { toast({ title: "Map the Barcode column", variant: "destructive" }); return; }
-    if (mapping.quantity === SKIP) { toast({ title: "Map the Quantity column", variant: "destructive" }); return; }
-
-    const items = csvData.rows.map((row) => ({
-      vehicleNumber: get(row, "vehicleNumber").trim(),
-      barcode: get(row, "barcode").trim(),
-      itemName: get(row, "itemName").trim() || null,
-      sapCode: get(row, "sapCode").trim() || null,
-      quantity: parseQtyCell(get(row, "quantity")),
-    })).filter((it) => it.vehicleNumber || it.barcode);
-
-    setIsImporting(true);
-    try {
-      const data = await apiRequest("POST", "/api/unloading/import", {
-        plant: importPlant, orderDate: importDate, csvFileName: csvData.name, items,
-      }, false, true);
-
-      toast({
-        title: "Imported",
-        description: `${csvData.name} — ${data.vehicles.length} vehicle(s): ${data.vehicles.map((v: any) => `${v.vehicleNumber} (${v.rowCount})${v.replacesSessionId ? " · replaced" : ""}`).join(", ")}`,
-      });
-      queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
-      setShowMappingDialog(false);
-      setCsvData(null);
-      resetImportDialog();
-    } catch (error: any) {
-      console.error("Unloading import failed:", error);
-      toast({ title: "Import failed", description: error?.message || "Could not import CSV", variant: "destructive" });
-    } finally {
-      setIsImporting(false);
-    }
-  }
 
   // ─── Scan view ──────────────────────────────────────────────────────────────
   const [activeSessionId, setActiveSessionId] = useState<number | null>(() => {
@@ -432,13 +288,13 @@ export default function Unloading() {
   });
   const [expandedItemId, setExpandedItemId] = useState<number | null>(null);
 
-  // Draggable Vehicle Details / Scan Items split — desktop (lg) only; stacks to one column
-  // below that, same breakpoint Tailwind's own lg: prefix uses elsewhere on this page.
+  // Draggable totals / Scan Items split — desktop (lg) only; stacks to one column below that,
+  // same breakpoint Tailwind's own lg: prefix uses elsewhere on this page.
   const [leftColWidth, setLeftColWidth] = useState<number>(() => {
     try {
       const saved = parseInt(localStorage.getItem(LEFT_COL_WIDTH_KEY) || "", 10);
-      return Number.isFinite(saved) ? Math.min(LEFT_COL_MAX, Math.max(LEFT_COL_MIN, saved)) : 340;
-    } catch { return 340; }
+      return Number.isFinite(saved) ? Math.min(LEFT_COL_MAX, Math.max(LEFT_COL_MIN, saved)) : 520;
+    } catch { return 520; }
   });
   const [isDesktop, setIsDesktop] = useState(false);
   useEffect(() => {
@@ -457,6 +313,36 @@ export default function Unloading() {
   const rotateNext = () => setRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
+  const quarterTurn = rotation === 90 || rotation === 270;
+  // Natural portrait (window taller than wide) — a tablet or laptop turned upright should get the
+  // same single-column layout as manual Rotate, just without the 90° CSS turn, since the screen is
+  // already the right way up. Same pair Order Scan uses (isPortrait/bigView in Scan.tsx).
+  const [isPortrait, setIsPortrait] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(orientation: portrait)");
+    const onChange = () => setIsPortrait(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  // Drives the single-column layout; the actual 90° rotation stays tied to `rotated` alone. The
+  // two-column split can't just be left to Tailwind's lg: prefix here — those breakpoints key off
+  // the REAL (unrotated) window width, not the rotated container's effective width, so a rotated
+  // kiosk kept getting the desktop grid crammed into a narrow band. Same reason Order Scan forces
+  // its own single-column layout on for bigView instead of relying on breakpoints.
+  const bigView = rotated || isPortrait;
+  // Bounded, self-scrolling frame for tables in rotated mode — mirrors Order Scan's own
+  // kioskTableBoxClass exactly (client/src/pages/Scanning/Scan.tsx). Without this, a table left
+  // to flow naturally inside the rotated box has no cap of its own and no scrollbar to fall back
+  // on, so it either overflows the rotated box's bounds or gets squeezed by the browser's table
+  // layout algorithm into absurdly narrow columns with heavily-wrapped text — exactly the
+  // "cramped, not responsive" look reported. The %-of-viewport cap flips units on a quarter turn:
+  // that turns the subtree 90°, so content-space height runs along the viewport's WIDTH (vw)
+  // instead of its height (vh).
+  const kioskTableBoxClass = bigView
+    ? `overflow-auto kiosk-scroll ${quarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
+    : "";
   const portalRotate = rotated ? portalRotateClass(rotation) : "";
   function handleColumnResizeStart(e: React.MouseEvent) {
     e.preventDefault();
@@ -508,20 +394,41 @@ export default function Unloading() {
   const [itemSearchText, setItemSearchText] = useState("");
   const itemSearchRef = useOutsideClick(itemSearchOpen, () => setItemSearchOpen(false));
 
-  const filteredItems = (detail?.items ?? []).filter((item) => {
-    if (itemStatusFilter) {
-      const extra = Math.max(0, item.scanned - item.expected);
-      if (itemStatusFilter === "done" && !(item.scanned > 0)) return false;
-      if (itemStatusFilter === "remaining" && !(item.remaining > 0)) return false;
-      if (itemStatusFilter === "extra" && !(extra > 0)) return false;
-    }
-    if (itemSearchText.trim()) {
-      const q = itemSearchText.trim().toLowerCase();
-      const hay = `${item.itemName ?? ""} ${item.barcode ?? ""} ${item.sapCode ?? ""}`.toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    return true;
-  });
+  // Client-side "most recently scanned floats to top" ordering for the item table — same idea as
+  // Order Scan's osScanSeqRef (client/src/pages/Scanning/Scan.tsx). A monotonic counter bumped in
+  // scanMutation's onMutate (i.e. only once a scan is actually submitted, not merely dialog-opened),
+  // keyed by item id since server items here carry no lastScannedAt to fall back on. scanItemRef
+  // carries the matched item from wherever the scan was triggered (auto-scan or dialog confirm)
+  // through to onMutate. Reset whenever a different batch is opened. Declared here (ahead of
+  // filteredItems below, which reads it synchronously inside .sort()) rather than nearer
+  // scanMutation/pending further down — filteredItems' sort runs during render, not inside a
+  // later callback, so the ref must already be initialized by this point or it's a TDZ error.
+  const itemScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
+  const scanItemRef = useRef<SessionItem | null>(null);
+
+  const filteredItems = (detail?.items ?? [])
+    .filter((item) => {
+      if (itemStatusFilter) {
+        const extra = Math.max(0, item.scanned - item.expected);
+        if (itemStatusFilter === "done" && !(item.scanned > 0)) return false;
+        if (itemStatusFilter === "remaining" && !(item.remaining > 0)) return false;
+        if (itemStatusFilter === "extra" && !(extra > 0)) return false;
+      }
+      if (itemSearchText.trim()) {
+        const q = itemSearchText.trim().toLowerCase();
+        const hay = `${item.itemName ?? ""} ${item.barcode ?? ""} ${item.sapCode ?? ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    })
+    // Whatever was scanned most recently floats to the top — same behavior as Order Scan's item
+    // list (see itemScanSeqRef above). Never-scanned rows are left in their original order (stable).
+    .sort((a, b) => {
+      const seq = itemScanSeqRef.current.byId;
+      const aSeq = seq.get(a.id) ?? 0;
+      const bSeq = seq.get(b.id) ?? 0;
+      return bSeq - aSeq;
+    });
 
   const activateMutation = useMutation({
     mutationFn: (id: number) => apiRequest("POST", `/api/unloading/sessions/${id}/activate`, {}, false, true),
@@ -532,6 +439,7 @@ export default function Unloading() {
     setActiveSessionId(id);
     setView("scan");
     setItemBarcode(""); setItemScanMode("manual"); setItemStatusFilter(""); setExpandedItemId(null);
+    itemScanSeqRef.current = { seq: 0, byId: new Map() };
     try { localStorage.setItem(LAST_SESSION_KEY, String(id)); } catch { /* ignore */ }
   }
 
@@ -585,20 +493,67 @@ export default function Unloading() {
   })();
 
   const scanMutation = useMutation({
-    mutationFn: ({ barcode, qty }: { barcode: string; qty: number }) =>
-      apiRequest("POST", `/api/unloading/sessions/${activeSessionId}/scan`, { barcode, qty }, false, true),
+    mutationFn: ({ barcode, qty, stv }: { barcode: string; qty: number; stv?: string | null }) =>
+      apiRequest("POST", `/api/unloading/sessions/${activeSessionId}/scan`, { barcode, qty, stv: stv ?? null }, false, true),
+    onMutate: () => {
+      const item = scanItemRef.current;
+      if (item) {
+        const s = itemScanSeqRef.current;
+        s.seq += 1;
+        s.byId.set(item.id, s.seq);
+      }
+    },
     onSuccess: (data) => {
       queryClient.setQueryData(["/api/unloading/sessions", activeSessionId], { session: data.session, items: data.items, allComplete: data.allComplete });
+      // setQueryData above only updates the item table's own progress numbers (an instant,
+      // no-refetch cache write) — it does NOT touch the separate per-item history query
+      // (["/api/unloading/sessions", activeSessionId, "events"], powering each item row's
+      // expand panel), so without this, a just-recorded scan kept showing "No scan history for
+      // this item yet." until something else (e.g. a void, which invalidates more broadly)
+      // happened to refresh it.
+      queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId, "events"] });
       if (data.allComplete) toast({ title: "Batch complete", description: "Every item's expected quantity has been matched." });
     },
-    onError: (error: any) => toast({ title: "Scan failed", description: error?.message || "Could not record scan", variant: "destructive" }),
+    onError: (error: any) => {
+      const productMasterMissing = matchProductMasterMissingError(error);
+      if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
+      toast({ title: "Scan failed", description: error?.message || "Could not record scan", variant: "destructive" });
+    },
     onSettled: () => { scanLockRef.current = false; },
   });
+  const [productMasterMissingMessage, setProductMasterMissingMessage] = useState<string | null>(null);
 
   // ─── Manual/Camera barcode input, same-barcode cooldown, auto-scan popup — mirrors
   // client/src/pages/Loading/LoadOperation.tsx's item-scanning UX exactly. ─────────────────────
   const [itemScanMode, setItemScanMode] = useState<"camera" | "manual">("manual");
   const [itemBarcode, setItemBarcode] = useState("");
+
+  // ─── STV (sub-transfer voucher) — same per-plant picker Order Scan has, reusing its existing
+  // GET /api/order-scan/stvs endpoint (a generic plant-scoped lookup, not Order-Scan-specific).
+  // Picked once for the vehicle, stored on every scan event (see scanMutation below).
+  const [selectedStv, setSelectedStv] = useState(() => {
+    try { return localStorage.getItem(UNLOADING_STV_STORAGE_KEY) ?? ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    try {
+      if (selectedStv) localStorage.setItem(UNLOADING_STV_STORAGE_KEY, selectedStv);
+      else localStorage.removeItem(UNLOADING_STV_STORAGE_KEY);
+    } catch { /* storage unavailable (private mode) — in-memory state still works */ }
+  }, [selectedStv]);
+  const stvsQuery = useQuery<string[]>({
+    queryKey: ["/api/order-scan/stvs", detail?.session?.plant],
+    queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(detail!.session.plant)}`).then((r) => r.json()),
+    enabled: !!detail?.session?.plant,
+  });
+  const stvs = stvsQuery.data ?? [];
+  // Drop a remembered STV that doesn't belong to this plant's list, and default to the first STV
+  // once the list loads and nothing is picked yet — same reasoning as Order Scan's own effect.
+  useEffect(() => {
+    if (stvs.length === 0) return;
+    if (selectedStv && !stvs.includes(selectedStv)) { setSelectedStv(""); return; }
+    if (!selectedStv) setSelectedStv(stvs[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stvsQuery.data, selectedStv]);
   const [itemCameraReady, setItemCameraReady] = useState(false);
   const [itemCameraError, setItemCameraError] = useState<string | null>(null);
   const itemVideoRef = useRef<HTMLVideoElement>(null);
@@ -610,6 +565,10 @@ export default function Unloading() {
   const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null } | null>(null);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
+  const [dialogImageFailed, setDialogImageFailed] = useState(false);
+  useEffect(() => { setDialogImageFailed(false); }, [pending]);
+  const dialogPlt = pending?.item?.itemsPerPallet ?? 0;
+  const dialogResolvedImageName = pending?.item?.itemName ?? pending?.barcode;
 
   const [autoFeedback, setAutoFeedback] = useState<
     { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean } | null
@@ -642,6 +601,11 @@ export default function Unloading() {
     const barcode = rawBarcode.trim();
     if (!barcode || !detail || locked || scanLockRef.current || pending) return;
 
+    if (stvs.length > 0 && !selectedStv) {
+      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      return;
+    }
+
     const nb = normalize(barcode);
     const last = lastScanRef.current;
     if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) return;
@@ -649,11 +613,12 @@ export default function Unloading() {
 
     const item = detail.items.find((i) => normalize(i.barcode) === nb) ?? null;
     scanLockRef.current = true;
+    scanItemRef.current = item;
 
     const ipp = item?.itemsPerPallet ?? 0;
     const canAutoScan = autoScanEnabled && !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
-      scanMutation.mutate({ barcode, qty: ipp }, {
+      scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null }, {
         onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra),
       });
       setItemBarcode("");
@@ -755,6 +720,13 @@ export default function Unloading() {
     },
     onError: (error: any) => toast({ title: "Failed", description: error?.message, variant: "destructive" }),
   });
+
+  // ─── Reports — same dialog Order Import uses (Summary/Activity/Hourly, per-part + whole-group),
+  // pointed at Unloading's own report endpoints via basePath="unloading". ───────────────────────
+  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
+  const openReports = (s: SessionListItem) => {
+    setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.groupId, partIndex: s.partIndex });
+  };
 
   // ─── Delete (replace vs discard) ──────────────────────────────────────────────────────────
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; vehicleNumber: string; orderDate: string } | null>(null);
@@ -907,7 +879,10 @@ export default function Unloading() {
             <tbody>
               {rowEvents.map((ev) => (
                 <tr key={ev.id} className={ev.voided ? "opacity-50" : ""}>
-                  <td className="py-1 pr-3 tabular-nums">{ev.totalQty}{ev.isExtra ? " (extra)" : ""}{ev.isCredit ? " (credit)" : ""}</td>
+                  <td className="py-1 pr-3 tabular-nums">
+                    {ev.totalQty}{ev.isExtra ? " (extra)" : ""}{ev.isCredit ? " (credit)" : ""}
+                    {ev.stv && <span className="ml-1 text-gray-400">· {ev.stv}</span>}
+                  </td>
                   <td className="py-1 pr-3">{ev.scannedByName ?? ev.scannedByCode ?? "—"}</td>
                   <td className="py-1 pr-3">{new Date(ev.scannedAt).toLocaleString()}</td>
                   <td className="py-1 pr-3">{ev.voided ? <span className="text-red-500">Voided</span> : <span className="text-green-600">OK</span>}</td>
@@ -929,19 +904,136 @@ export default function Unloading() {
     );
   }
 
+  // ─── Scan-view header pieces ─────────────────────────────────────────────────────────
+  // Shared because they render in two different places. Normally they hang off the page's own
+  // PageHeader: Back to list above the title, the vehicle beside it, status + Complete opposite
+  // it. But PageHeader is hidden in rotated kiosk mode (the fixed rotate overlay covers it), so
+  // the rotated layout folds these same three pieces into its own batch bar instead.
+  const scanSession = detail?.session;
+
+  const scanBackButton = canWrite ? (
+    <Button variant="outline" size="sm" onClick={backToList}>&larr; Back to list</Button>
+  ) : null;
+
+  // While a vehicle is on the bay it IS the page — so the truck and its number take the title
+  // slot where "Unloading" sits on the list, and this carries the rest of the identity beside it.
+  const scanVehicleTitle = scanSession ? (
+    <div className="flex shrink-0 items-center gap-1.5 text-[#001d6e]">
+      <Truck className="h-5 w-5" />
+      <span className="text-2xl font-bold">{scanSession.vehicleNumber}</span>
+    </div>
+  ) : null;
+
+  // Replaces the old Vehicle Details card, whose column the totals tiles now occupy. The vehicle
+  // number moved up into the title above, so this is just what's left: when, and which plant.
+  const scanVehicleSummary = scanSession ? (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
+      <span className="font-medium text-gray-600">{scanSession.orderDate}</span>
+      <span className="text-gray-300">&middot;</span>
+      <PlantBadge plant={scanSession.plant} className="px-2 py-0 text-[11px]" />
+    </div>
+  ) : null;
+
+  // STV picker. Rides in the title row's action group next to Complete rather than on a line of
+  // its own: it's a batch-level control like Complete is, and parked below the description on its
+  // own it just read as one stray dropdown floating in whitespace.
+  const scanStvControl = canWrite && !locked ? (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
+      {stvs.length > 0 ? (
+        <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
+          {/* Amber when nothing is picked — scanning is blocked until it is (see
+              handleItemBarcode's "Select an STV before scanning" toast), so the control has to
+              read as needing attention, not as an idle dropdown. */}
+          <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
+            selectedStv
+              ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
+              : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+          }`}>
+            <SelectValue placeholder="Select STV…" />
+          </SelectTrigger>
+          <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
+            <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+            {stvs.map((st) => (
+              <SelectItem key={st} value={st}>{st}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : !stvsQuery.isLoading && (
+        <span className="rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
+          No STV — create one in Plant Settings
+        </span>
+      )}
+    </div>
+  ) : null;
+
+  const scanStatusActions = scanSession ? (
+    <>
+      {statusBadge(scanSession.scanStatus)}
+      {scanStvControl}
+      {canWrite && scanSession.scanStatus === "completed" && (
+        <Button size="sm" variant="outline" onClick={() => reopenMutation.mutate()} disabled={reopenMutation.isPending}>
+          <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reopen
+        </Button>
+      )}
+      {canWrite && scanSession.scanStatus !== "completed" && (
+        <Button
+          size="sm"
+          className="h-8 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
+          onClick={() => setShowCompleteConfirm(true)}
+        >
+          Complete
+        </Button>
+      )}
+    </>
+  ) : null;
+
   return (
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
-        <PageHeader
-          icon={PackageOpen}
-          title="Unloading"
-          description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
-        />
+        {/* The kiosk-rotate wrapper below is position:fixed over the whole viewport, so it visually
+            covers this header once rotated — hide it then and fold the page's identity into the
+            rotated box's own header (the "Unloading" eyebrow above "Vehicles") instead, so the
+            title stays visible rather than sitting hidden behind the fixed overlay. */}
+        {!rotated && (
+          <div className="space-y-2">
+            {/* Back to list sits above the title so the title row itself stays one clean identity
+                line: the vehicle on the bay and when/where, with status, STV and Complete
+                opposite it. */}
+            {view === "scan" && scanBackButton}
+            <PageHeader
+              // On the list this is the page; on a batch it's the vehicle, which is what the
+              // operator is actually looking at.
+              icon={view === "scan" ? Truck : PackageOpen}
+              title={view === "scan" && scanSession ? scanSession.vehicleNumber : "Unloading"}
+              // Only on the list, where it's the instruction for what to do next. Once a vehicle
+              // is on the bay it's stale advice taking a line under the batch you're scanning.
+              description={view === "list" ? "Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock." : undefined}
+              actions={view === "scan" ? scanStatusActions : undefined}
+            >
+              {view === "scan" ? scanVehicleSummary : undefined}
+            </PageHeader>
+          </div>
+        )}
 
         {view === "list" && (
+          <div className={`${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            <button
+              onClick={rotateNext}
+              className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+              title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
+            >
+              <RotateCw className="h-5 w-5" />
+            </button>
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
             <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
               <div>
+                {rotated && (
+                  <div className="flex items-center gap-1.5 text-[#001d6e]">
+                    <PackageOpen className="h-4 w-4" />
+                    <span className="text-xs font-bold uppercase tracking-wide">Unloading</span>
+                  </div>
+                )}
                 <div className="text-lg font-bold text-[#001d6e]">Vehicles</div>
                 <div className="text-xs text-gray-400">{total} part(s){sessionPlantFilter ? ` · ${sessionPlantFilter}` : ""}</div>
               </div>
@@ -949,18 +1041,13 @@ export default function Unloading() {
                 {importablePlants.length > 1 && (
                   <Select value={sessionPlantFilter || "all"} onValueChange={(v) => { setSessionPlantFilter(v === "all" ? "" : v); setOffset(0); }}>
                     <SelectTrigger className="h-9 w-[160px]"><SelectValue placeholder="All Plants" /></SelectTrigger>
-                    <SelectContent>
+                    <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
                       <SelectItem value="all">All Plants</SelectItem>
                       {importablePlants.map((p: any) => (
                         <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                )}
-                {canWrite && (
-                  <Button className="h-9 bg-[#001d6e] text-white hover:bg-[#001552]" onClick={() => setShowImport(true)}>
-                    <Upload className="mr-1.5 h-4 w-4" /> Import CSV
-                  </Button>
                 )}
               </div>
             </div>
@@ -1021,7 +1108,8 @@ export default function Unloading() {
                   [
                     { key: "available", label: "Available", count: statusCounts.available + statusCounts.active },
                     { key: "history", label: "History", count: statusCounts.total },
-                  ] as { key: "available" | "active" | "completed" | "history"; label: string; count: number }[]
+                    { key: "recent-complete", label: "Recent Complete", count: 0 },
+                  ] as { key: "available" | "active" | "completed" | "history" | "recent-complete"; label: string; count: number }[]
                 ).map((tab) => (
                   <button
                     key={tab.key}
@@ -1045,7 +1133,64 @@ export default function Unloading() {
               </div>
             </div>
 
-            {sessionsQuery.isLoading ? (
+            {statusTab === "recent-complete" ? (
+              // One small, self-contained list — no pagination (there's at most one row per
+              // plant), no rotated-vs-desktop split (it's never wide enough to need one). See
+              // this tab's own comment above and /unloading/sessions/recent-complete's comment
+              // in server/routes/unloading.ts for why this is a distinct list from History.
+              recentCompleteQuery.isLoading ? (
+                <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              ) : recentCompleteSessions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">
+                    <RotateCcw className="h-7 w-7 text-[#001d6e]/40" />
+                  </div>
+                  <div className="mb-1 text-sm font-semibold text-[#001d6e]">Nothing completed yet</div>
+                  <p className="mb-4 max-w-xs text-xs text-muted-foreground">Once a batch finishes for a plant, it'll show up here.</p>
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-100">
+                  {recentCompleteSessions.map((s, i) => (
+                    <div
+                      key={s.id}
+                      className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 ${i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
+                    >
+                      <span className="text-sm font-bold text-[#001d6e]">{s.vehicleNumber}</span>
+                      <PlantBadge plant={s.plant} />
+                      <span className="text-xs text-gray-500">{s.orderDate}</span>
+                      {s.partsCount > 1 && (
+                        <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex}/{s.partsCount}</span>
+                      )}
+                      <span className="text-xs text-gray-600"><span className="text-gray-400">Received </span><span className="font-bold tabular-nums">{s.scannedQty}/{s.expectedQty}</span></span>
+                      {s.scanCompletedAt && (
+                        <span className="text-xs text-gray-400">Completed {new Date(s.scanCompletedAt).toLocaleString()}</span>
+                      )}
+                      <div className="ml-auto flex items-center gap-1.5">
+                        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => openSession(s)}>
+                          View
+                        </Button>
+                        <button
+                          className="rounded p-1 text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
+                          title="Reports"
+                          onClick={() => openReports(s)}
+                        >
+                          <FileBarChart className="h-3.5 w-3.5" />
+                        </button>
+                        {canWrite && (
+                          <Button
+                            size="sm" variant="outline" className="h-7 text-xs"
+                            disabled={recentCompleteReopenMutation.isPending}
+                            onClick={() => recentCompleteReopenMutation.mutate(s.id)}
+                          >
+                            <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reopen
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : sessionsQuery.isLoading ? (
               <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
             ) : sessions.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -1060,9 +1205,13 @@ export default function Unloading() {
                 </p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
+              // Rotated/kiosk mode reuses this exact same table, just bounded + self-scrolling
+              // inside kioskTableBoxClass (same treatment as the item table's own DataTable) —
+              // rather than a different, cut-down card view, so what an operator sees rotated is
+              // the same table as everywhere else in the app, only fitted to the rotated screen.
+              <div className={bigView ? kioskTableBoxClass : "overflow-x-auto"}>
                 <table className="w-full min-w-full caption-bottom border-collapse text-xs">
-                  <thead>
+                  <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">
                       <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
@@ -1112,6 +1261,13 @@ export default function Unloading() {
                                 >
                                   {s.scanStatus === "completed" ? "View" : s.scanStatus === "active" ? "Continue Scan" : s.canActivate ? "Start Scan" : "Locked"}
                                 </Button>
+                                <button
+                                  className="rounded p-1 text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
+                                  title="Reports"
+                                  onClick={(e) => { e.stopPropagation(); openReports(s); }}
+                                >
+                                  <FileBarChart className="h-3.5 w-3.5" />
+                                </button>
                                 {canWrite && (
                                   <button
                                     className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600"
@@ -1131,13 +1287,14 @@ export default function Unloading() {
               </div>
             )}
 
-            {total > 0 && (() => {
+            {statusTab !== "recent-complete" && total > 0 && (() => {
+              const effectiveTotal = total;
               const pageIndex = Math.floor(offset / limit);
-              const pageCount = Math.max(1, Math.ceil(total / limit));
+              const pageCount = Math.max(1, Math.ceil(effectiveTotal / limit));
               return (
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 px-4 py-3">
                   <span className="text-xs text-muted-foreground">
-                    Showing {offset + 1} to {Math.min(offset + limit, total)} of {total} entries
+                    Showing {offset + 1} to {Math.min(offset + limit, effectiveTotal)} of {effectiveTotal} entries
                   </span>
                   <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
                     <Button
@@ -1192,6 +1349,7 @@ export default function Unloading() {
               );
             })()}
           </div>
+          </div>
         )}
 
         {view === "scan" && (
@@ -1203,44 +1361,26 @@ export default function Unloading() {
             >
               <RotateCw className="h-5 w-5" />
             </button>
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              {canWrite ? (
-                <Button variant="outline" size="sm" onClick={backToList}>&larr; Back to list</Button>
-              ) : <span />}
-              {detail?.session && (
-                <div className="flex items-center gap-2 flex-wrap justify-end">
-                  {statusBadge(detail.session.scanStatus)}
-                  {itemTotals.expected > 0 && (
-                    <div
-                      className="flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1"
-                      title={`Batch progress: ${itemTotals.received.toLocaleString()} / ${itemTotals.expected.toLocaleString()} (${itemPct}%)`}
-                    >
-                      <div className="h-1.5 w-14 rounded-full bg-gray-200 overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all ${itemPct >= 100 ? "bg-emerald-500" : "bg-[#001d6e]"}`}
-                          style={{ width: `${itemPct}%` }}
-                        />
-                      </div>
-                      <span className="text-[11px] font-semibold text-gray-600 whitespace-nowrap">{itemPct}%</span>
-                    </div>
-                  )}
-                  {canWrite && detail.session.scanStatus === "completed" && (
-                    <Button size="sm" variant="outline" onClick={() => reopenMutation.mutate()} disabled={reopenMutation.isPending}>
-                      <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reopen
-                    </Button>
-                  )}
-                  {canWrite && detail.session.scanStatus !== "completed" && (
-                    <Button
-                      size="sm"
-                      className="h-8 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
-                      onClick={() => setShowCompleteConfirm(true)}
-                    >
-                      Complete
-                    </Button>
-                  )}
+            {/* ── Rotated kiosk mode only. Unrotated, this whole header lives on the page's
+                PageHeader above; rotated, the fixed rotate overlay covers that, so the back
+                button, vehicle identity and the STV/status/Complete group fold into a card here
+                instead — same order, so the two orientations read the same. ── */}
+            {rotated && (
+              <div className="space-y-2 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
+                {/* Same order the unrotated PageHeader uses: Back to list on its own line at the
+                    top, then one identity line — the vehicle and when/where — with status, STV
+                    and Complete opposite it. */}
+                {scanBackButton}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    {scanVehicleTitle}
+                    {scanVehicleSummary && <span className="text-gray-300">&middot;</span>}
+                    {scanVehicleSummary}
+                  </div>
+                  <div className="flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             {activeSessionQuery.isLoading || !detail ? (
               <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
@@ -1248,25 +1388,99 @@ export default function Unloading() {
               <>
                 <div
                   className="grid grid-cols-1 gap-4 items-start"
-                  style={isDesktop && canWrite && !locked ? { gridTemplateColumns: `${leftColWidth}px 10px 1fr` } : undefined}
+                  // Two columns only on a real landscape desktop. bigView (rotated kiosk, or a
+                  // naturally portrait screen) stacks instead: the draggable leftColWidth is a
+                  // fixed PIXEL the operator set against a real desktop window, and it's easily
+                  // wider than the room a rotated box actually has — that width is tied to the
+                  // screen's SHORT side — so holding a split there squeezed Scan Items down to
+                  // nothing. Full-width stacked cards give both the room they need.
+                  style={
+                    !bigView && isDesktop && canWrite && !locked
+                      ? { gridTemplateColumns: `${leftColWidth}px 10px 1fr` }
+                      : undefined
+                  }
                 >
-                  <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-                    <div className="flex items-center gap-2 px-4 sm:px-5 py-3 border-b border-gray-100">
-                      <Truck className="h-4 w-4 text-[#001d6e]" />
-                      <span className="text-sm font-semibold text-gray-900">Vehicle Details</span>
+                  {/* ── Batch totals — the left column of the split (where Vehicle Details used to
+                      be, now summarised up in the header). Same card Order Scan builds for its
+                      own Order Totals (client/src/pages/Scanning/Scan.tsx): a percent on the
+                      right, four dotted stat boxes on one row, and a progress bar with
+                      received/remaining under it. Each box filters the item table below to
+                      its own rows; Total is the "show everything" box, so it doubles as Clear. ── */}
+                  <div className={`flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm ${bigView ? "order-2" : ""}`}>
+                    {/* No title — the four labelled tiles under it already say what this is. */}
+                    <div className="flex items-baseline justify-end gap-2">
+                      {itemTotals.expected <= 0 ? (
+                        <p className="text-sm font-medium text-gray-400">&mdash;</p>
+                      ) : itemPct >= 100 ? (
+                        <p className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+                          <CheckCircle2 className="h-4 w-4" /> Complete
+                        </p>
+                      ) : (
+                        <p className="text-sm font-medium text-gray-400">{itemPct}% complete</p>
+                      )}
                     </div>
-                    <div className="grid grid-cols-2 gap-3 text-sm px-4 sm:px-5 py-4">
-                      <div><div className="text-xs text-gray-400">Vehicle</div><div className="font-semibold text-[#001d6e]">{detail.session.vehicleNumber}</div></div>
-                      <div><div className="text-xs text-gray-400">Order Date</div><div className="font-semibold">{detail.session.orderDate}</div></div>
-                      <div><div className="text-xs text-gray-400">Plant</div><div className="font-semibold"><PlantBadge plant={detail.session.plant} /></div></div>
-                      <div>
-                        <div className="text-xs text-gray-400" title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">Batch</div>
-                        <div className="font-semibold">{detail.session.partIndex}</div>
+
+                    {/* In the desktop split this column is a dragged PIXEL width, not a viewport
+                        one, so the fold to 2×2 keys off that width rather than a sm: breakpoint —
+                        which would keep four across in a 320px column and overflow every tile.
+                        Stacked (bigView, mobile, or no Scan Items card) the card spans the full
+                        width, so the ordinary viewport breakpoint is the right call again. */}
+                    <div
+                      className={`grid gap-2 ${
+                        !bigView && isDesktop && canWrite && !locked
+                          ? leftColWidth >= TOTALS_ONE_ROW_MIN ? "grid-cols-4" : "grid-cols-2"
+                          : "grid-cols-2 sm:grid-cols-4"
+                      }`}
+                    >
+                      {([
+                        { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                        { key: "done" as const, label: "Received", value: itemTotals.received, plt: itemTotals.pltReceived, dot: "bg-emerald-500", text: "text-emerald-600" },
+                        { key: "remaining" as const, label: "Remaining", value: itemTotals.remaining, plt: itemTotals.pltRemaining, dot: "bg-red-500", text: "text-red-600" },
+                        { key: "extra" as const, label: "Extra", value: itemTotals.extra, plt: itemTotals.pltExtra, dot: "bg-orange-500", text: itemTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                      ]).map((s) => {
+                        const isActive = itemStatusFilter === s.key;
+                        return (
+                          <button
+                            key={s.label}
+                            type="button"
+                            onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
+                            aria-pressed={isActive}
+                            title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                            className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                              isActive
+                                ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
+                                : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                            }`}
+                          >
+                            <div className="flex items-center justify-center gap-1.5">
+                              <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                            </div>
+                            <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                            <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="space-y-1">
+                      {/* itemPct, not received/expected raw: received here already includes extras
+                          (it sums item.scanned, which can exceed expected), so an over-received
+                          batch would otherwise push the bar past its own track. */}
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                        <div
+                          className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                          style={{ width: `${itemPct}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[10px] font-medium text-gray-400">
+                        <span>{itemTotals.received} received</span>
+                        <span>{itemTotals.remaining} remaining</span>
                       </div>
                     </div>
                   </div>
 
-                  {isDesktop && canWrite && !locked && (
+                  {isDesktop && canWrite && !locked && !bigView && (
                     <div
                       onMouseDown={handleColumnResizeStart}
                       title="Drag to resize"
@@ -1277,7 +1491,10 @@ export default function Unloading() {
                   )}
 
                   {canWrite && !locked && (
-                    <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+                    // order-1 stacked: the barcode box is what the operator reaches for first, so
+                    // it leads and the totals read as the result underneath. Side by side the
+                    // source order already puts totals on the left, so no ordering is needed.
+                    <div className={`rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden ${bigView ? "order-1" : ""}`}>
                       <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                         <ScanLine className="h-4 w-4 text-[#001d6e]" />
                         <span className="text-sm font-semibold text-gray-900">Scan Items</span>
@@ -1332,34 +1549,6 @@ export default function Unloading() {
                       </div>
                     </div>
                   )}
-                </div>
-
-                {/* ── Totals strip — same "4 clickable stat tiles with a pallet count under each
-                    number" pattern as Order Scan's own item table (client/src/pages/Scanning/
-                    Scan.tsx). Clicking a tile filters the table below to just that bucket. ── */}
-                <div className="grid grid-cols-4 divide-x divide-gray-200 overflow-hidden rounded-xl border border-gray-300 bg-white">
-                  {([
-                    { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, text: "text-gray-900" },
-                    { key: "done" as const, label: "Received", value: itemTotals.received, plt: itemTotals.pltReceived, text: "text-emerald-600" },
-                    { key: "remaining" as const, label: "Remaining", value: itemTotals.remaining, plt: itemTotals.pltRemaining, text: "text-red-600" },
-                    { key: "extra" as const, label: "Extra", value: itemTotals.extra, plt: itemTotals.pltExtra, text: itemTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
-                  ]).map((s) => {
-                    const isActive = itemStatusFilter === s.key;
-                    return (
-                      <button
-                        key={s.label}
-                        type="button"
-                        onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
-                        aria-pressed={isActive}
-                        title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                        className={`text-center px-2 py-1.5 transition-colors ${isActive ? "bg-[#001d6e]/[0.06] ring-1 ring-inset ring-[#001d6e]/30" : "hover:bg-gray-50"}`}
-                      >
-                        <p className="uppercase tracking-wide text-gray-400 text-xs">{s.label}</p>
-                        <p className={`font-bold text-2xl ${s.text}`}>{s.value}</p>
-                        <p className={`font-bold text-sm ${s.text}`}>{s.plt.toFixed(2)} plt</p>
-                      </button>
-                    );
-                  })}
                 </div>
 
                 <div ref={itemSearchRef} className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
@@ -1418,6 +1607,8 @@ export default function Unloading() {
                     emptyState="No items on this batch."
                     noResultsState="No items match your search."
                     hasActiveFilters={!!itemStatusFilter || !!itemSearchText}
+                    isStickyHeader={bigView}
+                    maxHeight={bigView ? (quarterTurn ? "62vw" : "62vh") : undefined}
                   />
                 </div>
 
@@ -1469,64 +1660,223 @@ export default function Unloading() {
           portalRotateClass in Scan.tsx) — otherwise it opens upright while the page behind it is
           rotated. */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
-        <DialogContent className={`max-w-sm ${portalRotate}`}>
-          <DialogHeader>
-            <DialogTitle>{pending?.item?.itemName ?? pending?.barcode ?? "Confirm scan"}</DialogTitle>
-            <DialogDescription>
-              {pending?.item
-                ? `Expected ${pending.item.expected} · Scanned ${pending.item.scanned} · Remaining ${pending.item.remaining}`
-                : "Not on this vehicle's manifest — will be logged as an extra."}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            {pending?.item && pending.item.itemsPerPallet > 0 ? (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <Label className="text-xs">Pallets</Label>
-                  <Input
-                    value={dialogPalletsInput}
-                    onChange={(e) => {
-                      setDialogPalletsInput(e.target.value);
-                      const p = parseFloat(e.target.value);
-                      if (Number.isFinite(p)) setDialogQty(Math.round(p * (pending.item!.itemsPerPallet)));
-                    }}
-                    type="number" step="0.01" min="0"
-                  />
-                </div>
-                <div>
-                  <Label className="text-xs">Qty</Label>
-                  <Input
-                    value={dialogQty}
-                    onChange={(e) => {
-                      const q = parseInt(e.target.value, 10) || 0;
-                      setDialogQty(q);
-                      setDialogPalletsInput((q / pending.item!.itemsPerPallet).toFixed(2));
-                    }}
-                    type="number" min="0"
-                  />
-                </div>
-              </div>
-            ) : (
-              <div>
-                <Label className="text-xs">Qty</Label>
-                <Input value={dialogQty} onChange={(e) => setDialogQty(parseInt(e.target.value, 10) || 0)} type="number" min="1" />
+        <DialogContent
+          className={`overflow-y-auto rounded-2xl p-0 ${portalRotate} ${
+            quarterTurn
+              ? "w-[92vh] max-w-[92vh] max-h-[92vw]"
+              : "w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl max-h-[90vh]"}`}
+        >
+          {/* Two columns: full-height product image on the left, all controls on the right — same
+              layout as Order Scan's own confirm dialog (client/src/pages/Scanning/Scan.tsx). Under
+              rotate-90, CSS-left maps to physical-top, so image-left reads as image-on-top. */}
+          <div className="flex flex-col sm:flex-row">
+            {dialogResolvedImageName && !dialogImageFailed && (
+              <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
+                <img
+                  key={dialogResolvedImageName}
+                  src={`/api/products/image-by-name?name=${encodeURIComponent(dialogResolvedImageName)}`}
+                  alt=""
+                  className="max-h-96 w-full object-contain sm:max-h-full"
+                  onError={() => setDialogImageFailed(true)}
+                />
               </div>
             )}
+            <div className="min-w-0 flex-1 p-6">
+          <DialogHeader>
+            <DialogTitle className={`flex items-center gap-2.5 text-2xl ${
+              !pending?.item ? "text-red-700"
+              : pending.item.isComplete ? "text-amber-700"
+              : "text-[#001d6e]"
+            }`}>
+              {!pending?.item
+                ? <><AlertTriangle className="h-7 w-7" /> Not on manifest</>
+                : pending.item.isComplete
+                  ? <><AlertTriangle className="h-7 w-7" /> Extra item</>
+                  : <><CheckCircle2 className="h-7 w-7" /> Match found</>}
+            </DialogTitle>
+            <DialogDescription className="text-left space-y-1.5 min-w-0 pt-3">
+              <p className="font-bold text-gray-900 text-2xl leading-snug">{pending?.item?.itemName ?? pending?.barcode}</p>
+              <p className="font-mono text-lg text-gray-400">{pending?.barcode}</p>
+              {!pending?.item && (
+                <p className="text-lg text-red-600 mt-1">Not on this vehicle's manifest — will be logged as an extra.</p>
+              )}
+              {pending?.item?.isComplete && (
+                <p className="text-lg text-amber-600 mt-1">Item already complete — these extra units will be logged separately.</p>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-1">
+            {pending?.item && (
+              <div className="rounded-xl bg-gray-50 px-4 py-3 text-base text-gray-600 space-y-1.5">
+                {pending.item.sapCode && (
+                  <p>SAP: <span className="font-mono font-bold text-gray-700">{pending.item.sapCode}</span></p>
+                )}
+                <div className="space-y-1">
+                  <p>Items per pallet: <strong>{pending.item.itemsPerPallet || "—"}</strong></p>
+                  <p>Expected: <strong>{pending.item.expected}</strong> · Received: <strong className="text-green-600">{pending.item.scanned}</strong></p>
+                  <p>
+                    Remaining: <strong className="text-red-600">{pending.item.remaining}</strong> boxes
+                    {pending.item.itemsPerPallet > 0 && (
+                      <> · <strong className="text-base font-bold text-red-600">{(pending.item.remaining / pending.item.itemsPerPallet).toFixed(2)}</strong> plt</>
+                    )}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {stvs.length > 0 && (
+              <div className="space-y-1">
+                <Label className="text-sm">STV <span className="text-red-500">*</span></Label>
+                <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
+                  <SelectTrigger className={`w-full rounded-xl ${!selectedStv ? "border-dashed text-gray-400" : ""}`}>
+                    <SelectValue placeholder="Select STV…" />
+                  </SelectTrigger>
+                  <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
+                    <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                    {stvs.map((s) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            {/* Qty (boxes) and Pallets side by side — each with −/+ steppers. Off-rotation: side by
+                side (sm:grid-cols-2). Rotated: single CSS column, since the rotate-90 turns that
+                vertical stack into the side-by-side pair the kiosk layout expects. */}
+            <div className={`grid gap-3 ${dialogPlt > 1 && !quarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+              <div className="space-y-1">
+                <Label className="text-sm">Qty (boxes)</Label>
+                <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
+                  <Button
+                    type="button" variant="ghost"
+                    className="h-14 w-14 shrink-0 rounded-none border-r border-gray-200 text-3xl font-bold text-gray-500 hover:bg-gray-100"
+                    onClick={() => {
+                      const q = Math.max(1, dialogQty - 1);
+                      setDialogQty(q);
+                      if (dialogPlt > 0) setDialogPalletsInput((q / dialogPlt).toFixed(2));
+                    }}
+                    aria-label="Decrease quantity"
+                  >
+                    −
+                  </Button>
+                  <Input
+                    type="number" min={0}
+                    value={dialogQty === 0 ? "" : dialogQty}
+                    onChange={(e) => {
+                      const q = parseInt(e.target.value) || 0;
+                      setDialogQty(q);
+                      if (dialogPlt > 0) setDialogPalletsInput((q / dialogPlt).toFixed(2));
+                    }}
+                    onBlur={(e) => {
+                      if (!e.target.value || parseInt(e.target.value) < 1) {
+                        setDialogQty(1);
+                        if (dialogPlt > 0) setDialogPalletsInput((1 / dialogPlt).toFixed(2));
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        if (pending && dialogQty > 0 && !scanMutation.isPending) {
+                          scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null }, { onSuccess: () => setPending(null) });
+                        }
+                      }
+                    }}
+                    className="text-center text-3xl font-bold h-14 flex-1 rounded-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                    autoFocus
+                  />
+                  <Button
+                    type="button" variant="ghost"
+                    className="h-14 w-14 shrink-0 rounded-none border-l border-gray-200 text-3xl font-bold text-gray-500 hover:bg-gray-100"
+                    onClick={() => {
+                      const q = dialogQty + 1;
+                      setDialogQty(q);
+                      if (dialogPlt > 0) setDialogPalletsInput((q / dialogPlt).toFixed(2));
+                    }}
+                    aria-label="Increase quantity"
+                  >
+                    +
+                  </Button>
+                </div>
+              </div>
+
+              {dialogPlt > 1 && (
+                <div className="space-y-1">
+                  <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {dialogPlt}/pallet</span></Label>
+                  <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-[#001d6e]/30 bg-white focus-within:border-[#001d6e]">
+                    <Button
+                      type="button" variant="ghost"
+                      className="h-14 w-14 shrink-0 rounded-none border-r border-[#001d6e]/15 text-3xl font-bold text-[#001d6e] hover:bg-[#001d6e]/5"
+                      onClick={() => {
+                        const p = Math.max(0, Math.round(((parseFloat(dialogPalletsInput) || 0) - 1) * 100) / 100);
+                        setDialogPalletsInput(p.toFixed(2));
+                        setDialogQty(Math.max(1, Math.round(p * dialogPlt)));
+                      }}
+                      aria-label="Decrease pallets"
+                    >
+                      −
+                    </Button>
+                    <Input
+                      type="number" min={0} step="0.01"
+                      value={dialogPalletsInput}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setDialogPalletsInput(raw);
+                        const p = parseFloat(raw);
+                        if (!isNaN(p) && p >= 0) setDialogQty(Math.round(p * dialogPlt));
+                      }}
+                      onBlur={() => {
+                        if (dialogPalletsInput === "" || isNaN(parseFloat(dialogPalletsInput))) {
+                          setDialogPalletsInput((dialogQty / dialogPlt).toFixed(2));
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          if (pending && dialogQty > 0 && !scanMutation.isPending) {
+                            scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null }, { onSuccess: () => setPending(null) });
+                          }
+                        }
+                      }}
+                      className="text-center text-3xl font-bold text-[#001d6e] h-14 flex-1 rounded-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                    />
+                    <Button
+                      type="button" variant="ghost"
+                      className="h-14 w-14 shrink-0 rounded-none border-l border-[#001d6e]/15 text-3xl font-bold text-[#001d6e] hover:bg-[#001d6e]/5"
+                      onClick={() => {
+                        const p = Math.round(((parseFloat(dialogPalletsInput) || 0) + 1) * 100) / 100;
+                        setDialogPalletsInput(p.toFixed(2));
+                        setDialogQty(Math.round(p * dialogPlt));
+                      }}
+                      aria-label="Increase pallets"
+                    >
+                      +
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPending(null)}>Cancel</Button>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="rounded-xl" onClick={() => setPending(null)}>Cancel</Button>
             <Button
-              className="bg-[#001d6e] text-white hover:bg-[#001552]"
+              className={`rounded-xl ${(!pending?.item || pending.item.isComplete)
+                ? "bg-amber-600 hover:bg-amber-700 text-white"
+                : "bg-[#001d6e] hover:bg-[#001552] text-white"}`}
               disabled={dialogQty <= 0 || scanMutation.isPending}
               onClick={() => {
                 if (!pending) return;
-                scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty }, { onSuccess: () => setPending(null) });
+                scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null }, { onSuccess: () => setPending(null) });
               }}
             >
-              {scanMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
-              Confirm
+              {scanMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {(!pending?.item || pending.item.isComplete) ? "Log as Extra" : "Confirm Scan"}
             </Button>
           </DialogFooter>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 
@@ -1564,150 +1914,16 @@ export default function Unloading() {
         </DialogContent>
       </Dialog>
 
-      {/* ── Import: step 1 — plant/date/file picker ─────────────────────────────── */}
-      <Dialog open={showImport} onOpenChange={(open) => { setShowImport(open); if (!open) resetImportDialog(); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Import Unloading CSV</DialogTitle>
-            <DialogDescription>
-              One CSV can contain multiple vehicles — every row must have a Vehicle Number column.
-            </DialogDescription>
-          </DialogHeader>
+      {/* Import CSV moved to the Order Import page's own "Unloading" mode
+          (client/src/pages/OrderImport.tsx) — see that page's plan comment for why. */}
 
-          <div className="space-y-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="importPlant">Plant</Label>
-              <Select value={importPlant} onValueChange={setImportPlant}>
-                <SelectTrigger id="importPlant"><SelectValue placeholder="Select a plant" /></SelectTrigger>
-                <SelectContent>
-                  {importablePlants.map((p: any) => (
-                    <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="importDate">Order Date</Label>
-              <Input id="importDate" type="date" value={importDate} onChange={(e) => setImportDate(e.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="importFile">CSV File</Label>
-              <Input
-                id="importFile" ref={fileRef} type="file" accept=".csv"
-                onChange={(e) => setImportFile(e.target.files?.[0] ?? null)}
-              />
-              {importFile && <div className="text-xs text-gray-500">{importFile.name}</div>}
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowImport(false)}>Cancel</Button>
-            <Button className="bg-[#001d6e] text-white hover:bg-[#001552]" onClick={handleImportNext}>
-              Next: Map Columns
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Import: step 2 — column mapping dialog (mirrors OrderImport.tsx) ────── */}
-      <Dialog open={showMappingDialog} onOpenChange={(open) => { if (!open) { setShowMappingDialog(false); setCsvData(null); } }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col rounded-xl">
-          <DialogHeader>
-            <DialogTitle>Map CSV Columns</DialogTitle>
-            <DialogDescription>
-              {csvData ? `"${csvData.name}" — ${csvData.rows.length} rows detected. Match each target field to a CSV column.` : "Map columns."}
-            </DialogDescription>
-          </DialogHeader>
-
-          {csvData && (
-            <div className="flex flex-col gap-4 overflow-y-auto flex-1 min-h-0 pr-1">
-              <div className="border border-blue-100 bg-blue-50 px-4 py-3">
-                <p className="mb-2 text-xs font-semibold text-blue-700">{csvData.headers.length} columns detected in "{csvData.name}"</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {csvData.headers.map((h) => (
-                    <span key={h} className="border border-blue-200 bg-white px-2 py-0.5 text-xs text-blue-800 font-mono">{h}</span>
-                  ))}
-                </div>
-              </div>
-              <div className="border bg-gray-50 p-4">
-                <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Map each target field → CSV column</p>
-                <div className="grid grid-cols-1 gap-3">
-                  {TARGET_FIELDS.map((field) => {
-                    const matched = mapping[field.key] !== SKIP && mapping[field.key] !== "";
-                    return (
-                      <div key={field.key} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
-                        <div className="flex w-full items-center gap-1.5 sm:w-[160px] sm:shrink-0">
-                          <span className={`h-2 w-2 rounded-full ${matched ? "bg-green-500" : "bg-gray-300"}`} />
-                          <Label className="text-sm">{field.label}</Label>
-                        </div>
-                        <Select value={mapping[field.key] || SKIP} onValueChange={(v) => setMapping((m) => ({ ...m, [field.key]: v }))}>
-                          <SelectTrigger className={`sm:flex-1 h-9 text-sm rounded-full ${!matched ? "border-dashed text-gray-400" : ""}`}>
-                            <SelectValue placeholder="— skip this field —" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value={SKIP}>— skip this field —</SelectItem>
-                            {csvData.headers.map((h) => (<SelectItem key={h} value={h}>{h}</SelectItem>))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                  Preview — first {Math.min(5, csvData.rows.length)} of {csvData.rows.length} rows
-                </p>
-                <div className="overflow-x-auto border">
-                  <table className="w-max min-w-full border-collapse text-xs">
-                    <thead>
-                      <tr>
-                        {TARGET_FIELDS.map((f) => {
-                          const col = mapping[f.key];
-                          const matched = col && col !== SKIP;
-                          return (
-                            <th key={f.key} className={`sticky top-0 whitespace-nowrap border-b border-r px-3 py-2 text-left font-semibold ${matched ? "bg-green-50 text-green-800" : "bg-gray-100 text-gray-400"}`}>
-                              {f.label}
-                              {matched && <div className="font-normal text-green-600 text-xs mt-0.5">← {col}</div>}
-                            </th>
-                          );
-                        })}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {csvData.rows.slice(0, 5).map((row, i) => (
-                        <tr key={i} className="border-b hover:bg-gray-50">
-                          {TARGET_FIELDS.map((f) => {
-                            const col = mapping[f.key];
-                            const val = col && col !== SKIP ? (row[col] ?? "") : "";
-                            return (
-                              <td key={f.key} className={`max-w-[180px] truncate whitespace-nowrap border-r px-3 py-2 ${val ? "" : "text-gray-300"}`} title={val}>{val || "—"}</td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <DialogFooter className="mt-2 gap-2">
-            <Button variant="outline" className="rounded-xl" onClick={() => { setShowMappingDialog(false); setCsvData(null); setShowImport(true); }} disabled={isImporting}>
-              Back
-            </Button>
-            <Button onClick={handleConfirmImport} disabled={isImporting || !csvData} className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl">
-              {isImporting ? (<><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>) : (<><Upload className="mr-1.5 h-4 w-4" />Import {csvData?.rows.length ?? 0} rows</>)}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} basePath="unloading" />
+      <ProductMasterMissingDialog message={productMasterMissingMessage} onClose={() => setProductMasterMissingMessage(null)} />
 
       {/* ── Delete confirmation — replace (soft, carries forward on re-upload) vs discard
           (reverses stock, voids history, self-resolves) ─────────────────────────────────── */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <DialogContent className="max-w-md">
+        <DialogContent className={`max-w-md ${portalRotate}`}>
           <DialogHeader>
             <DialogTitle>Delete {deleteTarget?.vehicleNumber} ({deleteTarget?.orderDate})?</DialogTitle>
             <DialogDescription>

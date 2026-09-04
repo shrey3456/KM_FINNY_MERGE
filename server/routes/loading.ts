@@ -4,6 +4,7 @@ import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty } from './order-scan';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
+import { pushOrderStatusToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
 
 // Loading — two things happen here:
 //   1. Link a vehicle (from Vehicle Master) onto a Proforma Slip: sets the slip's vehicleNumber,
@@ -44,6 +45,16 @@ function canCompleteLoad(user: any): boolean {
 function requireCompleteLoadAccess(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
   if (!canCompleteLoad(req.user)) return res.status(403).json({ message: 'You do not have permission to complete this load.' });
+  next();
+}
+
+// Reopening (undoing Complete) is admin-only — deliberately stricter than completing a load.
+// Completing is a routine step anyone with load-completion rights can do; reopening un-does a
+// finished, audited state (and re-enables scanning/stock changes against it), so it's reserved
+// for admin/super-admin rather than everyone canCompleteLoad() already allows.
+function requireReopenAccess(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Only an admin can reopen a completed load.' });
   next();
 }
 
@@ -100,8 +111,13 @@ async function withProgress(slip: any, items: any[]) {
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     let stockAvailable: number | null = null;
     if (item.barcode) {
+      // Case/whitespace-insensitive plant match — proforma_slips.plant comes from whatever
+      // casing the source (e.g. Notion's "Plant :"/"Stk Plant :") used ("VALSAD"), which won't
+      // exact-match product_plant_stock's canonical casing ("Valsad") otherwise, causing a false
+      // "no stock" even though Stock Overview (which already matches case-insensitively — see
+      // server/routes/scan-sessions.ts) shows stock for the same plant.
       const { rows } = await pool.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2`,
+        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
         [item.barcode, slip.plant],
       );
       stockAvailable = rows[0]?.inStock ?? 0;
@@ -144,8 +160,21 @@ router.get('/loading/proforma/search', requirePageAccess('loading'), async (req:
 // gun) or an Enter/suggestion-pick resolves to a specific order number.
 router.get('/loading/proforma/:orderNumber', requirePageAccess('loading'), async (req: Request, res: Response) => {
   try {
-    const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    let slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+
+    // Successfully opening an order for loading IS "starting to load it" — flip to LOADING right
+    // here, not only on the later explicit Link-vehicle click (which can be skipped entirely
+    // when a vehicle number already arrived pre-filled from Notion, letting scanning — and even
+    // full completion — happen without it). Guarded so this only fires once per order (skips if
+    // already LOADING or already complete) and only for someone who could actually change it, so
+    // a read-only viewer opening the order doesn't silently write to Notion.
+    if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS && hasWriteAccess(req.user, 'loading')) {
+      const withStatus = await storage.updateProformaSlip(slip.id, { notionStatus: NOTION_LOADING_STATUS } as any);
+      if (withStatus) slip = withStatus;
+      void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
+    }
+
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete } = await withProgress(slip, rawItems);
     res.json({ slip: await withRto(slip), items, allComplete });
@@ -257,12 +286,20 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
       ? await storage.getVehicleInfo(vehicleId)
       : await storage.getVehicleInfoByVehicleNumber(vehicleNumber);
     if (!vehicle) return res.status(404).json({ message: `No vehicle found in Vehicle Master${vehicleNumber ? ` with number "${vehicleNumber}"` : ''}` });
+    // vehicleInfo.vehicleNumber is nullable (a manually-added Vehicle Master row can be saved
+    // without one) — the vehicleId lookup path doesn't guarantee it's set, unlike the
+    // by-vehicleNumber path. Nothing meaningful to link without it.
+    if (!vehicle.vehicleNumber) return res.status(400).json({ message: 'This vehicle has no vehicle number set in Vehicle Master.' });
 
     const updated = await storage.updateProformaSlip(slip.id, {
       vehicleNumber: vehicle.vehicleNumber,
       vehicleInfoId: vehicle.id,
       totalVolume: vehicle.volume != null ? String(vehicle.volume) : slip.totalVolume,
       vehicleAssignedByCode: userCode ?? null,
+      // Kept in lockstep with the Notion push below (NOTION_LOADING_STATUS) rather than waiting
+      // for the next Notion sync/import to pull it back — so the app's own notionStatus column
+      // reflects "loading started" immediately too.
+      notionStatus: NOTION_LOADING_STATUS,
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to link vehicle to proforma slip' });
 
@@ -285,6 +322,10 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
     });
 
     res.json({ slip: await withRto(updated), vehicle });
+
+    // Best-effort, after the response — linking a vehicle means loading has started. Never
+    // blocks/fails the request itself (see notionOrderStatusSync.ts).
+    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_STATUS);
   } catch (error) {
     console.error('Error linking vehicle to proforma slip:', error);
     res.status(500).json({ message: 'Failed to link vehicle' });
@@ -323,11 +364,24 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     if (!matchedItem && !product) {
       return res.status(400).json({ message: 'Barcode not in system — not on this order and not in Product Master.' });
     }
+    // On the order, but nothing in Product Master to back it — item name/SAP code would
+    // silently fall back to the order's own text and pallet size to a generic default instead of
+    // the real GJ/MP-PLT value. Blocked rather than allowed through quietly. See
+    // PRODUCT_MASTER_MISSING's client-side handling (a distinct centered popup, not the ordinary
+    // error toast) in LoadOperation.tsx.
+    if (matchedItem && !product) {
+      return res.status(400).json({
+        message: `PRODUCT_MASTER_MISSING: "${barcode}" is on this order but has no matching entry in Product Master. Check Product Master and correct the barcode before scanning it.`,
+      });
+    }
 
     // Stock check — the actual ask: an item already at zero (or short) for this plant cannot
     // be loaded. Checked against the live ledger, not the proforma's planned quantity.
+    // Case/whitespace-insensitive match — see the comment on the identical query in
+    // withProgress() above for why (Notion-imported slip.plant casing vs. canonical
+    // product_plant_stock.plant casing).
     const { rows: stockRows } = await client.query(
-      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2`,
+      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
       [barcode, slip.plant],
     );
     const inStock = stockRows[0]?.inStock ?? 0;
@@ -381,7 +435,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
       // see stockBarcodeReconcile.ts.
       await reconcileProductPlantStockBarcode(client, product?.id, slip.plant, barcode);
       await client.query(
-        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
+        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
         [qty, barcode, slip.plant],
       );
       await client.query(
@@ -403,6 +457,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     if (allComplete && !(slip as any).loadingCompletedAt) {
       finalSlip = await storage.updateProformaSlip(slip.id, {
         loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null,
+        notionStatus: NOTION_LOADING_COMPLETE_STATUS,
       } as any) ?? slip;
     }
 
@@ -414,6 +469,11 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
         totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty),
       },
     });
+
+    // Best-effort, after the response — only when this scan is what just auto-completed it.
+    if (allComplete && finalSlip !== slip) {
+      void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
+    }
   } catch (error) {
     console.error('Error scanning item for loading:', error);
     res.status(500).json({ message: 'Failed to record scan' });
@@ -433,6 +493,7 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
     const { userCode, userName } = actor(req);
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null,
+      notionStatus: NOTION_LOADING_COMPLETE_STATUS,
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to complete load' });
 
@@ -447,6 +508,8 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete } = await withProgress(updated, rawItems);
     res.json({ slip: await withRto(updated), items, allComplete });
+
+    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
   } catch (error) {
     console.error('Error completing load:', error);
     res.status(500).json({ message: 'Failed to complete load' });
@@ -456,7 +519,7 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
 // POST /api/loading/proforma/:orderNumber/reopen — undoes Complete (auto or manual), same
 // permission as Complete itself. Purely a status flip: clears loadingCompletedAt/By so the order
 // can be scanned again; nothing else about the load (items already scanned, vehicle) is touched.
-router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading'), requireCompleteLoadAccess, async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading'), requireReopenAccess, async (req: Request, res: Response) => {
   try {
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
@@ -464,6 +527,7 @@ router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading')
     const { userCode, userName } = actor(req);
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingCompletedAt: null, loadingCompletedByCode: null,
+      notionStatus: NOTION_LOADING_STATUS,
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to reopen load' });
 
@@ -478,6 +542,9 @@ router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading')
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete } = await withProgress(updated, rawItems);
     res.json({ slip: await withRto(updated), items, allComplete });
+
+    // Symmetric with completing — reopening un-does "DISPATCHED" back to "LOADING" in Notion too.
+    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_STATUS);
   } catch (error) {
     console.error('Error reopening load:', error);
     res.status(500).json({ message: 'Failed to reopen load' });
@@ -516,7 +583,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
         await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
         await client.query(
           `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
-           WHERE barcode = $2 AND plant = $3`,
+           WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
           [qty, event.barcode, event.plant],
         );
         await client.query(
@@ -599,7 +666,7 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
       await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
       await client.query(
         `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
-         WHERE barcode = $2 AND plant = $3`,
+         WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
         [qty, event.barcode, event.plant],
       );
       await client.query(
@@ -618,11 +685,149 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
     );
 
     await client.query('COMMIT');
+
+    // A voided scan can drop an order below fully-loaded again — if it had auto- or manually-
+    // completed, clear that now rather than leaving the list showing "Complete" for an order
+    // that's actually short again. Mirrors the auto-complete side effect in /scan the other way
+    // around; done after COMMIT so it reads the just-voided row rather than a stale snapshot.
+    const slip = await storage.getProformaSlipByOrderNumber(event.order_number);
+    if (slip && (slip as any).loadingCompletedAt) {
+      const rawItems = await storage.getProformaSlipItems(slip.id);
+      const { allComplete } = await withProgress(slip, rawItems);
+      if (!allComplete) {
+        await storage.updateProformaSlip(slip.id, {
+          loadingCompletedAt: null, loadingCompletedByCode: null,
+          notionStatus: NOTION_LOADING_STATUS,
+        } as any);
+        void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
+      }
+    }
+
     res.json({ event: voidRows[0] });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Error voiding load event:', error);
     res.status(500).json({ message: 'Failed to void load event' });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /api/loading/events/:id — body: { totalQty }. Corrects a mistake in an already-recorded
+// load scan (Load Event has no STV concept — see Unloading/Order Scan for that). No cached
+// progress table here (loaded-so-far is always summed live from loading_scan_events, same as
+// Unloading), and no cross-part credit system like Order Scan's — so unlike that one, this is a
+// direct in-place-feeling correction: reverse the old qty's stock, void the old event, then
+// re-run the same regular/extra split and stock application /scan itself does for the new qty.
+// Two audit rows (old voided, new corrected) instead of a silently-edited one, same as everywhere
+// else in this app.
+router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request, res: Response) => {
+  const eventId = parseInt(req.params.id);
+  if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+
+  const newQty = Math.round(Number(req.body?.totalQty));
+  if (!Number.isFinite(newQty) || newQty <= 0) return res.status(400).json({ message: 'totalQty must be a positive number' });
+
+  const { userCode, userName } = actor(req);
+  const editorLabel = userName ?? userCode ?? 'unknown';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: eventRows } = await client.query(`SELECT * FROM loading_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const event = eventRows[0];
+    if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Load event not found' }); }
+    if (event.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This scan is voided — nothing to edit' }); }
+
+    const oldQty = Number(event.total_qty ?? 0);
+    if (newQty === oldQty) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'That is already the current quantity' }); }
+
+    const slip = await storage.getProformaSlipByOrderNumber(event.order_number);
+    if (!slip) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Proforma slip not found' }); }
+
+    // Reverse the old qty's stock (Loading REMOVES stock, so reversing adds it back — same
+    // direction the void handler above uses) before checking whether the new qty actually fits.
+    const product = await storage.getProductByBarcode(event.barcode);
+    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+    await client.query(
+      `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
+       WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+      [oldQty, event.barcode, event.plant],
+    );
+
+    const { rows: stockRows } = await client.query(
+      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
+      [event.barcode, event.plant],
+    );
+    const inStock = stockRows[0]?.inStock ?? 0;
+    if (newQty > inStock) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: `Only ${inStock} in stock at ${event.plant} — cannot correct to ${newQty}.` });
+    }
+
+    await client.query(
+      `UPDATE loading_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
+      [userCode ?? null, `Qty corrected: ${oldQty} -> ${newQty} (edited by ${editorLabel})`, eventId],
+    );
+
+    // Same regular/extra split /scan itself computes, against expected qty minus whatever's
+    // still loaded (now excluding the just-voided old event).
+    const rawItems = await storage.getProformaSlipItems(slip.id);
+    const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(event.barcode));
+    const { rows: loadedRows } = await client.query(
+      `SELECT COALESCE(SUM(total_qty), 0)::int AS "loaded" FROM loading_scan_events
+       WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+      [slip.orderNumber, event.barcode],
+    );
+    const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
+    const expected = matchedItem?.quantity ?? 0;
+    const remainingBefore = matchedItem ? Math.max(0, expected - alreadyLoaded) : 0;
+    const regularQty = matchedItem ? Math.min(newQty, remainingBefore) : 0;
+    const extraQty = newQty - regularQty;
+
+    const state = await getPlantStateCode(client, event.plant ?? '');
+    const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
+    const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
+      `INSERT INTO loading_scan_events
+         (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        slip.orderNumber, slip.id, event.barcode, event.item_name, event.sap_code,
+        itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
+        itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
+        totalQty, isExtra, event.plant, event.scanned_by_code, event.scanned_by_name,
+      ],
+    );
+    if (regularQty > 0) await insertEvent(regularQty, false);
+    if (extraQty > 0) await insertEvent(extraQty, true);
+
+    await client.query(
+      `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+      [newQty, event.barcode, event.plant],
+    );
+    await client.query(
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
+       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
+      [event.barcode, product?.id ?? null, event.plant, -newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, userCode ?? null],
+    );
+
+    await client.query('COMMIT');
+
+    // Same completion-flip-in-either-direction reasoning as the void handler above, just checked
+    // both ways since an edit can push an order past complete OR pull it back short of complete.
+    const { allComplete } = await withProgress(slip, rawItems);
+    if (allComplete && !(slip as any).loadingCompletedAt) {
+      await storage.updateProformaSlip(slip.id, { loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null } as any);
+    } else if (!allComplete && (slip as any).loadingCompletedAt) {
+      await storage.updateProformaSlip(slip.id, { loadingCompletedAt: null, loadingCompletedByCode: null } as any);
+    }
+
+    res.json({ success: true, regularQty, extraQty });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error editing load event:', error);
+    res.status(500).json({ message: 'Failed to edit load event' });
   } finally {
     client.release();
   }

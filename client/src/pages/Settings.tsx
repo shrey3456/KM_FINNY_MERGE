@@ -29,7 +29,7 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from 'react-hook-form';
 import { useEffect, useState } from 'react';
-import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload } from 'lucide-react';
+import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, CalendarDays } from 'lucide-react';
 import Papa from 'papaparse';
 import { apiRequest } from '@/lib/queryClient';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -138,12 +138,42 @@ const Settings = () => {
   const [csPlant, setCsPlant] = useState<string>('');
   const [csMode, setCsMode] = useState<'void' | 'remove'>('void');
   const [csConfirmText, setCsConfirmText] = useState('');
+  // Optional — leave blank and this clears everything for the plant, exactly like before. Set it
+  // and only orders/vehicles/deliveries dated on or before it clear (Order Import, Unloading, and
+  // Loading via its proforma slip's own order date).
+  const [csOrderDateUpTo, setCsOrderDateUpTo] = useState('');
 
   const { data: allPlants } = useQuery<any[]>({
     queryKey: ['/api/plants'],
     queryFn: () => apiRequest('GET', '/api/plants').then((r) => r.json()),
     staleTime: 60000,
   });
+
+  // Sales tracking start date — Overall Stock's ledger's "all dates" Sale Qty sums from here
+  // onward (proforma data before it isn't reliable). Was a hardcoded constant; now editable here.
+  const { data: salesTrackingData } = useQuery<{ salesTrackingStartDate: string }>({
+    queryKey: ['/api/settings/sales-tracking-start'],
+    queryFn: () => apiRequest('GET', '/api/settings/sales-tracking-start').then((r) => r.json()),
+  });
+  const [salesTrackingStartDraft, setSalesTrackingStartDraft] = useState('');
+  useEffect(() => {
+    if (salesTrackingData?.salesTrackingStartDate) setSalesTrackingStartDraft(salesTrackingData.salesTrackingStartDate);
+  }, [salesTrackingData?.salesTrackingStartDate]);
+  const [isSavingSalesTrackingStart, setIsSavingSalesTrackingStart] = useState(false);
+  const saveSalesTrackingStart = async () => {
+    if (!salesTrackingStartDraft) return;
+    setIsSavingSalesTrackingStart(true);
+    try {
+      await apiRequest('PUT', '/api/settings/sales-tracking-start', { date: salesTrackingStartDraft }, false, true);
+      queryClient.invalidateQueries({ queryKey: ['/api/settings/sales-tracking-start'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
+      toast({ title: 'Saved', description: `Sales tracking now starts from ${salesTrackingStartDraft}.` });
+    } catch (error: any) {
+      toast({ title: 'Error', description: error?.message || 'Failed to save', variant: 'destructive' });
+    } finally {
+      setIsSavingSalesTrackingStart(false);
+    }
+  };
 
   const { data: csPreview, isFetching: csPreviewLoading } = useQuery<{
     productsWithStock: number;
@@ -154,10 +184,14 @@ const Settings = () => {
     unloadingSessions: number;
     unloadingScanEvents: number;
     stockMovements: number;
+    dateScoped: boolean;
   }>({
-    queryKey: ['/api/settings/clear-stock/preview', csPlant],
+    queryKey: ['/api/settings/clear-stock/preview', csPlant, csOrderDateUpTo],
     queryFn: () =>
-      apiRequest('GET', `/api/settings/clear-stock/preview?plant=${encodeURIComponent(csPlant)}`).then((r) => r.json()),
+      apiRequest(
+        'GET',
+        `/api/settings/clear-stock/preview?plant=${encodeURIComponent(csPlant)}${csOrderDateUpTo ? `&orderDateUpTo=${encodeURIComponent(csOrderDateUpTo)}` : ''}`,
+      ).then((r) => r.json()),
     enabled: showClearStockDialog && !!csPlant,
   });
 
@@ -167,6 +201,7 @@ const Settings = () => {
       setCsPlant('');
       setCsMode('void');
       setCsConfirmText('');
+      setCsOrderDateUpTo('');
     }
   };
 
@@ -176,16 +211,21 @@ const Settings = () => {
     if (!csPlant) return;
     setIsClearingStock(true);
     try {
-      const data = await apiRequest('POST', '/api/settings/clear-stock', { plant: csPlant, mode: csMode }, false, true);
+      const data = await apiRequest(
+        'POST', '/api/settings/clear-stock',
+        { plant: csPlant, mode: csMode, ...(csOrderDateUpTo ? { orderDateUpTo: csOrderDateUpTo } : {}) },
+        false, true,
+      );
       toast({
         title: 'Success',
-        description: `Stock cleared for ${csPlant === 'all' ? 'all plants' : csPlant}. `
-          + `${data.stockRowsCleared} stock row(s) zeroed, ${data.importSessionsAffected} import session(s), `
+        description: `Stock cleared for ${csPlant === 'all' ? 'all plants' : csPlant}${csOrderDateUpTo ? ` (orders up to ${csOrderDateUpTo})` : ''}. `
+          + `${data.stockRowsCleared} stock row(s) adjusted, ${data.importSessionsAffected} import session(s), `
           + `${data.receivingEventsAffected} receiving event(s), ${data.loadingEventsAffected} loading event(s), `
           + `${data.unloadingSessionsAffected} unloading session(s), ${data.unloadingEventsAffected} unloading event(s) affected.`,
       });
       queryClient.invalidateQueries({ queryKey: ['/api/products'] });
       queryClient.invalidateQueries({ queryKey: ['/api/scans'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
     } catch (error: any) {
       console.error('Error clearing stock:', error);
       toast({ title: 'Error', description: error?.message || 'Failed to clear stock', variant: 'destructive' });
@@ -661,7 +701,30 @@ const Settings = () => {
                         Import Opening Stock
                       </Button>
                     </div>
-                    
+
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Sales Tracking Start</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Overall Stock's Sale Qty (when no date is picked there) sums Proforma Slip quantities from this date onward — earlier data isn't reliable enough to include.
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          type="date"
+                          value={salesTrackingStartDraft}
+                          onChange={(e) => setSalesTrackingStartDraft(e.target.value)}
+                          disabled={!isAdminUser}
+                          className="w-auto"
+                        />
+                        <Button
+                          size="sm"
+                          onClick={saveSalesTrackingStart}
+                          disabled={!isAdminUser || isSavingSalesTrackingStart || !salesTrackingStartDraft || salesTrackingStartDraft === salesTrackingData?.salesTrackingStartDate}
+                        >
+                          {isSavingSalesTrackingStart ? 'Saving...' : 'Save'}
+                        </Button>
+                      </div>
+                    </div>
+
                     <div className="p-4 border border-red-200 rounded-lg bg-red-50">
                       <h4 className="font-medium text-[#001d6e] flex items-center"><Shield className="h-4 w-4 mr-2" /> Danger Zone</h4>
                       <p className="text-sm text-[#001d6e] mt-1 mb-3">These actions are irreversible</p>
@@ -776,8 +839,9 @@ const Settings = () => {
           <AlertDialogHeader>
             <AlertDialogTitle>Clear Stock?</AlertDialogTitle>
             <AlertDialogDescription>
-              This zeroes stock for the selected plant and removes its CSV import + Loading + Unloading scan history.
-              This action cannot be undone.
+              This clears stock and removes CSV import + Loading + Unloading scan history for the selected plant —
+              either everything, or (if you set an Order Date below) only orders/vehicles/deliveries dated on or
+              before it. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
 
@@ -795,6 +859,29 @@ const Settings = () => {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="csOrderDateUpTo">Order Date up to (optional)</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="csOrderDateUpTo"
+                  type="date"
+                  value={csOrderDateUpTo}
+                  onChange={(e) => { setCsOrderDateUpTo(e.target.value); setCsConfirmText(''); }}
+                  className="w-auto"
+                />
+                {csOrderDateUpTo && (
+                  <Button variant="ghost" size="sm" onClick={() => { setCsOrderDateUpTo(''); setCsConfirmText(''); }}>
+                    Clear date
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-gray-500">
+                Leave blank to clear everything for this plant, like before. Set a date to only clear orders/
+                vehicles/deliveries dated on or before it (checked across Order Import, Unloading, and Loading's
+                own proforma order date) — stock is adjusted by exactly what that scope contributed, not zeroed out.
+              </p>
             </div>
 
             {csPlant && (
@@ -856,8 +943,10 @@ const Settings = () => {
                 </div>
 
                 <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
-                  Stock for {csPlant === 'all' ? 'every plant' : csPlant} will be set to 0. Proforma slips, product
-                  master, and vehicle master are not affected.
+                  {csOrderDateUpTo
+                    ? <>Stock for {csPlant === 'all' ? 'every plant' : csPlant} will be adjusted by what orders up to {csOrderDateUpTo} contributed — not zeroed out, since orders after that date aren't being cleared. </>
+                    : <>Stock for {csPlant === 'all' ? 'every plant' : csPlant} will be set to 0. </>}
+                  Proforma slips, product master, and vehicle master are not affected.
                 </div>
 
                 <div className="space-y-2">

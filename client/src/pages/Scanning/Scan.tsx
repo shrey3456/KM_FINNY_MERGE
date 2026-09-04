@@ -35,6 +35,8 @@ import BarcodeScanner from "@/lib/barcodeScanner";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
 import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
+import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
+import { matchProductMasterMissingError } from "@/lib/apiError";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/hooks/use-user";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -1057,9 +1059,12 @@ export default function ScanOrderPage() {
         setOsPending(context.previousPending);
         osPendingRef.current = context.previousPending;
       }
+      const productMasterMissing = matchProductMasterMissingError(err);
+      if (productMasterMissing) { setOsProductMasterMissingMessage(productMasterMissing); return; }
       toast({ title: "Scan failed", description: err?.message ?? "Unknown error", variant: "destructive" });
     },
   });
+  const [osProductMasterMissingMessage, setOsProductMasterMissingMessage] = useState<string | null>(null);
 
   const stopOsCamera = () => {
     if (osScannerRef.current) { osScannerRef.current.stop(); osScannerRef.current = null; }
@@ -5689,6 +5694,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
         )}
       </div>
+
+      <ProductMasterMissingDialog message={osProductMasterMissingMessage} onClose={() => setOsProductMasterMissingMessage(null)} />
     </div>
   );
 }

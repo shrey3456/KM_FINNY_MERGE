@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { FileDown, LayoutList, Boxes, TrendingUp, ChevronDown, ChevronLeft, ChevronRight, PackageX, CalendarDays, Loader2, History, X, Plus, ArrowLeftRight, Search, ListFilter, ShoppingCart, Scale, Pencil, RotateCw } from "lucide-react";
+import { FileDown, LayoutList, Boxes, TrendingUp, ChevronDown, ChevronLeft, ChevronRight, PackageX, CalendarDays, Loader2, History, X, Plus, ArrowLeftRight, Search, ListFilter, ShoppingCart, Scale, Pencil, Trash2, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,7 +24,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Input } from "@/components/ui/input";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/hooks/use-auth";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import { DataTable, DataTableColumnToggle, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
@@ -61,8 +66,9 @@ type PlantStockRow = {
   expectedQty?: number | null;
   expectedPallets?: number | null;
   // Sum of Proforma Slip quantities for this barcode+plant — same date scoping as expectedQty,
-  // except the "all dates" default floors at Aug 1, 2026 (see saleDate below) instead of truly
-  // summing every slip ever raised. null when Sale Qty isn't populated at all.
+  // except the "all dates" default floors at the configured Sales Tracking Start date (see
+  // salesTrackingStart below, Settings > Data Management) instead of truly summing every slip
+  // ever raised. null when Sale Qty isn't populated at all.
   saleQty?: number | null;
   salePallets?: number | null;
   // Only populated when a single explicit date is selected — the running physical balance as
@@ -97,6 +103,10 @@ type PlantStockResponse = {
   // Same shape as expectedDate/expectedTotal, for Sale Qty (sourced from Proforma Slips).
   saleDate?: string | null;
   saleTotal?: number | null;
+  // The "all dates" floor Sale Qty sums from — admin-editable on Settings (Sales Tracking Start),
+  // sent along so the "since ..." label below always shows the real configured date instead of a
+  // hardcoded one.
+  salesTrackingStart?: string | null;
 };
 
 // One dated entry from the stock_movements ledger for a single (barcode, plant) — powers the
@@ -347,6 +357,57 @@ export default function OverallStock() {
   // ExchangeProductDialog with this row locked in as the source ("From") product.
   const [exchangeSource, setExchangeSource] = useState<ExchangeSourceRow | null>(null);
 
+  const { toast } = useToast();
+
+  // Edit (set this item's stock to a new total — logs one stock_movements 'adjust' row for the
+  // delta) and Delete (remove this barcode+plant entirely, including its receiving/loading/
+  // unloading scan history — the surgical, one-item counterpart to Settings > Clear Stock) —
+  // both admin-only (server/routes/plant-stock-admin.ts).
+  const [editTarget, setEditTarget] = useState<PlantStockRow | null>(null);
+  const [editQtyInput, setEditQtyInput] = useState("");
+  const [editReason, setEditReason] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<PlantStockRow | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+
+  const { data: deletePreview, isFetching: deletePreviewLoading } = useQuery<{
+    currentStock: number; receivingScanEvents: number; loadingScanEvents: number;
+    unloadingScanEvents: number; stockMovements: number; orderImportSessionsTouched: number;
+    unloadingSessionsTouched: number;
+  }>({
+    queryKey: ["/api/plant-stock/delete-preview", deleteTarget?.barcode, deleteTarget?.plant],
+    queryFn: () =>
+      apiRequest(
+        "GET",
+        buildUrl("/api/plant-stock/delete-preview", { barcode: deleteTarget!.barcode!, plant: deleteTarget!.plant }),
+        undefined, false, true,
+      ),
+    enabled: !!deleteTarget?.barcode,
+  });
+
+  const adjustMutation = useMutation({
+    mutationFn: (vars: { barcode: string; plant: string; newQty: number; reason: string }) =>
+      apiRequest("POST", "/api/plant-stock/adjust", vars, false, true),
+    onSuccess: (data: any) => {
+      toast({ title: "Stock updated", description: `${data.previousQty} → ${data.newQty} (${data.delta >= 0 ? "+" : ""}${data.delta})` });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/stock-movements"] });
+      setEditTarget(null);
+    },
+    onError: (error: any) => toast({ title: "Failed to update stock", description: error?.message, variant: "destructive" }),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (vars: { barcode: string; plant: string }) =>
+      apiRequest("DELETE", "/api/plant-stock", vars, false, true),
+    onSuccess: () => {
+      toast({ title: "Item deleted" });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      setDeleteTarget(null);
+      setDeleteConfirmText("");
+    },
+    onError: (error: any) => toast({ title: "Failed to delete", description: error?.message, variant: "destructive" }),
+  });
+
   const toggleColumn = (key: string) =>
     setVisibleColumnIds((prev) => {
       const next = new Set(prev);
@@ -473,11 +534,14 @@ export default function OverallStock() {
   const expectedTotal = stockData?.expectedTotal ?? 0;
   const hasExpected = stockData?.expectedTotal != null;
   // Sale Qty (sum of Proforma Slip quantities) — same date scoping as Expected Qty, except the
-  // "all dates" default only counts sales from Aug 1, 2026 onward (reliable sales tracking's
-  // actual start), not truly every slip ever raised.
+  // "all dates" default only counts sales from the configured Sales Tracking Start date onward
+  // (Settings > Data Management), not truly every slip ever raised.
   const saleDate = stockData?.saleDate ?? null;
   const saleTotal = stockData?.saleTotal ?? 0;
   const hasSale = stockData?.saleTotal != null;
+  const salesTrackingStartLabel = stockData?.salesTrackingStart
+    ? new Date(`${stockData.salesTrackingStart}T00:00:00`).toLocaleDateString("en-IN", { year: "numeric", month: "short", day: "numeric" })
+    : null;
 
   const rows = stockData?.items ?? [];
   // null = admin (may pick any plant). Array = restricted user → lock the switcher to these.
@@ -1189,7 +1253,7 @@ export default function OverallStock() {
       cellClassName: cellBorder,
       render: (row) =>
         row.isEmptyBox || row.saleQty == null ? dash : (
-          <span title={saleDate ? `Sum of Proforma Slip quantity for ${saleDate}` : "Sum of Proforma Slip quantity since Aug 1, 2026"}>
+          <span title={saleDate ? `Sum of Proforma Slip quantity for ${saleDate}` : `Sum of Proforma Slip quantity since ${salesTrackingStartLabel ?? "the configured start date"}`}>
             {stackedCell(row.saleQty, row.salePallets, "text-emerald-600")}
           </span>
         ),
@@ -1266,33 +1330,68 @@ export default function OverallStock() {
       cellClassName: "text-gray-500 whitespace-nowrap",
       render: (row) => (row.lastArrived ? format(new Date(row.lastArrived), "MMM d, yyyy") : dash),
     },
-    ...(canExchange ? [{
+    ...(canExchange || isAdminOrSuper ? [{
       id: "actions",
       header: "",
       hideable: false,
       totalable: false,
-      width: 48,
+      width: isAdminOrSuper ? 96 : 48,
       align: "center" as const,
       render: (row: PlantStockRow) =>
         !row.isEmptyBox && row.barcode ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
-            title="Exchange this product for another"
-            onClick={(e) => {
-              e.stopPropagation();
-              setExchangeSource({
-                barcode: row.barcode!,
-                itemName: row.itemName,
-                plant: row.plant,
-                availableStock: row.inStock,
-                itemsPerPallet: row.itemsPerPallet,
-              });
-            }}
-          >
-            <ArrowLeftRight className="h-3.5 w-3.5" />
-          </Button>
+          <div className="flex items-center justify-center gap-0.5">
+            {canExchange && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
+                title="Exchange this product for another"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setExchangeSource({
+                    barcode: row.barcode!,
+                    itemName: row.itemName,
+                    plant: row.plant,
+                    availableStock: row.inStock,
+                    itemsPerPallet: row.itemsPerPallet,
+                  });
+                }}
+              >
+                <ArrowLeftRight className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {isAdminOrSuper && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
+                title="Edit this item's stock"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditTarget(row);
+                  setEditQtyInput(String(row.inStock + row.extraQty));
+                  setEditReason("");
+                }}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {isAdminOrSuper && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                title="Delete this item — removes it and its scan history entirely"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleteTarget(row);
+                  setDeleteConfirmText("");
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
         ) : null,
     } satisfies DataTableColumn<PlantStockRow>] : []),
   ];
@@ -1426,11 +1525,12 @@ export default function OverallStock() {
               icon: ShoppingCart,
               tone: "emerald" as const,
               value: saleTotal.toLocaleString(),
-              // Same explicit-date-vs-all-dates split as Expected above, except "all dates"
-              // here means "since Aug 1, 2026" — sales tracking isn't reliable before that.
+              // Same explicit-date-vs-all-dates split as Expected above, except "all dates" here
+              // means "since the configured Sales Tracking Start date" (Settings > Data
+              // Management) — sales tracking isn't reliable before that.
               label: saleDate
                 ? `Sale (${saleDate}) · ${salePalletsTotal.toFixed(2)} plt`
-                : `Sale (Since Aug 1, 2026) · ${salePalletsTotal.toFixed(2)} plt`,
+                : `Sale (Since ${salesTrackingStartLabel ?? "start"}) · ${salePalletsTotal.toFixed(2)} plt`,
             }] : []),
             // Closing Stock (date-filter view) replaces Remain (all-dates view) — same math
             // (Opening + Purchase − Sale, or Purchase − Sale with no Opening), just labeled for
@@ -2006,6 +2106,144 @@ export default function OverallStock() {
       </div>
 
       <ExchangeProductDialog source={exchangeSource} onClose={() => setExchangeSource(null)} />
+
+      {/* Edit — set this item's stock to a new total. Server computes the delta and logs one
+          stock_movements 'adjust' row, which then shows up as "Adjusted" in the arrival-history
+          drill-down above with no extra work. */}
+      <Dialog open={!!editTarget} onOpenChange={(open) => { if (!open) setEditTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Edit stock — {editTarget?.itemName}</DialogTitle>
+            <DialogDescription>
+              <span className="font-mono">{editTarget?.barcode}</span> · {editTarget?.plant}. Currently{" "}
+              <span className="font-semibold text-gray-900">{editTarget ? editTarget.inStock + editTarget.extraQty : 0}</span> in stock.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="editQty">New total quantity</Label>
+              <Input
+                id="editQty"
+                type="number"
+                min="0"
+                value={editQtyInput}
+                onChange={(e) => setEditQtyInput(e.target.value)}
+              />
+              {editTarget && editQtyInput.trim() !== "" && Number.isFinite(Number(editQtyInput)) && (() => {
+                const delta = Math.round(Number(editQtyInput)) - (editTarget.inStock + editTarget.extraQty);
+                if (delta === 0) return null;
+                return (
+                  <p className={`text-xs font-semibold ${delta > 0 ? "text-emerald-600" : "text-amber-600"}`}>
+                    {delta > 0 ? `+${delta} will be added` : `${delta} will be removed`} — logged as an Adjusted entry.
+                  </p>
+                );
+              })()}
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="editReason">Reason (optional)</Label>
+              <Input
+                id="editReason"
+                placeholder="e.g. Physical count correction"
+                value={editReason}
+                onChange={(e) => setEditReason(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditTarget(null)} disabled={adjustMutation.isPending}>Cancel</Button>
+            <Button
+              disabled={
+                adjustMutation.isPending ||
+                editQtyInput.trim() === "" ||
+                !Number.isFinite(Number(editQtyInput)) ||
+                Number(editQtyInput) < 0
+              }
+              onClick={() => {
+                if (!editTarget?.barcode) return;
+                adjustMutation.mutate({
+                  barcode: editTarget.barcode,
+                  plant: editTarget.plant,
+                  newQty: Math.round(Number(editQtyInput)),
+                  reason: editReason,
+                });
+              }}
+            >
+              {adjustMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete — permanently removes this barcode+plant, including its receiving/loading/
+          unloading scan history. Type-to-confirm since it's irreversible, same pattern as
+          Settings > Clear Stock. */}
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) { setDeleteTarget(null); setDeleteConfirmText(""); } }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-red-700">Delete {deleteTarget?.itemName}?</DialogTitle>
+            <DialogDescription>
+              <span className="font-mono">{deleteTarget?.barcode}</span> · {deleteTarget?.plant}. This permanently removes the
+              item's stock and every trace of it from receiving, Loading, and Unloading scan history at this plant. Cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          {deletePreviewLoading ? (
+            <div className="flex justify-center py-4"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+          ) : deletePreview && (
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div className="p-2 rounded border bg-white">
+                <div className="font-medium">Current stock</div>
+                <div className="text-muted-foreground">{deletePreview.currentStock}</div>
+              </div>
+              <div className="p-2 rounded border bg-white">
+                <div className="font-medium">Stock movements</div>
+                <div className="text-muted-foreground">{deletePreview.stockMovements}</div>
+              </div>
+              <div className="p-2 rounded border bg-white">
+                <div className="font-medium">Receiving events</div>
+                <div className="text-muted-foreground">{deletePreview.receivingScanEvents}</div>
+              </div>
+              <div className="p-2 rounded border bg-white">
+                <div className="font-medium">Loading events</div>
+                <div className="text-muted-foreground">{deletePreview.loadingScanEvents}</div>
+              </div>
+              <div className="p-2 rounded border bg-white">
+                <div className="font-medium">Unloading events</div>
+                <div className="text-muted-foreground">{deletePreview.unloadingScanEvents}</div>
+              </div>
+              <div className="p-2 rounded border bg-white">
+                <div className="font-medium">Import sessions touched</div>
+                <div className="text-muted-foreground">{deletePreview.orderImportSessionsTouched + deletePreview.unloadingSessionsTouched}</div>
+              </div>
+            </div>
+          )}
+          <div className="space-y-1.5">
+            <Label htmlFor="deleteConfirm">Type DELETE to confirm</Label>
+            <Input
+              id="deleteConfirm"
+              placeholder="DELETE"
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setDeleteTarget(null); setDeleteConfirmText(""); }} disabled={deleteMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteMutation.isPending || deleteConfirmText.trim().toUpperCase() !== "DELETE"}
+              onClick={() => {
+                if (!deleteTarget?.barcode) return;
+                deleteMutation.mutate({ barcode: deleteTarget.barcode, plant: deleteTarget.plant });
+              }}
+            >
+              {deleteMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

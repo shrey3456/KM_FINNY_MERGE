@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -341,6 +341,15 @@ export const proformaSlips = pgTable("proforma_slips", {
   totalVolume: text("total_volume"),
   vehicleNumber: text("vehicle_number"),
   driverName: text("driver_name"),
+  // Extra fields pulled from the Notion dispatch database on import — not set by manual creation.
+  invoiceNumber: text("invoice_number"),
+  partyState: text("party_state"),
+  notionStatus: text("notion_status"), // Notion's "+ / - Status :" property
+  storeKeeperInfo: text("storekeeper_info"),
+  // Full raw property map read off the Notion page at import time (property name -> extracted
+  // display value), so any Notion column not mapped to its own DB field above is still kept
+  // instead of silently dropped, and future columns can be surfaced without another migration.
+  notionRawData: jsonb("notion_raw_data").$type<Record<string, unknown>>(),
   createdByCode: text("created_by_code").references(() => users.userCode),
   createdAt: timestamp("created_at").defaultNow(),
   notes: text("notes"),
@@ -376,6 +385,7 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
 }).pick({
   orderDate: true, orderNumber: true, partyName: true, plant: true,
   totalQuantity: true, totalVolume: true, vehicleNumber: true, driverName: true,
+  invoiceNumber: true, partyState: true, notionStatus: true, storeKeeperInfo: true, notionRawData: true,
   createdByCode: true, notes: true, isBackedUp: true, isPrintLocked: true,
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
   loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,
@@ -1159,6 +1169,10 @@ export const unloadScanEvents = pgTable("unload_scan_events", {
   looseQty: integer("loose_qty").default(0),
   totalQty: integer("total_qty").default(0),
   isExtra: boolean("is_extra").default(false), // scanned beyond this item's expected quantity
+  // Sub-transfer voucher code (see plantStvs above) — same per-plant STV concept Order Scan
+  // already records per event; picked once for the vehicle before scanning (see the STV
+  // selector in client/src/pages/Unloading/Unloading.tsx), stored on every event.
+  stv: text("stv"),
   plant: text("plant"),
   vehicleNumber: text("vehicle_number"),
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
@@ -1192,7 +1206,7 @@ export const insertUnloadImportItemSchema = createInsertSchema(unloadImportItems
 });
 export const insertUnloadScanEventSchema = createInsertSchema(unloadScanEvents).pick({
   sessionId: true, barcode: true, itemName: true, sapCode: true, pallets: true, looseQty: true,
-  totalQty: true, isExtra: true, plant: true, vehicleNumber: true, scannedByCode: true, scannedByName: true,
+  totalQty: true, isExtra: true, stv: true, plant: true, vehicleNumber: true, scannedByCode: true, scannedByName: true,
 });
 
 export type UnloadImportSession = typeof unloadImportSessions.$inferSelect;
@@ -1272,6 +1286,24 @@ export const backupSettings = pgTable("backup_settings", {
 export const insertBackupSettingsSchema = createInsertSchema(backupSettings).pick({
   lastBackupDate: true, autoBackupEnabled: true, backupFrequencyHours: true,
 });
+
+// Single-row settings table — same pattern as backupSettings above. Currently holds just the
+// Sales tracking start date (Overall Stock's ledger: proforma data before this date isn't
+// reliable, so the "all dates" Sales total starts counting from here instead of the true
+// beginning — see SALES_TRACKING_START's old hardcoded home in server/routes/scan-sessions.ts).
+// Room to grow if another admin-editable, no-code-change setting shows up later.
+export const salesSettings = pgTable("sales_settings", {
+  id: serial("id").primaryKey(),
+  salesTrackingStartDate: text("sales_tracking_start_date").notNull().default('2026-08-01'),
+  updatedAt: timestamp("updated_at").defaultNow(),
+  updatedByCode: text("updated_by_code").references(() => users.userCode),
+});
+
+export const insertSalesSettingsSchema = createInsertSchema(salesSettings).pick({
+  salesTrackingStartDate: true, updatedByCode: true,
+});
+export type SalesSettings = typeof salesSettings.$inferSelect;
+export type InsertSalesSettings = z.infer<typeof insertSalesSettingsSchema>;
 
 export type BackupSettings = typeof backupSettings.$inferSelect;
 export type InsertBackupSettings = z.infer<typeof insertBackupSettingsSchema>;
