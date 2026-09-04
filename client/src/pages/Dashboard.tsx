@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'wouter';
 import { apiRequest } from '@/lib/queryClient';
-import { isAdminOrSuperAdmin, getCurrentUserPermissions } from '@/lib/permissions';
+import { isAdminOrSuperAdmin, getCurrentUserPermissions, hasPageViewAccess } from '@/lib/permissions';
 
 // Import the requested images
 import ganpatiImg from '@assets/ganpati.png';
@@ -155,34 +155,40 @@ const Home = () => {
         <div className="grid grid-cols-4 gap-4">
           {/* Row 1 */}
           {/* Print Operations Button */}
-          <div className="flex flex-col items-center">
-            <Link href="/print-operations" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <PrinterCheck className="h-7 w-7 text-[#001d6e]" style={{fill: "#8766e3"}} />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Print</span>
-            </Link>
-          </div>
+          {hasPageViewAccess("print-operations") && (
+            <div className="flex flex-col items-center">
+              <Link href="/print-operations" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <PrinterCheck className="h-7 w-7 text-[#001d6e]" style={{fill: "#8766e3"}} />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Print</span>
+              </Link>
+            </div>
+          )}
 
           {/* Load Button */}
-          <div className="flex flex-col items-center">
-            <Link href="/load-operations" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <Factory className="h-7 w-7 text-[#001d6e] fill-[#4d7eff]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Load</span>
-            </Link>
-          </div>
+          {hasPageViewAccess("load-operations") && (
+            <div className="flex flex-col items-center">
+              <Link href="/load-operations" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <Factory className="h-7 w-7 text-[#001d6e] fill-[#4d7eff]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Load</span>
+              </Link>
+            </div>
+          )}
 
           {/* Dispatch Button */}
-          <div className="flex flex-col items-center">
-            <Link href="/dispatch" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <Truck className="h-7 w-7 text-[#001d6e]" style={{fill: "#eab308"}} />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Dispatch</span>
-            </Link>
-          </div>
+          {hasPageViewAccess("dispatch") && (
+            <div className="flex flex-col items-center">
+              <Link href="/dispatch" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <Truck className="h-7 w-7 text-[#001d6e]" style={{fill: "#eab308"}} />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Dispatch</span>
+              </Link>
+            </div>
+          )}
 
           {/* Expense Voucher Button - Only show if user has access */}
           {canAccessExpenseVoucher && (
@@ -198,46 +204,53 @@ const Home = () => {
 
           {/* Row 2 */}
           {/* Scan Button */}
-          <div className="flex flex-col items-center">
-            <Link href="/scan" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <ScanLine className="h-7 w-7 text-[#001d6e]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Scan</span>
-            </Link>
-          </div>
+          {hasPageViewAccess("scan-order") && (
+            <div className="flex flex-col items-center">
+              <Link href="/scan" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <ScanLine className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Scan</span>
+              </Link>
+            </div>
+          )}
 
-          {/* Scan History Button — points at Reports, which is where Scan History actually
-              lives (/scan-history was never wired up as a real route and 404'd). */}
-          <div className="flex flex-col items-center">
-            <Link href="/reports" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <History className="h-7 w-7 text-[#001d6e]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Scan History</span>
-            </Link>
-          </div>
+          {/* Scan History Button */}
+          {hasPageViewAccess("scan-history") && (
+            <div className="flex flex-col items-center">
+              <Link href="/scan-history" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <History className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Scan History</span>
+              </Link>
+            </div>
+          )}
 
           {/* Proforma Slips Button */}
-          <div className="flex flex-col items-center">
-            <Link href="/proforma-slips" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <FileText className="h-7 w-7 text-[#001d6e]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Proforma Slips</span>
-            </Link>
-          </div>
+          {hasPageViewAccess("proforma") && (
+            <div className="flex flex-col items-center">
+              <Link href="/proforma-slips" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <FileText className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Proforma Slips</span>
+              </Link>
+            </div>
+          )}
 
           {/* Reports Button — order reports live inside Order Management now (per-row
               Reports dialog), not a separate page, so this points there. */}
-          <div className="flex flex-col items-center">
-            <Link href="/order-import" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <PieChart className="h-7 w-7 text-[#001d6e]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Reports</span>
-            </Link>
-          </div>
+          {hasPageViewAccess("order-import") && (
+            <div className="flex flex-col items-center">
+              <Link href="/order-import" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <PieChart className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Reports</span>
+              </Link>
+            </div>
+          )}
         </div>
         
         {/* KRUPA MARKETING Credit */}

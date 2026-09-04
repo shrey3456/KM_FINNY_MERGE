@@ -6,6 +6,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import sharp from 'sharp';
+import {
+  extractText, extractInteger, extractMultiSelect, multiSelectToText, extractFileUrl, firstOf,
+} from '../lib/notionProperties';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -151,72 +154,8 @@ const pendingImageUrlByCreateIndex = new Map<number, string>();
 let pendingSyncImages = false;
 
 // ─── Notion property helpers ──────────────────────────────────────────────────
-
-function extractText(prop: any): string {
-  if (!prop) return '';
-  switch (prop.type) {
-    case 'title':       return prop.title?.map((t: any) => t.plain_text).join('') || '';
-    case 'rich_text':   return prop.rich_text?.map((t: any) => t.plain_text).join('') || '';
-    case 'select':      return prop.select?.name || '';
-    case 'status':      return prop.status?.name || '';
-    case 'multi_select':return prop.multi_select?.map((s: any) => s.name).join(', ') || '';
-    case 'number':      return prop.number != null ? String(prop.number) : '';
-    case 'formula':
-      if (prop.formula?.type === 'string') return prop.formula.string || '';
-      if (prop.formula?.type === 'number') return prop.formula.number != null ? String(prop.formula.number) : '';
-      return '';
-    case 'rollup':
-      if (prop.rollup?.type === 'number') return prop.rollup.number != null ? String(prop.rollup.number) : '';
-      if (prop.rollup?.type === 'array')
-        return prop.rollup.array?.map((i: any) => extractText(i)).filter(Boolean).join(', ') || '';
-      return '';
-    default: return '';
-  }
-}
-
-function extractInteger(prop: any): number | undefined {
-  if (!prop) return undefined;
-  if (prop.type === 'number' && prop.number != null && prop.number > 0) return Math.round(prop.number);
-  const text = extractText(prop);
-  if (!text) return undefined;
-  const n = parseFloat(text.replace(/[₹,\s]/g, ''));
-  return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
-}
-
-function extractMultiSelect(prop: any): string[] {
-  if (!prop) return [];
-  if (prop.type === 'multi_select') return (prop.multi_select ?? []).map((s: any) => String(s.name)).filter(Boolean);
-  if (prop.type === 'status')  return prop.status?.name  ? [String(prop.status.name)]  : [];
-  if (prop.type === 'select')  return prop.select?.name  ? [String(prop.select.name)]  : [];
-  return [];
-}
-
-function multiSelectToText(values: string[]): string | null {
-  return values.length > 0 ? values.join(', ') : null;
-}
-
-// Notion "Files & media" properties aren't covered by extractText (it only handles
-// text-like property types) — the URL lives at a different path depending on whether
-// the file was uploaded to Notion directly (type 'file', a presigned S3 URL that
-// EXPIRES after ~1 hour) or linked externally (type 'external', a stable URL). Either
-// way, the caller must use this URL immediately (download it), never persist it as-is
-// long-term for Notion-hosted files.
-function extractFileUrl(prop: any): string {
-  if (!prop || prop.type !== 'files') return '';
-  const first = (prop.files ?? [])[0];
-  if (!first) return '';
-  if (first.type === 'external') return first.external?.url ?? '';
-  if (first.type === 'file') return first.file?.url ?? '';
-  return '';
-}
-
-function firstOf(props: any, ...keys: string[]): string {
-  for (const key of keys) {
-    const val = extractText(props[key]);
-    if (val.trim()) return val.trim();
-  }
-  return '';
-}
+// Moved to server/lib/notionProperties.ts so Vehicle Master's sync service can reuse the same
+// property-type handling instead of duplicating it — see that file for extractText etc.
 
 // ─── Map Notion page → all fields ────────────────────────────────────────────
 

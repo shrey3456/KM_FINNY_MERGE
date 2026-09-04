@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
 import { ProformaSlipAPIImport } from "@/components/ProformaSlipAPIImport";
+import { ProformaSlipNotionSync } from "@/components/ProformaSlipNotionSync";
 import PageHeader from "../components/PageHeader";
 import { Lock, Unlock } from "lucide-react";
 
@@ -58,7 +59,7 @@ import {
 } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, buildPageList, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -180,46 +181,6 @@ function readSavedSlipFilters(): SavedSlipFilters {
   }
 }
 
-/**
- * Which page numbers a pager should offer, given the current page and how many there are — all of
- * them when they fit, otherwise the first, the last, a window around the current page, and "gap"
- * where the run is broken. Both indexes are 0-based, matching DataTable's own pageIndex.
- *
- * e.g. page 1 of 442 → 1 2 3 … 442, and page 10 → 1 … 9 10 11 … 442.
- */
-function buildPageList(pageIndex: number, pageCount: number, window = 1): Array<number | "gap"> {
-  // Small enough to list in full — an ellipsis is never narrower than just showing the numbers.
-  const maxWithoutGaps = window * 2 + 5;
-  if (pageCount <= maxWithoutGaps) return Array.from({ length: pageCount }, (_, i) => i);
-
-  const last = pageCount - 1;
-  // Near either end the window would be clipped by the edge, leaving a stubby "1 2 … 442". Extend
-  // it inward instead so the run of numbers stays the same length wherever you are.
-  let from: number;
-  let to: number;
-  if (pageIndex <= window) {
-    from = 1;
-    to = Math.min(last - 1, window * 2);
-  } else if (pageIndex >= last - window) {
-    from = Math.max(1, last - window * 2);
-    to = last - 1;
-  } else {
-    from = pageIndex - window;
-    to = pageIndex + window;
-  }
-
-  const pages: Array<number | "gap"> = [0];
-  // A gap standing in for a single page would take as much room as the page itself, so only use
-  // one where at least two pages are actually being hidden — otherwise show that page.
-  if (from > 2) pages.push("gap");
-  else if (from === 2) pages.push(1);
-  for (let i = from; i <= to; i++) pages.push(i);
-  if (to < last - 2) pages.push("gap");
-  else if (to === last - 2) pages.push(last - 1);
-  pages.push(last);
-  return pages;
-}
-
 export default function ProformaSlips() {
   const [selectedSlip, setSelectedSlip] = useState<ProformaSlip | null>(null);
   const [isNewSlipDialogOpen, setIsNewSlipDialogOpen] = useState(false);
@@ -236,6 +197,11 @@ export default function ProformaSlips() {
   const [slipSearchQuery, setSlipSearchQuery] = useState(() => readSavedSlipFilters().search ?? '');
   const [filteredProducts, setFilteredProducts] = useState<Product[] | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
+  // Inline "Edit SKU" on a single existing slip item — separate search state from the
+  // slip-level "Add Items" box above so editing one row's SKU doesn't fight over the same query.
+  const [editingSkuItemId, setEditingSkuItemId] = useState<number | null>(null);
+  const [skuEditQuery, setSkuEditQuery] = useState('');
+  const [filteredSkuProducts, setFilteredSkuProducts] = useState<Product[] | null>(null);
   const [selectedSlipIds, setSelectedSlipIds] = useState<number[]>([]);
   const [isMultipleDeleteDialogOpen, setIsMultipleDeleteDialogOpen] = useState(false);
   const [sortConfig, setSortConfig] = useState<{column: string, direction: 'asc' | 'desc'}>({
@@ -244,7 +210,7 @@ export default function ProformaSlips() {
   });
 
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
-    () => new Set(['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'actions']),
+    () => new Set(['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'invoiceNumber', 'actions']),
   );
 
   // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
@@ -371,11 +337,16 @@ export default function ProformaSlips() {
   // canAddSlips/canEditSlips (they were always the same check under two different names).
   const canWriteSlips = isAdminOrSuper || isReadWriteUser;
 
-  // Lock/Unlock: admin/super-admin, OR Write Access to BOTH "print-operations" AND
-  // "proforma" — needs both page grants, not just one. No more department/designation
-  // special-casing (IT/Management/Billing-Head are gone — grant Write Access on both of
-  // those page keys instead).
-  const canLockUnlockSlips = isAdminOrSuper || (hasPageWriteAccess('print-operations') && hasPageWriteAccess('proforma'));
+  // Lock: admin/super-admin, OR Write Access to EITHER "print-operations" OR "proforma" —
+  // deliberately looser than Unlock below, matching the server's requireLockAccess (see
+  // server/routes/proforma-api.ts) — more people should be able to lock a slip to protect it
+  // than can later reverse that.
+  const canLockSlips = isAdminOrSuper || hasPageWriteAccess('print-operations') || hasPageWriteAccess('proforma');
+  // Unlock: admin/super-admin, OR Write Access to BOTH "print-operations" AND "proforma" —
+  // needs both page grants, not just one. No more department/designation special-casing
+  // (IT/Management/Billing-Head are gone — grant Write Access on both of those page keys
+  // instead).
+  const canUnlockSlips = isAdminOrSuper || (hasPageWriteAccess('print-operations') && hasPageWriteAccess('proforma'));
 
   console.log('DEBUG PROFORMA PERMISSIONS:', {
     source: remoteUser ? 'remote' : 'local',
@@ -384,7 +355,8 @@ export default function ProformaSlips() {
     desig: userDesig,
     isAdminOrSuper,
     isReadWriteUser,
-    canLockUnlockSlips,
+    canLockSlips,
+    canUnlockSlips,
     canWriteSlips,
   });
 
@@ -881,6 +853,17 @@ export default function ProformaSlips() {
   const handleDeleteItem = (id: number) => {
     deleteSlipItemMutation.mutate(id);
   };
+
+  // Handle editing an existing item's SKU — swaps which product this line points to. The server
+  // re-snapshots every product field (name, barcode, SAP code, price, etc.) onto the item, so
+  // this reflects everywhere the slip is read from: printing, Reports, and Loading's barcode
+  // matching (server/routes/loading.ts), which looks up items live off proforma_slip_items.
+  const handleEditSku = (itemId: number, product: Product) => {
+    handleSaveItem(itemId, { productId: product.id });
+    setEditingSkuItemId(null);
+    setSkuEditQuery('');
+    setFilteredSkuProducts(null);
+  };
   
   // Toggle row expansion to show items
   const toggleRowExpansion = (slip: ProformaSlip) => {
@@ -928,27 +911,38 @@ export default function ProformaSlips() {
   // Handle CSV export
   const handleExportCSV = async () => {
     try {
-      const response = await fetch('/api/proforma-slips/export-csv');
-      
+      // Export exactly what's currently on screen — search text, plant tab, date range, and any
+      // Excel-style column filters — instead of always dumping every slip regardless of what the
+      // user has filtered down to.
+      const filtered = getFilteredSlips();
+      const isFiltered = !!proformaSlips && filtered.length !== proformaSlips.length;
+      const url = isFiltered
+        ? `/api/proforma-slips/export-csv?ids=${filtered.map((s) => s.id).join(',')}`
+        : '/api/proforma-slips/export-csv';
+
+      const response = await fetch(url);
+
       if (!response.ok) {
         throw new Error('Failed to export CSV');
       }
-      
+
       const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
+      const blobUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url;
+      a.href = blobUrl;
       a.download = 'proforma-slips.csv';
-      
+
       document.body.appendChild(a);
       a.click();
-      
-      window.URL.revokeObjectURL(url);
+
+      window.URL.revokeObjectURL(blobUrl);
       document.body.removeChild(a);
-      
+
       toast({
         title: "Success",
-        description: "All proforma slips exported successfully",
+        description: isFiltered
+          ? `Exported ${filtered.length} filtered proforma slip(s)`
+          : "All proforma slips exported successfully",
       });
     } catch (error: any) {
       console.error("Export error:", error);
@@ -1052,6 +1046,10 @@ export default function ProformaSlips() {
       { id: "totalVolume", label: "Total Volume", filterType: "text", options: textOptions((s) => s.totalVolume), accessor: (s) => s.totalVolume },
       { id: "vehicleNumber", label: "Vehicle No.", filterType: "text", options: textOptions((s) => s.vehicleNumber), accessor: (s) => s.vehicleNumber },
       { id: "driverName", label: "Driver", filterType: "text", options: textOptions((s) => s.driverName), accessor: (s) => s.driverName },
+      { id: "invoiceNumber", label: "Invoice No.", filterType: "text", options: textOptions((s) => s.invoiceNumber), accessor: (s) => s.invoiceNumber },
+      { id: "partyState", label: "State", filterType: "enum", options: textOptions((s) => s.partyState), accessor: (s) => s.partyState },
+      { id: "notionStatus", label: "Notion Status", filterType: "enum", options: textOptions((s) => s.notionStatus), accessor: (s) => s.notionStatus },
+      { id: "storeKeeperInfo", label: "StoreKeeper Info", filterType: "text", options: textOptions((s) => s.storeKeeperInfo), accessor: (s) => s.storeKeeperInfo },
     ];
   }, [proformaSlips]);
 
@@ -1191,7 +1189,7 @@ export default function ProformaSlips() {
     const q = slipSearchQuery.trim().toLowerCase();
     return (proformaSlips as LockedProformaSlip[]).filter((slip) => {
       if (q) {
-        const hit = [slip.orderNumber, slip.partyName, slip.plant, slip.vehicleNumber, slip.driverName]
+        const hit = [slip.orderNumber, slip.partyName, slip.plant, slip.vehicleNumber, slip.driverName, slip.invoiceNumber]
           .some((v) => v && v.toLowerCase().includes(q));
         if (!hit) return false;
       }
@@ -1447,6 +1445,30 @@ export default function ProformaSlips() {
       render: (slip) => slip.driverName || ' ',
     },
     {
+      id: 'invoiceNumber',
+      header: columnHeader('invoiceNumber', 'Invoice No.'),
+      width: 120,
+      render: (slip) => slip.invoiceNumber || ' ',
+    },
+    {
+      id: 'partyState',
+      header: columnHeader('partyState', 'State'),
+      width: 90,
+      render: (slip) => slip.partyState || ' ',
+    },
+    {
+      id: 'notionStatus',
+      header: columnHeader('notionStatus', 'Notion Status'),
+      width: 110,
+      render: (slip) => slip.notionStatus || ' ',
+    },
+    {
+      id: 'storeKeeperInfo',
+      header: columnHeader('storeKeeperInfo', 'StoreKeeper Info'),
+      width: 140,
+      render: (slip) => slip.storeKeeperInfo || ' ',
+    },
+    {
       id: 'actions',
       header: '',
       width: 60,
@@ -1464,7 +1486,7 @@ export default function ProformaSlips() {
             <DropdownMenuLabel>Actions</DropdownMenuLabel>
             <DropdownMenuSeparator />
 
-            {!slip.isPrintLocked && canLockUnlockSlips && (
+            {!slip.isPrintLocked && canLockSlips && (
               <DropdownMenuItem
                 onClick={async () => {
                   try {
@@ -1487,7 +1509,7 @@ export default function ProformaSlips() {
               </DropdownMenuItem>
             )}
 
-            {slip.isPrintLocked && canLockUnlockSlips && (
+            {slip.isPrintLocked && canUnlockSlips && (
               <DropdownMenuItem
                 onClick={async () => {
                   try {
@@ -1702,8 +1724,80 @@ export default function ProformaSlips() {
                 return (
                   <TableRow key={item.id}>
                     <TableCell>{item.srNo || ' '}</TableCell>
-                    <TableCell className="break-words">
-                      {item.barcode || ' '}
+                    <TableCell className="break-words relative">
+                      {editingSkuItemId === item.id ? (
+                        <div className="relative">
+                          <Input
+                            autoFocus
+                            type="text"
+                            placeholder="Search by name, Sr.No, or barcode..."
+                            value={skuEditQuery}
+                            onChange={(e) => {
+                              setSkuEditQuery(e.target.value);
+                              if (e.target.value.trim() !== '' && products) {
+                                setFilteredSkuProducts(products.filter(product =>
+                                  product.name?.toLowerCase().includes(e.target.value.toLowerCase()) ||
+                                  product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
+                                  product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
+                                ));
+                              } else {
+                                setFilteredSkuProducts(products ?? null);
+                              }
+                            }}
+                            className="h-8 text-xs w-full min-w-[180px]"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="absolute -right-8 top-0 h-8 w-8"
+                            onClick={() => { setEditingSkuItemId(null); setSkuEditQuery(''); setFilteredSkuProducts(null); }}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
+                          {filteredSkuProducts && filteredSkuProducts.length > 0 && (
+                            <div className="absolute z-20 w-[280px] mt-1 bg-white rounded-md shadow-lg max-h-60 overflow-auto border border-gray-300">
+                              <ul className="py-1">
+                                {filteredSkuProducts.slice(0, 30).map(product => (
+                                  <li
+                                    key={product.id}
+                                    className="px-3 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-100"
+                                    onClick={() => handleEditSku(item.id, product)}
+                                  >
+                                    <div className="flex flex-col">
+                                      <span className="font-medium text-sm">{product.name}</span>
+                                      <span className="text-xs text-muted-foreground">
+                                        Sr.No: {product.newSr || ' '} | Barcode: {product.barcode || ' '}
+                                      </span>
+                                    </div>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {skuEditQuery.trim() !== '' && (!filteredSkuProducts || filteredSkuProducts.length === 0) && (
+                            <div className="absolute z-20 w-[280px] mt-1 bg-white rounded-md shadow-lg border border-gray-300 px-3 py-3 text-center text-xs text-gray-500">
+                              No products found matching your search.
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <span>{item.barcode || ' '}</span>
+                          {canWriteSlips && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 shrink-0"
+                              title="Edit SKU"
+                              onClick={() => { setEditingSkuItemId(item.id); setSkuEditQuery(''); setFilteredSkuProducts(products ?? null); }}
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </Button>
+                          )}
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell className="max-w-[300px] break-words">
                       {item.itemName || `Product #${item.productId}`}
@@ -1975,8 +2069,20 @@ export default function ProformaSlips() {
 
           {/* Export button - Visible to Read-Only AND Admin/Super */}
           {(isread || isAdminOrSuper || isReadWriteUser) && (
-            <Button variant="outline" size="sm" onClick={() => handleExportCSV()}>
-              <FileDown className="mr-2 h-4 w-4" /> Export All
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleExportCSV()}
+              title={
+                proformaSlips && getFilteredSlips().length !== proformaSlips.length
+                  ? `Export the ${getFilteredSlips().length} filtered slip(s) currently shown`
+                  : "Export all proforma slips"
+              }
+            >
+              <FileDown className="mr-2 h-4 w-4" />
+              {proformaSlips && getFilteredSlips().length !== proformaSlips.length
+                ? `Export Filtered (${getFilteredSlips().length})`
+                : "Export All"}
             </Button>
           )}
 
@@ -1996,10 +2102,31 @@ export default function ProformaSlips() {
                       Fetch proforma slip data directly from your Notion database.
                     </DialogDescription>
                   </DialogHeader>
-                  <ProformaSlipAPIImport 
+                  <ProformaSlipAPIImport
                     onImportSuccess={() => {
                       queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
-                    }} 
+                    }}
+                  />
+                </DialogContent>
+              </Dialog>
+
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    <RefreshCw className="mr-2 h-4 w-4" /> Sync from Notion
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-2xl">
+                  <DialogHeader>
+                    <DialogTitle>Sync Proforma Slips from Notion</DialogTitle>
+                    <DialogDescription>
+                      Check what's changed in Notion for a date range, review it, then apply.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <ProformaSlipNotionSync
+                    onApplySuccess={() => {
+                      queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
+                    }}
                   />
                 </DialogContent>
               </Dialog>

@@ -231,7 +231,15 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import-edi
         const oldBarcode = existing.barcode;
         const barcodeChanged = (oldBarcode ?? '').toLowerCase() !== (barcode ?? '').toLowerCase();
 
-        if (barcodeChanged && existing.scannedQty > 0 && oldBarcode && barcode) {
+        // order_scan_items is seeded with its own copy of the barcode the moment the CSV is
+        // uploaded — independent of whether anything has been scanned yet (see seedSessionItems
+        // in order-scan.ts). So this must run on every barcode change, not just ones with
+        // existing scanned quantity: an item edited BEFORE its first scan still has a stale
+        // order_scan_items.barcode snapshot pointing at the old value, and a scan against the
+        // corrected barcode would find no match there and get logged as an unmatched Extra
+        // instead of against this item. The stock reversal/reapply below stays its own,
+        // separately-guarded (`totalQty > 0`) step — nothing to reverse when nothing was scanned.
+        if (barcodeChanged && oldBarcode && barcode) {
           const { rows: scannedRows } = await client.query(
             `SELECT
                COALESCE(SUM(total_qty) FILTER (WHERE NOT is_extra), 0)::int AS "orderQty",

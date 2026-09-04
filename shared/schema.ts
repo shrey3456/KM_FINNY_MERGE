@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -341,6 +341,15 @@ export const proformaSlips = pgTable("proforma_slips", {
   totalVolume: text("total_volume"),
   vehicleNumber: text("vehicle_number"),
   driverName: text("driver_name"),
+  // Extra fields pulled from the Notion dispatch database on import — not set by manual creation.
+  invoiceNumber: text("invoice_number"),
+  partyState: text("party_state"),
+  notionStatus: text("notion_status"), // Notion's "+ / - Status :" property
+  storeKeeperInfo: text("storekeeper_info"),
+  // Full raw property map read off the Notion page at import time (property name -> extracted
+  // display value), so any Notion column not mapped to its own DB field above is still kept
+  // instead of silently dropped, and future columns can be surfaced without another migration.
+  notionRawData: jsonb("notion_raw_data").$type<Record<string, unknown>>(),
   createdByCode: text("created_by_code").references(() => users.userCode),
   createdAt: timestamp("created_at").defaultNow(),
   notes: text("notes"),
@@ -350,6 +359,25 @@ export const proformaSlips = pgTable("proforma_slips", {
   printedByName: text("printed_by_name"),
   printedAt: timestamp("printed_at"),
   printCount: integer("print_count").default(0),
+  // Set once the Loading page's item-scanning is done for this order — either automatically
+  // (every proforma_slip_item's expected qty fully matched by loadingScanEvents) or manually via
+  // the Complete button (same "force it even if not everything is loaded" allowance Order Scan
+  // gives a non-loader/helper/driver/scanner designation). Null while loading is still open.
+  loadingCompletedAt: timestamp("loading_completed_at"),
+  loadingCompletedByCode: text("loading_completed_by_code"),
+  // Whoever most recently linked/changed the vehicle on the Loading page — once set, only this
+  // user or an admin/super-admin may change the assignment again (server-enforced in
+  // server/routes/loading.ts's /link-vehicle, not just hidden client-side). Anyone with write
+  // access to Loading may still perform the FIRST assignment (this column starts null).
+  vehicleAssignedByCode: text("vehicle_assigned_by_code"),
+  // The EXACT vehicle_info row linked (soft reference — display always uses vehicleNumber above,
+  // matching every other snapshot field on this table). vehicleNumber alone stopped being
+  // unambiguous once Vehicle Master allowed the same number on more than one row (identity is
+  // now notionPageId, not vehicleNumber — see vehicleInfo's own comment); this is what lets RTO
+  // resolution (withRto, server/routes/loading.ts) find the SAME row that was actually picked
+  // in the Loading page's vehicle search, instead of re-guessing by number. Null on slips linked
+  // before this column existed — those fall back to a by-number lookup.
+  vehicleInfoId: integer("vehicle_info_id"),
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
@@ -357,13 +385,19 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
 }).pick({
   orderDate: true, orderNumber: true, partyName: true, plant: true,
   totalQuantity: true, totalVolume: true, vehicleNumber: true, driverName: true,
+  invoiceNumber: true, partyState: true, notionStatus: true, storeKeeperInfo: true, notionRawData: true,
   createdByCode: true, notes: true, isBackedUp: true, isPrintLocked: true,
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
+  loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,
+  vehicleInfoId: true,
 });
 
 // IMPORTANT: All fields below are IMMUTABLE SNAPSHOTS of product data at import
 // time. They must NEVER be updated after the slip is created, even if the live
-// product record changes later.
+// product record changes later — EXCEPT via an explicit "edit SKU" action (Proforma
+// Slips page, PUT /api/proforma-slip-items/:id with a new productId), which
+// re-snapshots every field below from the newly-picked product on purpose, since
+// that's a correction to a wrong line, not a passive product-master update.
 export const proformaSlipItems = pgTable("proforma_slip_items", {
   id: serial("id").primaryKey(),
   proformaSlipId: integer("proforma_slip_id").references(() => proformaSlips.id),
@@ -393,6 +427,83 @@ export type ProformaSlip = typeof proformaSlips.$inferSelect;
 export type InsertProformaSlip = z.infer<typeof insertProformaSlipSchema>;
 export type ProformaSlipItem = typeof proformaSlipItems.$inferSelect;
 export type InsertProformaSlipItem = z.infer<typeof insertProformaSlipItemSchema>;
+
+// ============================================================================
+// LOADING RECORDS
+// Purpose : One row per completed "link a vehicle to a proforma slip" action on the Loading
+//           page (server/routes/loading.ts) — a history log of who loaded which order onto
+//           which vehicle, and when. Fields are snapshots at the moment of linking (party
+//           name, plant, RTO, volume), not live joins, so this history stays accurate even
+//           if the proforma or the vehicle record changes later.
+// Used by : Loading page (/loading) — its landing table, scoped to the current user unless
+//           they're admin/super-admin (see requirePageAccess('loading') + server-side filter).
+// ============================================================================
+
+export const loadingRecords = pgTable("loading_records", {
+  id: serial("id").primaryKey(),
+  orderNumber: text("order_number").notNull(),
+  proformaSlipId: integer("proforma_slip_id"),
+  partyName: text("party_name"),
+  plant: text("plant"),
+  vehicleNumber: text("vehicle_number").notNull(),
+  rtoNumber: text("rto_number"),
+  volume: text("volume"),
+  createdByCode: text("created_by_code").references(() => users.userCode),
+  createdByName: text("created_by_name"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertLoadingRecordSchema = createInsertSchema(loadingRecords).pick({
+  orderNumber: true, proformaSlipId: true, partyName: true, plant: true,
+  vehicleNumber: true, rtoNumber: true, volume: true, createdByCode: true, createdByName: true,
+});
+
+export type LoadingRecord = typeof loadingRecords.$inferSelect;
+export type InsertLoadingRecord = z.infer<typeof insertLoadingRecordSchema>;
+
+// ============================================================================
+// LOADING SCAN EVENTS
+// Purpose : Per-scan audit trail for the Loading page's item-loading step — mirrors
+//           order_scan_events' role for Order Scan, one row per confirmed barcode scan while
+//           physically loading a proforma slip's items onto the linked vehicle. This is what
+//           actually decrements product_plant_stock/stock_movements (type 'dispatch') — a real,
+//           scan-verified removal, not a passive estimate from the slip's planned quantity.
+// Used by : Loading page (/loading).
+// ============================================================================
+
+export const loadingScanEvents = pgTable("loading_scan_events", {
+  id: serial("id").primaryKey(),
+  orderNumber: text("order_number").notNull(),
+  proformaSlipId: integer("proforma_slip_id"),
+  barcode: text("barcode").notNull(),
+  itemName: text("item_name"),
+  sapCode: text("sap_code"),
+  pallets: real("pallets").default(0),
+  looseQty: integer("loose_qty").default(0),
+  totalQty: integer("total_qty").default(0),
+  isExtra: boolean("is_extra").default(false), // scanned beyond this item's proforma quantity
+  plant: text("plant"),
+  scannedByCode: text("scanned_by_code").references(() => users.userCode),
+  scannedByName: text("scanned_by_name"),
+  scannedAt: timestamp("scanned_at").defaultNow(),
+  // Void — same "keep it in history, reverse the stock, mark it" pattern as order_scan_events'
+  // voided/voidedByCode/voidedAt/voidReason (server/routes/order-scan.ts). Voiding here reverses
+  // the opposite direction (adds stock back to product_plant_stock instead of subtracting it),
+  // since a loading scan removed stock rather than added it. See POST /api/loading/events/:id/void.
+  voided: boolean("voided").default(false),
+  voidedByCode: text("voided_by_code").references(() => users.userCode),
+  voidedAt: timestamp("voided_at"),
+  voidReason: text("void_reason"),
+});
+
+export const insertLoadingScanEventSchema = createInsertSchema(loadingScanEvents).pick({
+  orderNumber: true, proformaSlipId: true, barcode: true, itemName: true, sapCode: true,
+  pallets: true, looseQty: true, totalQty: true, isExtra: true, plant: true,
+  scannedByCode: true, scannedByName: true,
+});
+
+export type LoadingScanEvent = typeof loadingScanEvents.$inferSelect;
+export type InsertLoadingScanEvent = z.infer<typeof insertLoadingScanEventSchema>;
 
 // ============================================================================
 // LOAD OPERATIONS  (GJ / Truck Loading Jobs)
@@ -672,18 +783,71 @@ export type PlantStv = typeof plantStvs.$inferSelect;
 export type InsertPlantStv = z.infer<typeof insertPlantStvSchema>;
 
 // ============================================================================
-// VEHICLE INFO
-// Purpose : Registry of company vehicles with their RTO numbers.
-//           Provides an autocomplete source for the vehicle number field
-//           in Proforma Slips and Load Operations.
-// Used by : Proforma Slips page, Load Operations page, Settings.
+// VEHICLE MASTER (vehicle_info table)
+// Purpose : Registry of company vehicles, mirrored from Notion the same way Product Master
+//           mirrors the product catalog (see notionPageId + server/services/notionVehicleSync.ts).
+//           Field names below are confirmed against the real Notion database schema (via a
+//           one-off schema-inspection run against NOTION_VEHICLE_DATABASE_ID) — several of the
+//           Notion columns are formulas that just re-derive a simpler underlying field (e.g.
+//           "RTO Number :" is a formula wrapping "Link to RTO No. :"; "Volume" wraps "Vol ";
+//           "Vehicle %" wraps "Vehi %") — this table stores the raw underlying value, not the
+//           formatted formula output. Three relation properties (VEHICLE FILE MANAGEMENT,
+//           ORDER{CURRENT}, ORDER {BKUP}...) have no title rollup to read text from, so their
+//           columns stay unpopulated by sync — kept for a future manual/rollup-backed use.
+// Used by : Vehicle Master page (/vehicle-master).
 // ============================================================================
 
 export const vehicleInfo = pgTable("vehicle_info", {
   id: serial("id").primaryKey(),
+  // The REAL identity for a Notion-synced row — each Notion page always maps to exactly one
+  // vehicle_info row (unique), matched/created purely by this id, never by vehicleNumber. A
+  // manually-added local vehicle (not from Notion) leaves this null; Postgres allows any number
+  // of NULLs under a UNIQUE constraint, so many local-only rows can coexist.
+  notionPageId: text("notion_page_id").unique(),
+
+  // Identity
   srNo: integer("sr_no").notNull(),
-  rtoNumber: text("rto_number").notNull(),
-  vehicleNumber: text("vehicle_number").notNull().unique(),
+  // Deliberately NOT unique and NOT required: two different Notion pages (two different
+  // physical vehicles, or intentionally more than one page for the same one) can share the same
+  // vehicle number — that's normal, not a data problem, since notionPageId above is what makes
+  // each row distinct. See server/services/notionVehicleSync.ts's computeChanges.
+  vehicleNumber: text("vehicle_number"), // Notion: "Vehicle No. :" (title)
+  rtoNumber: text("rto_number"), // Notion: "Link to RTO No. :" (plain text, despite the "Link to" name — not a relation)
+  series: text("series"),
+
+  // Vehicle details
+  companyType: text("company_type"), // Notion: "Company Type :" — a short prefix code (e.g. "T-"), distinct from Company below
+  acTruckUrl: text("ac_truck_url"), // Notion: "AC Track :" — a URL property (a document/photo link), not a yes/no
+  company: text("company"),
+  manufacturer: text("manufacturer"),
+  modelYear: text("model_year"),
+  engine: text("engine"),
+  volume: real("volume"), // Notion: "Vol " (note trailing space in the real property name)
+  vehiclePercent: real("vehicle_percent"), // Notion: "Vehi %"
+
+  // GPS
+  gps: text("gps"),
+  forGps: text("for_gps"),
+
+  // Driver
+  driver: text("driver"),
+  recordDriver: text("record_driver"), // Notion: "Dri Records :"
+
+  // Plant / status / ops
+  plant: text("plant"),
+  status: text("status"),
+  remark: text("remark"),
+  vehicleFitness: text("vehicle_fitness"), // Notion: "VEHICLE FILE MANAGEMENT" — relation, no rollup; stays unpopulated by sync
+
+  // Rollups / formulas
+  latestEntry: text("latest_entry"),
+  latestOrder: text("latest_order"),
+  linkToVehicle: text("link_to_vehicle"), // Notion: "Link to Vehicle No. :" — a composite display label, e.g. "T-578 {CG-04-QK-7186}"
+  orderCurrent: text("order_current"), // Notion: "ORDER{CURRENT}" — relation, no rollup; stays unpopulated by sync
+  orderBackup: text("order_backup"), // Notion: "ORDER {BKUP} - DATABASE (Vehi No. :)" — relation, no rollup; stays unpopulated by sync
+
+  // Audit — who last touched this row (a manual edit, or whoever clicked "Apply" on a Notion
+  // sync run that changed it), so the page can show a real name, not a raw code.
   lastEditedByCode: text("last_edited_by_code").references(() => users.userCode),
   lastEditedAt: timestamp("last_edited_at").defaultNow(),
   createdByCode: text("created_by_code").references(() => users.userCode),
@@ -691,7 +855,11 @@ export const vehicleInfo = pgTable("vehicle_info", {
 });
 
 export const insertVehicleInfoSchema = createInsertSchema(vehicleInfo).pick({
-  srNo: true, rtoNumber: true, vehicleNumber: true,
+  notionPageId: true, srNo: true, vehicleNumber: true, rtoNumber: true, series: true,
+  companyType: true, acTruckUrl: true, company: true, manufacturer: true, modelYear: true, engine: true,
+  volume: true, vehiclePercent: true, gps: true, forGps: true, driver: true, recordDriver: true,
+  plant: true, status: true, remark: true, vehicleFitness: true,
+  latestEntry: true, latestOrder: true, linkToVehicle: true, orderCurrent: true, orderBackup: true,
   lastEditedByCode: true, createdByCode: true,
 });
 
@@ -920,6 +1088,135 @@ export type OrderScanEvent = typeof orderScanEvents.$inferSelect;
 export type InsertOrderScanEvent = z.infer<typeof insertOrderScanEventSchema>;
 
 // ============================================================================
+// UNLOADING  (Vehicle-wise receiving — a CSV import can span multiple vehicles)
+// Purpose : Same "import a CSV, then scan against it to receive stock" idea as Order Import/
+//           Scan Order, but organized by (plant, vehicleNumber, orderDate) instead of just
+//           (plant, orderDate) — one uploaded CSV's rows can belong to several different
+//           vehicles at once, each becoming its own scannable group. A second upload for the
+//           same vehicle+date becomes the next queued FIFO part for that group (mirrors Order
+//           Import's receivingSessionId/partIndex, scoped one level deeper by vehicle), rather
+//           than merging or blocking. There is no single "active session" gate across the whole
+//           plant like Order Scan has — every vehicle+date group tracks its own active part
+//           independently, which is what lets the Unloading page be "pick a vehicle + date,
+//           it opens" instead of picking from one shared session list.
+//           Deliberately simpler than Order Import/Scan Order: no delete-with-rollback replace
+//           flow, no cross-part credit reconciliation, no Master View cross-file merge — a plain
+//           two-table shape (import items = the expected list, scan events = the audit trail),
+//           the same shape Loading already uses for its own scan side, with progress computed
+//           live by summing events rather than a separate progress-tracking table.
+// Used by : Unloading page (/unloading).
+// ============================================================================
+
+export const unloadImportSessions = pgTable("unload_import_sessions", {
+  id: serial("id").primaryKey(),
+  plant: text("plant").notNull(),
+  vehicleNumber: text("vehicle_number").notNull(),
+  orderDate: text("order_date").notNull(),
+  csvFileName: text("csv_file_name").notNull(),
+  rowCount: integer("row_count").default(0),
+  importedByCode: text("imported_by_code").references(() => users.userCode),
+  createdAt: timestamp("created_at").defaultNow(),
+  // FIFO grouping, scoped by (plant, vehicleNumber, orderDate): groupId is Part 1's own id;
+  // every later upload for the same vehicle+date joins as the next partIndex.
+  groupId: integer("group_id"),
+  partIndex: integer("part_index").default(1),
+  // available: queued behind another part of the same group that's still active.
+  // active: the group's current scannable part.
+  // completed: every item's expected quantity has been matched; locked, stock already applied.
+  scanStatus: text("scan_status").default("available"),
+  scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
+  scanActivatedAt: timestamp("scan_activated_at"),
+  scanCompletedByCode: text("scan_completed_by_code").references(() => users.userCode),
+  scanCompletedAt: timestamp("scan_completed_at"),
+  // Soft-delete + delete-with-rollback replacement flow — same convention as
+  // orderImportSessions (see its comment): a "replace" delete keeps scan history in place
+  // (isDeleted=true only) so a corrected re-upload for the same vehicle+date can carry it
+  // forward (remappedToSessionId/remappedAt set on THIS row once that happens; replacesSessionId
+  // set on the new session, pointing back). A "discard" delete additionally reverses stock,
+  // voids events, and self-resolves (remappedToSessionId = own id) so the next upload starts
+  // fresh instead of inheriting this one's history.
+  isDeleted: boolean("is_deleted").default(false).notNull(),
+  deletedAt: timestamp("deleted_at"),
+  deletedByCode: text("deleted_by_code").references(() => users.userCode),
+  remappedToSessionId: integer("remapped_to_session_id"),
+  remappedAt: timestamp("remapped_at"),
+  replacesSessionId: integer("replaces_session_id"),
+});
+
+export const unloadImportItems = pgTable("unload_import_items", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id")
+    .references(() => unloadImportSessions.id, { onDelete: "cascade" })
+    .notNull(),
+  plant: text("plant"),
+  vehicleNumber: text("vehicle_number"),
+  barcode: text("barcode"),
+  itemName: text("item_name"),
+  sapCode: text("sap_code"),
+  quantity: integer("quantity").default(0),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const unloadScanEvents = pgTable("unload_scan_events", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id")
+    .references(() => unloadImportSessions.id, { onDelete: "cascade" })
+    .notNull(),
+  barcode: text("barcode").notNull(),
+  itemName: text("item_name"),
+  sapCode: text("sap_code"),
+  pallets: real("pallets").default(0),
+  looseQty: integer("loose_qty").default(0),
+  totalQty: integer("total_qty").default(0),
+  isExtra: boolean("is_extra").default(false), // scanned beyond this item's expected quantity
+  // Sub-transfer voucher code (see plantStvs above) — same per-plant STV concept Order Scan
+  // already records per event; picked once for the vehicle before scanning (see the STV
+  // selector in client/src/pages/Unloading/Unloading.tsx), stored on every event.
+  stv: text("stv"),
+  plant: text("plant"),
+  vehicleNumber: text("vehicle_number"),
+  scannedByCode: text("scanned_by_code").references(() => users.userCode),
+  scannedByName: text("scanned_by_name"),
+  scannedAt: timestamp("scanned_at").defaultNow(),
+  // Same audit-preserving void pattern as order_scan_events/loading_scan_events — voiding
+  // reverses the stock this event added (product_plant_stock -= qty) and marks the row, never
+  // deletes it.
+  voided: boolean("voided").default(false),
+  voidedByCode: text("voided_by_code").references(() => users.userCode),
+  voidedAt: timestamp("voided_at"),
+  voidReason: text("void_reason"),
+  // Cross-part credit reconciliation — mirrors order_scan_events' isCredit/creditedQty/
+  // creditSourceEventId (see their comments there). When a part completes with leftover
+  // un-consumed "extra" scans, reconcileUnloadCredits (server/lib/unloadCredit.ts) hands them
+  // forward to a real shortfall on a later, not-yet-completed part of the SAME vehicle+date
+  // group, writing a system-generated credit row here (isCredit=true, creditSourceEventId
+  // pointing at the original extra event) instead of leaving it a display-only estimate.
+  // creditedQty on the SOURCE event caps how much of it has already been handed out, so the
+  // same physical boxes can never be credited twice.
+  isCredit: boolean("is_credit").default(false),
+  creditedQty: integer("credited_qty").default(0),
+  creditSourceEventId: integer("credit_source_event_id"),
+});
+
+export const insertUnloadImportSessionSchema = createInsertSchema(unloadImportSessions).pick({
+  plant: true, vehicleNumber: true, orderDate: true, csvFileName: true, rowCount: true, importedByCode: true,
+});
+export const insertUnloadImportItemSchema = createInsertSchema(unloadImportItems).pick({
+  sessionId: true, plant: true, vehicleNumber: true, barcode: true, itemName: true, sapCode: true, quantity: true,
+});
+export const insertUnloadScanEventSchema = createInsertSchema(unloadScanEvents).pick({
+  sessionId: true, barcode: true, itemName: true, sapCode: true, pallets: true, looseQty: true,
+  totalQty: true, isExtra: true, stv: true, plant: true, vehicleNumber: true, scannedByCode: true, scannedByName: true,
+});
+
+export type UnloadImportSession = typeof unloadImportSessions.$inferSelect;
+export type InsertUnloadImportSession = z.infer<typeof insertUnloadImportSessionSchema>;
+export type UnloadImportItem = typeof unloadImportItems.$inferSelect;
+export type InsertUnloadImportItem = z.infer<typeof insertUnloadImportItemSchema>;
+export type UnloadScanEvent = typeof unloadScanEvents.$inferSelect;
+export type InsertUnloadScanEvent = z.infer<typeof insertUnloadScanEventSchema>;
+
+// ============================================================================
 // ACTIVITIES  (Global Audit Log)
 // Purpose : Records every significant user action across all pages — creates,
 //           updates, deletes, prints, etc. Used for the Activities admin page
@@ -989,6 +1286,24 @@ export const backupSettings = pgTable("backup_settings", {
 export const insertBackupSettingsSchema = createInsertSchema(backupSettings).pick({
   lastBackupDate: true, autoBackupEnabled: true, backupFrequencyHours: true,
 });
+
+// Single-row settings table — same pattern as backupSettings above. Currently holds just the
+// Sales tracking start date (Overall Stock's ledger: proforma data before this date isn't
+// reliable, so the "all dates" Sales total starts counting from here instead of the true
+// beginning — see SALES_TRACKING_START's old hardcoded home in server/routes/scan-sessions.ts).
+// Room to grow if another admin-editable, no-code-change setting shows up later.
+export const salesSettings = pgTable("sales_settings", {
+  id: serial("id").primaryKey(),
+  salesTrackingStartDate: text("sales_tracking_start_date").notNull().default('2026-08-01'),
+  updatedAt: timestamp("updated_at").defaultNow(),
+  updatedByCode: text("updated_by_code").references(() => users.userCode),
+});
+
+export const insertSalesSettingsSchema = createInsertSchema(salesSettings).pick({
+  salesTrackingStartDate: true, updatedByCode: true,
+});
+export type SalesSettings = typeof salesSettings.$inferSelect;
+export type InsertSalesSettings = z.infer<typeof insertSalesSettingsSchema>;
 
 export type BackupSettings = typeof backupSettings.$inferSelect;
 export type InsertBackupSettings = z.infer<typeof insertBackupSettingsSchema>;

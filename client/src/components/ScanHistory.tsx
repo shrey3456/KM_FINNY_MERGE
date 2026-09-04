@@ -119,7 +119,7 @@ const ScanHistory = () => {
     <Card>
       <CardHeader className="p-4 border-b border-gray-200 flex justify-between items-center">
         <h3 className="text-lg font-medium">Recent Scans</h3>
-        <Link href="/reports">
+        <Link href="/scan-history">
           <Button variant="link" className="text-primary p-0">
             View All <ArrowRight className="ml-1 h-4 w-4" />
           </Button>

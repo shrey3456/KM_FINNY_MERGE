@@ -32,13 +32,11 @@ import {
   insertProformaSlipSchema,
   insertProformaSlipItemSchema,
   insertMessageSchema,
-  insertVehicleInfoSchema,
   insertLoadingOpItemSchema as insertMpOperationItemSchema,
   Product,
   ProformaSlip,
   ProformaSlipItem,
   Message,
-  VehicleInfo,
   InsertProformaSlipItem,
   MpOperation,
   MpOperationItem,
@@ -98,6 +96,7 @@ function parseOrderDate(dateString: string): Date | null {
 
 import { setupAuth } from "./auth";
 import fastNotionImportRoutes from "./routes/fast-notion-import";
+import proformaNotionSyncRoutes from "./routes/proforma-notion-sync";
 import dispatchRoutes from "./routes/dispatch-simple";
 import dispatchOrdersRoutes from "./routes/dispatch-orders";
 import expenseVoucherRoutes from "./routes/expense-voucher";
@@ -106,12 +105,97 @@ import voucherPrefixRoutes from "./routes/voucher-prefix";
 import checkinoutRoutes from "./routes/checkinout";
 import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
+import vehicleInfoRoutes from "./routes/vehicle-info";
+import loadingRoutes from "./routes/loading";
 import orderImportRoutes from "./routes/order-import";
 import orderImportEditRoutes from "./routes/order-import-edit";
+import unloadingEditRoutes from "./routes/unloading-edit";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
+import settingsAdminRoutes from "./routes/settings-admin";
+import unloadingRoutes from "./routes/unloading";
+import openingStockRoutes from "./routes/opening-stock";
+import plantStockAdminRoutes from "./routes/plant-stock-admin";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
 import { requirePageWrite, requirePageAccess } from "./lib/pageAccess";
+
+// Builds the proforma-slips CSV export (one row per line item, snapshot fields only — never
+// re-fetches product data, so the export stays correct even if a product was later edited or
+// deleted) for whatever set of slips the caller has already selected/filtered. Shared by the
+// GET (query-param filters) and POST (arbitrary id list, for a client-side-filtered view too
+// large to fit in a query string) export routes so both produce identical output.
+async function buildProformaSlipsCsv(
+  filteredSlips: ProformaSlip[],
+  summaryText: string,
+  filenameSuffix: string,
+): Promise<{ csv: string; filename: string }> {
+  const csvRows: any[] = [];
+  let totalVolumeSum = 0;
+
+  for (const slip of filteredSlips) {
+    if (slip.totalVolume && !isNaN(parseFloat(slip.totalVolume))) {
+      totalVolumeSum += parseFloat(slip.totalVolume);
+    }
+
+    const slipItems = await storage.getProformaSlipItems(slip.id);
+
+    if (!slipItems || slipItems.length === 0) {
+      csvRows.push({
+        orderNumber: slip.orderNumber,
+        orderDate: slip.orderDate || "",
+        partyName: slip.partyName,
+        plant: slip.plant,
+        totalQuantity: slip.totalQuantity,
+        totalVolume: slip.totalVolume,
+        vehicleNumber: slip.vehicleNumber,
+        driverName: slip.driverName,
+        notes: slip.notes,
+        productId: "",
+        productSrNo: "",
+        productBarcode: "",
+        productName: "",
+        quantity: "",
+      });
+    } else {
+      // IMPORTANT: Use ONLY snapshot data from item to ensure immutability — DO NOT fetch
+      // product data, proforma slips must remain unchanged even if inventory is edited/deleted.
+      for (const item of slipItems) {
+        csvRows.push({
+          orderNumber: slip.orderNumber,
+          orderDate: slip.orderDate ? new Date(slip.orderDate).toISOString().split("T")[0] : "",
+          partyName: slip.partyName,
+          plant: slip.plant,
+          totalQuantity: slip.totalQuantity,
+          totalVolume: slip.totalVolume,
+          vehicleNumber: slip.vehicleNumber,
+          driverName: slip.driverName,
+          notes: slip.notes,
+          productId: item.sapCode || item.productId || "",
+          productSrNo: item.srNo || "",
+          productBarcode: item.barcode || "",
+          productName: item.itemName || "",
+          quantity: item.quantity,
+        });
+      }
+    }
+  }
+
+  let csv = `"${summaryText}","${totalVolumeSum.toFixed(2)}"\n\n`;
+
+  if (csvRows.length > 0) {
+    const headers = Object.keys(csvRows[0]);
+    csv += headers.join(",") + "\n";
+    csvRows.forEach((row) => {
+      const values = headers.map((header) => {
+        const value = row[header]?.toString().replace(/,/g, ";") || "";
+        return `"${value}"`;
+      });
+      csv += values.join(",") + "\n";
+    });
+  }
+
+  return { csv, filename: `proforma-slips-${filenameSuffix}` };
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -3528,6 +3612,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const filterDate = req.query.date as string;
         const startDate = req.query.startDate as string;
         const endDate = req.query.endDate as string;
+        // ids: comma-separated proforma_slips.id list — sent by the client when the table has
+        // an active search / plant tab / date range / column filter applied, so the export
+        // matches exactly what's on screen instead of always dumping every slip in the table
+        // regardless of what's currently filtered.
+        const idsParam = req.query.ids as string | undefined;
+        const idsFilter = idsParam
+          ? new Set(idsParam.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n)))
+          : null;
 
         // Get all proforma slips with very high limit for no practical limitation
         const slips = await storage.listProformaSlips(100000, 0);
@@ -3537,10 +3629,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
 
         // Filter slips by date if provided
-        let filteredSlips = slips;
+        let filteredSlips = idsFilter ? slips.filter((slip) => idsFilter.has(slip.id)) : slips;
         let dateFilter = "";
 
-        if (startDate && endDate) {
+        if (idsFilter) {
+          dateFilter = "filtered-view";
+          console.log(`Exporting ${filteredSlips.length} slips matching the current on-screen filter (${idsFilter.size} ids requested)`);
+        } else if (startDate && endDate) {
           // Filter by date range if both start and end dates are provided
           console.log(
             `Filtering slips by date range: ${startDate} to ${endDate}`,
@@ -3589,105 +3684,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
           );
         }
 
-        // Fetch items for each slip and products for each item
-        const csvRows: any[] = [];
-
-        // Calculate total volume sum for all matched slips
-        let totalVolumeSum = 0;
-
-        for (const slip of filteredSlips) {
-          // Add to total volume if it's a valid number
-          if (slip.totalVolume && !isNaN(parseFloat(slip.totalVolume))) {
-            totalVolumeSum += parseFloat(slip.totalVolume);
-          }
-
-          // Fetch items for this slip
-          const slipItems = await storage.getProformaSlipItems(slip.id);
-
-          // If slip has no items, still add one row for the slip header
-          if (!slipItems || slipItems.length === 0) {
-            csvRows.push({
-              orderNumber: slip.orderNumber,
-              orderDate: slip.orderDate || "",
-              partyName: slip.partyName,
-              plant: slip.plant,
-              totalQuantity: slip.totalQuantity,
-              totalVolume: slip.totalVolume,
-              vehicleNumber: slip.vehicleNumber,
-              driverName: slip.driverName,
-              notes: slip.notes,
-              productId: "",
-              productSrNo: "",
-              productBarcode: "",
-              productName: "",
-              quantity: "",
-            });
-          } else {
-            // Add a row for each item in the slip
-            // IMPORTANT: Use ONLY snapshot data from item to ensure immutability
-            // DO NOT fetch product data - proforma slips must remain unchanged even if inventory is edited/deleted
-            for (const item of slipItems) {
-              csvRows.push({
-                orderNumber: slip.orderNumber,
-                orderDate: slip.orderDate
-                  ? new Date(slip.orderDate).toISOString().split("T")[0]
-                  : "",
-                partyName: slip.partyName,
-                plant: slip.plant,
-                totalQuantity: slip.totalQuantity,
-                totalVolume: slip.totalVolume,
-                vehicleNumber: slip.vehicleNumber,
-                driverName: slip.driverName,
-                notes: slip.notes,
-                productId: item.sapCode || item.productId || "",
-                productSrNo: item.srNo || "",
-                productBarcode: item.barcode || "",
-                productName: item.itemName || "",
-                quantity: item.quantity,
-              });
-            }
-          }
-        }
-
-        // Convert to CSV
-        let csv = "";
-
-        // Add total volume summary at the beginning
-        let summaryText = "";
-        if (startDate && endDate) {
+        // Total volume summary label + filename suffix, covering the ids-filter case too.
+        let summaryText: string;
+        let filenameSuffix: string;
+        if (idsFilter) {
+          summaryText = "Total Volume Sum for the current filtered view";
+          filenameSuffix = "filtered-view";
+        } else if (startDate && endDate) {
           summaryText = `Total Volume Sum for date range ${startDate} to ${endDate}`;
+          filenameSuffix = `${startDate}-to-${endDate}`;
         } else if (filterDate) {
           summaryText = `Total Volume Sum for ${dateFilter}`;
+          filenameSuffix = dateFilter;
         } else {
           summaryText = "Total Volume Sum for all dates";
+          filenameSuffix = "all-dates";
         }
 
-        csv += `"${summaryText}","${totalVolumeSum.toFixed(2)}"\n\n`;
-
-        // Add headers
-        if (csvRows.length > 0) {
-          const headers = Object.keys(csvRows[0]);
-          csv += headers.join(",") + "\n";
-
-          // Add rows
-          csvRows.forEach((row) => {
-            const values = headers.map((header) => {
-              const value = row[header]?.toString().replace(/,/g, ";") || "";
-              return `"${value}"`;
-            });
-            csv += values.join(",") + "\n";
-          });
-        }
-
-        // Generate appropriate filename
-        let filename = "proforma-slips";
-        if (startDate && endDate) {
-          filename += `-${startDate}-to-${endDate}`;
-        } else if (dateFilter) {
-          filename += `-${dateFilter}`;
-        } else {
-          filename += "-all-dates";
-        }
+        const { csv, filename } = await buildProformaSlipsCsv(filteredSlips, summaryText, filenameSuffix);
 
         // Set headers and send response
         res.setHeader("Content-Type", "text/csv");
@@ -4677,6 +4691,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         // Update the item
         const itemData = insertProformaSlipItemSchema.partial().parse(req.body);
+
+        // Editing the SKU — an explicit "this line is actually a different product" swap, sent
+        // as a new productId. Unlike creation (which only fills snapshot fields left blank),
+        // this OVERWRITES every snapshot field from the new product, since the whole point is to
+        // correct a wrong SKU everywhere the slip reads it (printing, Loading's barcode matching,
+        // reports) — not just the productId pointer. Quantity is untouched; it's set independently.
+        if (itemData.productId && itemData.productId !== existingItem.productId) {
+          const newProduct = await storage.getProduct(itemData.productId);
+          if (!newProduct) {
+            return res.status(400).json({ message: "Referenced product does not exist" });
+          }
+          itemData.itemName = newProduct.name ?? null;
+          itemData.barcode = newProduct.barcode ?? null;
+          itemData.srNo = newProduct.newSr ?? null;
+          itemData.itemNo = newProduct.itemNo ?? null;
+          itemData.category = newProduct.category ?? null;
+          itemData.volumeInCuFt = newProduct.volumeInCuFt ?? null;
+          itemData.hsnCode = newProduct.hsnCode ?? null;
+          itemData.sapCode = newProduct.sapCode ?? null;
+          itemData.description = newProduct.description ?? null;
+          itemData.purchasePrice = newProduct.purchasePrice ?? null;
+          itemData.sellingPrice = newProduct.sellingPrice ?? null;
+        }
+
         const updatedItem = await storage.updateProformaSlipItem(id, itemData);
 
         if (!updatedItem) {
@@ -6762,231 +6800,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  // Vehicle Info endpoints
-  apiRouter.get("/vehicle-info", async (req: Request, res: Response) => {
-    try {
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
-      const offset = req.query.offset
-        ? parseInt(req.query.offset as string)
-        : 0;
-
-      const vehicles = await storage.listVehicleInfo(limit, offset);
-
-      // Fetch user info for each vehicle to include lastEditedBy info
-      const enrichedVehicles = await Promise.all(
-        vehicles.map(async (vehicle) => {
-          let lastEditedBy = null;
-          let createdBy = null;
-
-          if (vehicle.lastEditedById) {
-            const editor = await storage.getUser(vehicle.lastEditedById);
-            if (editor) {
-              lastEditedBy = editor.name || editor.username;
-            }
-          }
-
-          if (vehicle.createdById) {
-            const creator = await storage.getUser(vehicle.createdById);
-            if (creator) {
-              createdBy = creator.name || creator.username;
-            }
-          }
-
-          return {
-            ...vehicle,
-            lastEditedBy,
-            createdBy,
-          };
-        }),
-      );
-
-      res.json(enrichedVehicles);
-    } catch (error) {
-      console.error("Error fetching vehicle info:", error);
-      res.status(500).json({ message: "Failed to fetch vehicle info" });
-    }
-  });
-
-  apiRouter.get("/vehicle-info/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-      const vehicle = await storage.getVehicleInfo(id);
-
-      if (!vehicle) {
-        return res.status(404).json({ message: "Vehicle info not found" });
-      }
-
-      // Get user who last edited
-      let lastEditedBy = null;
-      if (vehicle.lastEditedById) {
-        const editor = await storage.getUser(vehicle.lastEditedById);
-        if (editor) {
-          lastEditedBy = editor.name || editor.username;
-        }
-      }
-
-      res.json({ ...vehicle, lastEditedBy });
-    } catch (error) {
-      console.error("Error fetching vehicle info:", error);
-      res.status(500).json({ message: "Failed to fetch vehicle info" });
-    }
-  });
-
-  apiRouter.get(
-    "/vehicle-info/number/:vehicleNumber",
-    async (req: Request, res: Response) => {
-      try {
-        const vehicle = await storage.getVehicleInfoByVehicleNumber(
-          req.params.vehicleNumber,
-        );
-
-        if (!vehicle) {
-          return res.status(404).json({ message: "Vehicle info not found" });
-        }
-
-        // Get user who last edited
-        let lastEditedBy = null;
-        if (vehicle.lastEditedById) {
-          const editor = await storage.getUser(vehicle.lastEditedById);
-          if (editor) {
-            lastEditedBy = editor.name || editor.username;
-          }
-        }
-
-        res.json({ ...vehicle, lastEditedBy });
-      } catch (error) {
-        console.error("Error fetching vehicle info by number:", error);
-        res.status(500).json({ message: "Failed to fetch vehicle info" });
-      }
-    },
-  );
-
-  apiRouter.post("/vehicle-info", async (req: Request, res: Response) => {
-    try {
-      // Validate and parse the request body
-      const vehicleData = insertVehicleInfoSchema.parse(req.body);
-
-      // Create the vehicle info
-      const vehicle = await storage.createVehicleInfo(vehicleData);
-
-      // Add activity log
-      const userId = vehicleData.createdById || vehicleData.lastEditedById;
-      if (userId) {
-        const user = await storage.getUser(userId);
-        await storage.createActivity({
-          userId,
-          action: "create",
-          entityType: "vehicle",
-          entityId: vehicle.id,
-          details: `Vehicle ${vehicle.vehicleNumber} added by ${user?.name || user?.username || "Unknown user"}`,
-          pageName: "VehicleInfo",
-        });
-      }
-
-      res.status(201).json(vehicle);
-    } catch (error) {
-      console.error("Error creating vehicle info:", error);
-
-      if (error instanceof ZodError) {
-        return res.status(400).json({
-          message: "Invalid vehicle data",
-          errors: error.format(),
-        });
-      }
-
-      res.status(500).json({ message: "Failed to create vehicle info" });
-    }
-  });
-
-  apiRouter.put("/vehicle-info/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-
-      // Get the existing vehicle
-      const existingVehicle = await storage.getVehicleInfo(id);
-      if (!existingVehicle) {
-        return res.status(404).json({ message: "Vehicle info not found" });
-      }
-
-      // Validate and parse the request body
-      const vehicleData = insertVehicleInfoSchema.partial().parse(req.body);
-
-      // Update the vehicle info
-      const updatedVehicle = await storage.updateVehicleInfo(id, vehicleData);
-
-      if (!updatedVehicle) {
-        return res
-          .status(404)
-          .json({ message: "Vehicle info could not be updated" });
-      }
-
-      // Add activity log
-      const userId = vehicleData.lastEditedById;
-      if (userId) {
-        const user = await storage.getUser(userId);
-        await storage.logActivity({
-          userId,
-          action: "update",
-          entityType: "vehicle",
-          entityId: id,
-          details: `Vehicle ${updatedVehicle.vehicleNumber} updated by ${user?.name || user?.username || "Unknown user"}`,
-          pageName: "VehicleInfo",
-        });
-      }
-
-      res.json(updatedVehicle);
-    } catch (error) {
-      console.error("Error updating vehicle info:", error);
-
-      if (error instanceof ZodError) {
-        return res.status(400).json({
-          message: "Invalid vehicle data",
-          errors: error.format(),
-        });
-      }
-
-      res.status(500).json({ message: "Failed to update vehicle info" });
-    }
-  });
-
-  apiRouter.delete("/vehicle-info/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-
-      // Get the vehicle before deleting
-      const vehicle = await storage.getVehicleInfo(id);
-      if (!vehicle) {
-        return res.status(404).json({ message: "Vehicle info not found" });
-      }
-
-      // Delete the vehicle
-      const success = await storage.deleteVehicleInfo(id);
-
-      if (!success) {
-        return res
-          .status(500)
-          .json({ message: "Failed to delete vehicle info" });
-      }
-
-      // Add activity log for deletion
-      const sessionUser = (req as any).session?.user;
-      if (sessionUser?.id) {
-        await storage.logActivity({
-          userId: sessionUser.id,
-          action: "delete",
-          entityType: "vehicle",
-          entityId: id,
-          details: `Vehicle ${vehicle.vehicleNumber} deleted by ${sessionUser.name || sessionUser.username || "Unknown user"}`,
-          pageName: "VehicleInfo",
-        });
-      }
-
-      res.status(204).send(); // 204 No Content
-    } catch (error) {
-      console.error("Error deleting vehicle info:", error);
-      res.status(500).json({ message: "Failed to delete vehicle info" });
-    }
-  });
+  // Vehicle Info / Vehicle Master endpoints moved to server/routes/vehicle-info.ts (mounted
+  // below via apiRouter.use(vehicleInfoRoutes)) — was previously six unauthenticated handlers
+  // inline here, now a protected, self-contained router.
 
   // ==================== Purchase Orders API ====================
 
@@ -8301,6 +8117,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount fast import routes
   apiRouter.use(fastNotionImportRoutes);
+  apiRouter.use(proformaNotionSyncRoutes);
 
   // Mount dispatch routes
   apiRouter.use(dispatchRoutes);
@@ -8326,14 +8143,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount Notion inventory sync routes
   apiRouter.use(notionInventorySyncRoutes);
 
+  // Mount Vehicle Master (vehicle_info CRUD + Notion vehicle sync) routes
+  apiRouter.use(vehicleInfoRoutes);
+
+  // Mount Loading routes (link a Vehicle Master vehicle onto a Proforma Slip) — new feature,
+  // own file, no dependency on the legacy Load Operations routes.
+  apiRouter.use(loadingRoutes);
+
   // Mount order import routes
   apiRouter.use(orderImportRoutes);
 
   // Mount order import edit routes (fix a mistake in an already-uploaded, not-yet-completed CSV)
   apiRouter.use(orderImportEditRoutes);
 
+  // Mount unloading edit routes (same idea, for an unloading vehicle's CSV)
+  apiRouter.use(unloadingEditRoutes);
+
   // Mount order scan routes
   apiRouter.use(orderScanRoutes);
+
+  // Mount Settings > Clear Stock admin routes
+  apiRouter.use(settingsAdminRoutes);
+
+  // Mount Overall Stock > per-row Edit/Delete admin routes
+  apiRouter.use(plantStockAdminRoutes);
+
+  // Mount Unloading routes (vehicle-wise receiving)
+  apiRouter.use(unloadingRoutes);
+
+  // Mount Settings > Opening Stock import routes
+  apiRouter.use(openingStockRoutes);
 
   // Mount the API router
   app.use("/api", apiRouter);
@@ -8379,6 +8218,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
     setInterval(() => runScheduledSync(false), SYNC_INTERVAL_MS);
     setTimeout(() => runScheduledSync(false), 10000);
     console.log('[Notion Inventory Sync] 24-hour auto sync+apply scheduler registered');
+  }
+
+  // Same 24-hour detect(+apply-if-enabled) scheduler as Product Master above, for Vehicle
+  // Master. No image work here (vehicle_info has no photo column), so there's no syncImages
+  // split — every run is the same shape.
+  if (process.env.NOTION_VEHICLE_DATABASE_ID) {
+    const { detectVehicleChangesFromNotion, applyPendingVehicleChanges, fullSyncVehiclesFromNotion, getAutoApplyEnabled: getVehicleAutoApplyEnabled } =
+      await import('./services/notionVehicleSync');
+    const VEHICLE_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    const runScheduledVehicleSync = async () => {
+      try {
+        const allVehicles = await storage.getAllVehicleInfo();
+        if (allVehicles.length === 0) {
+          console.log('[Notion Vehicle Sync] DB is empty — running full import from Notion...');
+          await fullSyncVehiclesFromNotion('system', null);
+        } else {
+          const autoApplyEnabled = await getVehicleAutoApplyEnabled();
+          console.log(`[Notion Vehicle Sync] Running scheduled detect${autoApplyEnabled ? ' + apply' : ' (auto-apply is off — review required)'}...`);
+          const detectReport = await detectVehicleChangesFromNotion('system');
+          const hasChanges = (detectReport.created ?? 0) + (detectReport.updated ?? 0) > 0;
+          if (hasChanges && autoApplyEnabled) {
+            console.log(`[Notion Vehicle Sync] ${detectReport.created} new, ${detectReport.updated} changed — applying now...`);
+            await applyPendingVehicleChanges(null);
+            console.log('[Notion Vehicle Sync] Auto-apply complete.');
+          } else if (hasChanges) {
+            console.log(`[Notion Vehicle Sync] ${detectReport.created} new, ${detectReport.updated} changed — left pending for review (auto-apply is off).`);
+          } else {
+            console.log('[Notion Vehicle Sync] No changes found, nothing to apply.');
+          }
+        }
+      } catch (err) {
+        console.error('[Notion Vehicle Sync] Scheduled sync failed:', err);
+      }
+    };
+    setInterval(() => runScheduledVehicleSync(), VEHICLE_SYNC_INTERVAL_MS);
+    setTimeout(() => runScheduledVehicleSync(), 15000);
+    console.log('[Notion Vehicle Sync] 24-hour auto sync+apply scheduler registered');
   }
 
   // Return the HTTP server with WebSocket support

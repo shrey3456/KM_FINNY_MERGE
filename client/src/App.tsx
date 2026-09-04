@@ -1,4 +1,4 @@
-import { Switch, Route, useLocation } from "wouter";
+import { Switch, Route, Redirect, useLocation } from "wouter";
 import { queryClient, handleUnauthorized } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -34,6 +34,9 @@ import { initializeStatePreservation } from "./utils/statePreservationInit.tsx";
 import { useAuth, AuthProvider } from "@/hooks/use-auth";
 import PlantSettings from "./pages/PlantSettings";
 import OverallStock from "./pages/OverallStock";
+import VehicleMaster from "./pages/VehicleMaster";
+import LoadOperation from "./pages/Loading/LoadOperation";
+import Unloading from "./pages/Unloading/Unloading";
 
 // Loading indicator component for Suspense fallback
 const LoadingIndicator = () => (
@@ -238,6 +241,7 @@ function Router() {
       <Switch>
         <Route path="/" component={Home} />
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} requiredPage="notion-inventory" />
+        <ProtectedRoute path="/vehicle-master" component={VehicleMaster} requiredPage="vehicle-master" />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
         <ProtectedRoute path="/load-operations" component={LoadOperations} requiredPage="load-operations" />
         <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />
@@ -246,9 +250,14 @@ function Router() {
         <ProtectedRoute path="/expense-voucher" component={ExpenseVoucher} requiredPage="expense-voucher" />
         <ProtectedRoute path="/toll-voucher" component={TollVoucher} requiredPage="toll-voucher" />
         <Route path="/stock-sheets" component={StockSheets} />
-        <ProtectedRoute path="/reports" component={Reports} requiredPage="scan-history" />
+        <ProtectedRoute path="/scan-history" component={Reports} requiredPage="scan-history" />
+        {/* /reports was the old path for this page — kept as a redirect so any existing
+            bookmark/browser history still lands somewhere instead of 404ing. */}
+        <Route path="/reports"><Redirect to="/scan-history" /></Route>
         <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
+        <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />
+        <ProtectedRoute path="/unloading" component={Unloading} requiredPage="unloading" />
         <ProtectedRoute path="/scan-viewer" component={ScanViewer} requiredPage="scan-viewer" />
         <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
         <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />

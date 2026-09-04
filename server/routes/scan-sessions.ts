@@ -604,7 +604,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
           LEFT JOIN products p    ON p.id    = se.product_id
           LEFT JOIN products p_bc ON p.id IS NULL
                                   AND p_bc.barcode IS NOT NULL
-                                  AND LOWER(p_bc.barcode) = LOWER(se.code)
+                                  AND LOWER(TRIM(p_bc.barcode)) = LOWER(TRIM(se.code))
           ${oldDateWhere}
         ),
         new_e AS (
@@ -627,7 +627,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
           FROM order_scan_events ose
           JOIN  order_import_sessions ois ON ois.id = ose.session_id
           LEFT JOIN plants pl_new ON LOWER(pl_new.name) = LOWER(ois.plant)
-          LEFT JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
+          LEFT JOIN products p ON LOWER(TRIM(p.barcode)) = LOWER(TRIM(ose.barcode))
           WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'
           ${newDateAnd}
         ),
@@ -744,7 +744,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
        FROM order_scan_events ose
        INNER JOIN order_import_sessions ois ON ois.id = ose.session_id
        LEFT  JOIN plants pl ON LOWER(pl.name) = LOWER(ois.plant)
-       LEFT  JOIN products p ON LOWER(p.barcode) = LOWER(ose.barcode)
+       LEFT  JOIN products p ON LOWER(TRIM(p.barcode)) = LOWER(TRIM(ose.barcode))
        WHERE ose.is_extra = true AND ose.barcode <> 'EMPTY_BOX'
          ${osDateAnd}
        ORDER BY ose.scanned_at DESC`,
@@ -791,6 +791,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       ose.is_extra         AS "isExtra",
       (ose.barcode = 'EMPTY_BOX') AS "isEmptyBox",
       false AS "isExchange",
+      false AS "isDispatch",
+      false AS "isUnload",
       CASE WHEN ose.item_name LIKE 'Empty Box: %' THEN SUBSTRING(ose.item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
       ose.stv,
       ose.scanned_by_code  AS "scannedByCode",
@@ -802,7 +804,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       -- Inventory Sr. No for this item (products.new_sr, matched by barcode) so the same item
       -- always carries the same Sr. No here as on the Inventory page. LIMIT 1 avoids row
       -- duplication if a barcode ever appears on more than one product row.
-      (SELECT p.new_sr FROM products p WHERE LOWER(p.barcode) = LOWER(ose.barcode) LIMIT 1) AS "srNo",
+      (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(ose.barcode)) LIMIT 1) AS "srNo",
       ois.csv_file_name    AS "orderName",
       ois.order_date       AS "orderDate",
       ois.plant            AS "plant"
@@ -819,7 +821,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       -- barcode is later edited (most commonly via the Notion inventory sync).
       COALESCE(
         (SELECT p.name FROM products p WHERE p.id = sm.product_id),
-        (SELECT p.name FROM products p WHERE LOWER(p.barcode) = LOWER(sm.barcode) LIMIT 1)
+        (SELECT p.name FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1)
       ) AS "itemName",
       NULL::integer AS pallets,
       sm.qty AS "totalQty",
@@ -828,6 +830,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isExtra",
       false AS "isEmptyBox",
       true AS "isExchange",
+      false AS "isDispatch",
+      false AS "isUnload",
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
@@ -838,13 +842,81 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       NULL::text AS "voidReason",
       COALESCE(
         (SELECT p.new_sr FROM products p WHERE p.id = sm.product_id),
-        (SELECT p.new_sr FROM products p WHERE LOWER(p.barcode) = LOWER(sm.barcode) LIMIT 1)
+        (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1)
       ) AS "srNo",
       sm.reason AS "orderName",
       NULL::text AS "orderDate",
       sm.plant AS "plant"
     FROM stock_movements sm
     WHERE sm.type = 'exchange'
+
+    UNION ALL
+
+    -- Loading page's item-scanning history (server/routes/loading.ts) — each row is a confirmed
+    -- scan that actually removed stock onto a vehicle for a proforma order ("Loaded"/"Loaded
+    -- Extra" in the Type column below), distinct from a receiving scan (which adds stock) or an
+    -- exchange correction. id offset (3000000000+) keeps it out of both other branches' id space,
+    -- since Void (order_scan_events-only) and any id-based lookup must never collide across them.
+    SELECT
+      (3000000000 + lse.id) AS id,
+      lse.barcode,
+      lse.item_name         AS "itemName",
+      lse.pallets,
+      lse.total_qty         AS "totalQty",
+      NULL::integer AS "itemsPerPallet",
+      lse.loose_qty         AS "looseQty",
+      lse.is_extra          AS "isExtra",
+      false AS "isEmptyBox",
+      false AS "isExchange",
+      true AS "isDispatch",
+      false AS "isUnload",
+      NULL::text AS "emptyBoxNote",
+      NULL::text AS stv,
+      lse.scanned_by_code   AS "scannedByCode",
+      lse.scanned_by_name   AS "scannedByName",
+      lse.scanned_at        AS "scannedAt",
+      COALESCE(lse.voided, false) AS voided,
+      lse.voided_at         AS "voidedAt",
+      lse.void_reason       AS "voidReason",
+      (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(lse.barcode)) LIMIT 1) AS "srNo",
+      lse.order_number AS "orderName",
+      (SELECT ps.order_date::text FROM proforma_slips ps WHERE ps.order_number = lse.order_number LIMIT 1) AS "orderDate",
+      lse.plant AS "plant"
+    FROM loading_scan_events lse
+
+    UNION ALL
+
+    -- Unloading page's own scan history (server/routes/unloading.ts) — each row is a confirmed
+    -- scan that received stock for a vehicle+date batch ("Unloaded"/"Unloaded Extra" in the Type
+    -- column below). id offset (4000000000+) keeps it out of every other branch's id space, same
+    -- reasoning as Loading's 3000000000+ above.
+    SELECT
+      (4000000000 + use.id) AS id,
+      use.barcode,
+      use.item_name         AS "itemName",
+      use.pallets,
+      use.total_qty         AS "totalQty",
+      NULL::integer AS "itemsPerPallet",
+      use.loose_qty         AS "looseQty",
+      use.is_extra          AS "isExtra",
+      false AS "isEmptyBox",
+      false AS "isExchange",
+      false AS "isDispatch",
+      true AS "isUnload",
+      NULL::text AS "emptyBoxNote",
+      use.stv,
+      use.scanned_by_code   AS "scannedByCode",
+      use.scanned_by_name   AS "scannedByName",
+      use.scanned_at        AS "scannedAt",
+      COALESCE(use.voided, false) AS voided,
+      use.voided_at         AS "voidedAt",
+      use.void_reason       AS "voidReason",
+      (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(use.barcode)) LIMIT 1) AS "srNo",
+      use.vehicle_number AS "orderName",
+      uis.order_date AS "orderDate",
+      use.plant AS "plant"
+    FROM unload_scan_events use
+    JOIN unload_import_sessions uis ON uis.id = use.session_id
   ) combined
 `;
 
@@ -966,6 +1038,17 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const toParam      = typeof req.query.to      === 'string' && req.query.to.trim()      ? req.query.to.trim()      : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
     const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange'].includes(req.query.type) ? req.query.type : null;
+    // Three distinct sections on the Scan History page (client dropdown) — "Scan History"
+    // (receiving + exchange corrections, the original page), "Load Event" (Loading's own
+    // item-scanning history, server/routes/loading.ts), and "Unload Event" (Unloading's own scan
+    // history, server/routes/unloading.ts) — plus 'all', which merges all three (no source
+    // condition added below at all). Default stays 'receiving' so any older/other caller that
+    // never sends this param keeps seeing exactly what it always saw.
+    const sourceParam  = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'all' ? 'all' : 'receiving';
+    // Scopes to one proforma order's own events — used by the Loading page's own landing table
+    // (server/routes/loading.ts), whose "click a row to expand" panel re-uses this same endpoint
+    // rather than a dedicated one.
+    const orderParam   = typeof req.query.order   === 'string' && req.query.order.trim()    ? req.query.order.trim()   : null;
     const searchParam  = typeof req.query.search  === 'string' && req.query.search.trim()  ? req.query.search.trim()  : null;
     const plantParam   = typeof req.query.plant   === 'string' && req.query.plant.trim()   ? req.query.plant.trim()   : null;
     const filtersParam = typeof req.query.filters === 'string' && req.query.filters.trim() ? req.query.filters.trim() : undefined;
@@ -990,6 +1073,18 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     if (fromParam)    { params.push(fromParam);    conditions.push(`DATE("scannedAt") >= $${params.length}::date`); }
     if (toParam)      { params.push(toParam);      conditions.push(`DATE("scannedAt") <= $${params.length}::date`); }
     if (scannerParam) { params.push(scannerParam); conditions.push(`"scannedByName" = $${params.length}`); }
+    if (orderParam)   { params.push(orderParam);   conditions.push(`"orderName" = $${params.length}`); }
+    // Section split — see sourceParam comment above. Applied before the Type filter below so
+    // 'regular'/'extra' inside the Load/Unload Event tabs only ever match their own rows, never
+    // receiving ones (and vice versa), without any filter needing to know about the others.
+    // 'all' adds no condition here at all — every source's rows pass through together.
+    if (sourceParam !== 'all') {
+      conditions.push(
+        sourceParam === 'dispatch' ? `"isDispatch" = true`
+        : sourceParam === 'unload' ? `"isUnload" = true`
+        : `NOT "isDispatch" AND NOT "isUnload"`,
+      );
+    }
     // Empty boxes and exchanges ARE shown in scan history as their own distinct statuses, but
     // they're never product scans — so 'regular'/'extra' filters must exclude both, and the
     // box/pallet totals below exclude them too (they don't count toward order quantity). A
@@ -1010,9 +1105,10 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // Summary tiles are about genuine scanning activity — always exclude exchanges from them
     // regardless of the active type filter, so "Total Boxes"/"Total Pallets" never mix in a
     // stock-correction quantity.
-    const summaryWhere = where
-      ? `${where} AND NOT "isExchange"`
-      : `WHERE NOT "isExchange"`;
+    // where can be '' (no conditions at all — e.g. an admin with source=all and no other filter
+    // picked), so this can't unconditionally append "AND ..." onto it — that leaves a bare "AND"
+    // with no WHERE before it, a SQL syntax error.
+    const summaryWhere = where ? `${where} AND NOT "isExchange"` : `WHERE NOT "isExchange"`;
     const summaryFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${summaryWhere}`;
 
     // Destructuring order must track the array below: data, count, summary, column totals, scanners.
@@ -1052,6 +1148,8 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
            SELECT u.name FROM stock_movements sm
              JOIN users u ON u.user_code = sm.created_by_code
              WHERE sm.type = 'exchange' AND u.name IS NOT NULL
+           UNION
+           SELECT scanned_by_name AS name FROM loading_scan_events WHERE scanned_by_name IS NOT NULL
          ) s
          ORDER BY name`,
       ),
@@ -1092,7 +1190,21 @@ router.get('/reports/scan-history/filter-values', async (req: Request, res: Resp
       for (const id of Object.keys(SCAN_HISTORY_FILTER_COLUMNS)) empty[id] = [];
       return res.json(empty);
     }
-    const plantWhere = allowedPlants !== null ? `WHERE LOWER("plant") = ANY($1::text[])` : '';
+    // Same tab scoping as GET /reports/scan-history — Values checklists on the Load/Unload Event
+    // tabs shouldn't offer barcodes/plants/etc. that only ever appear on other rows, and vice
+    // versa. 'all' merges every source, so no source condition at all.
+    const sourceParam = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'all' ? 'all' : 'receiving';
+    const sourceCond =
+      sourceParam === 'dispatch' ? `"isDispatch" = true`
+      : sourceParam === 'unload' ? `"isUnload" = true`
+      : sourceParam === 'all' ? null
+      : `NOT "isDispatch" AND NOT "isUnload"`;
+    // Always starts with WHERE (falling back to the no-op "WHERE TRUE") — every call site below
+    // unconditionally appends "AND ..." after this, which is a syntax error if this were ever ''
+    // (an admin with source=all and no plant restriction has nothing else to put here).
+    const plantWhere = allowedPlants !== null
+      ? (sourceCond ? `WHERE LOWER("plant") = ANY($1::text[]) AND ${sourceCond}` : `WHERE LOWER("plant") = ANY($1::text[])`)
+      : (sourceCond ? `WHERE ${sourceCond}` : 'WHERE TRUE');
     const plantParams = allowedPlants !== null ? [allowedPlants] : [];
 
     const entries = Object.entries(SCAN_HISTORY_FILTER_COLUMNS);
@@ -1100,16 +1212,21 @@ router.get('/reports/scan-history/filter-values', async (req: Request, res: Resp
       if (col.type === 'date') {
         const { rows } = await pool.query(
           `SELECT DISTINCT DATE(${col.sql})::text AS d
-           FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere ? `${plantWhere} AND ${col.sql} IS NOT NULL` : `WHERE ${col.sql} IS NOT NULL`}
+           FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere} AND ${col.sql} IS NOT NULL
            ORDER BY d DESC LIMIT 500`,
           plantParams,
         );
         return [id, rows.map((r: any) => ({ value: r.d, label: format(new Date(r.d), 'MMM d, yyyy') }))] as const;
       }
+      // SELECT DISTINCT requires ORDER BY to use the exact same expression as the select list —
+      // ordering by the raw (uncast) column while selecting its ::text cast is two different
+      // expressions to Postgres and errors (42P10). Number columns sort correctly on their own
+      // numeric value without casting; text/enum columns need the cast for the emptiness check.
+      const valueExpr = col.type === 'number' ? col.sql : `${col.sql}::text`;
       const { rows } = await pool.query(
-        `SELECT DISTINCT ${col.sql}::text AS v
-         FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere ? `${plantWhere} AND ${col.sql} IS NOT NULL AND ${col.sql}::text <> ''` : `WHERE ${col.sql} IS NOT NULL AND ${col.sql}::text <> ''`}
-         ORDER BY ${col.type === 'number' ? `${col.sql}` : 'v'} LIMIT 500`,
+        `SELECT DISTINCT ${valueExpr} AS v
+         FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${plantWhere} AND ${col.sql} IS NOT NULL${col.type === 'number' ? '' : ` AND ${col.sql}::text <> ''`}
+         ORDER BY v LIMIT 500`,
         plantParams,
       );
       return [id, rows.map((r: any) => ({
@@ -1302,7 +1419,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         pps.updated_at                                     AS "lastArrived"
       FROM ${sourceSql} pps
       LEFT JOIN products p    ON p.id = pps.product_id
-      LEFT JOIN products p_bc ON p.id IS NULL AND LOWER(p_bc.barcode) = LOWER(pps.barcode)
+      LEFT JOIN products p_bc ON p.id IS NULL AND LOWER(TRIM(p_bc.barcode)) = LOWER(TRIM(pps.barcode))
       LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(pps.plant)
       ${where}
       ORDER BY ${
@@ -1464,8 +1581,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // parent row), not the item, so every item in a slip is grouped under that one slip's plant.
     // Reliable sales tracking only starts SALES_TRACKING_START — earlier proforma data is not
     // dependable, so unlike Expected Qty's true all-time sum, the "all dates" default floors
-    // there instead of summing everything that ever existed.
-    const SALES_TRACKING_START = '2026-08-01';
+    // there instead of summing everything that ever existed. Admin-editable on the Settings page
+    // (sales_settings — see server/index.ts's migration / server/routes/settings-admin.ts's
+    // GET/PUT /settings/sales-tracking-start) rather than a hardcoded constant.
+    const { rows: salesSettingsRows } = await pool.query(
+      `SELECT sales_tracking_start_date AS "salesTrackingStartDate" FROM sales_settings ORDER BY id LIMIT 1`,
+    );
+    const SALES_TRACKING_START = salesSettingsRows[0]?.salesTrackingStartDate ?? '2026-08-01';
     const saleByKey = new Map<string, number>();
     let saleTotal = 0;
     const saleOnlyRows: typeof items = [];
@@ -1608,8 +1730,10 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       // "all dates" mode, where expectedTotal is a sum across every order ever uploaded instead.
       expectedDate: singleDate, expectedTotal: hasExpected ? expectedTotal : null,
       // saleDate mirrors expectedDate — null in "all dates" mode, where saleTotal is a sum from
-      // SALES_TRACKING_START onward rather than one explicit date's sales.
-      saleDate: singleDate, saleTotal: hasSale ? saleTotal : null,
+      // SALES_TRACKING_START onward rather than one explicit date's sales. salesTrackingStart is
+      // sent along so the client can label that "since ..." text with the real, admin-editable
+      // date (Settings > Sales Tracking Start) instead of hardcoding it.
+      saleDate: singleDate, saleTotal: hasSale ? saleTotal : null, salesTrackingStart: SALES_TRACKING_START,
     });
   } catch (error) {
     console.error('Error generating plant stock report:', error);

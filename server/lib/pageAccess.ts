@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 
-const WRITE_ADMIN_ROLES = ["admin", "super-admin", "superadmin", "super_admin", "super admin"];
+export const WRITE_ADMIN_ROLES = ["admin", "super-admin", "superadmin", "super_admin", "super admin"];
 
 // Generic write-access gate, reusable across any page key from CONTROLLABLE_PAGES
 // (client/src/pages/Users.tsx). Admin/super-admin always pass. Anyone else passes only if
@@ -42,4 +42,21 @@ export function requirePageAccess(pageKey: string | string[]) {
     if (pageKeys.some((key) => allowed.includes(key))) return next();
     return res.status(403).json({ message: "Page access required" });
   };
+}
+
+// Admin-only gate for operations that bypass the per-page grant system entirely — bulk
+// Notion sync (detect/apply/full-sync) can create/overwrite many rows at once, so it stays
+// restricted to admin/super-admin regardless of a user's page-level write access. Originally
+// a private copy inside server/routes/notion-inventory-sync.ts; shared here so
+// notion-vehicle-sync.ts (and any future Notion-synced page) uses the same check.
+export function requireAdminRole(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) {
+    return res.status(401).json({ success: false, message: "Not authenticated" });
+  }
+  const user = req.user as any;
+  const role = (user?.role ?? "").toString().toLowerCase();
+  if (!WRITE_ADMIN_ROLES.includes(role)) {
+    return res.status(403).json({ success: false, message: "Admin access required" });
+  }
+  next();
 }

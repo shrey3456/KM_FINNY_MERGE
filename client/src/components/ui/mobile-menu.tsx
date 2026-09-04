@@ -25,7 +25,7 @@ const MobileMenu: React.FC<MobileMenuProps> = ({ currentPath }) => {
     { label: 'Proforma Slips', icon: <FileText className="h-5 w-5 mr-3" />, path: '/proforma-slips' },
     { label: 'Scan Order', icon: <ScanLine className="h-5 w-5 mr-3" />, path: '/scan' },
     { label: 'Order Management', icon: <ClipboardList className="h-5 w-5 mr-3" />, path: '/order-management' },
-    { label: 'Reports', icon: <BarChart4 className="h-5 w-5 mr-3" />, path: '/reports' },
+    { label: 'Reports', icon: <BarChart4 className="h-5 w-5 mr-3" />, path: '/scan-history' },
     { label: 'Users', icon: <Users className="h-5 w-5 mr-3" />, path: '/users' },
     { label: 'Settings', icon: <Settings className="h-5 w-5 mr-3" />, path: '/settings' },
   ];

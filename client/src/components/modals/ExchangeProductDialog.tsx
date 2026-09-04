@@ -160,7 +160,7 @@ export default function ExchangeProductDialog({ source, onClose }: ExchangeProdu
     const scanner = new BarcodeScanner({
       onDetected: (result) => {
         if (cancelled) return;
-        const code = result.getText();
+        const code = result.getText().trim();
         const match = allProducts.find((p) => (p.barcode ?? "").toLowerCase() === code.toLowerCase());
         if (!match) {
           setCameraError(`No product found for barcode "${code}"`);

@@ -159,6 +159,218 @@ app.use((req, res, next) => {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    // Same role as notion_inventory_sync_config above, for the Vehicle Master Notion sync
+    // (server/services/notionVehicleSync.ts) — kept as its own row/table rather than sharing
+    // the product one, since the two syncs are independent and shouldn't share an on/off switch.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notion_vehicle_sync_config (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        auto_apply_enabled BOOLEAN NOT NULL DEFAULT false,
+        updated_by TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // History log for the Loading page (server/routes/loading.ts) — one row per completed
+    // vehicle-link action, scoped per-user unless admin/super-admin (see requirePageAccess
+    // ('loading') + the createdByCode filter in listLoadingRecords).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loading_records (
+        id SERIAL PRIMARY KEY,
+        order_number TEXT NOT NULL,
+        proforma_slip_id INTEGER,
+        party_name TEXT,
+        plant TEXT,
+        vehicle_number TEXT NOT NULL,
+        rto_number TEXT,
+        volume TEXT,
+        created_by_code TEXT REFERENCES users(user_code),
+        created_by_name TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // Per-scan audit trail for Loading's item-loading step — see loadingScanEvents' comment in
+    // shared/schema.ts. Each confirmed row here is what actually decrements product_plant_stock.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loading_scan_events (
+        id SERIAL PRIMARY KEY,
+        order_number TEXT NOT NULL,
+        proforma_slip_id INTEGER,
+        barcode TEXT NOT NULL,
+        item_name TEXT,
+        sap_code TEXT,
+        pallets REAL DEFAULT 0,
+        loose_qty INTEGER DEFAULT 0,
+        total_qty INTEGER DEFAULT 0,
+        is_extra BOOLEAN DEFAULT false,
+        plant TEXT,
+        scanned_by_code TEXT REFERENCES users(user_code),
+        scanned_by_name TEXT,
+        scanned_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // Void support for loading_scan_events (server/routes/loading.ts's POST /events/:id/void) —
+    // same voided/voidedByCode/voidedAt/voidReason shape as order_scan_events.
+    await pool.query(`
+      ALTER TABLE loading_scan_events
+        ADD COLUMN IF NOT EXISTS voided BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS voided_by_code TEXT REFERENCES users(user_code),
+        ADD COLUMN IF NOT EXISTS voided_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS void_reason TEXT
+    `);
+    // Unloading (server/routes/unloading.ts) — vehicle-wise receiving. See unloadImportSessions'
+    // comment in shared/schema.ts: FIFO grouping like order_import_sessions, but scoped one level
+    // deeper by vehicleNumber (plant + vehicleNumber + orderDate), so one CSV upload can span
+    // several vehicles and every vehicle+date group tracks its own active part independently.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS unload_import_sessions (
+        id SERIAL PRIMARY KEY,
+        plant TEXT NOT NULL,
+        vehicle_number TEXT NOT NULL,
+        order_date TEXT NOT NULL,
+        csv_file_name TEXT NOT NULL,
+        row_count INTEGER DEFAULT 0,
+        imported_by_code TEXT REFERENCES users(user_code),
+        created_at TIMESTAMP DEFAULT NOW(),
+        group_id INTEGER,
+        part_index INTEGER DEFAULT 1,
+        scan_status TEXT DEFAULT 'available',
+        scan_activated_by_code TEXT REFERENCES users(user_code),
+        scan_activated_at TIMESTAMP,
+        scan_completed_by_code TEXT REFERENCES users(user_code),
+        scan_completed_at TIMESTAMP
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS unload_import_items (
+        id SERIAL PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES unload_import_sessions(id) ON DELETE CASCADE,
+        plant TEXT,
+        vehicle_number TEXT,
+        barcode TEXT,
+        item_name TEXT,
+        sap_code TEXT,
+        quantity INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS unload_scan_events (
+        id SERIAL PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES unload_import_sessions(id) ON DELETE CASCADE,
+        barcode TEXT NOT NULL,
+        item_name TEXT,
+        sap_code TEXT,
+        pallets REAL DEFAULT 0,
+        loose_qty INTEGER DEFAULT 0,
+        total_qty INTEGER DEFAULT 0,
+        is_extra BOOLEAN DEFAULT false,
+        plant TEXT,
+        vehicle_number TEXT,
+        scanned_by_code TEXT REFERENCES users(user_code),
+        scanned_by_name TEXT,
+        scanned_at TIMESTAMP DEFAULT NOW(),
+        voided BOOLEAN DEFAULT false,
+        voided_by_code TEXT REFERENCES users(user_code),
+        voided_at TIMESTAMP,
+        void_reason TEXT
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_unload_import_sessions_group ON unload_import_sessions(group_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_unload_import_items_session ON unload_import_items(session_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_unload_scan_events_session ON unload_scan_events(session_id)`);
+    // Delete-with-rollback replacement flow for Unloading — same shape as order_import_sessions'
+    // own isDeleted/remappedToSessionId/replacesSessionId columns (see their comment there).
+    await pool.query(`
+      ALTER TABLE unload_import_sessions
+        ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT false NOT NULL,
+        ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS deleted_by_code TEXT REFERENCES users(user_code),
+        ADD COLUMN IF NOT EXISTS remapped_to_session_id INTEGER,
+        ADD COLUMN IF NOT EXISTS remapped_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS replaces_session_id INTEGER
+    `);
+    // Cross-part credit reconciliation for Unloading — same shape as order_scan_events' own
+    // isCredit/creditedQty/creditSourceEventId columns (see their comment there).
+    await pool.query(`
+      ALTER TABLE unload_scan_events
+        ADD COLUMN IF NOT EXISTS is_credit BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS credit_source_event_id INTEGER
+    `);
+    // STV (sub-transfer voucher) per scan — same per-plant STV concept Order Scan already
+    // records (order_scan_events.stv, backed by plant_stvs).
+    await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS stv TEXT`);
+
+    // Single-row admin-editable settings (see shared/schema.ts's salesSettings comment) — starts
+    // with just the Sales tracking start date, previously a hardcoded constant. Seeded with that
+    // same default so behavior doesn't change until an admin edits it on the Settings page.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sales_settings (
+        id SERIAL PRIMARY KEY,
+        sales_tracking_start_date TEXT NOT NULL DEFAULT '2026-08-01',
+        updated_at TIMESTAMP DEFAULT NOW(),
+        updated_by_code TEXT REFERENCES users(user_code)
+      )
+    `);
+    await pool.query(`INSERT INTO sales_settings (sales_tracking_start_date) SELECT '2026-08-01' WHERE NOT EXISTS (SELECT 1 FROM sales_settings)`);
+
+    // Loading-completion state lives directly on the slip (loadingCompletedAt/By), same pattern
+    // as the existing print-lock fields (isPrintLocked/printedByCode/printedAt) on this table.
+    await pool.query(`
+      ALTER TABLE proforma_slips
+        ADD COLUMN IF NOT EXISTS loading_completed_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS loading_completed_by_code TEXT,
+        ADD COLUMN IF NOT EXISTS vehicle_assigned_by_code TEXT,
+        ADD COLUMN IF NOT EXISTS vehicle_info_id INTEGER
+    `);
+    // Barcode text is compared across many tables (product name resolution, stock keys, the
+    // product_id backfill right below) using LOWER() — a barcode stored with stray leading/
+    // trailing whitespace (an old CSV export padded to a fixed width, a pre-fix Notion sync
+    // row, a barcode-gun double-fire captured before the trim-at-write fixes in storage.ts/
+    // order-scan.ts/loading.ts/unloading.ts existed) silently fails every one of those matches,
+    // and Overall Stock/Scan History fall back to showing the bare barcode instead of the
+    // resolved item name. Cleaned up once here, idempotently (WHERE barcode <> TRIM(barcode)
+    // is a no-op once everything's clean) — every write from here on is already trimmed at the
+    // source, so this can't reaccumulate.
+    await pool.query(`UPDATE products SET barcode = TRIM(barcode) WHERE barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE stock_movements SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE order_import_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE order_scan_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE order_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE loading_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE unload_import_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE unload_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+
+    // product_plant_stock is UNIQUE(barcode, plant) — unlike the tables above, blindly trimming
+    // its barcode can collide with a row that already exists under the trimmed barcode for the
+    // same plant. Same merge-or-rename dance as reconcileProductPlantStockBarcode.ts (which
+    // handles the equivalent collision for a live barcode edit), run once here for any row still
+    // holding a padded barcode from before the trim-at-write fixes existed.
+    {
+      const { rows: paddedRows } = await pool.query(
+        `SELECT id, barcode, plant, in_stock, extra_qty FROM product_plant_stock WHERE barcode <> TRIM(barcode)`
+      );
+      for (const row of paddedRows) {
+        const trimmed = row.barcode.trim();
+        const { rows: targetRows } = await pool.query(
+          `SELECT id FROM product_plant_stock WHERE barcode = $1 AND plant = $2`,
+          [trimmed, row.plant],
+        );
+        if (targetRows[0]) {
+          await pool.query(
+            `UPDATE product_plant_stock SET in_stock = in_stock + $1, extra_qty = extra_qty + $2, updated_at = NOW() WHERE id = $3`,
+            [row.in_stock, row.extra_qty, targetRows[0].id],
+          );
+          await pool.query(`DELETE FROM product_plant_stock WHERE id = $1`, [row.id]);
+        } else {
+          await pool.query(
+            `UPDATE product_plant_stock SET barcode = $1, updated_at = NOW() WHERE id = $2`,
+            [trimmed, row.id],
+          );
+        }
+      }
+    }
+
     // product_plant_stock/stock_movements previously linked to a product ONLY by barcode text.
     // A product's barcode can be edited later (most commonly via the Notion inventory sync,
     // which matches/updates existing products by their stable Notion page id, not barcode, and
@@ -169,7 +381,8 @@ app.use((req, res, next) => {
     // each row's CURRENT barcode below — only fixes rows that haven't drifted yet (nothing
     // remembers what a barcode used to be), but every write from here on populates product_id
     // directly, so this can't happen again going forward. WHERE product_id IS NULL makes this
-    // safe to run on every server start — a no-op once everything's backfilled.
+    // safe to run on every server start — a no-op once everything's backfilled. TRIM() here too,
+    // belt-and-braces alongside the cleanup above, in case a row was added between the two.
     await pool.query(`
       ALTER TABLE product_plant_stock
       ADD COLUMN IF NOT EXISTS product_id INTEGER
@@ -181,13 +394,78 @@ app.use((req, res, next) => {
     await pool.query(`
       UPDATE product_plant_stock pps SET product_id = p.id
       FROM products p
-      WHERE pps.product_id IS NULL AND LOWER(p.barcode) = LOWER(pps.barcode)
+      WHERE pps.product_id IS NULL AND LOWER(TRIM(p.barcode)) = LOWER(TRIM(pps.barcode))
     `);
     await pool.query(`
       UPDATE stock_movements sm SET product_id = p.id
       FROM products p
-      WHERE sm.product_id IS NULL AND LOWER(p.barcode) = LOWER(sm.barcode)
+      WHERE sm.product_id IS NULL AND LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode))
     `);
+
+    // vehicle_info predates Vehicle Master and previously had a different, narrower column set
+    // (see shared/schema.ts's comment on the vehicleInfo table) — add whatever's missing rather
+    // than assuming a fresh table. Existing rows simply get NULL for these until synced/edited.
+    await pool.query(`
+      ALTER TABLE vehicle_info
+        ADD COLUMN IF NOT EXISTS notion_page_id TEXT,
+        ADD COLUMN IF NOT EXISTS series TEXT,
+        ADD COLUMN IF NOT EXISTS company_type TEXT,
+        ADD COLUMN IF NOT EXISTS ac_truck_url TEXT,
+        ADD COLUMN IF NOT EXISTS company TEXT,
+        ADD COLUMN IF NOT EXISTS manufacturer TEXT,
+        ADD COLUMN IF NOT EXISTS model_year TEXT,
+        ADD COLUMN IF NOT EXISTS engine TEXT,
+        ADD COLUMN IF NOT EXISTS volume REAL,
+        ADD COLUMN IF NOT EXISTS vehicle_percent REAL,
+        ADD COLUMN IF NOT EXISTS gps TEXT,
+        ADD COLUMN IF NOT EXISTS for_gps TEXT,
+        ADD COLUMN IF NOT EXISTS driver TEXT,
+        ADD COLUMN IF NOT EXISTS record_driver TEXT,
+        ADD COLUMN IF NOT EXISTS plant TEXT,
+        ADD COLUMN IF NOT EXISTS status TEXT,
+        ADD COLUMN IF NOT EXISTS remark TEXT,
+        ADD COLUMN IF NOT EXISTS vehicle_fitness TEXT,
+        ADD COLUMN IF NOT EXISTS latest_entry TEXT,
+        ADD COLUMN IF NOT EXISTS latest_order TEXT,
+        ADD COLUMN IF NOT EXISTS link_to_vehicle TEXT,
+        ADD COLUMN IF NOT EXISTS order_current TEXT,
+        ADD COLUMN IF NOT EXISTS order_backup TEXT,
+        DROP COLUMN IF EXISTS ac_truck,
+        DROP COLUMN IF EXISTS order_by,
+        DROP COLUMN IF EXISTS order_cl,
+        DROP COLUMN IF EXISTS link_to_rto,
+        DROP COLUMN IF EXISTS link_to_sr
+    `);
+    // rto_number was NOT NULL in the original table — Vehicle Master's Notion sync can create
+    // a row before that field is known, so this column needs to allow NULL going forward.
+    await pool.query(`ALTER TABLE vehicle_info ALTER COLUMN rto_number DROP NOT NULL`);
+
+    // Vehicle Master's real identity is notionPageId now, not vehicleNumber — two different
+    // Notion pages (two vehicles, or intentionally more than one page for the same one) can
+    // legitimately share a vehicle number; that's no longer treated as a sync conflict (see
+    // server/services/notionVehicleSync.ts). Drop the old uniqueness/requiredness on
+    // vehicle_number, and make notion_page_id unique instead — that's what now guarantees one
+    // row per Notion page.
+    await pool.query(`ALTER TABLE vehicle_info DROP CONSTRAINT IF EXISTS vehicle_info_vehicle_number_unique`);
+    await pool.query(`ALTER TABLE vehicle_info ALTER COLUMN vehicle_number DROP NOT NULL`);
+    try {
+      await pool.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'vehicle_info_notion_page_id_unique'
+          ) THEN
+            ALTER TABLE vehicle_info ADD CONSTRAINT vehicle_info_notion_page_id_unique UNIQUE (notion_page_id);
+          END IF;
+        END $$;
+      `);
+    } catch (err) {
+      // Only fails if some past sync run already left two rows sharing a notion_page_id — should
+      // never happen (each page always resolved to at most one row even under the old logic),
+      // but this is a startup migration and must never crash the server over a pre-existing data
+      // issue; log it so it's visible/fixable instead.
+      console.error('Failed to add vehicle_info_notion_page_id_unique constraint — check for duplicate notion_page_id rows:', (err as Error)?.message);
+    }
 
     console.log('Database migrations completed successfully');
 
