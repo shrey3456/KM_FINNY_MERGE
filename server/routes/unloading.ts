@@ -798,6 +798,16 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     if (!matchedItem && !product) {
       return res.status(400).json({ message: 'Barcode not in system — not on this vehicle\'s manifest and not in Product Master.' });
     }
+    // On the manifest, but nothing in Product Master to back it — item name/SAP code would
+    // silently fall back to the manifest's own text and pallet size to a generic default
+    // instead of the real GJ/MP-PLT value. Blocked rather than allowed through quietly, same as
+    // the "matched nowhere at all" case above — see PRODUCT_MASTER_MISSING's client-side handling
+    // (a distinct centered popup, not the ordinary error toast) in Unloading.tsx.
+    if (matchedItem && !product) {
+      return res.status(400).json({
+        message: `PRODUCT_MASTER_MISSING: "${barcode}" is on this vehicle's manifest but has no matching entry in Product Master. Check Product Master and correct the barcode before scanning it.`,
+      });
+    }
 
     const { rows: scannedRows } = await client.query(
       `SELECT COALESCE(SUM(total_qty), 0)::int AS "scanned" FROM unload_scan_events

@@ -8,6 +8,8 @@ import {
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
+import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
+import { matchProductMasterMissingError } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -512,9 +514,14 @@ export default function Unloading() {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId, "events"] });
       if (data.allComplete) toast({ title: "Batch complete", description: "Every item's expected quantity has been matched." });
     },
-    onError: (error: any) => toast({ title: "Scan failed", description: error?.message || "Could not record scan", variant: "destructive" }),
+    onError: (error: any) => {
+      const productMasterMissing = matchProductMasterMissingError(error);
+      if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
+      toast({ title: "Scan failed", description: error?.message || "Could not record scan", variant: "destructive" });
+    },
     onSettled: () => { scanLockRef.current = false; },
   });
+  const [productMasterMissingMessage, setProductMasterMissingMessage] = useState<string | null>(null);
 
   // ─── Manual/Camera barcode input, same-barcode cooldown, auto-scan popup — mirrors
   // client/src/pages/Loading/LoadOperation.tsx's item-scanning UX exactly. ─────────────────────
@@ -1911,6 +1918,7 @@ export default function Unloading() {
           (client/src/pages/OrderImport.tsx) — see that page's plan comment for why. */}
 
       <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} basePath="unloading" />
+      <ProductMasterMissingDialog message={productMasterMissingMessage} onClose={() => setProductMasterMissingMessage(null)} />
 
       {/* ── Delete confirmation — replace (soft, carries forward on re-upload) vs discard
           (reverses stock, voids history, self-resolves) ─────────────────────────────────── */}

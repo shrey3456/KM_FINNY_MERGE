@@ -286,6 +286,10 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
       ? await storage.getVehicleInfo(vehicleId)
       : await storage.getVehicleInfoByVehicleNumber(vehicleNumber);
     if (!vehicle) return res.status(404).json({ message: `No vehicle found in Vehicle Master${vehicleNumber ? ` with number "${vehicleNumber}"` : ''}` });
+    // vehicleInfo.vehicleNumber is nullable (a manually-added Vehicle Master row can be saved
+    // without one) — the vehicleId lookup path doesn't guarantee it's set, unlike the
+    // by-vehicleNumber path. Nothing meaningful to link without it.
+    if (!vehicle.vehicleNumber) return res.status(400).json({ message: 'This vehicle has no vehicle number set in Vehicle Master.' });
 
     const updated = await storage.updateProformaSlip(slip.id, {
       vehicleNumber: vehicle.vehicleNumber,
@@ -359,6 +363,16 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     // barcode it has no record of whatsoever, rather than quietly logging it as an extra.
     if (!matchedItem && !product) {
       return res.status(400).json({ message: 'Barcode not in system — not on this order and not in Product Master.' });
+    }
+    // On the order, but nothing in Product Master to back it — item name/SAP code would
+    // silently fall back to the order's own text and pallet size to a generic default instead of
+    // the real GJ/MP-PLT value. Blocked rather than allowed through quietly. See
+    // PRODUCT_MASTER_MISSING's client-side handling (a distinct centered popup, not the ordinary
+    // error toast) in LoadOperation.tsx.
+    if (matchedItem && !product) {
+      return res.status(400).json({
+        message: `PRODUCT_MASTER_MISSING: "${barcode}" is on this order but has no matching entry in Product Master. Check Product Master and correct the barcode before scanning it.`,
+      });
     }
 
     // Stock check — the actual ask: an item already at zero (or short) for this plant cannot

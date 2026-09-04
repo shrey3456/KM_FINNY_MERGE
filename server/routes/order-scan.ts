@@ -1617,6 +1617,20 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
       const state = await getPlantStateCode(client, anchorSession.plant ?? '');
       resolvedIpp = resolvePalletSizeOrQty({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state, anchorExpectedQty);
     }
+
+    // On some part's CSV (regardless of whether it still has remaining capacity — a barcode
+    // already fully scanned elsewhere still counts as "on the order"), but nothing in Product
+    // Master to back it — pallet size silently falls back to a generic default instead of the
+    // real GJ/MP-PLT value. Blocked rather than allowed through quietly, same as Loading/
+    // Unloading's own equivalent check. A barcode not on ANY part's CSV at all keeps today's
+    // existing behavior (logged as a pure Extra) — this is deliberately narrower than that.
+    const onAnyPartCsv = sessions.some((s: any) => itemRowsBySession.get(s.id) != null);
+    if (onAnyPartCsv && !prodResult.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        message: `PRODUCT_MASTER_MISSING: "${barcode}" is on this order but has no matching entry in Product Master. Check Product Master and correct the barcode before scanning it.`,
+      });
+    }
     const itemsPerPallet = resolvedIpp;
 
     const totalQty = qty != null

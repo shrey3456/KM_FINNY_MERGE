@@ -16,6 +16,8 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
+import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
+import { matchProductMasterMissingError } from "@/lib/apiError";
 
 // ─── Types (mirror server/routes/loading.ts responses) ───────────────────────
 type ProformaSuggestion = {
@@ -532,9 +534,14 @@ export default function LoadOperation() {
       }
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", data.slip.orderNumber] });
     },
-    onError: (err: any) => toast({ title: "Scan failed", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => {
+      const productMasterMissing = matchProductMasterMissingError(err);
+      if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
+      toast({ title: "Scan failed", description: err?.message, variant: "destructive" });
+    },
     onSettled: () => { scanLockRef.current = false; },
   });
+  const [productMasterMissingMessage, setProductMasterMissingMessage] = useState<string | null>(null);
 
   const completeMutation = useMutation({
     mutationFn: async () => {
@@ -1013,8 +1020,127 @@ export default function LoadOperation() {
           </div>
         )}
 
-        {/* ── Stage B: order found — responsive 2-column layout on wide screens ──── */}
-        {view === "create" && slip && (
+        {/* ── Stage B(pre): order found, no vehicle yet — pick one in a dialog, then
+            "Create Load Slip" before the actual load page (Stage B below) ever mounts. Replaces
+            the old inline "Link a vehicle above before scanning items" placeholder — the load
+            page itself no longer renders at all until this step is done, instead of rendering
+            disabled/incomplete next to it. */}
+        {view === "create" && slip && !slip.vehicleNumber && (
+          <Dialog open onOpenChange={(open) => { if (!open) resetToSearch(); }}>
+            <DialogContent className="max-w-md">
+              <DialogHeader>
+                <DialogTitle className="text-[#001d6e]">#{slip.orderNumber}</DialogTitle>
+                <DialogDescription>
+                  {slip.partyName}{slip.plant ? ` · ${slip.plant}` : ""}
+                  {slip.orderDate ? ` · ${new Date(slip.orderDate).toLocaleDateString("en-IN")}` : ""}
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="grid grid-cols-3 divide-x divide-gray-100 rounded-lg border border-gray-100 text-center">
+                <div className="px-2 py-2.5">
+                  <div className="text-base font-extrabold text-gray-900">{items.length}</div>
+                  <div className="text-[10px] font-medium text-gray-500 mt-0.5">Items</div>
+                </div>
+                <div className="px-2 py-2.5">
+                  <div className="text-base font-extrabold text-gray-900">{slip.totalQuantity ?? "-"}</div>
+                  <div className="text-[10px] font-medium text-gray-500 mt-0.5">Total Qty</div>
+                </div>
+                <div className="px-2 py-2.5">
+                  <div className="text-base font-extrabold text-gray-900">{slip.totalVolume ?? "-"}</div>
+                  <div className="text-[10px] font-medium text-gray-500 mt-0.5">Volume</div>
+                </div>
+              </div>
+
+              {canWrite ? (
+                <div className="space-y-1.5">
+                  <Label className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    <Truck className="h-3.5 w-3.5" /> Select a vehicle
+                  </Label>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                    <Input
+                      value={vehicleSearch}
+                      onChange={(e) => { setVehicleSearch(e.target.value); setSelectedVehicle(null); setVehicleSuggIdx(-1); }}
+                      onFocus={() => setVehicleFocused(true)}
+                      onBlur={() => setTimeout(() => setVehicleFocused(false), 150)}
+                      onKeyDown={(e) => {
+                        if (vehicleFocused && vehicleSuggestions.length > 0) {
+                          if (e.key === "ArrowDown") { e.preventDefault(); setVehicleSuggIdx((i) => Math.min(i + 1, vehicleSuggestions.length - 1)); return; }
+                          if (e.key === "ArrowUp") { e.preventDefault(); setVehicleSuggIdx((i) => Math.max(i - 1, -1)); return; }
+                          if (e.key === "Escape") { setVehicleFocused(false); return; }
+                          if (e.key === "Enter" && vehicleSuggIdx >= 0) { e.preventDefault(); pickVehicle(vehicleSuggestions[vehicleSuggIdx]); return; }
+                        }
+                      }}
+                      placeholder="Vehicle number, driver, company…"
+                      className="h-10 pl-9 pr-9 text-sm"
+                      autoFocus
+                    />
+                    {vehicleSearch && (
+                      <button onClick={() => { setVehicleSearch(""); setSelectedVehicle(null); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
+                    {vehicleFocused && !selectedVehicle && debouncedVehicleSearch.trim().length >= 1 && (
+                      <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                        {vehicleSuggestionsQuery.isFetching ? (
+                          <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+                        ) : vehicleSuggestions.length === 0 ? (
+                          <p className="px-4 py-3 text-xs text-gray-400">No matching vehicles.</p>
+                        ) : (
+                          vehicleSuggestions.map((v, i) => (
+                            <button
+                              key={v.id}
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => pickVehicle(v)}
+                              className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === vehicleSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
+                            >
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-[#001d6e] truncate">{v.vehicleNumber}</div>
+                                <div className="text-xs text-gray-500 truncate">{[v.rtoNumber && `RTO ${v.rtoNumber}`, v.driver, v.company].filter(Boolean).join(" · ") || "—"}</div>
+                              </div>
+                              <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {selectedVehicle && (
+                    <div className="flex items-center justify-between gap-2 rounded-lg border border-[#001d6e]/20 bg-[#001d6e]/5 px-3 py-2.5">
+                      <div className="min-w-0 text-sm">
+                        <span className="font-semibold text-[#001d6e]">{selectedVehicle.vehicleNumber}</span>
+                        <span className="text-gray-500"> — RTO {selectedVehicle.rtoNumber ?? "—"}{selectedVehicle.volume != null ? ` · Vol ${selectedVehicle.volume}` : ""}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">You have read-only access to Loading — a vehicle needs to be linked before a load slip can be created.</p>
+              )}
+
+              <DialogFooter className="gap-2">
+                <Button variant="outline" onClick={resetToSearch} disabled={linkVehicleMutation.isPending}>
+                  Cancel
+                </Button>
+                <Button
+                  className="bg-[#001d6e] text-white hover:bg-[#001552]"
+                  disabled={!canWrite || !selectedVehicle || linkVehicleMutation.isPending}
+                  onClick={() => selectedVehicle && linkVehicleMutation.mutate(selectedVehicle)}
+                >
+                  {linkVehicleMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Link2 className="mr-1.5 h-4 w-4" />}
+                  Create Load Slip
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        )}
+
+        {/* ── Stage B: order found and vehicle set — responsive 2-column layout on wide screens.
+            Only reached once a vehicle is linked (Stage B(pre) above handles getting one) — the
+            "no vehicle yet" placeholder that used to sit here is gone; this page simply doesn't
+            mount until then. ──────────────────────────────────────────────────────────────── */}
+        {view === "create" && slip && slip.vehicleNumber && (
           <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-4 items-start">
             {/* Left: slip summary + vehicle link */}
             <div className="space-y-4">
@@ -1151,18 +1277,10 @@ export default function LoadOperation() {
                 )}
               </div>
 
-              {/* Vehicle must be linked before scanning starts — server enforces this too
-                  (POST /scan 400s without one); this replaces the Scan Items section entirely
-                  until then, rather than showing it disabled. */}
-              {canWrite && !locked && !slip?.vehicleNumber && (
-                <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-4 sm:px-5 py-4 text-center">
-                  <p className="text-sm font-medium text-gray-500">Link a vehicle above before scanning items.</p>
-                </div>
-              )}
-
-              {/* Scan items — hidden once locked or before a vehicle is linked; same
-                  Camera/Manual pattern as order search */}
-              {canWrite && !locked && slip?.vehicleNumber && (
+              {/* Scan items — hidden once locked; a vehicle is guaranteed set by the time Stage B
+                  ever mounts (see Stage B(pre) above), so there's no "not linked yet" case to
+                  guard here anymore. Same Camera/Manual pattern as order search. */}
+              {canWrite && !locked && (
                 <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                   <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
@@ -1521,6 +1639,8 @@ export default function LoadOperation() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ProductMasterMissingDialog message={productMasterMissingMessage} onClose={() => setProductMasterMissingMessage(null)} />
     </div>
   );
 }
