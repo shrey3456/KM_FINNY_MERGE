@@ -37,6 +37,10 @@ type ProformaSlip = {
   vehicleNumber: string | null; driverName: string | null; rtoNumber: string | null;
   loadingCompletedAt: string | null; loadingCompletedByCode: string | null;
   vehicleAssignedByCode: string | null;
+  // Set server-side (see withRto in loading.ts) whenever vehicleInfoId already points at a
+  // specific Vehicle Master row but nobody has confirmed it yet — the exact row to pre-select,
+  // resolved by id rather than by re-matching vehicleNumber's text on the client.
+  suggestedVehicle: VehicleSuggestion | null;
 };
 type VehicleSuggestion = {
   id: number; vehicleNumber: string; rtoNumber: string | null; driver: string | null;
@@ -431,29 +435,23 @@ export default function LoadOperation() {
   // A slip can already carry a vehicleNumber straight from Notion (server/services/
   // proformaNotionSync.ts reads it off the dispatch DB's "Vehi No:" column) before anyone has
   // confirmed it through this page — vehicleAssignedByCode stays null until they do. Rather than
-  // making the user re-type/re-search a vehicle number that's already sitting on the order, look
-  // it up in Vehicle Master as soon as the slip opens and pre-select it, same as if the user had
-  // searched and clicked it themselves — they still have to press "Link" to actually confirm it,
-  // and can clear the box and search a different vehicle instead if the Notion value is wrong.
+  // making the user re-type/re-search a vehicle number that's already sitting on the order,
+  // pre-select it as soon as the slip opens, same as if the user had searched and clicked it
+  // themselves — they still have to press "Link" to actually confirm it, and can clear the box
+  // and search a different vehicle instead if the Notion value is wrong.
+  //
+  // suggestedVehicle (see withRto in loading.ts) is the server's own resolution of Notion's raw
+  // text down to a specific Vehicle Master row's id — done there once at sync time, not here, so
+  // this just picks it directly instead of re-deriving it from vehicleNumber text on every page
+  // load. Only falls back to a client-side text search when the server couldn't resolve any row
+  // at all (suggestedVehicle null) — same as a genuinely unmatched vehicle today.
   useEffect(() => {
     if (!slip || !slip.vehicleNumber || slip.vehicleAssignedByCode) return;
     if (vehicleSearch) return; // don't clobber an in-progress manual search/selection
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await apiRequest("GET", `/api/loading/vehicles/search?q=${encodeURIComponent(slip.vehicleNumber!)}`);
-        const data = (await res.json()) as { results: VehicleSuggestion[] };
-        if (cancelled) return;
-        const exact = data.results.find((v) => v.vehicleNumber.toLowerCase() === slip.vehicleNumber!.toLowerCase());
-        if (exact) pickVehicle(exact);
-        else setVehicleSearch(slip.vehicleNumber!); // show it even if Vehicle Master has no match to confirm against
-      } catch {
-        // Silent — user can still search manually.
-      }
-    })();
-    return () => { cancelled = true; };
+    if (slip.suggestedVehicle) { pickVehicle(slip.suggestedVehicle); return; }
+    setVehicleSearch(slip.vehicleNumber); // show it even if Vehicle Master has no match to confirm against
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slip?.orderNumber, slip?.vehicleNumber, slip?.vehicleAssignedByCode]);
+  }, [slip?.orderNumber, slip?.vehicleNumber, slip?.vehicleAssignedByCode, slip?.suggestedVehicle]);
 
   // ─── Item scanning — same barcode-matching / pallet-loose / auto-scan rules as Order Scan ──
   // Auto Scan itself is Plant Management's existing per-plant toggle (plants.isAutoScanEnabled)
@@ -1020,14 +1018,15 @@ export default function LoadOperation() {
           </div>
         )}
 
-        {/* ── Stage B(pre): order found, no vehicle yet — pick one in a dialog, then
-            "Create Load Slip" before the actual load page (Stage B below) ever mounts. Replaces
-            the old inline "Link a vehicle above before scanning items" placeholder — the load
-            page itself no longer renders at all until this step is done, instead of rendering
-            disabled/incomplete next to it. */}
-        {view === "create" && slip && !slip.vehicleNumber && (
+        {/* ── Stage B(pre): order found, vehicle not yet CLAIMED — pick one in a dialog, then
+            "Create Load Slip" before the actual load page (Stage B below) ever mounts. Gated on
+            isVehicleClaimed rather than slip.vehicleNumber: a Notion-synced order can already
+            carry a vehicle number before anyone here has confirmed it (see the useEffect above
+            that pre-fills vehicleSearch for exactly this case), and that still needs to go
+            through this same confirm step, pre-filled with the Notion-suggested vehicle. */}
+        {view === "create" && slip && !isVehicleClaimed && (
           <Dialog open onOpenChange={(open) => { if (!open) resetToSearch(); }}>
-            <DialogContent className="max-w-md">
+            <DialogContent className="max-w-lg">
               <DialogHeader>
                 <DialogTitle className="text-[#001d6e]">#{slip.orderNumber}</DialogTitle>
                 <DialogDescription>
@@ -1048,6 +1047,32 @@ export default function LoadOperation() {
                 <div className="px-2 py-2.5">
                   <div className="text-base font-extrabold text-gray-900">{slip.totalVolume ?? "-"}</div>
                   <div className="text-[10px] font-medium text-gray-500 mt-0.5">Volume</div>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  <Package className="h-3.5 w-3.5" /> Items on this order ({items.length})
+                </Label>
+                <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-100">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-gray-50">
+                      <tr className="text-left text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                        <th className="px-3 py-1.5">SKU</th>
+                        <th className="px-3 py-1.5">Item Name</th>
+                        <th className="px-3 py-1.5 text-right">Qty</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((it) => (
+                        <tr key={it.id} className="border-t border-gray-100">
+                          <td className="whitespace-nowrap px-3 py-1.5 text-gray-500">{it.sapCode ?? it.barcode ?? "—"}</td>
+                          <td className="px-3 py-1.5 text-gray-800">{it.itemName ?? "—"}</td>
+                          <td className="px-3 py-1.5 text-right font-medium tabular-nums text-gray-900">{it.expected}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
 
@@ -1140,7 +1165,7 @@ export default function LoadOperation() {
             Only reached once a vehicle is linked (Stage B(pre) above handles getting one) — the
             "no vehicle yet" placeholder that used to sit here is gone; this page simply doesn't
             mount until then. ──────────────────────────────────────────────────────────────── */}
-        {view === "create" && slip && slip.vehicleNumber && (
+        {view === "create" && slip && isVehicleClaimed && (
           <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-4 items-start">
             {/* Left: slip summary + vehicle link */}
             <div className="space-y-4">
@@ -1191,14 +1216,17 @@ export default function LoadOperation() {
                   </div>
                 </div>
 
+                {/* Stage B only mounts once isVehicleClaimed is true (see Stage B(pre) above), so
+                    this is always the "linked" state — the "on this order from Notion — confirm
+                    below" amber state used to live here, but that case is now handled by Stage
+                    B(pre)'s dialog before Stage B ever renders. */}
                 {slip.vehicleNumber && (
-                  <div className={`flex items-center gap-2.5 px-4 sm:px-5 py-3 border-b ${isVehicleClaimed ? "bg-emerald-50 border-emerald-100" : "bg-amber-50 border-amber-100"}`}>
-                    <CheckCircle2 className={`h-4 w-4 shrink-0 ${isVehicleClaimed ? "text-emerald-600" : "text-amber-600"}`} />
-                    <div className={`text-sm ${isVehicleClaimed ? "text-emerald-800" : "text-amber-800"}`}>
-                      <span className="font-semibold">{slip.vehicleNumber}</span>{" "}
-                      {isVehicleClaimed ? "linked" : "on this order from Notion — confirm below"}
+                  <div className="flex items-center gap-2.5 px-4 sm:px-5 py-3 border-b bg-emerald-50 border-emerald-100">
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+                    <div className="text-sm text-emerald-800">
+                      <span className="font-semibold">{slip.vehicleNumber}</span> linked
                       {slip.rtoNumber ? <> — RTO <span className="font-semibold">{slip.rtoNumber}</span></> : null}
-                      {isVehicleClaimed && !canEditVehicle && (
+                      {!canEditVehicle && (
                         <div className="mt-0.5 text-xs text-emerald-700/70">Assigned by another user — you can view this but can't change it.</div>
                       )}
                     </div>
@@ -1208,7 +1236,7 @@ export default function LoadOperation() {
                 {canWrite && !locked && canEditVehicle && (
                   <div className="px-4 sm:px-5 py-4">
                     <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      <Truck className="h-3.5 w-3.5" /> {isVehicleClaimed ? "Change vehicle" : slip.vehicleNumber ? "Confirm vehicle" : "Link a vehicle"}
+                      <Truck className="h-3.5 w-3.5" /> Change vehicle
                     </label>
                     <div className="relative">
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />

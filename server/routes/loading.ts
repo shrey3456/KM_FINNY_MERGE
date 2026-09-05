@@ -81,13 +81,23 @@ function requireLoadingVoidAccess(req: Request, res: Response, next: NextFunctio
 // proforma_slips itself (see file header comment). Resolved by the EXACT vehicle_info row
 // (vehicleInfoId) when known — vehicleNumber alone is no longer unique in Vehicle Master (two
 // Notion pages can share one), so a by-number lookup could return a different row than the one
-// actually linked. Falls back to by-number for slips linked before vehicleInfoId existed.
+// actually linked. Falls back to by-number for the rare slip with no vehicleInfoId at all (older
+// data, or Notion's text genuinely matched nothing in Vehicle Master — see writeOrderToDb in
+// proformaNotionSync.ts, which is what normally resolves vehicleInfoId at sync time now).
+//
+// Also attaches `suggestedVehicle` — the full Vehicle Master row, not just its RTO — whenever
+// vehicleInfoId is set but nobody has confirmed it yet (vehicleAssignedByCode still null). The
+// Loading page's confirm dialog uses this to pre-select the exact row directly, rather than
+// re-deriving it from vehicleNumber text on the client (see LoadOperation.tsx's pre-fill effect).
 async function withRto(slip: any) {
-  if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null };
+  if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null, suggestedVehicle: null };
   const vehicle = slip.vehicleInfoId
     ? await storage.getVehicleInfo(slip.vehicleInfoId)
-    : await storage.getVehicleInfoByVehicleNumber(slip.vehicleNumber);
-  return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null };
+    : await storage.getVehicleInfoByVehicleNumberOrRto(slip.vehicleNumber);
+  const suggestedVehicle = !slip.vehicleAssignedByCode && vehicle
+    ? { id: vehicle.id, vehicleNumber: vehicle.vehicleNumber, rtoNumber: vehicle.rtoNumber, driver: vehicle.driver, company: vehicle.company, manufacturer: vehicle.manufacturer, volume: vehicle.volume }
+    : null;
+  return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null, suggestedVehicle };
 }
 
 // Attaches load progress to each proforma item (expected/loaded/remaining/itemsPerPallet,
@@ -284,7 +294,7 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
 
     const vehicle = vehicleId
       ? await storage.getVehicleInfo(vehicleId)
-      : await storage.getVehicleInfoByVehicleNumber(vehicleNumber);
+      : await storage.getVehicleInfoByVehicleNumberOrRto(vehicleNumber);
     if (!vehicle) return res.status(404).json({ message: `No vehicle found in Vehicle Master${vehicleNumber ? ` with number "${vehicleNumber}"` : ''}` });
     // vehicleInfo.vehicleNumber is nullable (a manually-added Vehicle Master row can be saved
     // without one) — the vehicleId lookup path doesn't guarantee it's set, unlike the

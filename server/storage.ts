@@ -211,6 +211,8 @@ export interface IStorage {
   createVehicleInfo(vehicle: InsertVehicleInfo): Promise<VehicleInfo>;
   getVehicleInfo(id: number): Promise<VehicleInfo | undefined>;
   getVehicleInfoByVehicleNumber(vehicleNumber: string): Promise<VehicleInfo | undefined>;
+  getVehicleInfoByVehicleNumberOrRto(value: string): Promise<VehicleInfo | undefined>;
+  getVehicleInfoFromNotionText(raw: string): Promise<VehicleInfo | undefined>;
   updateVehicleInfo(id: number, vehicle: Partial<InsertVehicleInfo>): Promise<VehicleInfo | undefined>;
   deleteVehicleInfo(id: number): Promise<boolean>;
   listVehicleInfo(limit?: number, offset?: number): Promise<VehicleInfo[]>;
@@ -4273,6 +4275,55 @@ eq(loadingOperations.status, status),
       console.error("Error getting vehicle info by vehicle number:", error);
       return undefined;
     }
+  }
+
+  // Notion's dispatch DB "Vehi No:" rollup isn't reliably formatted — depending on how that row
+  // was filled in, the sync (see extractVehicleCode in proformaNotionSync.ts) can end up storing
+  // the bare vehicle code ("112"), the RTO plate number alone ("GJ-15-AV-8225"), or occasionally
+  // something else, onto proforma_slips.vehicleNumber — not always the vehicle_number value a
+  // plain getVehicleInfoByVehicleNumber lookup expects. This tries both columns, case-
+  // insensitively, so Loading's vehicle-confirm step still finds the right Vehicle Master row
+  // whichever piece Notion happened to write.
+  async getVehicleInfoByVehicleNumberOrRto(value: string): Promise<VehicleInfo | undefined> {
+    try {
+      const [result] = await db.select().from(vehicleInfo)
+        .where(or(ilike(vehicleInfo.vehicleNumber, value), ilike(vehicleInfo.rtoNumber, value)))
+        .limit(1);
+      return result;
+    } catch (error) {
+      console.error("Error getting vehicle info by vehicle number or RTO:", error);
+      return undefined;
+    }
+  }
+
+  // Resolves Notion's raw "Vehi No:" text (e.g. "112 {GJ-15-AV-8225}", or occasionally just the
+  // bare code or just the RTO plate alone) down to the ONE specific Vehicle Master row it means,
+  // so an order can be linked by that row's stable id instead of by this text — the id survives
+  // even if the vehicle's own number/RTO text is later edited in Vehicle Master, whereas a fresh
+  // text match could silently land on a different (or no) row after such an edit. When the text
+  // has both pieces, requires them to match the SAME row (higher confidence than either alone);
+  // falls back to matching either column alone when only one piece is present, or the combined
+  // match found nothing.
+  async getVehicleInfoFromNotionText(raw: string): Promise<VehicleInfo | undefined> {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    const idx = trimmed.indexOf(' {');
+    if (idx >= 0) {
+      const code = trimmed.slice(0, idx).trim();
+      const rto = trimmed.slice(idx + 2).replace(/\}\s*$/, '').trim();
+      if (code && rto) {
+        try {
+          const [combined] = await db.select().from(vehicleInfo)
+            .where(and(ilike(vehicleInfo.vehicleNumber, code), ilike(vehicleInfo.rtoNumber, rto)))
+            .limit(1);
+          if (combined) return combined;
+        } catch (error) {
+          console.error("Error getting vehicle info by combined vehicle number + RTO:", error);
+        }
+      }
+      return this.getVehicleInfoByVehicleNumberOrRto(code || trimmed);
+    }
+    return this.getVehicleInfoByVehicleNumberOrRto(trimmed);
   }
 
   async updateVehicleInfo(id: number, vehicle: Partial<InsertVehicleInfo>): Promise<VehicleInfo | undefined> {

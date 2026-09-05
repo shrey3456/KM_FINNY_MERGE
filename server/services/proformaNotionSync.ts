@@ -244,13 +244,26 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
     orderDate: orderData.orderDate,
     partyName: orderData.partyName,
     plant: orderData.plant,
-    vehicleNumber: orderData.vehicleNumber || undefined,
     invoiceNumber: orderData.invoiceNumber || undefined,
     partyState: orderData.partyState || undefined,
     notionStatus: orderData.notionStatus || undefined,
     storeKeeperInfo: orderData.storeKeeperInfo || undefined,
     notionRawData: orderData.notionRawData,
   };
+
+  // Once a person has actually confirmed a vehicle for this order through the Loading page
+  // (vehicleAssignedByCode set), a later sync must never silently overwrite that — leave both
+  // fields alone entirely. Otherwise, resolve Notion's text down to the exact Vehicle Master row
+  // it means (see getVehicleInfoFromNotionText) and link by that row's id, not just its text —
+  // the id stays correct even if that vehicle's own number/RTO is edited later in Vehicle
+  // Master. Falls back to storing the raw text with no id when nothing in Vehicle Master matches
+  // it (same as before — the Loading page's own confirm step then requires a manual pick).
+  if (!existingSlip?.vehicleAssignedByCode) {
+    const rawVehicleText = orderData.vehicleNumber || '';
+    const resolved = rawVehicleText ? await storage.getVehicleInfoFromNotionText(rawVehicleText) : undefined;
+    notionFields.vehicleNumber = resolved?.vehicleNumber ?? (rawVehicleText || undefined);
+    notionFields.vehicleInfoId = resolved?.id ?? null;
+  }
 
   let slipId: number;
   let created = false;
