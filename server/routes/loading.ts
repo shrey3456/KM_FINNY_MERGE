@@ -77,27 +77,32 @@ function requireLoadingVoidAccess(req: Request, res: Response, next: NextFunctio
   return res.status(403).json({ message: 'Write access required' });
 }
 
-// Attaches the linked vehicle's RTO number to a slip response, resolved live — never stored on
-// proforma_slips itself (see file header comment). Resolved by the EXACT vehicle_info row
-// (vehicleInfoId) when known — vehicleNumber alone is no longer unique in Vehicle Master (two
-// Notion pages can share one), so a by-number lookup could return a different row than the one
-// actually linked. Falls back to by-number for the rare slip with no vehicleInfoId at all (older
-// data, or Notion's text genuinely matched nothing in Vehicle Master — see writeOrderToDb in
-// proformaNotionSync.ts, which is what normally resolves vehicleInfoId at sync time now).
+// Attaches the linked vehicle's RTO number AND volume capacity to a slip response, resolved
+// live — never stored on proforma_slips itself (see file header comment). proforma_slips.
+// totalVolume is a SEPARATE number: the order's own required cargo volume, computed from
+// Product Master's per-item volumeInCuFt at import/scan time (see server/services/
+// proformaNotionSync.ts) — it is NOT the vehicle's capacity, and linking a vehicle no longer
+// overwrites it with one (it used to; see the /link-vehicle comment below for why that changed).
+// Resolved by the EXACT vehicle_info row (vehicleInfoId) when known — vehicleNumber alone is no
+// longer unique in Vehicle Master (two Notion pages can share one), so a by-number lookup could
+// return a different row than the one actually linked. Falls back to by-number-or-RTO for the
+// rare slip with no vehicleInfoId at all (older data, or Notion's text genuinely matched nothing
+// in Vehicle Master — see writeOrderToDb in proformaNotionSync.ts, which is what normally
+// resolves vehicleInfoId at sync time now).
 //
-// Also attaches `suggestedVehicle` — the full Vehicle Master row, not just its RTO — whenever
-// vehicleInfoId is set but nobody has confirmed it yet (vehicleAssignedByCode still null). The
+// Also attaches `suggestedVehicle` — the full Vehicle Master row, not just its RTO — whenever a
+// vehicle resolves but nobody has confirmed it yet (vehicleAssignedByCode still null). The
 // Loading page's confirm dialog uses this to pre-select the exact row directly, rather than
 // re-deriving it from vehicleNumber text on the client (see LoadOperation.tsx's pre-fill effect).
 async function withRto(slip: any) {
-  if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null, suggestedVehicle: null };
+  if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null, vehicleVolume: null, suggestedVehicle: null };
   const vehicle = slip.vehicleInfoId
     ? await storage.getVehicleInfo(slip.vehicleInfoId)
     : await storage.getVehicleInfoByVehicleNumberOrRto(slip.vehicleNumber);
   const suggestedVehicle = !slip.vehicleAssignedByCode && vehicle
     ? { id: vehicle.id, vehicleNumber: vehicle.vehicleNumber, rtoNumber: vehicle.rtoNumber, driver: vehicle.driver, company: vehicle.company, manufacturer: vehicle.manufacturer, volume: vehicle.volume }
     : null;
-  return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null, suggestedVehicle };
+  return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null, vehicleVolume: vehicle?.volume ?? null, suggestedVehicle };
 }
 
 // Attaches load progress to each proforma item (expected/loaded/remaining/itemsPerPallet,
@@ -139,7 +144,17 @@ async function withProgress(slip: any, items: any[]) {
   }));
 
   const allComplete = progressItems.length > 0 && progressItems.every((i) => i.isComplete);
-  return { items: progressItems, allComplete };
+
+  // Volume actually scanned onto the vehicle so far — each item's own snapshotted
+  // volumeInCuFt (Product Master at import time, immutable per file header) times how much of
+  // it has actually been loaded, summed. Distinct from slip.totalVolume (the order's full planned
+  // volume) and vehicleVolume (the vehicle's capacity) — this is "how much is on the truck right now".
+  const loadedVolume = progressItems.reduce((sum, item) => {
+    const perUnit = parseFloat(item.volumeInCuFt ?? '');
+    return sum + (Number.isFinite(perUnit) ? perUnit * item.loaded : 0);
+  }, 0);
+
+  return { items: progressItems, allComplete, loadedVolume: Number(loadedVolume.toFixed(2)) };
 }
 
 // GET /api/loading/proforma/search?q=  — suggestions dropdown while typing/scanning.
@@ -170,27 +185,42 @@ router.get('/loading/proforma/search', requirePageAccess('loading'), async (req:
 // gun) or an Enter/suggestion-pick resolves to a specific order number.
 router.get('/loading/proforma/:orderNumber', requirePageAccess('loading'), async (req: Request, res: Response) => {
   try {
+    // Read-only: looking a slip up (or previewing it in the Create-Operation dialog) never
+    // changes its status. Starting the load is an explicit action — see POST /start below.
+    const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+
+    const rawItems = await storage.getProformaSlipItems(slip.id);
+    const { items, allComplete, loadedVolume } = await withProgress(slip, rawItems);
+    res.json({ slip: await withRto(slip), items, allComplete, loadedVolume });
+  } catch (error) {
+    console.error('Error fetching proforma slip for loading:', error);
+    res.status(500).json({ message: 'Failed to fetch proforma slip' });
+  }
+});
+
+// POST /api/loading/proforma/:orderNumber/start — "Create Operation" on the Create Load Operation
+// from Proforma dialog. This is what actually starts the load: it flips the slip to LOADING both
+// locally and in Notion. Deliberately NOT done on lookup, so previewing a slip (or cancelling out
+// of that dialog) leaves its status alone. No-op on a load that's already complete — reopening is
+// its own explicit, admin-only action.
+router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'), async (req: Request, res: Response) => {
+  try {
     let slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
 
-    // Successfully opening an order for loading IS "starting to load it" — flip to LOADING right
-    // here, not only on the later explicit Link-vehicle click (which can be skipped entirely
-    // when a vehicle number already arrived pre-filled from Notion, letting scanning — and even
-    // full completion — happen without it). Guarded so this only fires once per order (skips if
-    // already LOADING or already complete) and only for someone who could actually change it, so
-    // a read-only viewer opening the order doesn't silently write to Notion.
-    if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS && hasWriteAccess(req.user, 'loading')) {
-      const withStatus = await storage.updateProformaSlip(slip.id, { notionStatus: NOTION_LOADING_STATUS } as any);
-      if (withStatus) slip = withStatus;
+    if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS) {
+      const updated = await storage.updateProformaSlip(slip.id, { notionStatus: NOTION_LOADING_STATUS } as any);
+      if (updated) slip = updated;
       void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
     }
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
-    const { items, allComplete } = await withProgress(slip, rawItems);
-    res.json({ slip: await withRto(slip), items, allComplete });
+    const { items, allComplete, loadedVolume } = await withProgress(slip, rawItems);
+    res.json({ slip: await withRto(slip), items, allComplete, loadedVolume });
   } catch (error) {
-    console.error('Error fetching proforma slip for loading:', error);
-    res.status(500).json({ message: 'Failed to fetch proforma slip' });
+    console.error('Error starting load:', error);
+    res.status(500).json({ message: 'Failed to start load' });
   }
 });
 
@@ -304,14 +334,25 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
     const updated = await storage.updateProformaSlip(slip.id, {
       vehicleNumber: vehicle.vehicleNumber,
       vehicleInfoId: vehicle.id,
-      totalVolume: vehicle.volume != null ? String(vehicle.volume) : slip.totalVolume,
+      // totalVolume is NOT touched here — it's the order's own cargo volume (Product Master's
+      // per-item volumeInCuFt, summed at import/scan time), a different number from the
+      // vehicle's capacity. This used to overwrite one with the other; see the capacity check
+      // just below for how the two are actually meant to be compared instead.
       vehicleAssignedByCode: userCode ?? null,
-      // Kept in lockstep with the Notion push below (NOTION_LOADING_STATUS) rather than waiting
-      // for the next Notion sync/import to pull it back — so the app's own notionStatus column
-      // reflects "loading started" immediately too.
-      notionStatus: NOTION_LOADING_STATUS,
+      // Status is deliberately NOT touched here — a vehicle can be linked (or changed) from the
+      // Create-Operation dialog before the load has actually been started, and starting it is
+      // what owns the flip to LOADING (see POST /start).
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to link vehicle to proforma slip' });
+
+    // Informational only — never blocks linking or scanning, just surfaced to the client to warn
+    // before scanning starts if the order's own required volume won't fit this vehicle.
+    const orderVolume = parseFloat(updated.totalVolume ?? '');
+    const vehicleCapacity = vehicle.volume != null ? Number(vehicle.volume) : null;
+    const capacityWarning =
+      Number.isFinite(orderVolume) && vehicleCapacity != null && orderVolume > vehicleCapacity
+        ? `This order needs ${orderVolume} cu ft but ${vehicle.vehicleNumber} only holds ${vehicleCapacity} cu ft.`
+        : null;
 
     if (userCode) {
       await storage.logActivity({
@@ -331,11 +372,7 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
       createdByCode: userCode ?? null, createdByName: userName ?? null,
     });
 
-    res.json({ slip: await withRto(updated), vehicle });
-
-    // Best-effort, after the response — linking a vehicle means loading has started. Never
-    // blocks/fails the request itself (see notionOrderStatusSync.ts).
-    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_STATUS);
+    res.json({ slip: await withRto(updated), vehicle, capacityWarning });
   } catch (error) {
     console.error('Error linking vehicle to proforma slip:', error);
     res.status(500).json({ message: 'Failed to link vehicle' });
@@ -459,7 +496,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
       throw err;
     }
 
-    const { items: progressItems, allComplete } = await withProgress(slip, rawItems);
+    const { items: progressItems, allComplete, loadedVolume } = await withProgress(slip, rawItems);
 
     // Auto-complete — "complete also auto if all item load". Attributed to whoever's scan
     // finished it (more useful than a bare "system" marker), only fires once.
@@ -472,7 +509,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     }
 
     res.json({
-      slip: await withRto(finalSlip), items: progressItems, allComplete,
+      slip: await withRto(finalSlip), items: progressItems, allComplete, loadedVolume,
       event: {
         barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
         sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
@@ -516,8 +553,8 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
     }
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
-    const { items, allComplete } = await withProgress(updated, rawItems);
-    res.json({ slip: await withRto(updated), items, allComplete });
+    const { items, allComplete, loadedVolume } = await withProgress(updated, rawItems);
+    res.json({ slip: await withRto(updated), items, allComplete, loadedVolume });
 
     void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
   } catch (error) {
@@ -550,8 +587,8 @@ router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading')
     }
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
-    const { items, allComplete } = await withProgress(updated, rawItems);
-    res.json({ slip: await withRto(updated), items, allComplete });
+    const { items, allComplete, loadedVolume } = await withProgress(updated, rawItems);
+    res.json({ slip: await withRto(updated), items, allComplete, loadedVolume });
 
     // Symmetric with completing — reopening un-does "DISPATCHED" back to "LOADING" in Notion too.
     void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_STATUS);
@@ -610,7 +647,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
 
     await client.query(
       `UPDATE proforma_slips
-       SET vehicle_number = NULL, vehicle_assigned_by_code = NULL, total_volume = NULL,
+       SET vehicle_number = NULL, vehicle_info_id = NULL, vehicle_assigned_by_code = NULL,
            loading_completed_at = NULL, loading_completed_by_code = NULL
        WHERE id = $1`,
       [slip.id],

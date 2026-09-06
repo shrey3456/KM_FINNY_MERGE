@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, Camera, CheckCircle2, ChevronDown, ChevronRight, Keyboard, Link2, Loader2,
-  Lock, Package, Plus, RotateCcw, ScanLine, Search, Trash2, Truck, X, Zap,
+  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileText,
+  Keyboard, Layers, Link2, Loader2, Lock, Package, Plus, RotateCcw, ScanLine, Search, Trash2,
+  Truck, UserCircle2, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
@@ -10,6 +11,13 @@ import PageHeader from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { PlantBadge } from "@/components/PlantBadge";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PlantFilter } from "@/components/PlantFilter";
+import { SingleDateFilter } from "@/components/SingleDateFilter";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -26,6 +34,7 @@ type ProformaSuggestion = {
 };
 type ProformaItem = {
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
+  srNo: string | null; volumeInCuFt: string | null;
   quantity: number | null;
   // Progress fields, added by withProgress() server-side
   expected: number; loaded: number; remaining: number; itemsPerPallet: number;
@@ -33,8 +42,12 @@ type ProformaItem = {
 };
 type ProformaSlip = {
   id: number; orderNumber: string; partyName: string; plant: string | null;
-  orderDate: string | null; totalQuantity: number | null; totalVolume: string | null;
+  orderDate: string | null; totalQuantity: number | null;
+  // The order's OWN required cargo volume (Product Master's per-item volume, summed) — separate
+  // from vehicleVolume (the linked vehicle's capacity, resolved live, never stored on the slip).
+  totalVolume: string | null;
   vehicleNumber: string | null; driverName: string | null; rtoNumber: string | null;
+  vehicleVolume: number | null;
   loadingCompletedAt: string | null; loadingCompletedByCode: string | null;
   vehicleAssignedByCode: string | null;
   // Set server-side (see withRto in loading.ts) whenever vehicleInfoId already points at a
@@ -52,7 +65,7 @@ type LoadingRecord = {
   createdByCode: string | null; createdByName: string | null; createdAt: string;
   loadingCompletedAt: string | null;
 };
-type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; event: { barcode: string; itemName: string; sapCode: string | null; totalQty: number; isExtra: boolean; remaining: number } };
+type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number; event: { barcode: string; itemName: string; sapCode: string | null; totalQty: number; isExtra: boolean; remaining: number } };
 // One row of that order's own load-event history (the landing table's expand panel) — fetched
 // from the same Scan History endpoint the Reports page's Load Event tab uses, scoped to this
 // order (GET /api/scan-sessions/reports/scan-history?source=dispatch&order=X).
@@ -145,6 +158,63 @@ export default function LoadOperation() {
   const recordsItems = recordsQuery.data?.records ?? [];
   const recordsHasMore = recordsOffset + recordsItems.length < recordsTotal;
 
+  // ─── Landing-view filters — same controls/layout Load Operations uses (search box, date +
+  // plant filters, status count buttons, status tabs). All applied client-side over the current
+  // page of records, exactly like Load Operations filters its own already-fetched list.
+  const [listSearch, setListSearch] = useState("");
+  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
+  const [selectedPlants, setSelectedPlants] = useState<string[]>([]);
+  const [activeViewTab, setActiveViewTab] = useState("overall");
+  const [sortBy, setSortBy] = useState<"orderNumber" | "creationDate">("creationDate");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  // Plant options for PlantFilter, straight from Plant Management (same source PlantBadge reads),
+  // so the filter's colors match the badges rendered in the rows.
+  const { data: plantsData } = useQuery<Array<{ name: string; bgColor?: string; textColor?: string; borderColor?: string }>>({
+    queryKey: ["/api/plants"],
+    queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
+    staleTime: 60_000,
+  });
+  const plantOptions = (plantsData ?? []).map((p) => ({
+    value: p.name, label: p.name, bgColor: p.bgColor, textColor: p.textColor, borderColor: p.borderColor,
+  }));
+
+  // "READY≈DESP" once loading is complete, "LOADING" while it's still in progress — the same two
+  // Finny Status values this page pushes to Notion (server/services/notionOrderStatusSync.ts), so
+  // the status shown here reads identically to Load Operations' own status column.
+  const recordStatus = (r: LoadingRecord) => (r.loadingCompletedAt ? "READY≈DESP" : "LOADING");
+
+  const filteredRecords = recordsItems
+    .filter((r) => {
+      if (activeViewTab === "loading" && r.loadingCompletedAt) return false;
+      if (activeViewTab === "ready-desp" && !r.loadingCompletedAt) return false;
+      if (selectedPlants.length > 0 && !selectedPlants.includes(r.plant ?? "")) return false;
+      if (selectedDate) {
+        const d = new Date(r.createdAt);
+        if (
+          d.getDate() !== selectedDate.getDate() ||
+          d.getMonth() !== selectedDate.getMonth() ||
+          d.getFullYear() !== selectedDate.getFullYear()
+        ) return false;
+      }
+      const q = listSearch.trim().toLowerCase();
+      if (q) {
+        const hay = [r.orderNumber, r.partyName, r.plant, r.vehicleNumber, r.rtoNumber, recordStatus(r)];
+        if (!hay.some((v) => (v ?? "").toLowerCase().includes(q))) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const dir = sortOrder === "asc" ? 1 : -1;
+      if (sortBy === "orderNumber") {
+        return dir * ((parseInt(a.orderNumber) || 0) - (parseInt(b.orderNumber) || 0));
+      }
+      return dir * (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    });
+
+  const inProgressCount = recordsItems.filter((r) => !r.loadingCompletedAt).length;
+  const readyDespCount = recordsItems.filter((r) => r.loadingCompletedAt).length;
+
   // Whichever row's history panel is currently open — click-to-expand, same idea as the Scan
   // History page's own drill-down (only one open at a time).
   const [expandedRecordOrder, setExpandedRecordOrder] = useState<string | null>(null);
@@ -227,6 +297,10 @@ export default function LoadOperation() {
   const [slip, setSlip] = useState<ProformaSlip | null>(null);
   const [items, setItems] = useState<ProformaItem[]>([]);
   const [allComplete, setAllComplete] = useState(false);
+  // Volume actually scanned onto the vehicle so far (server-computed in withProgress(), server/
+  // routes/loading.ts) — distinct from slip.totalVolume (the order's full planned volume) and
+  // slip.vehicleVolume (the vehicle's capacity).
+  const [loadedVolume, setLoadedVolume] = useState(0);
 
   // "Items on this order" table — click a row to expand it and see that item's own scan history.
   // Fetched once for the whole order (same endpoint the Loading landing table's own expand panel
@@ -255,17 +329,39 @@ export default function LoadOperation() {
   // since mutate() itself doesn't pass arbitrary context through to those.
   const silentLookupRef = useRef(false);
 
+  // A freshly-looked-up slip waiting on the "Create Load Operation from Proforma" confirmation
+  // dialog — same intermediate step Load Operations puts between finding a slip and actually
+  // starting work on it. Only the user-driven search/scan path goes through it (confirmRef);
+  // resuming a remembered order or opening one from the landing list skips straight in.
+  type SlipLookup = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number };
+  const confirmRef = useRef(false);
+  const [pendingSlip, setPendingSlip] = useState<SlipLookup | null>(null);
+
+  function commitSlip(data: SlipLookup) {
+    setSlip(data.slip);
+    setItems(data.items);
+    setAllComplete(data.allComplete);
+    setLoadedVolume(data.loadedVolume);
+    setOrderFocused(false);
+    setPendingSlip(null);
+    localStorage.setItem(LAST_ORDER_KEY, data.slip.orderNumber);
+  }
+
   const fetchSlipMutation = useMutation({
     mutationFn: async (orderNumber: string) => {
       const res = await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(orderNumber)}`);
-      return res.json() as Promise<{ slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean }>;
+      return res.json() as Promise<SlipLookup>;
     },
     onSuccess: (data) => {
-      setSlip(data.slip);
-      setItems(data.items);
-      setAllComplete(data.allComplete);
-      setOrderFocused(false);
-      localStorage.setItem(LAST_ORDER_KEY, data.slip.orderNumber);
+      if (confirmRef.current) {
+        // Hold it in the dialog — nothing is opened until "Create Operation" is clicked.
+        setPendingSlip(data);
+        setOrderFocused(false);
+        confirmRef.current = false;
+        silentLookupRef.current = false;
+        return;
+      }
+      commitSlip(data);
       if (!silentLookupRef.current) toast({ title: "Order found", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
       silentLookupRef.current = false;
     },
@@ -278,13 +374,32 @@ export default function LoadOperation() {
         setView("list");
         return;
       }
+      confirmRef.current = false;
       toast({ title: "Order not found", description: err?.message, variant: "destructive" });
     },
   });
 
-  function openOrder(orderNumber: string, opts?: { silent?: boolean }) {
+  // "Create Operation" — the point the load actually starts, and the only thing that flips the
+  // slip to LOADING (locally and in Notion). Looking a slip up, previewing it, or cancelling out
+  // of the dialog all leave its status untouched.
+  const startLoadMutation = useMutation({
+    mutationFn: async (orderNumber: string) => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(orderNumber)}/start`, {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to start load");
+      return res.json() as Promise<SlipLookup>;
+    },
+    onSuccess: (data) => {
+      commitSlip(data);
+      toast({ title: "Load operation created", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
+      queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+    },
+    onError: (err: any) => toast({ title: "Could not start load", description: err?.message, variant: "destructive" }),
+  });
+
+  function openOrder(orderNumber: string, opts?: { silent?: boolean; confirm?: boolean }) {
     if (!orderNumber.trim()) return;
     silentLookupRef.current = !!opts?.silent;
+    confirmRef.current = !!opts?.confirm;
     fetchSlipMutation.mutate(orderNumber.trim());
   }
 
@@ -297,8 +412,10 @@ export default function LoadOperation() {
 
   function resetToSearch() {
     setSlip(null);
+    setPendingSlip(null);
     setItems([]);
     setAllComplete(false);
+    setLoadedVolume(0);
     setOrderSearch("");
     setVehicleSearch("");
     setSelectedVehicle(null);
@@ -340,7 +457,7 @@ export default function LoadOperation() {
     const scanner = new BarcodeScanner({
       onDetected: (result: Result) => {
         const code = result.getText().trim();
-        if (code && !cancelled) { setOrderSearch(code); openOrder(code); }
+        if (code && !cancelled) { setOrderSearch(code); openOrder(code, { confirm: true }); }
       },
       onError: (err: Error) => { if (!cancelled) { setCameraError(err.message); setScanMode("manual"); } },
     });
@@ -379,7 +496,7 @@ export default function LoadOperation() {
       buffer += e.key;
       if (flushTimer) clearTimeout(flushTimer);
       flushTimer = setTimeout(() => {
-        if (buffer.length >= 3) { setScanMode("manual"); orderInputRef.current?.focus(); setOrderSearch(buffer); openOrder(buffer); }
+        if (buffer.length >= 3) { setScanMode("manual"); orderInputRef.current?.focus(); setOrderSearch(buffer); openOrder(buffer, { confirm: true }); }
         buffer = "";
       }, BURST_END_MS);
     };
@@ -397,10 +514,15 @@ export default function LoadOperation() {
   const [vehicleSuggIdx, setVehicleSuggIdx] = useState(-1);
   const [selectedVehicle, setSelectedVehicle] = useState<VehicleSuggestion | null>(null);
 
+  // The slip the vehicle picker acts on: the one open in the scanning view, or — before the load
+  // has been started — the one being previewed in the Create-Operation dialog, so a vehicle can be
+  // linked or changed from there too.
+  const vehicleTargetSlip = slip ?? pendingSlip?.slip ?? null;
+
   const vehicleSuggestionsQuery = useQuery<{ results: VehicleSuggestion[] }>({
     queryKey: ["/api/loading/vehicles/search", debouncedVehicleSearch],
     queryFn: async () => (await apiRequest("GET", `/api/loading/vehicles/search?q=${encodeURIComponent(debouncedVehicleSearch)}`)).json(),
-    enabled: !!slip && debouncedVehicleSearch.trim().length >= 1,
+    enabled: !!vehicleTargetSlip && debouncedVehicleSearch.trim().length >= 1,
   });
   const vehicleSuggestions = vehicleSuggestionsQuery.data?.results ?? [];
 
@@ -410,16 +532,23 @@ export default function LoadOperation() {
     // the server links the EXACT row shown/picked in the dropdown, not just "some" vehicle with
     // a matching number.
     mutationFn: async (vehicle: VehicleSuggestion) => {
-      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/link-vehicle`, {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(vehicleTargetSlip!.orderNumber)}/link-vehicle`, {
         vehicleId: vehicle.id, vehicleNumber: vehicle.vehicleNumber,
       });
-      return res.json() as Promise<{ slip: ProformaSlip; vehicle: VehicleSuggestion }>;
+      return res.json() as Promise<{ slip: ProformaSlip; vehicle: VehicleSuggestion; capacityWarning: string | null }>;
     },
     onSuccess: (data) => {
-      setSlip(data.slip);
+      // Update whichever slip the picker was acting on — the open one, or the one still sitting
+      // in the Create-Operation dialog.
+      if (slip) setSlip(data.slip);
+      else setPendingSlip((cur) => (cur ? { ...cur, slip: data.slip } : cur));
       setSelectedVehicle(null);
       setVehicleSearch("");
-      toast({ title: "Vehicle linked", description: `${data.vehicle.vehicleNumber} — RTO ${data.vehicle.rtoNumber ?? "—"}` });
+      if (data.capacityWarning) {
+        toast({ title: "Vehicle linked — over capacity", description: data.capacityWarning, variant: "destructive" });
+      } else {
+        toast({ title: "Vehicle linked", description: `${data.vehicle.vehicleNumber} — RTO ${data.vehicle.rtoNumber ?? "—"}` });
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
     onError: (err: any) => toast({ title: "Link failed", description: err?.message, variant: "destructive" }),
@@ -444,14 +573,30 @@ export default function LoadOperation() {
   // text down to a specific Vehicle Master row's id — done there once at sync time, not here, so
   // this just picks it directly instead of re-deriving it from vehicleNumber text on every page
   // load. Only falls back to a client-side text search when the server couldn't resolve any row
-  // at all (suggestedVehicle null) — same as a genuinely unmatched vehicle today.
+  // at all (suggestedVehicle null) — same as a genuinely unmatched vehicle today. Runs against
+  // vehicleTargetSlip so this pre-fill also happens for the slip sitting in the Create-Operation
+  // dialog, not just the one already open in the scanning view.
   useEffect(() => {
-    if (!slip || !slip.vehicleNumber || slip.vehicleAssignedByCode) return;
+    const target = vehicleTargetSlip;
+    if (!target || !target.vehicleNumber || target.vehicleAssignedByCode) return;
     if (vehicleSearch) return; // don't clobber an in-progress manual search/selection
-    if (slip.suggestedVehicle) { pickVehicle(slip.suggestedVehicle); return; }
-    setVehicleSearch(slip.vehicleNumber); // show it even if Vehicle Master has no match to confirm against
+    if (target.suggestedVehicle) { pickVehicle(target.suggestedVehicle); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiRequest("GET", `/api/loading/vehicles/search?q=${encodeURIComponent(target.vehicleNumber!)}`);
+        const data = (await res.json()) as { results: VehicleSuggestion[] };
+        if (cancelled) return;
+        const exact = data.results.find((v) => v.vehicleNumber.toLowerCase() === target.vehicleNumber!.toLowerCase());
+        if (exact) pickVehicle(exact);
+        else setVehicleSearch(target.vehicleNumber!); // show it even if Vehicle Master has no match to confirm against
+      } catch {
+        // Silent — user can still search manually.
+      }
+    })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slip?.orderNumber, slip?.vehicleNumber, slip?.vehicleAssignedByCode, slip?.suggestedVehicle]);
+  }, [vehicleTargetSlip?.orderNumber, vehicleTargetSlip?.vehicleNumber, vehicleTargetSlip?.vehicleAssignedByCode, vehicleTargetSlip?.suggestedVehicle]);
 
   // ─── Item scanning — same barcode-matching / pallet-loose / auto-scan rules as Order Scan ──
   // Auto Scan itself is Plant Management's existing per-plant toggle (plants.isAutoScanEnabled)
@@ -523,6 +668,7 @@ export default function LoadOperation() {
       setSlip(data.slip);
       setItems(data.items);
       setAllComplete(data.allComplete);
+      setLoadedVolume(data.loadedVolume);
       if (data.allComplete && !slip?.loadingCompletedAt) {
         toast({ title: "Load complete", description: "Every item has been fully loaded — marked complete automatically." });
         // The server auto-set loadingCompletedAt as a side effect of this scan — the landing
@@ -545,12 +691,13 @@ export default function LoadOperation() {
     mutationFn: async () => {
       const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/complete`, {});
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Complete failed");
-      return res.json() as Promise<{ slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean }>;
+      return res.json() as Promise<{ slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number }>;
     },
     onSuccess: (data) => {
       setSlip(data.slip);
       setItems(data.items);
       setAllComplete(data.allComplete);
+      setLoadedVolume(data.loadedVolume);
       toast({ title: "Load marked complete" });
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
@@ -684,213 +831,452 @@ export default function LoadOperation() {
   const isVehicleClaimed = !!slip?.vehicleAssignedByCode;
   const canEditVehicle = !isVehicleClaimed || admin || slip?.vehicleAssignedByCode === currentUser()?.userCode;
 
+  // Purely informational (never blocks scanning) — the order's own required volume (Product
+  // Master, summed at import/scan time) vs. the linked vehicle's capacity (Vehicle Master).
+  const isOverCapacity =
+    slip?.vehicleVolume != null &&
+    Number.isFinite(parseFloat(slip.totalVolume ?? "")) &&
+    parseFloat(slip.totalVolume ?? "") > slip.vehicleVolume;
+
+  // Items + Total Qty + Order Volume are always shown; Loaded Volume once a vehicle's linked,
+  // Vehicle Capacity once it resolves in Vehicle Master — drives the stat grid's column count.
+  const statColumnCount = 3 + (slip?.vehicleNumber ? 1 : 0) + (slip?.vehicleVolume != null ? 1 : 0);
+
+  // That order's scan history, rendered under whichever row/card is expanded. One shared node
+  // rather than two copies: only one record can be expanded at a time, and the desktop table and
+  // the mobile card list are never both visible.
+  const historyPanel = recordHistoryQuery.isLoading ? (
+    <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+  ) : (recordHistoryQuery.data?.items.length ?? 0) === 0 ? (
+    <p className="py-4 text-center text-xs text-gray-400">No scan history for this order yet.</p>
+  ) : (
+    <div className="max-h-72 overflow-y-auto overflow-x-auto border rounded-md bg-white">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>SKU</TableHead>
+            <TableHead>Item</TableHead>
+            <TableHead>Date &amp; Time</TableHead>
+            <TableHead>Scanned By</TableHead>
+            <TableHead className="text-right">Qty</TableHead>
+            <TableHead>Status</TableHead>
+            {canResetLoad && <TableHead className="text-right">Void</TableHead>}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(recordHistoryQuery.data?.items ?? []).map((ev) => (
+            <TableRow key={ev.id} className={ev.voided ? "opacity-60" : ""}>
+              <TableCell className="font-mono text-gray-500">{ev.barcode ?? "-"}</TableCell>
+              <TableCell>{ev.itemName ?? "-"}</TableCell>
+              <TableCell className="whitespace-nowrap text-muted-foreground">
+                {new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
+              </TableCell>
+              <TableCell className="text-muted-foreground">{ev.scannedByName ?? "-"}</TableCell>
+              <TableCell className="text-right">
+                <Badge className={ev.isExtra ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-purple-100 text-purple-800 hover:bg-purple-200"}>
+                  {ev.isExtra ? "+" : ""}{ev.totalQty}
+                </Badge>
+              </TableCell>
+              <TableCell className="text-xs">
+                {ev.voided ? (
+                  <span className="font-medium text-red-500">Voided</span>
+                ) : ev.isExtra ? (
+                  <span className="font-semibold uppercase text-amber-700">Extra</span>
+                ) : (
+                  <span className="text-muted-foreground">-</span>
+                )}
+              </TableCell>
+              {canResetLoad && (
+                <TableCell className="text-right">
+                  {!ev.voided && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
+                      onClick={() => setVoidTarget(ev)}
+                      title="Void this scan"
+                    >
+                      <Trash2 className="h-4 w-4 text-red-500" />
+                    </Button>
+                  )}
+                </TableCell>
+              )}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+
+  // Same page shell Load Operations uses — full width, px-2 py-6, space-y-6 between blocks (its
+  // own wrapper is a container-fluid, which is a no-op here) — kept inside this page's scroll
+  // container so the app shell still scrolls it the same way.
   return (
-    <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-      <div className="mx-auto w-full max-w-[1800px] space-y-4">
+    <div className="flex-1 overflow-y-auto px-2 py-6">
+      <div className="w-full space-y-6">
         <PageHeader
           icon={Package}
           title="Loading"
           description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
         />
 
-        {/* ── Landing view: this user's (or, for admin, everyone's) loading history ────── */}
+        {/* ── Landing view — mirrors Load Operations' layout exactly: full-width search, a
+             filter row (date + plant + status counters), status tabs, then a desktop table with
+             a mobile card list below it ───────────────────────────────────────────────────── */}
         {view === "list" && (
-          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-            <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
-              <div>
-                <div className="text-lg font-bold text-[#001d6e]">{admin ? "All Loading Slips" : "Your Loading Slips"}</div>
-                <div className="text-xs text-gray-400">{recordsTotal} slip(s){admin ? " · every user" : ""}</div>
+          <>
+            {/* Search bar (desktop) */}
+            <div className="w-full hidden md:block">
+              <Input
+                placeholder="Search by order number, party name, vehicle or status..."
+                value={listSearch}
+                onChange={(e) => setListSearch(e.target.value)}
+                className="w-full"
+              />
+            </div>
+
+            {/* Row with Date Filter, Plant Filter and Status Buttons */}
+            <div className="items-center flex-wrap gap-2 hidden md:flex">
+              <div className="flex-grow-0">
+                <SingleDateFilter
+                  pageKey="loading-page"
+                  selectedDate={selectedDate}
+                  onDateChange={(date: Date | null) => setSelectedDate(date)}
+                />
               </div>
+
+              <PlantFilter
+                selectedPlants={selectedPlants}
+                onPlantChange={setSelectedPlants}
+                plantOptions={plantOptions}
+              />
+
+              {/* Status Buttons */}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-auto py-1.5 px-3 flex items-center bg-gray-50 hover:bg-gray-100"
+                onClick={() => setActiveViewTab("overall")}
+              >
+                <Layers className="h-4 w-4 mr-2 text-gray-700" />
+                <div className="flex flex-col items-start">
+                  <span className="text-xs font-bold">SLIPS</span>
+                  <span className="text-sm font-semibold">{recordsItems.length}</span>
+                </div>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-auto py-1.5 px-3 flex items-center bg-blue-50 hover:bg-blue-100"
+                onClick={() => setActiveViewTab("loading")}
+              >
+                <Truck className="h-4 w-4 mr-2 text-blue-600" />
+                <div className="flex flex-col items-start">
+                  <span className="text-xs font-bold">LOADING</span>
+                  <span className="text-sm font-semibold">{inProgressCount}</span>
+                </div>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-auto py-1.5 px-3 flex items-center bg-amber-50 hover:bg-amber-100"
+                onClick={() => setActiveViewTab("ready-desp")}
+              >
+                <Truck className="h-4 w-4 mr-2 text-amber-600" />
+                <div className="flex flex-col items-start">
+                  <span className="text-xs font-bold">READY≈DESP</span>
+                  <span className="text-sm font-semibold">{readyDespCount}</span>
+                </div>
+              </Button>
+
               {canWrite && (
-                <Button className="h-9 bg-[#001d6e] text-white hover:bg-[#001552]" onClick={startNewLoad}>
-                  <Plus className="mr-1.5 h-4 w-4" /> Load New Slip
+                <Button
+                  className="ml-auto gap-1 bg-[#001d6e] text-white hover:bg-[#001552]"
+                  onClick={startNewLoad}
+                >
+                  <Plus className="h-4 w-4" /> Load New Slip
+                </Button>
+              )}
+            </div>
+
+            {/* Navigation Tabs (hidden on mobile) */}
+            <div className="mb-2 hidden md:block">
+              <Tabs value={activeViewTab} onValueChange={setActiveViewTab} className="w-full">
+                <TabsList className="w-full justify-start">
+                  <TabsTrigger value="overall" className="flex-1 max-w-[200px]">All Operations</TabsTrigger>
+                  <TabsTrigger value="loading" className="flex-1 max-w-[200px]">Loading</TabsTrigger>
+                  <TabsTrigger value="ready-desp" className="flex-1 max-w-[200px]">Ready for Dispatch</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+
+            {/* Mobile: search + new-slip button (the filter row above is desktop-only) */}
+            <div className="md:hidden space-y-2">
+              <Input
+                placeholder="Search order, party, vehicle..."
+                value={listSearch}
+                onChange={(e) => setListSearch(e.target.value)}
+              />
+              {canWrite && (
+                <Button className="w-full gap-1 bg-[#001d6e] text-white hover:bg-[#001552]" onClick={startNewLoad}>
+                  <Plus className="h-4 w-4" /> Load New Slip
                 </Button>
               )}
             </div>
 
             {recordsQuery.isLoading ? (
               <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
-            ) : recordsItems.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 text-center">
+            ) : filteredRecords.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 text-center border rounded-md">
                 <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">
                   <Truck className="h-7 w-7 text-[#001d6e]/40" />
                 </div>
-                <div className="mb-1 text-sm font-semibold text-[#001d6e]">No loading slips yet</div>
-                <p className="mb-4 max-w-xs text-xs text-muted-foreground">{canWrite ? "Start a new load to scan a proforma slip and link it to a vehicle." : "Nothing has been loaded yet."}</p>
+                <div className="mb-1 text-sm font-semibold text-[#001d6e]">
+                  {recordsItems.length === 0 ? "No loading slips yet" : "No slips match these filters"}
+                </div>
+                <p className="mb-4 max-w-xs text-xs text-muted-foreground">
+                  {recordsItems.length === 0
+                    ? (canWrite ? "Start a new load to scan a proforma slip and link it to a vehicle." : "Nothing has been loaded yet.")
+                    : "Try clearing the search, date or plant filter."}
+                </p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-full caption-bottom border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-[#001d6e]">
-                      <th className="w-8 border-r border-[#1a3a9c] px-2 py-2.5"></th>
-                      <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order No.</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Party</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">RTO No.</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Status</th>
-                      {admin && <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Created By</th>}
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Created At</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</th>
-                      <th className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {recordsItems.map((r, i) => {
-                      const isExpanded = expandedRecordOrder === r.orderNumber;
-                      const colCount = admin ? 12 : 11;
-                      return (
-                        <>
-                          <tr
-                            key={r.id}
-                            onClick={() => openOrderFromList(r.orderNumber)}
-                            className={`cursor-pointer transition-colors hover:bg-[#001d6e]/[0.06] ${isExpanded ? "bg-[#001d6e]/[0.04]" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
-                          >
-                            <td className="border-r border-b border-gray-200 px-2 py-2 text-center">
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); setExpandedRecordOrder((cur) => (cur === r.orderNumber ? null : r.orderNumber)); }}
-                                className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-[#001d6e]"
-                                title="View scan history"
-                              >
-                                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
-                              </button>
-                            </td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-400 tabular-nums">{recordsOffset + i + 1}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]">#{r.orderNumber}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{r.partyName ?? "—"}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{r.plant ?? "—"}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{r.vehicleNumber}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{r.rtoNumber ?? "—"}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2">
-                              {r.loadingCompletedAt ? (
-                                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">Complete</span>
-                              ) : (
-                                <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700">In Progress</span>
-                              )}
-                            </td>
-                            {admin && <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{r.createdByName ?? r.createdByCode ?? "—"}</td>}
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-500 whitespace-nowrap">{new Date(r.createdAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">
-                              {formatDuration(r.createdAt, r.loadingCompletedAt) ?? <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className="border-b border-gray-200 px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
-                              <div className="flex items-center justify-end gap-1">
+              <>
+                {/* Desktop View - Loading Slips Table */}
+                <div className="hidden md:block border rounded-md w-full">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-12"></TableHead>
+                        <TableHead>Order Date</TableHead>
+                        <TableHead
+                          className="cursor-pointer"
+                          onClick={() => { setSortBy("orderNumber"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
+                        >
+                          Order Number {sortBy === "orderNumber" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
+                        </TableHead>
+                        <TableHead>Party Name</TableHead>
+                        <TableHead>Plant</TableHead>
+                        <TableHead>Vehicle No.</TableHead>
+                        <TableHead>RTO No.</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
+                        <TableHead
+                          className="cursor-pointer"
+                          onClick={() => { setSortBy("creationDate"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
+                        >
+                          Creator {sortBy === "creationDate" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
+                        </TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredRecords.map((r) => {
+                        const isExpanded = expandedRecordOrder === r.orderNumber;
+                        return (
+                          <Fragment key={r.id}>
+                            <TableRow className="cursor-pointer" onClick={() => openOrderFromList(r.orderNumber)}>
+                              <TableCell onClick={(e) => e.stopPropagation()}>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 rounded-full"
+                                  title="View scan history"
+                                  onClick={() => setExpandedRecordOrder((cur) => (cur === r.orderNumber ? null : r.orderNumber))}
+                                >
+                                  <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
+                                </Button>
+                              </TableCell>
+                              <TableCell>{new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}</TableCell>
+                              <TableCell>#{r.orderNumber}</TableCell>
+                              <TableCell>{r.partyName || "-"}</TableCell>
+                              <TableCell>{r.plant ? <PlantBadge plant={r.plant} /> : "-"}</TableCell>
+                              <TableCell>{r.vehicleNumber || "-"}</TableCell>
+                              <TableCell>{r.rtoNumber || "-"}</TableCell>
+                              <TableCell>
+                                <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-200">
+                                  {recordStatus(r)}
+                                </Badge>
+                              </TableCell>
+                              <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
+                              <TableCell>
+                                <div className="flex flex-col">
+                                  <span className="font-medium">{r.createdByName ?? r.createdByCode ?? "Unknown"}</span>
+                                  <span className="text-xs text-muted-foreground">
+                                    {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}{" "}
+                                    {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
+                                  </span>
+                                </div>
+                              </TableCell>
+                              <TableCell onClick={(e) => e.stopPropagation()}>
+                                <div className="flex space-x-2 justify-end">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9 rounded-full bg-blue-50 hover:bg-blue-100"
+                                    title="Open this loading slip"
+                                    onClick={() => openOrderFromList(r.orderNumber)}
+                                  >
+                                    <FileText className="h-5 w-5 text-[#001d6e]" />
+                                  </Button>
                                   {/* Reopening is admin-only (server-enforced too, see
-                                    requireReopenAccess in server/routes/loading.ts) —
-                                    deliberately stricter than completing a load, since it
-                                    un-does a finished, audited state. */}
-                                {r.loadingCompletedAt && admin && (
-                                  <Button
-                                    size="sm" variant="ghost"
-                                    className="h-7 px-2 text-[11px] text-amber-600 hover:bg-amber-50 hover:text-amber-700"
-                                    disabled={reopenMutation.isPending}
-                                    onClick={() => reopenMutation.mutate(r.orderNumber)}
-                                    title="Reopen this load"
-                                  >
-                                    <RotateCcw className="mr-1 h-3 w-3" /> Reopen
-                                  </Button>
-                                )}
-                                {canResetLoad && (
-                                  <Button
-                                    size="sm" variant="ghost"
-                                    className="h-7 w-7 p-0 text-gray-400 hover:bg-red-50 hover:text-red-600"
-                                    onClick={() => setResetTarget(r)}
-                                    title="Delete this loading slip"
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                  </Button>
-                                )}
+                                      requireReopenAccess in server/routes/loading.ts) —
+                                      deliberately stricter than completing a load, since it
+                                      un-does a finished, audited state. */}
+                                  {r.loadingCompletedAt && admin && (
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-9 w-9 rounded-full bg-amber-50 hover:bg-amber-100"
+                                      disabled={reopenMutation.isPending}
+                                      title="Reopen this load"
+                                      onClick={() => reopenMutation.mutate(r.orderNumber)}
+                                    >
+                                      <RotateCcw className="h-5 w-5 text-amber-600" />
+                                    </Button>
+                                  )}
+                                  {canResetLoad && (
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
+                                      title="Delete this loading slip"
+                                      onClick={() => setResetTarget(r)}
+                                    >
+                                      <Trash2 className="h-5 w-5 text-red-500" />
+                                    </Button>
+                                  )}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                            {isExpanded && (
+                              <TableRow>
+                                <TableCell colSpan={11} className="bg-gray-50 p-3">
+                                  {historyPanel}
+                                </TableCell>
+                              </TableRow>
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                {/* Mobile View - card list */}
+                <div className="space-y-3 md:hidden">
+                  {filteredRecords.map((r) => {
+                    const isExpanded = expandedRecordOrder === r.orderNumber;
+                    return (
+                      <Card key={r.id} className="overflow-hidden">
+                        <CardHeader className="pb-2 pt-3 cursor-pointer" onClick={() => openOrderFromList(r.orderNumber)}>
+                          <div className="flex justify-between items-start gap-2">
+                            <div className="min-w-0">
+                              <div className="font-medium text-md flex items-center gap-2">
+                                #{r.orderNumber}
+                                {r.plant && <PlantBadge plant={r.plant} />}
                               </div>
-                            </td>
-                          </tr>
+                              <div className="text-sm text-muted-foreground mt-1 truncate">{r.partyName || "-"}</div>
+                            </div>
+                            <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-200 text-xs shrink-0">
+                              {recordStatus(r)}
+                            </Badge>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="pb-4 pt-0">
+                          <div className="flex justify-between items-center mt-2">
+                            <div className="flex items-center gap-2">
+                              {r.vehicleNumber && (
+                                <div
+                                  className="h-10 w-10 rounded-full bg-amber-50 flex items-center justify-center overflow-hidden shrink-0"
+                                  title={`${r.vehicleNumber}${r.rtoNumber ? ` — RTO ${r.rtoNumber}` : ""}`}
+                                >
+                                  <span className="text-orange-600 font-medium text-xs truncate px-1">{r.vehicleNumber}</span>
+                                </div>
+                              )}
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-10 w-10 p-0 rounded-full bg-blue-50 hover:bg-blue-100"
+                                title="View scan history"
+                                onClick={(e) => { e.stopPropagation(); setExpandedRecordOrder((cur) => (cur === r.orderNumber ? null : r.orderNumber)); }}
+                              >
+                                <FileText className="h-5 w-5 text-[#001d6e]" />
+                              </Button>
+                              {r.loadingCompletedAt && admin && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-10 w-10 p-0 rounded-full bg-amber-50 hover:bg-amber-100"
+                                  disabled={reopenMutation.isPending}
+                                  title="Reopen this load"
+                                  onClick={(e) => { e.stopPropagation(); reopenMutation.mutate(r.orderNumber); }}
+                                >
+                                  <RotateCcw className="h-5 w-5 text-amber-600" />
+                                </Button>
+                              )}
+                              {canResetLoad && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-10 w-10 p-0 rounded-full bg-red-50 hover:bg-red-100"
+                                  title="Delete this loading slip"
+                                  onClick={(e) => { e.stopPropagation(); setResetTarget(r); }}
+                                >
+                                  <Trash2 className="h-5 w-5 text-red-500" />
+                                </Button>
+                              )}
+                            </div>
+                            <div className="flex flex-col items-end">
+                              <div className="flex items-center text-xs">
+                                <Calendar className="h-3 w-3 mr-1 text-muted-foreground" />
+                                <span className="font-medium">
+                                  {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
+                                </span>
+                              </div>
+                              <div className="text-xs text-muted-foreground mt-0.5" title="Time from when the vehicle was linked to when the load was marked complete">
+                                {formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}
+                              </div>
+                              <div className="text-xs text-muted-foreground mt-2 flex items-center">
+                                <UserCircle2 className="h-3 w-3 mr-1" />
+                                <span>
+                                  {r.createdByName ?? r.createdByCode ?? "Unknown"}
+                                  {" • "}
+                                  {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
                           {isExpanded && (
-                            <tr key={`${r.id}-history`}>
-                              <td colSpan={colCount} className="border-b border-gray-200 bg-gray-50 p-3">
-                                {recordHistoryQuery.isLoading ? (
-                                  <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
-                                ) : (recordHistoryQuery.data?.items.length ?? 0) === 0 ? (
-                                  <p className="py-4 text-center text-xs text-gray-400">No scan history for this order yet.</p>
-                                ) : (
-                                  <div className="max-h-72 overflow-y-auto overflow-x-auto border border-gray-200 bg-white">
-                                    <table className="w-full min-w-[640px] table-fixed border-collapse text-xs">
-                                      <thead>
-                                        <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
-                                          <th className="w-32 border-r border-gray-200 px-2 py-2 font-semibold">SKU</th>
-                                          <th className="border-r border-gray-200 px-2 py-2 font-semibold">Item</th>
-                                          <th className="w-[168px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
-                                          <th className="w-28 border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
-                                          <th className="w-16 border-r border-gray-200 px-2 py-2 text-right font-semibold">Qty</th>
-                                          <th className="w-20 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
-                                          {canResetLoad && <th className="w-14 px-2 py-2 text-right font-semibold">Void</th>}
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {recordHistoryQuery.data!.items.map((ev, idx) => (
-                                          <tr key={ev.id} className={`border-b border-gray-100 ${ev.voided ? "opacity-60" : "hover:bg-gray-50"} ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
-                                            <td className="truncate border-r border-gray-100 px-2 py-2 font-mono text-gray-500">{ev.barcode ?? "—"}</td>
-                                            <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{ev.itemName ?? "—"}</td>
-                                            <td className="whitespace-nowrap border-r border-gray-100 px-2 py-2 text-gray-600">{new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
-                                            <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
-                                            <td className="border-r border-gray-100 px-2 py-2 text-right">
-                                              <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
-                                                {ev.isExtra ? "+" : ""}{ev.totalQty}
-                                              </span>
-                                            </td>
-                                            <td className="truncate border-r border-gray-100 px-2 py-2 text-[11px]">
-                                              {ev.voided ? (
-                                                <span className="font-medium text-red-500">Voided</span>
-                                              ) : ev.isExtra ? (
-                                                <span className="font-semibold uppercase text-amber-700">Extra</span>
-                                              ) : (
-                                                <span className="text-gray-400">—</span>
-                                              )}
-                                            </td>
-                                            {canResetLoad && (
-                                              <td className="px-2 py-2 text-right">
-                                                {!ev.voided && (
-                                                  <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-gray-400 hover:bg-red-50 hover:text-red-600"
-                                                    onClick={() => setVoidTarget(ev)} title="Void this scan">
-                                                    <Trash2 className="h-3.5 w-3.5" />
-                                                  </Button>
-                                                )}
-                                              </td>
-                                            )}
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </td>
-                            </tr>
+                            <div className="mt-3 border-t border-gray-100 pt-3" onClick={(e) => e.stopPropagation()}>
+                              {historyPanel}
+                            </div>
                           )}
-                        </>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+                </div>
+              </>
             )}
 
             {!recordsQuery.isLoading && recordsItems.length > 0 && (
-              <div className="flex items-center justify-between border-t border-gray-100 px-4 sm:px-5 py-3 text-xs text-gray-500">
+              <div className="flex items-center justify-between border rounded-md px-4 py-3 text-xs text-gray-500">
                 <span>
                   {recordsTotal > 0
                     ? `Showing ${recordsOffset + 1}–${Math.min(recordsOffset + recordsItems.length, recordsTotal)} of ${recordsTotal.toLocaleString()} slips`
                     : "No slips"}
                 </span>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" className="rounded-xl" disabled={recordsPage <= 1}
+                  <Button variant="outline" size="sm" disabled={recordsPage <= 1}
                     onClick={() => setRecordsPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                  <Button variant="outline" size="sm" className="rounded-xl" disabled={!recordsHasMore}
+                  <Button variant="outline" size="sm" disabled={!recordsHasMore}
                     onClick={() => setRecordsPage((p) => p + 1)}>Next</Button>
                 </div>
               </div>
             )}
-          </div>
+          </>
         )}
 
         {/* ── Stage A: find the order ─────────────────────────────────────── */}
@@ -969,9 +1355,9 @@ export default function LoadOperation() {
                         if (e.key === "ArrowDown") { e.preventDefault(); setOrderSuggIdx((i) => Math.min(i + 1, orderSuggestions.length - 1)); return; }
                         if (e.key === "ArrowUp") { e.preventDefault(); setOrderSuggIdx((i) => Math.max(i - 1, -1)); return; }
                         if (e.key === "Escape") { setOrderFocused(false); return; }
-                        if (e.key === "Enter" && orderSuggIdx >= 0) { e.preventDefault(); openOrder(orderSuggestions[orderSuggIdx].orderNumber); return; }
+                        if (e.key === "Enter" && orderSuggIdx >= 0) { e.preventDefault(); openOrder(orderSuggestions[orderSuggIdx].orderNumber, { confirm: true }); return; }
                       }
-                      if (e.key === "Enter") openOrder(orderSearch);
+                      if (e.key === "Enter") openOrder(orderSearch, { confirm: true });
                     }}
                     placeholder="Type an order number / party name…"
                     className="h-11 pl-9 pr-9 text-sm"
@@ -992,7 +1378,7 @@ export default function LoadOperation() {
                           <button
                             key={s.id}
                             onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => openOrder(s.orderNumber)}
+                            onClick={() => openOrder(s.orderNumber, { confirm: true })}
                             className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === orderSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
                           >
                             <div className="min-w-0">
@@ -1010,7 +1396,7 @@ export default function LoadOperation() {
 
               <Button className="w-full h-10 bg-[#001d6e] text-white hover:bg-[#001552]"
                 disabled={!orderSearch.trim() || fetchSlipMutation.isPending}
-                onClick={() => openOrder(orderSearch)}>
+                onClick={() => openOrder(orderSearch, { confirm: true })}>
                 {fetchSlipMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
                 Find Order
               </Button>
@@ -1201,7 +1587,7 @@ export default function LoadOperation() {
                   </div>
                 )}
 
-                <div className="grid grid-cols-3 divide-x divide-gray-100 border-b border-gray-100 text-center">
+                <div className={`grid ${statColumnCount === 5 ? "grid-cols-5" : statColumnCount === 4 ? "grid-cols-4" : "grid-cols-3"} divide-x divide-gray-100 border-b border-gray-100 text-center`}>
                   <div className="px-2 py-3">
                     <div className="text-lg font-extrabold text-gray-900">{items.length}</div>
                     <div className="text-[10px] font-medium text-gray-500 mt-0.5">Items</div>
@@ -1210,16 +1596,37 @@ export default function LoadOperation() {
                     <div className="text-lg font-extrabold text-gray-900">{slip.totalQuantity ?? "-"}</div>
                     <div className="text-[10px] font-medium text-gray-500 mt-0.5">Total Qty</div>
                   </div>
+                  {slip.vehicleNumber && (
+                    <div className="px-2 py-3">
+                      <div className="text-lg font-extrabold text-gray-900">{loadedVolume}</div>
+                      <div className="text-[10px] font-medium text-gray-500 mt-0.5">Loaded Volume</div>
+                    </div>
+                  )}
                   <div className="px-2 py-3">
-                    <div className="text-lg font-extrabold text-gray-900">{slip.totalVolume ?? "-"}</div>
-                    <div className="text-[10px] font-medium text-gray-500 mt-0.5">Volume</div>
+                    <div className={`text-lg font-extrabold ${isOverCapacity ? "text-red-600" : "text-gray-900"}`}>{slip.totalVolume ?? "-"}</div>
+                    <div className="text-[10px] font-medium text-gray-500 mt-0.5">Order Volume</div>
                   </div>
+                  {slip.vehicleVolume != null && (
+                    <div className="px-2 py-3">
+                      <div className={`text-lg font-extrabold ${isOverCapacity ? "text-red-600" : "text-gray-900"}`}>{slip.vehicleVolume}</div>
+                      <div className="text-[10px] font-medium text-gray-500 mt-0.5">Vehicle Capacity</div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Stage B only mounts once isVehicleClaimed is true (see Stage B(pre) above), so
                     this is always the "linked" state — the "on this order from Notion — confirm
                     below" amber state used to live here, but that case is now handled by Stage
-                    B(pre)'s dialog before Stage B ever renders. */}
+                    B(pre)'s dialog before Stage B ever renders. isOverCapacity below is a
+                    separate, unrelated warning (order volume vs. vehicle capacity) that still
+                    applies regardless of how the vehicle got linked. */}
+                {isOverCapacity && (
+                  <div className="flex items-center gap-2.5 px-4 sm:px-5 py-2.5 bg-red-50 border-b border-red-100 text-sm text-red-700">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    Order needs {slip.totalVolume} cu ft but {slip.vehicleNumber} only holds {slip.vehicleVolume} cu ft.
+                  </div>
+                )}
+
                 {slip.vehicleNumber && (
                   <div className="flex items-center gap-2.5 px-4 sm:px-5 py-3 border-b bg-emerald-50 border-emerald-100">
                     <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
@@ -1533,6 +1940,198 @@ export default function LoadOperation() {
           </div>
         </div>
       )}
+
+      {/* "Create Load Operation from Proforma" — the same confirmation step Load Operations shows
+          between finding a slip and starting work on it: full slip details, every item on it, and
+          an explicit Create Operation before the scanning view opens. */}
+      <Dialog open={!!pendingSlip} onOpenChange={(open) => { if (!open) setPendingSlip(null); }}>
+        <DialogContent className="sm:max-w-[700px] w-full overflow-y-auto max-h-[90vh]">
+          <DialogHeader>
+            <DialogTitle>Create Load Operation from Proforma</DialogTitle>
+            <DialogDescription>
+              Search for a proforma slip by order number to create a Load operation.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="space-y-6">
+              <div className="border rounded-md p-4 bg-muted/30">
+                <h3 className="text-lg font-semibold mb-2">Proforma Slip Details</h3>
+                <div className="grid gap-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Order Number:</span>
+                    <span className="font-medium">#{pendingSlip?.slip?.orderNumber || "N/A"}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Order Date:</span>
+                    <span className="font-medium">
+                      {pendingSlip?.slip?.orderDate
+                        ? new Date(pendingSlip.slip.orderDate).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
+                        : "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Party Name:</span>
+                    <span className="font-medium">{pendingSlip?.slip?.partyName || "N/A"}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Plant:</span>
+                    <span className="font-medium"><PlantBadge plant={pendingSlip?.slip?.plant || ""} /></span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Vehicle Number:</span>
+                    <span className="font-medium">{pendingSlip?.slip?.vehicleNumber || "Not assigned"}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Driver Name:</span>
+                    <span className="font-medium">{pendingSlip?.slip?.driverName || "Not assigned"}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Status:</span>
+                    <Badge variant="secondary" className="bg-purple-100 text-purple-800 hover:bg-purple-200">
+                      {pendingSlip?.slip?.loadingCompletedAt
+                        ? "READY≈DESP"
+                        : pendingSlip?.slip?.vehicleNumber
+                          ? "LOADING"
+                          : "PENDING"}
+                    </Badge>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Total Items:</span>
+                    <span className="font-medium">{pendingSlip?.items?.length || 0}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Link / change the vehicle without leaving the dialog — same Vehicle Master
+                  search the scanning view uses, acting on this not-yet-started slip. */}
+              {canWrite && (
+                <div className="border rounded-md">
+                  <h4 className="text-sm font-medium p-3 border-b bg-muted/30">
+                    {pendingSlip?.slip?.vehicleAssignedByCode ? "Change vehicle" : "Link a vehicle"}
+                  </h4>
+                  <div className="p-3 space-y-3">
+                    <div className="relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <Input
+                        value={vehicleSearch}
+                        onChange={(e) => { setVehicleSearch(e.target.value); setSelectedVehicle(null); setVehicleSuggIdx(-1); }}
+                        onFocus={() => setVehicleFocused(true)}
+                        onBlur={() => setTimeout(() => setVehicleFocused(false), 150)}
+                        onKeyDown={(e) => {
+                          if (vehicleFocused && vehicleSuggestions.length > 0) {
+                            if (e.key === "ArrowDown") { e.preventDefault(); setVehicleSuggIdx((i) => Math.min(i + 1, vehicleSuggestions.length - 1)); return; }
+                            if (e.key === "ArrowUp") { e.preventDefault(); setVehicleSuggIdx((i) => Math.max(i - 1, -1)); return; }
+                            if (e.key === "Escape") { setVehicleFocused(false); return; }
+                            if (e.key === "Enter" && vehicleSuggIdx >= 0) { e.preventDefault(); pickVehicle(vehicleSuggestions[vehicleSuggIdx]); return; }
+                          }
+                        }}
+                        placeholder="Vehicle number, driver, company…"
+                        className="h-10 pl-9 pr-9 text-sm"
+                      />
+                      {vehicleSearch && (
+                        <button onClick={() => { setVehicleSearch(""); setSelectedVehicle(null); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                          <X className="h-4 w-4" />
+                        </button>
+                      )}
+                      {vehicleFocused && !selectedVehicle && debouncedVehicleSearch.trim().length >= 1 && (
+                        <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                          {vehicleSuggestionsQuery.isFetching ? (
+                            <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+                          ) : vehicleSuggestions.length === 0 ? (
+                            <p className="px-4 py-3 text-xs text-gray-400">No matching vehicles.</p>
+                          ) : (
+                            vehicleSuggestions.map((v, i) => (
+                              <button
+                                key={v.id}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => pickVehicle(v)}
+                                className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === vehicleSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-sm font-semibold text-[#001d6e] truncate">{v.vehicleNumber}</div>
+                                  <div className="text-xs text-gray-500 truncate">{[v.rtoNumber && `RTO ${v.rtoNumber}`, v.driver, v.company].filter(Boolean).join(" · ") || "—"}</div>
+                                </div>
+                                <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {selectedVehicle && (
+                      <div className="flex items-center justify-between gap-2 rounded-lg border border-[#001d6e]/20 bg-[#001d6e]/5 px-3 py-2.5">
+                        <div className="min-w-0 text-sm">
+                          <span className="font-semibold text-[#001d6e]">{selectedVehicle.vehicleNumber}</span>
+                          <span className="text-gray-500"> — RTO {selectedVehicle.rtoNumber ?? "—"}{selectedVehicle.volume != null ? ` · Vol ${selectedVehicle.volume}` : ""}</span>
+                        </div>
+                        <Button size="sm" className="h-8 shrink-0 bg-[#001d6e] text-white hover:bg-[#001552]"
+                          disabled={linkVehicleMutation.isPending}
+                          onClick={() => linkVehicleMutation.mutate(selectedVehicle)}>
+                          {linkVehicleMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Link2 className="mr-1.5 h-3.5 w-3.5" />}
+                          {pendingSlip?.slip?.vehicleAssignedByCode ? "Update" : "Link"}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="border rounded-md">
+                <h4 className="text-sm font-medium p-3 border-b bg-muted/30">Items in Slip</h4>
+                <div className="max-h-60 overflow-y-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-24">Sr. No.</TableHead>
+                        <TableHead>Name</TableHead>
+                        <TableHead className="w-20 text-right">Qty</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(pendingSlip?.items?.length ?? 0) > 0 ? (
+                        pendingSlip!.items.map((item, idx) => (
+                          <TableRow key={item.id}>
+                            <TableCell>{item.srNo || idx + 1}</TableCell>
+                            <TableCell className="max-w-[200px] break-words whitespace-normal">{item.itemName || "-"}</TableCell>
+                            <TableCell className="text-right">{item.expected ?? item.quantity ?? 0}</TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={3} className="text-center py-4">No items in this slip</TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+
+              <div className="flex flex-col space-y-4 pt-2">
+                <Button variant="outline" className="w-full" onClick={() => { setPendingSlip(null); setOrderSearch(""); }}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="default"
+                  className="w-full bg-[#001d6e] hover:bg-[#001d6e]/90"
+                  disabled={startLoadMutation.isPending}
+                  onClick={() => { if (pendingSlip) startLoadMutation.mutate(pendingSlip.slip.orderNumber); }}
+                >
+                  {startLoadMutation.isPending ? (
+                    <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</>
+                  ) : (
+                    <>Create Operation</>
+                  )}
+                </Button>
+                <Button type="button" variant="ghost" className="w-full" onClick={() => { setPendingSlip(null); setOrderSearch(""); setTimeout(() => orderInputRef.current?.focus(), 50); }}>
+                  <ChevronLeft className="h-4 w-4 mr-1" />
+                  Back to Search
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Confirm dialog — loose/partial/extra scans, and anything not on this slip at all */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
