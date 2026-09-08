@@ -80,6 +80,12 @@ type PlantStockRow = {
   openingPallets?: number | null;
   closingStock?: number | null;
   closingPallets?: number | null;
+  // Set only on a synthetic row built by combining this item's per-plant rows together (see
+  // groupedByState) — every plant folded into it, so the Details/History drill-down knows which
+  // plants to query instead of just the one plant a normal row carries. Absent (or length <= 1)
+  // means "a real, single-plant row" — Edit/Delete/Exchange (which need one exact target) stay
+  // enabled only in that case.
+  combinedPlants?: string[];
 };
 
 type PlantStockResponse = {
@@ -123,7 +129,53 @@ type StockMovementRow = {
   orderName: string | null;
   orderDate: string | null;
   partIndex: number | null;
+  // Tagged on client-side after fetching — the endpoint itself is scoped to one plant per call
+  // (see combinedScanningHistory), so the response doesn't carry it, but a multi-plant state
+  // view needs to know which plant each merged entry came from.
+  plant?: string;
 };
+
+// One dated entry from unload_scan_events for a single (barcode, plant) — Unloading's own
+// arrival history, kept as an entirely separate shape/query from StockMovementRow above rather
+// than folded into it (see /reports/unloading-history's own comment for why).
+type UnloadingHistoryRow = {
+  id: number;
+  qty: number;
+  pallets: number | null;
+  looseQty: number | null;
+  isExtra: boolean;
+  voided: boolean;
+  voidReason: string | null;
+  scannedAt: string;
+  scannedByName: string | null;
+  stv: string | null;
+  vehicleNumber: string | null;
+  orderDate: string | null;
+  partIndex: number | null;
+  plant?: string;
+};
+
+// One dated entry from loading_scan_events for a single (barcode, plant) — Loading's own
+// dispatch history, same separate shape/query treatment as UnloadingHistoryRow above.
+type LoadingHistoryRow = {
+  id: number;
+  qty: number;
+  pallets: number | null;
+  looseQty: number | null;
+  isExtra: boolean;
+  voided: boolean;
+  voidReason: string | null;
+  scannedAt: string;
+  scannedByName: string | null;
+  orderNumber: string | null;
+  orderDate: string | null;
+  plant?: string;
+};
+
+// Per-plant "how much of this item's stock came from Scanning (Order Import) vs. Unloading" —
+// contribution totals, not an attempt to attribute the current balance to a source (see
+// /reports/source-breakdown's own comment).
+type SourceBreakdownRow = { plant: string; scanningQty: number; unloadingQty: number };
 
 // ─── Column config ────────────────────────────────────────────────────────────
 
@@ -153,6 +205,14 @@ const ALL_COLUMNS = [
 function totalStockOf(r: PlantStockRow): number | null {
   if (r.isEmptyBox || r.saleQty == null) return null;
   return r.inStock - r.saleQty;
+}
+
+// Adds two possibly-null quantities the way groupedByState needs to: stays null only when
+// BOTH sides are null (genuinely no data anywhere), otherwise treats a null side as 0 so one
+// plant actually having a value isn't masked by another plant simply not populating it.
+function sumNullable(a: number | null | undefined, b: number | null | undefined): number | null {
+  if (a == null && b == null) return null;
+  return (a ?? 0) + (b ?? 0);
 }
 
 function buildUrl(base: string, params: Record<string, string | number | undefined>) {
@@ -339,18 +399,62 @@ export default function OverallStock() {
   }, [columnOrder]);
 
 
-  // Arrival-history drill-down — clicking a row opens a dialog showing every dated entry from
-  // the stock_movements ledger for that exact (barcode, plant): when it arrived and how much.
+  // Arrival-history / details drill-down — clicking a row opens a two-tab panel below it:
+  // "Details" (per-plant Stock + Scanning-vs-Unloading breakdown) and "History" (the dated
+  // ledger, itself split into a Scanning list and a separate Unloading list — see the History
+  // tab's own comment). A normal row has one plant; a state-combined row (see groupedByState)
+  // carries every plant folded into it via combinedPlants, so all three queries below run once
+  // per plant and merge — same shape either way, just one plant in the list instead of several.
   const [detailRow, setDetailRow] = useState<PlantStockRow | null>(null);
-  const { data: movementsData, isLoading: movementsLoading } = useQuery<{ items: StockMovementRow[] }>({
-    queryKey: ["/api/scan-sessions/reports/stock-movements", detailRow?.barcode, detailRow?.plant],
+  const [detailTab, setDetailTab] = useState<"details" | "history">("details");
+  const [historySource, setHistorySource] = useState<"scanning" | "unloading" | "loading">("scanning");
+  const detailPlants = detailRow?.combinedPlants?.length ? detailRow.combinedPlants : (detailRow ? [detailRow.plant] : []);
+
+  const { data: scanningHistoryData, isLoading: scanningHistoryLoading } = useQuery<{ items: StockMovementRow[] }>({
+    queryKey: ["/api/scan-sessions/reports/stock-movements", detailRow?.barcode, detailPlants.join(",")],
+    queryFn: async () => {
+      const perPlant = await Promise.all(detailPlants.map((plant) =>
+        apiRequest("GET", buildUrl("/api/scan-sessions/reports/stock-movements", { barcode: detailRow!.barcode!, plant }), undefined, false, true)
+          .then((data: { items: StockMovementRow[] }) => data.items.map((it) => ({ ...it, plant })))
+      ));
+      return { items: perPlant.flat().sort((a, b) => +new Date(b.arrivedAt) - +new Date(a.arrivedAt)) };
+    },
+    enabled: !!detailRow?.barcode && detailPlants.length > 0,
+  });
+
+  const { data: unloadingHistoryData, isLoading: unloadingHistoryLoading } = useQuery<{ items: UnloadingHistoryRow[] }>({
+    queryKey: ["/api/scan-sessions/reports/unloading-history", detailRow?.barcode, detailPlants.join(",")],
+    queryFn: async () => {
+      const perPlant = await Promise.all(detailPlants.map((plant) =>
+        apiRequest("GET", buildUrl("/api/scan-sessions/reports/unloading-history", { barcode: detailRow!.barcode!, plant }), undefined, false, true)
+          .then((data: { items: UnloadingHistoryRow[] }) => data.items.map((it) => ({ ...it, plant })))
+      ));
+      return { items: perPlant.flat().sort((a, b) => +new Date(b.scannedAt) - +new Date(a.scannedAt)) };
+    },
+    enabled: !!detailRow?.barcode && detailPlants.length > 0,
+  });
+
+  const { data: loadingHistoryData, isLoading: loadingHistoryLoading } = useQuery<{ items: LoadingHistoryRow[] }>({
+    queryKey: ["/api/scan-sessions/reports/loading-history", detailRow?.barcode, detailPlants.join(",")],
+    queryFn: async () => {
+      const perPlant = await Promise.all(detailPlants.map((plant) =>
+        apiRequest("GET", buildUrl("/api/scan-sessions/reports/loading-history", { barcode: detailRow!.barcode!, plant }), undefined, false, true)
+          .then((data: { items: LoadingHistoryRow[] }) => data.items.map((it) => ({ ...it, plant })))
+      ));
+      return { items: perPlant.flat().sort((a, b) => +new Date(b.scannedAt) - +new Date(a.scannedAt)) };
+    },
+    enabled: !!detailRow?.barcode && detailPlants.length > 0,
+  });
+
+  const { data: sourceBreakdownData, isLoading: sourceBreakdownLoading } = useQuery<{ breakdown: SourceBreakdownRow[] }>({
+    queryKey: ["/api/scan-sessions/reports/source-breakdown", detailRow?.barcode, detailPlants.join(",")],
     queryFn: () =>
       apiRequest(
         "GET",
-        buildUrl("/api/scan-sessions/reports/stock-movements", { barcode: detailRow!.barcode!, plant: detailRow!.plant }),
+        buildUrl("/api/scan-sessions/reports/source-breakdown", { barcode: detailRow!.barcode!, plants: detailPlants.join(",") }),
         undefined, false, true,
       ),
-    enabled: !!detailRow?.barcode,
+    enabled: !!detailRow?.barcode && detailPlants.length > 0,
   });
 
   // Product Exchange — a distinct action from the row-click history drill-down above; opens
@@ -927,6 +1031,43 @@ export default function OverallStock() {
   const expectedPalletsTotal = rows.reduce((s, r) => s + (r.expectedPallets ?? 0), 0);
   const salePalletsTotal = rows.reduce((s, r) => s + (r.salePallets ?? 0), 0);
 
+  // A State tab (not narrowed to one specific plant) used to just widen the plant filter to
+  // every plant in that state, so the same item showed up as one row PER plant — a confusing
+  // pile of "duplicate" entries for what's really one product. Combined into a single row per
+  // item instead: Stock/Extra/Sale/Expected/Opening/Closing summed across every plant in the
+  // state, with combinedPlants recording which plants went into it so the Details/History
+  // drill-down can still break it back down. A specific single plant is unaffected — there's
+  // only ever one row per item there already.
+  const isStateView = !activePlant && !!activeState;
+  const groupedByState = useMemo(() => {
+    if (!isStateView) return filtered;
+    const byBarcode = new Map<string, PlantStockRow>();
+    for (const r of filtered) {
+      if (r.isEmptyBox) continue; // empty boxes stay their own per-plant rows below, never merged
+      const key = (r.barcode ?? r.itemName).toLowerCase();
+      const existing = byBarcode.get(key);
+      if (!existing) {
+        byBarcode.set(key, { ...r, plant: activeState, combinedPlants: [r.plant] });
+        continue;
+      }
+      existing.inStock += r.inStock;
+      existing.extraQty += r.extraQty;
+      existing.pallets = (existing.pallets ?? 0) + (r.pallets ?? 0);
+      existing.extraPallets = (existing.extraPallets ?? 0) + (r.extraPallets ?? 0);
+      existing.expectedQty = sumNullable(existing.expectedQty, r.expectedQty);
+      existing.expectedPallets = sumNullable(existing.expectedPallets, r.expectedPallets) ?? undefined;
+      existing.saleQty = sumNullable(existing.saleQty, r.saleQty);
+      existing.salePallets = sumNullable(existing.salePallets, r.salePallets) ?? undefined;
+      existing.openingStock = sumNullable(existing.openingStock, r.openingStock);
+      existing.openingPallets = sumNullable(existing.openingPallets, r.openingPallets) ?? undefined;
+      existing.closingStock = sumNullable(existing.closingStock, r.closingStock);
+      existing.closingPallets = sumNullable(existing.closingPallets, r.closingPallets) ?? undefined;
+      if (r.lastArrived && (!existing.lastArrived || r.lastArrived > existing.lastArrived)) existing.lastArrived = r.lastArrived;
+      existing.combinedPlants!.push(r.plant);
+    }
+    return Array.from(byBarcode.values());
+  }, [filtered, isStateView, activeState]);
+
   // Empty boxes as their OWN distinct rows (one per plant), appended below the stock rows.
   // Never mixed into stock/extra totals — the quantity shows only inside the "Empty Box" badge.
   const emptyBoxRows = useMemo<PlantStockRow[]>(() => {
@@ -948,8 +1089,9 @@ export default function OverallStock() {
   }, [stockData?.emptyBoxByPlant, search, activeFilters, columnConditionList]);
   const emptyBoxTotal = stockData?.emptyBoxTotal ?? 0;
 
-  // Real stock rows first, then the distinct empty-box rows.
-  const displayRows = useMemo(() => [...filtered, ...emptyBoxRows], [filtered, emptyBoxRows]);
+  // Real stock rows first, then the distinct empty-box rows. groupedByState IS filtered when not
+  // in state view (see its own comment) — this always reflects whichever one applies.
+  const displayRows = useMemo(() => [...groupedByState, ...emptyBoxRows], [groupedByState, emptyBoxRows]);
 
   // Any change to what's being listed restarts at page 1 — staying on page 4 of a plant you just
   // switched to shows an arbitrary slice, and reads as empty whenever the new set is shorter.
@@ -1075,7 +1217,11 @@ export default function OverallStock() {
           <button
             type="button"
             disabled={!row.barcode}
-            onClick={() => setDetailRow((cur) => (cur && cur.barcode === row.barcode && cur.plant === row.plant ? null : row))}
+            onClick={() => {
+              setDetailRow((cur) => (cur && cur.barcode === row.barcode && cur.plant === row.plant ? null : row));
+              setDetailTab("details");
+              setHistorySource("scanning");
+            }}
             className={`text-left underline decoration-dotted underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e] disabled:no-underline disabled:hover:text-inherit ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
           >
             {row.itemName}
@@ -1338,7 +1484,10 @@ export default function OverallStock() {
       width: isAdminOrSuper ? 96 : 48,
       align: "center" as const,
       render: (row: PlantStockRow) =>
-        !row.isEmptyBox && row.barcode ? (
+        // Exchange/Edit/Delete all need one exact (barcode, plant) target — hidden on a
+        // state-combined row (more than one plant folded into it), same as it would be on a
+        // row without a barcode at all.
+        !row.isEmptyBox && row.barcode && (!row.combinedPlants || row.combinedPlants.length <= 1) ? (
           <div className="flex items-center justify-center gap-0.5">
             {canExchange && (
               <Button
@@ -1396,80 +1545,242 @@ export default function OverallStock() {
     } satisfies DataTableColumn<PlantStockRow>] : []),
   ];
 
-  // Inline arrival-history drill-down — rendered as the DataTable's expanded row when an item
-  // name is clicked (detailRow set). Same stock_movements ledger the old dialog showed, now
-  // shown as a dropdown panel below the row (matching the Scan tab). Sticky-left + width-capped
-  // so it stays visible without its own horizontal scroll inside the wide, side-scrolling table.
+  // Tab-button style shared by the Details/History switch and the Scanning/Unloading switch
+  // inside it — same look as the Single date/Date range toggle above.
+  const detailTabButton = (active: boolean) =>
+    `rounded-md border px-2.5 py-1 text-xs font-medium ${
+      active ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"
+    }`;
+
+  // Details tab — one row per plant folded into detailRow (just one, for a normal row), each
+  // paired with its Scanning-vs-Unloading contribution split from sourceBreakdownData. Looked up
+  // from the raw, ungrouped `rows` (not `filtered`) so this always shows the real full picture
+  // regardless of whatever search/column filters happen to be active on the table itself.
+  const detailPlantRows = detailPlants.map((plant) => ({
+    plant,
+    stock: rows.find((r) => r.barcode === detailRow?.barcode && r.plant === plant) ?? null,
+    breakdown: sourceBreakdownData?.breakdown.find((b) => b.plant.toLowerCase() === plant.toLowerCase()) ?? null,
+  }));
+
+  const detailsTabContent = (
+    <div className="max-h-[360px] overflow-y-auto border border-gray-300">
+      <table className="w-full border-collapse text-xs">
+        <thead>
+          <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Plant</th>
+            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Stock</th>
+            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Extra</th>
+            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Sale</th>
+            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Via Scanning</th>
+            <th className="px-3 py-2 text-right font-semibold">Via Unloading</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sourceBreakdownLoading && !sourceBreakdownData ? (
+            <tr><td colSpan={6} className="py-8 text-center"><Loader2 className="mx-auto h-5 w-5 animate-spin text-[#001d6e]" /></td></tr>
+          ) : detailPlantRows.map(({ plant, stock, breakdown }) => (
+            <tr key={plant} className="border-b border-gray-200 bg-white">
+              <td className="border-r border-gray-200 px-3 py-2 font-medium text-gray-900">{plant}</td>
+              <td className="border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums text-[#001d6e]">{stock?.inStock ?? 0}</td>
+              <td className="border-r border-gray-200 px-3 py-2 text-right tabular-nums text-amber-600">{stock?.extraQty ? stock.extraQty : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-3 py-2 text-right tabular-nums text-emerald-600">{stock?.saleQty != null ? stock.saleQty : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-3 py-2 text-right tabular-nums text-gray-700">{breakdown?.scanningQty ? breakdown.scanningQty : <span className="text-gray-300">—</span>}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-gray-700">{breakdown?.unloadingQty ? breakdown.unloadingQty : <span className="text-gray-300">—</span>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  // History tab — Scanning and Unloading shown as two separate lists (their own separate
+  // queries, see the two useQuery calls above), never merged into one table. A state-combined
+  // row's entries carry a Plant column since they span more than one; a normal single-plant row
+  // just repeats the same plant on every line, which is harmless.
+  const scanningHistoryContent = scanningHistoryLoading ? (
+    <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+  ) : (scanningHistoryData?.items?.length ?? 0) === 0 ? (
+    <p className="py-6 text-center text-sm text-gray-400">No scanning (Order Import) movements yet for this item.</p>
+  ) : (
+    <div className="max-h-[360px] overflow-y-auto border border-gray-300">
+      <table className="w-full border-collapse text-xs">
+        <thead>
+          <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
+            {detailPlants.length > 1 && <th className="border-r border-gray-300 px-3 py-2 font-semibold">Plant</th>}
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order / CSV</th>
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order Date</th>
+            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Qty</th>
+            <th className="px-3 py-2 text-right font-semibold">Extra</th>
+          </tr>
+        </thead>
+        <tbody>
+          {scanningHistoryData!.items.map((m) => {
+            const isNegative = m.qty < 0;
+            const movementBadge = m.type === "dispatch"
+              ? <span className="inline-block bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">Dispatched</span>
+              : m.type === "adjust"
+              ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Adjusted</span>
+              : m.type === "exchange"
+              ? <span className="inline-block bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700">Exchanged</span>
+              : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
+            return (
+              <tr key={m.id} className="border-b border-gray-200 bg-white">
+                <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
+                  <div className="flex flex-col gap-1">
+                    <span>{m.arrivedAt ? format(new Date(m.arrivedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                    {movementBadge}
+                  </div>
+                </td>
+                {detailPlants.length > 1 && <td className="border-r border-gray-200 px-3 py-2 text-gray-600">{m.plant}</td>}
+                <td className="border-r border-gray-200 px-3 py-2 text-gray-600">
+                  {m.orderName ? (
+                    m.orderName
+                  ) : (
+                    <span className="text-gray-400" title={m.reason ?? undefined}>{m.reason ?? "—"}</span>
+                  )}
+                </td>
+                <td className="border-r border-gray-200 px-3 py-2 text-gray-600 whitespace-nowrap">
+                  {m.orderDate ? format(new Date(`${m.orderDate}T00:00:00`), "MMM d, yyyy") : <span className="text-gray-300">—</span>}
+                </td>
+                <td className={`border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums ${isNegative ? "text-red-500" : "text-[#001d6e]"}`}>
+                  {isNegative ? m.qty : `+${m.qty}`}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-amber-600">
+                  {m.extraQty ? (isNegative ? m.extraQty : `+${m.extraQty}`) : <span className="text-gray-300">—</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const unloadingHistoryContent = unloadingHistoryLoading ? (
+    <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+  ) : (unloadingHistoryData?.items?.length ?? 0) === 0 ? (
+    <p className="py-6 text-center text-sm text-gray-400">No unloading movements yet for this item.</p>
+  ) : (
+    <div className="max-h-[360px] overflow-y-auto border border-gray-300">
+      <table className="w-full border-collapse text-xs">
+        <thead>
+          <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
+            {detailPlants.length > 1 && <th className="border-r border-gray-300 px-3 py-2 font-semibold">Plant</th>}
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Vehicle</th>
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order Date</th>
+            <th className="px-3 py-2 text-right font-semibold">Qty</th>
+          </tr>
+        </thead>
+        <tbody>
+          {unloadingHistoryData!.items.map((m) => {
+            const movementBadge = m.voided
+              ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Voided</span>
+              : m.isExtra
+              ? <span className="inline-block bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">Extra</span>
+              : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
+            return (
+              <tr key={m.id} className="border-b border-gray-200 bg-white">
+                <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
+                  <div className="flex flex-col gap-1">
+                    <span>{m.scannedAt ? format(new Date(m.scannedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                    {movementBadge}
+                  </div>
+                </td>
+                {detailPlants.length > 1 && <td className="border-r border-gray-200 px-3 py-2 text-gray-600">{m.plant}</td>}
+                <td className="border-r border-gray-200 px-3 py-2 text-gray-600">
+                  {m.vehicleNumber ?? <span className="text-gray-300">—</span>}
+                </td>
+                <td className="border-r border-gray-200 px-3 py-2 text-gray-600 whitespace-nowrap">
+                  {m.orderDate ? format(new Date(`${m.orderDate}T00:00:00`), "MMM d, yyyy") : <span className="text-gray-300">—</span>}
+                </td>
+                <td className={`px-3 py-2 text-right font-bold tabular-nums ${m.voided ? "text-gray-400 line-through" : "text-[#001d6e]"}`}>
+                  {m.qty}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const loadingHistoryContent = loadingHistoryLoading ? (
+    <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+  ) : (loadingHistoryData?.items?.length ?? 0) === 0 ? (
+    <p className="py-6 text-center text-sm text-gray-400">No loading (dispatch) movements yet for this item.</p>
+  ) : (
+    <div className="max-h-[360px] overflow-y-auto border border-gray-300">
+      <table className="w-full border-collapse text-xs">
+        <thead>
+          <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
+            {detailPlants.length > 1 && <th className="border-r border-gray-300 px-3 py-2 font-semibold">Plant</th>}
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order</th>
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order Date</th>
+            <th className="px-3 py-2 text-right font-semibold">Qty</th>
+          </tr>
+        </thead>
+        <tbody>
+          {loadingHistoryData!.items.map((m) => {
+            const movementBadge = m.voided
+              ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Voided</span>
+              : m.isExtra
+              ? <span className="inline-block bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">Extra</span>
+              : <span className="inline-block bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">Dispatched</span>;
+            return (
+              <tr key={m.id} className="border-b border-gray-200 bg-white">
+                <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
+                  <div className="flex flex-col gap-1">
+                    <span>{m.scannedAt ? format(new Date(m.scannedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                    {movementBadge}
+                  </div>
+                </td>
+                {detailPlants.length > 1 && <td className="border-r border-gray-200 px-3 py-2 text-gray-600">{m.plant}</td>}
+                <td className="border-r border-gray-200 px-3 py-2 text-gray-600">
+                  {m.orderNumber ? `#${m.orderNumber}` : <span className="text-gray-300">—</span>}
+                </td>
+                <td className="border-r border-gray-200 px-3 py-2 text-gray-600 whitespace-nowrap">
+                  {m.orderDate ? format(new Date(m.orderDate), "MMM d, yyyy") : <span className="text-gray-300">—</span>}
+                </td>
+                <td className={`px-3 py-2 text-right font-bold tabular-nums ${m.voided ? "text-gray-400 line-through" : "text-red-600"}`}>
+                  -{m.qty}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  // Inline Details/History drill-down — rendered as the DataTable's expanded row when an item
+  // name is clicked (detailRow set). Sticky-left + width-capped so it stays visible without its
+  // own horizontal scroll inside the wide, side-scrolling table.
   const movementsPanel = (
     <div className="sticky left-0 w-full max-w-3xl bg-gray-50 p-3">
       <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[#001d6e]">
         <History className="h-4 w-4 shrink-0" />
         <span className="text-sm font-semibold">{detailRow?.itemName ?? "Item"}</span>
-        <span className="font-mono text-xs text-gray-400">{detailRow?.barcode} · {detailRow?.plant}</span>
+        <span className="font-mono text-xs text-gray-400">
+          {detailRow?.barcode} · {detailPlants.length > 1 ? `${detailRow?.plant} (${detailPlants.join(", ")})` : detailRow?.plant}
+        </span>
       </div>
-      {movementsLoading ? (
-        <div className="flex justify-center py-8">
-          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-        </div>
-      ) : (movementsData?.items?.length ?? 0) === 0 ? (
-        <p className="py-6 text-center text-sm text-gray-400">No stock movements yet for this item.</p>
-      ) : (
-        <div className="max-h-[360px] overflow-y-auto border border-gray-300">
-          <table className="w-full border-collapse text-xs">
-            <thead>
-              <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
-                <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
-                <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order / CSV</th>
-                {/* Distinct from "Date & Movement" (when it was physically scanned) — this is
-                    the date chosen at upload, which identifies which order/CSV this row
-                    actually belongs to (the two can differ by days for a late-scanned part). */}
-                <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order Date</th>
-                <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Qty</th>
-                <th className="px-3 py-2 text-right font-semibold">Extra</th>
-              </tr>
-            </thead>
-            <tbody>
-              {movementsData!.items.map((m) => {
-                const isNegative = m.qty < 0;
-                const movementBadge = m.type === "dispatch"
-                  ? <span className="inline-block bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">Dispatched</span>
-                  : m.type === "adjust"
-                  ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Adjusted</span>
-                  : m.type === "exchange"
-                  ? <span className="inline-block bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700">Exchanged</span>
-                  : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
-                return (
-                  <tr key={m.id} className="border-b border-gray-200 bg-white">
-                    <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
-                      <div className="flex flex-col gap-1">
-                        <span>{m.arrivedAt ? format(new Date(m.arrivedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
-                        {movementBadge}
-                      </div>
-                    </td>
-                    <td className="border-r border-gray-200 px-3 py-2 text-gray-600">
-                      {m.orderName ? (
-                        <>
-                          {m.orderName}
-                          {m.partIndex ? <span className="text-gray-400"> · Part {m.partIndex}</span> : null}
-                        </>
-                      ) : (
-                        <span className="text-gray-400" title={m.reason ?? undefined}>{m.reason ?? "—"}</span>
-                      )}
-                    </td>
-                    <td className="border-r border-gray-200 px-3 py-2 text-gray-600 whitespace-nowrap">
-                      {m.orderDate ? format(new Date(`${m.orderDate}T00:00:00`), "MMM d, yyyy") : <span className="text-gray-300">—</span>}
-                    </td>
-                    <td className={`border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums ${isNegative ? "text-red-500" : "text-[#001d6e]"}`}>
-                      {isNegative ? m.qty : `+${m.qty}`}
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-amber-600">
-                      {m.extraQty ? (isNegative ? m.extraQty : `+${m.extraQty}`) : <span className="text-gray-300">—</span>}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        <button type="button" onClick={() => setDetailTab("details")} className={detailTabButton(detailTab === "details")}>Details</button>
+        <button type="button" onClick={() => setDetailTab("history")} className={detailTabButton(detailTab === "history")}>History</button>
+      </div>
+
+      {detailTab === "details" ? detailsTabContent : (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button type="button" onClick={() => setHistorySource("scanning")} className={detailTabButton(historySource === "scanning")}>Scanning</button>
+            <button type="button" onClick={() => setHistorySource("unloading")} className={detailTabButton(historySource === "unloading")}>Unloading</button>
+            <button type="button" onClick={() => setHistorySource("loading")} className={detailTabButton(historySource === "loading")}>Loading</button>
+          </div>
+          {historySource === "scanning" ? scanningHistoryContent : historySource === "unloading" ? unloadingHistoryContent : loadingHistoryContent}
         </div>
       )}
     </div>

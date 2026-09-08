@@ -871,7 +871,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       true AS "isDispatch",
       false AS "isUnload",
       NULL::text AS "emptyBoxNote",
-      NULL::text AS stv,
+      lse.stv,
       lse.scanned_by_code   AS "scannedByCode",
       lse.scanned_by_name   AS "scannedByName",
       lse.scanned_at        AS "scannedAt",
@@ -1899,6 +1899,145 @@ router.get('/reports/stock-movements', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching stock movement history:', error);
     res.status(500).json({ error: 'Failed to fetch stock movement history' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/unloading-history?barcode=X&plant=Y ──────────────────────
+// Unloading's own arrival history for ONE item at ONE plant — deliberately separate from
+// /reports/stock-movements above rather than folded into it: that query's session_id join only
+// ever resolves against order_import_sessions, so an Unloading-sourced row there shows up with
+// no order/vehicle/date at all (session_id doesn't record which sessions table it points to —
+// see stock_movements' own comment). Going straight to unload_scan_events (which already carries
+// plant and vehicleNumber directly, no ambiguous join needed) sidesteps that entirely, so Overall
+// Stock's History view shows Scanning and Unloading as two clean, separately-sourced lists
+// instead of trying to make one query understand both.
+router.get('/reports/unloading-history', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!barcode || !plant) {
+      return res.status(400).json({ message: 'barcode and plant are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT
+        e.id, e.total_qty AS qty, e.pallets, e.loose_qty AS "looseQty", e.is_extra AS "isExtra",
+        e.voided, e.void_reason AS "voidReason", e.scanned_at AS "scannedAt",
+        e.scanned_by_name AS "scannedByName", e.stv,
+        e.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate", s.part_index AS "partIndex"
+      FROM unload_scan_events e
+      LEFT JOIN unload_import_sessions s ON s.id = e.session_id
+      WHERE LOWER(e.barcode) = LOWER($1) AND LOWER(e.plant) = LOWER($2)
+      ORDER BY e.scanned_at DESC
+      LIMIT 500
+    `, [barcode, plant]);
+
+    res.json({ items: rows });
+  } catch (error) {
+    console.error('Error fetching unloading history:', error);
+    res.status(500).json({ error: 'Failed to fetch unloading history' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/loading-history?barcode=X&plant=Y ────────────────────────
+// Loading's own dispatch history for ONE item at ONE plant — same separate-by-source spirit as
+// unloading-history above: loading_scan_events already carries plant directly, joined to
+// proforma_slips only for the order's own date (loading_scan_events has no date column of its
+// own). A third clean list alongside Scanning and Unloading, not merged into either.
+router.get('/reports/loading-history', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!barcode || !plant) {
+      return res.status(400).json({ message: 'barcode and plant are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT
+        e.id, e.total_qty AS qty, e.pallets, e.loose_qty AS "looseQty", e.is_extra AS "isExtra",
+        e.voided, e.void_reason AS "voidReason", e.scanned_at AS "scannedAt",
+        e.scanned_by_name AS "scannedByName",
+        e.order_number AS "orderNumber", ps.order_date AS "orderDate"
+      FROM loading_scan_events e
+      LEFT JOIN proforma_slips ps ON ps.order_number = e.order_number
+      WHERE LOWER(e.barcode) = LOWER($1) AND LOWER(e.plant) = LOWER($2)
+      ORDER BY e.scanned_at DESC
+      LIMIT 500
+    `, [barcode, plant]);
+
+    res.json({ items: rows });
+  } catch (error) {
+    console.error('Error fetching loading history:', error);
+    res.status(500).json({ error: 'Failed to fetch loading history' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/source-breakdown?barcode=X&plants=A,B,C ───────────────────
+// Overall Stock's per-plant "how much of this came from Scanning vs. Unloading" split, shown in
+// the state-combined view's Details tab. Two independent sums (not a merged query, same
+// separate-by-source spirit as unloading-history above) — Order Scan's own receiving events
+// (joined to order_import_sessions for plant, since order_scan_events itself carries no plant
+// column) vs Unloading's own (plant is direct on unload_scan_events). This is a contribution
+// total ("how much has this plant received via each channel"), not an attempt to attribute the
+// CURRENT balance to a source — Loading dispatch draws down the combined pool without recording
+// which channel it came from, so a precise current-balance split isn't something the data supports.
+router.get('/reports/source-breakdown', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plants = typeof req.query.plants === 'string'
+      ? req.query.plants.split(',').map((p) => p.trim()).filter(Boolean)
+      : [];
+    if (!barcode || plants.length === 0) {
+      return res.status(400).json({ message: 'barcode and plants are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    const plantsLower = plants.map((p) => p.toLowerCase());
+    if (allowed !== null && plantsLower.some((p) => !allowed.includes(p))) {
+      return res.status(403).json({ message: 'Access denied for one or more of these plants' });
+    }
+
+    const [scanRes, unloadRes] = await Promise.all([
+      pool.query(`
+        SELECT s.plant, COALESCE(SUM(e.total_qty), 0)::int AS qty
+        FROM order_scan_events e JOIN order_import_sessions s ON s.id = e.session_id
+        WHERE e.voided IS NOT TRUE AND LOWER(e.barcode) = LOWER($1) AND LOWER(s.plant) = ANY($2::text[])
+        GROUP BY s.plant
+      `, [barcode, plantsLower]),
+      pool.query(`
+        SELECT e.plant, COALESCE(SUM(e.total_qty), 0)::int AS qty
+        FROM unload_scan_events e
+        WHERE e.voided IS NOT TRUE AND LOWER(e.barcode) = LOWER($1) AND LOWER(e.plant) = ANY($2::text[])
+        GROUP BY e.plant
+      `, [barcode, plantsLower]),
+    ]);
+
+    const byPlant = new Map<string, { plant: string; scanningQty: number; unloadingQty: number }>(
+      plants.map((p) => [p.toLowerCase(), { plant: p, scanningQty: 0, unloadingQty: 0 }]),
+    );
+    for (const r of scanRes.rows as any[]) {
+      const entry = byPlant.get(String(r.plant).toLowerCase());
+      if (entry) entry.scanningQty = r.qty;
+    }
+    for (const r of unloadRes.rows as any[]) {
+      const entry = byPlant.get(String(r.plant).toLowerCase());
+      if (entry) entry.unloadingQty = r.qty;
+    }
+
+    res.json({ breakdown: Array.from(byPlant.values()) });
+  } catch (error) {
+    console.error('Error fetching source breakdown:', error);
+    res.status(500).json({ error: 'Failed to fetch source breakdown' });
   }
 });
 

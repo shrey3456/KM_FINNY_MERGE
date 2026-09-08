@@ -1803,7 +1803,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <th className="font-semibold border-r border-gray-200 px-2 py-2 w-7">#</th>
                 <th className="font-semibold border-r border-gray-200 px-2 py-2 w-[122px]">Date &amp; Time</th>
                 <th className="font-semibold border-r border-gray-200 px-2 py-2">Scanned By</th>
-                <th className="font-semibold border-r border-gray-200 px-2 py-2">Order / Part</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2">Order</th>
                 <th className="font-semibold text-center border-r border-gray-200 px-2 py-2 w-14">Qty</th>
                 <th className="font-semibold border-r border-gray-200 px-2 py-2 w-16">Status</th>
                 {canVoidScan && <th className="font-semibold text-right px-2 py-2 w-14">Action</th>}
@@ -1823,7 +1823,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </td>
                     <td className="px-2 py-2 text-gray-600 truncate border-r border-gray-100">{ev.scannedByName ?? "—"}</td>
                     <td className="px-2 py-2 text-gray-600 truncate border-r border-gray-100">
-                      {stripCsvExt(ev.orderName)}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
+                      {stripCsvExt(ev.orderName)}
                     </td>
                     <td className="px-2 py-2 text-center border-r border-gray-100">
                       <span className={`inline-flex items-center justify-center rounded-full text-[11px] font-bold px-2 py-0.5 ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
@@ -1890,7 +1890,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               </div>
               <p className="mt-1 text-xs text-gray-600">{ev.scannedByName ?? "—"}</p>
               <p className="text-xs text-gray-400">
-                {stripCsvExt(ev.orderName)}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
+                {stripCsvExt(ev.orderName)}
               </p>
               {(ev.voided || ev.isExtra || canVoidScan) && (
                 <div className="mt-1.5 flex items-center justify-between">

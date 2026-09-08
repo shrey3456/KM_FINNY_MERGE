@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Result } from "@zxing/library";
+import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
   AlertTriangle, Camera, CheckCircle2, ChevronLeft, ChevronRight, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
@@ -9,7 +10,7 @@ import {
 import PageHeader from "@/components/PageHeader";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
-import { matchProductMasterMissingError } from "@/lib/apiError";
+import { matchProductMasterMissingError, matchBarcodeNotInSystemError } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -492,6 +493,31 @@ export default function Unloading() {
     return p?.isAutoScanEnabled === true;
   })();
 
+  // Pallet size is a per-STATE fact (products.gjPlt/mpPlt), not per-plant — a plant just knows
+  // which state it's in (plants.state). Same pair Order Scan uses (getPlantState/
+  // getStatePalletSize in Scan.tsx) — itemsPerPallet ("Packets" in the Product Master UI) is a
+  // different concept and is NOT an equivalent fallback for the actual pallet size.
+  const getPlantState = (plantName: string): string | null => {
+    const name = (plantName ?? "").trim().toLowerCase();
+    if (!name || !allPlants) return null;
+    const match = allPlants.find((p: any) => String(p.name ?? "").trim().toLowerCase() === name);
+    const state = match?.state;
+    return state ? String(state).trim().toUpperCase() : null;
+  };
+  const getStatePalletSize = (product: Product | null, stateCode: string | null): number => {
+    if (!product) return 0;
+    if (stateCode === "GJ") return Number(product.gjPlt) || 0;
+    if (stateCode === "MP") return Number(product.mpPlt) || 0;
+    return 0;
+  };
+  // For an item not in this vehicle's batch: no server-resolved snapshot to start from (unlike
+  // a matched SessionItem), so this is just the GJ/MP-PLT override, or 1 when the product has
+  // none defined for this plant's state.
+  const extraProductPalletSize = (product: Product | null): number => {
+    const state = getPlantState(detail?.session?.plant ?? "");
+    return Math.max(1, getStatePalletSize(product, state) || 1);
+  };
+
   const scanMutation = useMutation({
     mutationFn: ({ barcode, qty, stv }: { barcode: string; qty: number; stv?: string | null }) =>
       apiRequest("POST", `/api/unloading/sessions/${activeSessionId}/scan`, { barcode, qty, stv: stv ?? null }, false, true),
@@ -517,11 +543,14 @@ export default function Unloading() {
     onError: (error: any) => {
       const productMasterMissing = matchProductMasterMissingError(error);
       if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
+      const barcodeNotInSystem = matchBarcodeNotInSystemError(error);
+      if (barcodeNotInSystem) { setBarcodeNotInSystemMessage(barcodeNotInSystem); return; }
       toast({ title: "Scan failed", description: error?.message || "Could not record scan", variant: "destructive" });
     },
     onSettled: () => { scanLockRef.current = false; },
   });
   const [productMasterMissingMessage, setProductMasterMissingMessage] = useState<string | null>(null);
+  const [barcodeNotInSystemMessage, setBarcodeNotInSystemMessage] = useState<string | null>(null);
 
   // ─── Manual/Camera barcode input, same-barcode cooldown, auto-scan popup — mirrors
   // client/src/pages/Loading/LoadOperation.tsx's item-scanning UX exactly. ─────────────────────
@@ -562,13 +591,17 @@ export default function Unloading() {
   const lastScanRef = useRef<{ barcode: string; at: number } | null>(null);
   const SAME_BARCODE_COOLDOWN_MS = 5000;
 
-  const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null } | null>(null);
+  // product: the resolved Product Master row when the barcode isn't on this vehicle's batch at
+  // all (pending.item null) — carries name/SAP/itemsPerPallet so the dialog can still show a
+  // real identity and default the qty to a full pallet, same as Order Scan's own
+  // inventoryProduct for an unmatched scan, instead of a bare barcode defaulting to 1.
+  const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null; product: Product | null } | null>(null);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
   const [dialogImageFailed, setDialogImageFailed] = useState(false);
   useEffect(() => { setDialogImageFailed(false); }, [pending]);
-  const dialogPlt = pending?.item?.itemsPerPallet ?? 0;
-  const dialogResolvedImageName = pending?.item?.itemName ?? pending?.barcode;
+  const dialogPlt = pending?.item?.itemsPerPallet ?? (pending?.product ? extraProductPalletSize(pending.product) : 0);
+  const dialogResolvedImageName = pending?.item?.itemName ?? pending?.product?.name ?? pending?.barcode;
 
   const [autoFeedback, setAutoFeedback] = useState<
     { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean } | null
@@ -585,19 +618,38 @@ export default function Unloading() {
     setItemCameraReady(false);
   }
 
-  function defaultDialogQty(item: SessionItem | null): number {
-    if (!item) return 1;
-    const ipp = item.itemsPerPallet || 1;
+  // ipp: item's own server-resolved snapshot when matched to this batch, else the GJ/MP-PLT
+  // override for the resolved Product Master row (NOT its plain itemsPerPallet — that field is
+  // "Packets" in the Product Master UI, a different concept from the actual pallet size) — same
+  // "full pallet, unless a partial amount is genuinely all that's left" rule either way.
+  function defaultDialogQty(item: SessionItem | null, product: Product | null): number {
+    const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 1);
+    if (!item) return ipp;
     return item.remaining > 0 && item.remaining < ipp ? item.remaining : ipp;
   }
-  function openConfirmDialog(barcode: string, item: SessionItem | null) {
-    const qty = defaultDialogQty(item);
+  function openConfirmDialog(barcode: string, item: SessionItem | null, product: Product | null) {
+    const qty = defaultDialogQty(item, product);
+    const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 0);
     setDialogQty(qty);
-    setDialogPalletsInput(item && item.itemsPerPallet > 0 ? (qty / item.itemsPerPallet).toFixed(2) : "");
-    setPending({ barcode, item });
+    setDialogPalletsInput(ipp > 0 ? (qty / ipp).toFixed(2) : "");
+    setPending({ barcode, item, product });
   }
 
-  function handleItemBarcode(rawBarcode: string) {
+  // A 404 here means this barcode genuinely isn't a real product at all — anything else
+  // (network hiccup, 500) shouldn't block a legitimate scan on our own connectivity/lookup
+  // failure, so those are treated as "assume known" rather than risk a false block (product
+  // comes back null in that case too — there's nothing to show, but the scan isn't refused).
+  async function resolveProduct(barcode: string): Promise<{ known: boolean; product: Product | null }> {
+    try {
+      const res = await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}`);
+      return { known: true, product: await res.json() };
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err ?? "");
+      return { known: !message.startsWith("404:"), product: null };
+    }
+  }
+
+  async function handleItemBarcode(rawBarcode: string) {
     const barcode = rawBarcode.trim();
     if (!barcode || !detail || locked || scanLockRef.current || pending) return;
 
@@ -615,6 +667,23 @@ export default function Unloading() {
     scanLockRef.current = true;
     scanItemRef.current = item;
 
+    // Not in this vehicle's batch — before walking the user through picking an STV/qty to
+    // "log as Extra", resolve whether it's even a real product at all, and if so pull its own
+    // Product Master details (name/SAP/itemsPerPallet) so the dialog can still show a real
+    // identity and default the qty to a full pallet — same as Order Scan's own inventoryProduct
+    // fallback for an unmatched scan — instead of a bare barcode defaulting to 1.
+    let resolvedProduct: Product | null = null;
+    if (!item) {
+      const { known, product } = await resolveProduct(barcode);
+      if (!known) {
+        scanLockRef.current = false;
+        setItemBarcode("");
+        setBarcodeNotInSystemMessage(`"${barcode}" is not in this vehicle's batch and not in Product Master. It cannot be scanned.`);
+        return;
+      }
+      resolvedProduct = product;
+    }
+
     const ipp = item?.itemsPerPallet ?? 0;
     const canAutoScan = autoScanEnabled && !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
@@ -626,7 +695,7 @@ export default function Unloading() {
     }
 
     scanLockRef.current = false;
-    openConfirmDialog(barcode, item);
+    openConfirmDialog(barcode, item, resolvedProduct);
     setItemBarcode("");
   }
 
@@ -768,9 +837,10 @@ export default function Unloading() {
   // Widths kept compact (total ~660px, close to Order Scan's own kiosk table's 640px) so the
   // rotated/kiosk view never needs horizontal scrolling — DataTable floors the table at the sum
   // of every column's width, so a narrower baseline here is what keeps it fitting in a rotated
-  // viewport instead of scrolling sideways. Text sizes bumped a step up from the original 10-11px
-  // micro-text in both views; the existing global .kiosk-rotate-* CSS (index.css) bumps these
-  // again automatically while rotated, on top of this baseline increase.
+  // viewport instead of scrolling sideways. Text sizes dropped one Tailwind step back down from
+  // an earlier bump (text-base/text-lg felt oversized outside the kiosk/rotated view) — the
+  // existing global .kiosk-rotate-* CSS (index.css) still bumps these up automatically while
+  // rotated, independent of this baseline.
   const itemColumns: DataTableColumn<SessionItem>[] = [
     {
       id: "item",
@@ -780,11 +850,11 @@ export default function Unloading() {
       minWidth: 140,
       render: (row) => (
         <div>
-          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug text-base">{row.itemName ?? "—"}</p>
-          <p className="text-gray-400 font-mono whitespace-normal break-words text-sm">
+          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug text-sm">{row.itemName ?? "—"}</p>
+          <p className="text-gray-400 font-mono whitespace-normal break-words text-xs">
             {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
           </p>
-          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold mt-0.5 text-sm">{row.itemsPerPallet} per pallet</p>}
+          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold mt-0.5 text-xs">{row.itemsPerPallet} per pallet</p>}
         </div>
       ),
     },
@@ -793,8 +863,8 @@ export default function Unloading() {
       accessor: (row) => row.expected,
       render: (row) => (
         <>
-          <span className="block text-lg font-semibold">{row.expected || "—"}</span>
-          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.expected, row.itemsPerPallet)} plt</span>
+          <span className="block text-base font-semibold">{row.expected || "—"}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.expected, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
@@ -804,8 +874,8 @@ export default function Unloading() {
       cellClassName: "font-semibold text-gray-900",
       render: (row) => (
         <>
-          <span className="block text-lg">{row.scanned}</span>
-          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.scanned, row.itemsPerPallet)} plt</span>
+          <span className="block text-base">{row.scanned}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.scanned, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
@@ -814,8 +884,8 @@ export default function Unloading() {
       accessor: (row) => row.remaining,
       render: (row) => (
         <>
-          <span className={`block text-lg font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
-          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.remaining, row.itemsPerPallet)} plt</span>
+          <span className={`block text-base font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.remaining, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
@@ -826,8 +896,8 @@ export default function Unloading() {
         const extra = Math.max(0, row.scanned - row.expected);
         return (
           <>
-            <span className={`block text-lg ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>
-            <span className="block text-sm font-semibold text-gray-400">{palletsOf(extra, row.itemsPerPallet)} plt</span>
+            <span className={`block text-base ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>
+            <span className="block text-xs font-semibold text-gray-400">{palletsOf(extra, row.itemsPerPallet)} plt</span>
           </>
         );
       },
@@ -838,7 +908,7 @@ export default function Unloading() {
       render: (row) => {
         const status = row.isComplete ? "complete" : row.scanned > 0 ? "partial" : "pending";
         return (
-          <span className={`inline-block font-semibold px-2 py-1 text-sm rounded ${
+          <span className={`inline-block font-semibold px-2 py-1 text-xs rounded ${
             status === "complete" ? "bg-emerald-100 text-emerald-700" :
             status === "partial" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
           }`}>
@@ -1689,16 +1759,16 @@ export default function Unloading() {
               : "text-[#001d6e]"
             }`}>
               {!pending?.item
-                ? <><AlertTriangle className="h-7 w-7" /> Not on manifest</>
+                ? <><AlertTriangle className="h-7 w-7" /> Not in this batch</>
                 : pending.item.isComplete
                   ? <><AlertTriangle className="h-7 w-7" /> Extra item</>
                   : <><CheckCircle2 className="h-7 w-7" /> Match found</>}
             </DialogTitle>
             <DialogDescription className="text-left space-y-1.5 min-w-0 pt-3">
-              <p className="font-bold text-gray-900 text-2xl leading-snug">{pending?.item?.itemName ?? pending?.barcode}</p>
+              <p className="font-bold text-gray-900 text-2xl leading-snug">{pending?.item?.itemName ?? pending?.product?.name ?? pending?.barcode}</p>
               <p className="font-mono text-lg text-gray-400">{pending?.barcode}</p>
               {!pending?.item && (
-                <p className="text-lg text-red-600 mt-1">Not on this vehicle's manifest — will be logged as an extra.</p>
+                <p className="text-lg text-red-600 mt-1">Not in this vehicle's batch — will be logged as an extra.</p>
               )}
               {pending?.item?.isComplete && (
                 <p className="text-lg text-amber-600 mt-1">Item already complete — these extra units will be logged separately.</p>
@@ -1707,6 +1777,19 @@ export default function Unloading() {
           </DialogHeader>
 
           <div className="space-y-4 py-1">
+            {/* Not in this batch, but a real Product Master row — same info box shape as a
+                matched item, just SAP + pallet size (there's no Expected/Received/Remaining to
+                show without a batch row backing it). */}
+            {!pending?.item && pending?.product && (
+              <div className="rounded-xl bg-gray-50 px-4 py-3 text-base text-gray-600 space-y-1.5">
+                {pending.product.sapCode && (
+                  <p>SAP: <span className="font-mono font-bold text-gray-700">{pending.product.sapCode}</span></p>
+                )}
+                {extraProductPalletSize(pending.product) > 0 && (
+                  <p>Items per pallet: <strong>{extraProductPalletSize(pending.product)}</strong></p>
+                )}
+              </div>
+            )}
             {pending?.item && (
               <div className="rounded-xl bg-gray-50 px-4 py-3 text-base text-gray-600 space-y-1.5">
                 {pending.item.sapCode && (
@@ -1919,6 +2002,7 @@ export default function Unloading() {
 
       <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} basePath="unloading" />
       <ProductMasterMissingDialog message={productMasterMissingMessage} onClose={() => setProductMasterMissingMessage(null)} />
+      <ProductMasterMissingDialog message={barcodeNotInSystemMessage} onClose={() => setBarcodeNotInSystemMessage(null)} title="Barcode Not Found" />
 
       {/* ── Delete confirmation — replace (soft, carries forward on re-upload) vs discard
           (reverses stock, voids history, self-resolves) ─────────────────────────────────── */}

@@ -795,8 +795,13 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     );
     const matchedItem = itemRows.find((i: any) => normalize(i.barcode) === normalize(barcode));
     const product = await storage.getProductByBarcode(barcode);
+    // Tagged the same way PRODUCT_MASTER_MISSING is below — see matchBarcodeNotInSystemError's
+    // client-side handling (a distinct centered popup, not the ordinary error toast) in
+    // Unloading.tsx.
     if (!matchedItem && !product) {
-      return res.status(400).json({ message: 'Barcode not in system — not on this vehicle\'s manifest and not in Product Master.' });
+      return res.status(400).json({
+        message: `BARCODE_NOT_IN_SYSTEM: "${barcode}" is not on this vehicle's manifest and not in Product Master. It cannot be scanned.`,
+      });
     }
     // On the manifest, but nothing in Product Master to back it — item name/SAP code would
     // silently fall back to the manifest's own text and pallet size to a generic default

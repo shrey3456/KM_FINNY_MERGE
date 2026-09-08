@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
 import { broadcastOrderImportUpdate } from '../lib/importEvents';
-import { getUserPlants } from './order-scan';
+import { getUserPlants, getPlantStateCode, resolvePalletSizeOrQty } from './order-scan';
 import { splitPallets, resplitEventsExtraFlag } from '../lib/orderScanRemap';
 
 // ============================================================================
@@ -377,11 +377,95 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import-edi
           }
         }
       } else {
-        await client.query(
+        const { rows: insertedRows } = await client.query(
           `INSERT INTO order_import_items (session_id, plant, barcode, item_name, sap_code, quantity, expected_pallets)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id`,
           [id, session.plant, barcode, itemName, sapCode, quantity, expectedPallets],
         );
+        const newItemId = insertedRows[0].id;
+
+        // A brand-new item needs its own order_scan_items row created right away (normally
+        // done at CSV upload time, by seedSessionItems) — without it, Order Scan has nothing to
+        // match a scan of this barcode against, and Master View (which reads more directly off
+        // order_import_items) would show it as expected while Order Scan still couldn't
+        // recognize it at all.
+        if (barcode) {
+          const state = await getPlantStateCode(client, session.plant);
+          const { rows: prodRows } = await client.query(
+            `SELECT gj_plt AS "gjPlt", mp_plt AS "mpPlt" FROM products WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($1))`,
+            [barcode],
+          );
+          const itemsPerPallet = resolvePalletSizeOrQty(prodRows[0] ?? null, state, quantity);
+
+          const { rows: newScanItemRows } = await client.query(
+            `INSERT INTO order_scan_items (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id`,
+            [id, newItemId, barcode, itemName, sapCode, quantity, itemsPerPallet],
+          );
+          const newScanItemId = newScanItemRows[0].id;
+
+          // Reconcile scans already made against this exact barcode BEFORE it existed on the
+          // CSV: writeScanEvents (order-scan.ts) logs those with scan_item_id = NULL and always
+          // as Extra, since there was nothing to match them against at scan time — the item
+          // would otherwise stay flagged Extra forever even after being added here. Same
+          // re-split-against-the-new-expected-qty idea the quantity-changed correction below
+          // already applies to an item that was already on the CSV.
+          const { rows: orphanEvents } = await client.query(
+            `SELECT id, total_qty, is_extra FROM order_scan_events
+             WHERE session_id = $1 AND scan_item_id IS NULL AND barcode IS NOT NULL AND LOWER(barcode) = LOWER($2) AND voided IS NOT TRUE
+             ORDER BY id ASC`,
+            [id, barcode],
+          );
+
+          if (orphanEvents.length > 0) {
+            // Link them to the new item BEFORE re-splitting — resplitEventsExtraFlag's
+            // straddle-the-boundary case copies scan_item_id (among other columns) from the
+            // original row into the new split-off row, so it needs to already be correct.
+            await client.query(
+              `UPDATE order_scan_events SET scan_item_id = $1
+               WHERE session_id = $2 AND scan_item_id IS NULL AND LOWER(barcode) = LOWER($3) AND voided IS NOT TRUE`,
+              [newScanItemId, id, barcode],
+            );
+
+            const physicalQty = orphanEvents.reduce((s: number, e: any) => s + Number(e.total_qty ?? 0), 0);
+            const oldExtraQty = orphanEvents.reduce((s: number, e: any) => s + (e.is_extra ? Number(e.total_qty ?? 0) : 0), 0);
+            const newOrderQty = Math.min(physicalQty, quantity);
+            const newExtraQty = physicalQty - newOrderQty;
+            const { pallets, looseQty } = splitPallets(newOrderQty, itemsPerPallet);
+            const status = physicalQty <= 0 ? 'pending'
+              : newOrderQty >= quantity && quantity > 0 ? 'complete'
+              : newOrderQty > 0 ? 'partial' : 'pending';
+
+            await client.query(
+              `UPDATE order_scan_items
+               SET total_scanned_qty = $1, scanned_pallets = $2, scanned_loose_qty = $3, status = $4, last_scanned_at = NOW()
+               WHERE id = $5`,
+              [newOrderQty, pallets, looseQty, status, newScanItemId],
+            );
+
+            await resplitEventsExtraFlag(client, orphanEvents, newOrderQty, itemsPerPallet);
+
+            // in_stock already counts every physical box regardless of order/extra split — only
+            // extra_qty, the "how much was over-order" subset, needs correcting (same reasoning
+            // as the quantity-changed branch below).
+            const extraDelta = newExtraQty - oldExtraQty;
+            if (extraDelta !== 0) {
+              const { rows: pps } = await client.query(
+                `UPDATE product_plant_stock SET extra_qty = GREATEST(0, extra_qty + $1), updated_at = NOW()
+                 WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
+                 RETURNING product_id`,
+                [extraDelta, barcode, session.plant],
+              );
+              await client.query(
+                `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
+                 VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
+                [barcode, pps[0]?.product_id ?? null, session.plant, extraDelta, `New item added to CSV (order-import edit): extra ${oldExtraQty} -> ${newExtraQty}`, id],
+              );
+            }
+          }
+        }
       }
     }
 

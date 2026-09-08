@@ -388,6 +388,8 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
   try {
     const barcode = String(req.body?.barcode ?? '').trim();
     const qty = Math.round(Number(req.body?.qty));
+    const isExtraScan = req.body?.extra === true;
+    const stv = req.body?.stv != null ? String(req.body.stv).trim() || null : null;
     if (!barcode) return res.status(400).json({ message: 'barcode is required' });
     if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be a positive number' });
 
@@ -407,9 +409,13 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     const product = await storage.getProductByBarcode(barcode);
 
     // Not on this slip AND not a known product at all — same refusal Order Scan gives for a
-    // barcode it has no record of whatsoever, rather than quietly logging it as an extra.
+    // barcode it has no record of whatsoever, rather than quietly logging it as an extra. Tagged
+    // for matchBarcodeNotInSystemError's client-side handling (a distinct centered popup, not
+    // the ordinary error toast) in LoadOperation.tsx.
     if (!matchedItem && !product) {
-      return res.status(400).json({ message: 'Barcode not in system — not on this order and not in Product Master.' });
+      return res.status(400).json({
+        message: `BARCODE_NOT_IN_SYSTEM: "${barcode}" is not on this order and not in Product Master. It cannot be scanned.`,
+      });
     }
     // On the order, but nothing in Product Master to back it — item name/SAP code would
     // silently fall back to the order's own text and pallet size to a generic default instead of
@@ -450,8 +456,25 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
     const expected = matchedItem?.quantity ?? 0;
     const remainingBefore = matchedItem ? Math.max(0, expected - alreadyLoaded) : 0;
-    const regularQty = matchedItem ? Math.min(qty, remainingBefore) : 0;
+    // The Add Extra flow is a deliberate, explicit "log this as extra" action — the whole qty is
+    // extra even if the item still has room left in `remaining`, not just whatever spills past
+    // it. A regular scan keeps the ordinary split (capped at what's remaining; see the
+    // EXTRA_NOT_ALLOWED check right below, which refuses it whenever that split would leave any
+    // extra portion at all).
+    const regularQty = (matchedItem && !isExtraScan) ? Math.min(qty, remainingBefore) : 0;
     const extraQty = qty - regularQty;
+
+    // Extra quantity (barcode not on this slip at all, or qty beyond what's still remaining for
+    // it) can only be logged through the dedicated Add Extra flow, never a regular scan — tagged
+    // for matchExtraNotAllowedError's client-side handling (a distinct centered popup) in
+    // LoadOperation.tsx. The Add Extra flow sends extra:true and skips this check entirely.
+    if (!isExtraScan && extraQty > 0) {
+      return res.status(400).json({
+        message: matchedItem
+          ? `EXTRA_NOT_ALLOWED: Only ${remainingBefore} left to load for "${matchedItem.itemName ?? barcode}" — scanning ${qty} would add ${extraQty} extra. Use Add Extra for the extra quantity.`
+          : `EXTRA_NOT_ALLOWED: "${barcode}" is not on this order. Use Add Extra to scan it.`,
+      });
+    }
 
     // Same itemsPerPallet the Items table already shows for this row (withProgress uses the
     // identical resolvePalletSizeOrQty(product, state, expected) call) — so a scan's pallets/
@@ -465,13 +488,13 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     try {
       const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
         `INSERT INTO loading_scan_events
-           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
           slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
           itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
           itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-          totalQty, isExtra, slip.plant, userCode ?? null, userName ?? null,
+          totalQty, isExtra, slip.plant, stv, userCode ?? null, userName ?? null,
         ],
       );
       if (regularQty > 0) await insertEvent(regularQty, false);

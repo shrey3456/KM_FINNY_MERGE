@@ -22,7 +22,7 @@ interface CurrentUser {
 }
 
 // Pages that scan at a fixed station, where the header is worth trading away for table height.
-const HEADER_HIDEABLE_PATHS = ['/scan', '/unloading'];
+const HEADER_HIDEABLE_PATHS = ['/scan', '/unloading', '/loading'];
 
 const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   const [location] = useLocation();

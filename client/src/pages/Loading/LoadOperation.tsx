@@ -1,20 +1,26 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileText,
-  Keyboard, Layers, Link2, Loader2, Lock, Package, Plus, RotateCcw, ScanLine, Search, Trash2,
+  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
+  Keyboard, Layers, Link2, Loader2, Lock, Package, PackagePlus, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
+import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import PageHeader from "@/components/PageHeader";
+import { PlantBadge } from "@/components/PlantBadge";
+import { CollapsibleSearch } from "@/components/ui/collapsible-search";
+import { buildPageList } from "@/components/ui/data-table/data-table-pagination";
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { PlantBadge } from "@/components/PlantBadge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PlantFilter } from "@/components/PlantFilter";
 import { SingleDateFilter } from "@/components/SingleDateFilter";
@@ -25,7 +31,29 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
-import { matchProductMasterMissingError } from "@/lib/apiError";
+import { matchProductMasterMissingError, matchBarcodeNotInSystemError, matchExtraNotAllowedError } from "@/lib/apiError";
+
+// Width split (percent) between the Load Totals card and the Scan Items column — operator-
+// draggable, same mechanism (and same localStorage-key naming convention) as Order Scan's own
+// totals/scanner split (OS_TOTALS_PCT_KEY in Scan.tsx).
+const LOADING_TOTALS_PCT_KEY = "km-finny.loading.totalsWidthPct";
+const LOADING_TOTALS_PCT_MIN = 30;
+const LOADING_TOTALS_PCT_MAX = 80;
+
+// Kiosk rotation — same idea and CSS mechanics as Order Scan's and Unloading's own rotate views
+// (.kiosk-rotate-* in index.css): for a screen physically mounted at an angle next to the
+// loading bay. Steps 0° → 90° → 180° → 270° → 0°, remembered per browser since a mounted screen
+// stays in the same orientation.
+const LOADING_ROTATIONS = [0, 90, 180, 270] as const;
+type LoadingRotation = (typeof LOADING_ROTATIONS)[number];
+const LOADING_ROTATION_STORAGE_KEY = "loadingRotation";
+
+// STV (sub-transfer voucher) — same per-plant picker Order Scan and Unloading have, reusing
+// their existing GET /api/order-scan/stvs endpoint (a generic plant-scoped lookup, not
+// Order-Scan-specific). Remembered per browser since this page unmounts on navigation, which
+// would otherwise clear the pick and re-trigger "Select an STV".
+const LOADING_STV_STORAGE_KEY = "km-finny.loading.selectedStv";
+const NO_STV = "__none__";
 
 // ─── Types (mirror server/routes/loading.ts responses) ───────────────────────
 type ProformaSuggestion = {
@@ -72,6 +100,7 @@ type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: bo
 type LoadHistoryEvent = {
   id: number; barcode: string | null; itemName: string | null; totalQty: number;
   isExtra: boolean; voided: boolean | null; scannedByName: string | null; scannedAt: string;
+  stv: string | null;
 };
 
 function currentUser(): any {
@@ -307,6 +336,86 @@ export default function LoadOperation() {
   // and Scan History's Load Event tab use) and filtered client-side per barcode when a row opens,
   // rather than one request per item.
   const [expandedItemBarcode, setExpandedItemBarcode] = useState<string | null>(null);
+  // Same click-to-filter tiles as Order Scan's own Order Totals card (Total/Loaded/Remaining/
+  // Extra) — narrows the items table below to just that bucket; clicking the active one clears it.
+  const [itemStatusFilter, setItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
+  const [itemSearchText, setItemSearchText] = useState("");
+
+  // Kiosk rotate — a screen mounted at an angle next to the loading bay. See
+  // LOADING_ROTATIONS above; mechanics match Unloading's own rotate view exactly.
+  const [rotation, setRotation] = useState<LoadingRotation>(() => {
+    const saved = Number(localStorage.getItem(LOADING_ROTATION_STORAGE_KEY));
+    return (LOADING_ROTATIONS as readonly number[]).includes(saved) ? (saved as LoadingRotation) : 0;
+  });
+  useEffect(() => { localStorage.setItem(LOADING_ROTATION_STORAGE_KEY, String(rotation)); }, [rotation]);
+  const rotateNext = () => setRotation((r) => LOADING_ROTATIONS[(LOADING_ROTATIONS.indexOf(r) + 1) % LOADING_ROTATIONS.length]);
+  const rotated = rotation !== 0;
+  const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
+  const quarterTurn = rotation === 90 || rotation === 270;
+  // Natural portrait (a tablet turned upright) gets the same single-column layout as a manual
+  // rotate, just without the 90° CSS turn — same pair Order Scan/Unloading use.
+  const [isPortrait, setIsPortrait] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(orientation: portrait)");
+    const onChange = () => setIsPortrait(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  // Drives the single-column layout; the 90° CSS turn stays tied to `rotated` alone. Tailwind's
+  // lg: breakpoints key off the real (unrotated) window width, not the rotated container's
+  // effective width, so a rotated kiosk would otherwise get the desktop grid crammed narrow.
+  const bigView = rotated || isPortrait;
+  // Bounded, self-scrolling frame for the items table in rotated mode — the %-of-viewport cap
+  // flips units on a quarter turn, since that turns the subtree 90° (content-space height then
+  // runs along the viewport's WIDTH, not its height).
+  const kioskTableMaxHeight = bigView ? (quarterTurn ? "62vw" : "62vh") : "65vh";
+  // Radix renders dialogs into document.body, outside the rotated container, so each needs the
+  // matching turn applied by hand or it opens upright while everything behind it is rotated.
+  const portalRotate = rotated ? (rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : "-rotate-90") : "";
+  // The vehicle search/assign UI is collapsed behind a button now instead of always sitting
+  // open under the header — the current vehicle is already shown right there in the header's
+  // own slip-details line, so it doesn't need its own separate always-visible banner + search
+  // box below it as well.
+  const [vehiclePanelOpen, setVehiclePanelOpen] = useState(false);
+
+  // Draggable split between the Load Totals card and the Scan Items column — same
+  // percent-of-row-width persistence and pointer-drag mechanism as Order Scan's own
+  // totalsRowRef/totalsPct/startTotalsResize (Scan.tsx).
+  const totalsRowRef = useRef<HTMLDivElement | null>(null);
+  const [totalsPct, setTotalsPct] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem(LOADING_TOTALS_PCT_KEY));
+      return Number.isFinite(saved) && saved >= LOADING_TOTALS_PCT_MIN && saved <= LOADING_TOTALS_PCT_MAX ? saved : 50;
+    } catch { return 50; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(LOADING_TOTALS_PCT_KEY, String(Math.round(totalsPct))); } catch { /* private mode */ }
+  }, [totalsPct]);
+  // Pointer events (not mouse) so a stylus/touch drag works too. Listeners go on window so the
+  // drag keeps tracking even when the cursor leaves the thin handle.
+  const startTotalsResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const row = totalsRowRef.current;
+    if (!row) return;
+    const onMove = (ev: PointerEvent) => {
+      const rect = row.getBoundingClientRect();
+      if (!rect.width) return;
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setTotalsPct(Math.min(LOADING_TOTALS_PCT_MAX, Math.max(LOADING_TOTALS_PCT_MIN, pct)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
   const orderLoadHistoryQuery = useQuery<{ items: LoadHistoryEvent[] }>({
     queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", slip?.orderNumber],
     queryFn: async () =>
@@ -544,6 +653,7 @@ export default function LoadOperation() {
       else setPendingSlip((cur) => (cur ? { ...cur, slip: data.slip } : cur));
       setSelectedVehicle(null);
       setVehicleSearch("");
+      setVehiclePanelOpen(false);
       if (data.capacityWarning) {
         toast({ title: "Vehicle linked — over capacity", description: data.capacityWarning, variant: "destructive" });
       } else {
@@ -614,8 +724,129 @@ export default function LoadOperation() {
     return p?.isAutoScanEnabled === true;
   })();
 
+  // Pallet size is a per-STATE fact (products.gjPlt/mpPlt), not per-plant — a plant just knows
+  // which state it's in (plants.state). Same pair Order Scan/Unloading use — itemsPerPallet
+  // ("Packets" in the Product Master UI) is a different concept and is NOT an equivalent
+  // fallback for the actual pallet size. Used by the Add Extra dialog, whose picked product has
+  // no server-resolved item snapshot to fall back to the way a matched slip item does.
+  const getPlantState = (plantName: string): string | null => {
+    const name = (plantName ?? "").trim().toLowerCase();
+    if (!name || !allPlants) return null;
+    const match = allPlants.find((p: any) => String(p.name ?? "").trim().toLowerCase() === name);
+    const state = match?.state;
+    return state ? String(state).trim().toUpperCase() : null;
+  };
+  const getStatePalletSize = (product: Product | null, stateCode: string | null): number => {
+    if (!product) return 0;
+    if (stateCode === "GJ") return Number(product.gjPlt) || 0;
+    if (stateCode === "MP") return Number(product.mpPlt) || 0;
+    return 0;
+  };
+  function extraProductPalletSize(product: Product | null): number {
+    const state = getPlantState(slip?.plant ?? "");
+    return Math.max(1, getStatePalletSize(product, state) || 1);
+  }
+
+  // STV — same per-plant picker Order Scan/Unloading have. Persisted per browser; dropped and
+  // re-defaulted whenever it doesn't belong to the current plant's list (e.g. restored from a
+  // different plant's session).
+  const [selectedStv, setSelectedStv] = useState<string>(() => {
+    try { return localStorage.getItem(LOADING_STV_STORAGE_KEY) ?? ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    try {
+      if (selectedStv) localStorage.setItem(LOADING_STV_STORAGE_KEY, selectedStv);
+      else localStorage.removeItem(LOADING_STV_STORAGE_KEY);
+    } catch { /* private mode */ }
+  }, [selectedStv]);
+  const stvsQuery = useQuery<string[]>({
+    queryKey: ["/api/order-scan/stvs", slip?.plant],
+    queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(slip!.plant ?? "")}`).then((r) => r.json()),
+    enabled: !!slip?.plant,
+  });
+  const stvs = stvsQuery.data ?? [];
+  useEffect(() => {
+    if (stvs.length === 0) return;
+    if (selectedStv && !stvs.includes(selectedStv)) { setSelectedStv(""); return; }
+    if (!selectedStv) setSelectedStv(stvs[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stvsQuery.data, selectedStv]);
+
   const [itemScanMode, setItemScanMode] = useState<"camera" | "manual">("manual");
   const [itemBarcode, setItemBarcode] = useState("");
+  const [extraNotAllowedMessage, setExtraNotAllowedMessage] = useState<string | null>(null);
+
+  // Add Extra — a dedicated popup instead of arming the regular scanner: search by name/barcode/
+  // SAP (same catalog + search-as-you-type pattern the Exchange Product dialog uses), confirm by
+  // sight via the product's own image, then a qty/pallets pair defaulting to one full pallet.
+  const [extraDialogOpen, setExtraDialogOpen] = useState(false);
+  const [extraSearch, setExtraSearch] = useState("");
+  const [extraTarget, setExtraTarget] = useState<Product | null>(null);
+  const [extraQty, setExtraQty] = useState(1);
+  const [extraPalletsInput, setExtraPalletsInput] = useState("");
+  const allProductsQuery = useQuery<Product[]>({
+    queryKey: ["/api/products", "all"],
+    queryFn: async () => (await apiRequest("GET", "/api/products?all=true")).json(),
+    enabled: extraDialogOpen,
+    staleTime: 60_000,
+  });
+  const extraSearchResults = (() => {
+    const q = extraSearch.trim().toLowerCase();
+    if (!q) return [];
+    return (allProductsQuery.data ?? [])
+      .filter((p) =>
+        (p.name ?? "").toLowerCase().includes(q) ||
+        (p.barcode ?? "").toLowerCase().includes(q) ||
+        (p.sapCode ?? "").toLowerCase().includes(q),
+      )
+      .slice(0, 20);
+  })();
+  function resetExtraDialog() {
+    setExtraDialogOpen(false);
+    setExtraSearch("");
+    setExtraTarget(null);
+    setExtraQty(1);
+    setExtraPalletsInput("");
+  }
+  function pickExtraTarget(p: Product) {
+    setExtraTarget(p);
+    setExtraSearch("");
+    const ipp = extraProductPalletSize(p);
+    const qty = ipp > 0 ? ipp : 1;
+    setExtraQty(qty);
+    setExtraPalletsInput(ipp > 0 ? "1.00" : "");
+  }
+  function changeExtraQty(v: string) {
+    const q = parseInt(v, 10) || 0;
+    setExtraQty(q);
+    const ipp = extraTarget ? extraProductPalletSize(extraTarget) : 0;
+    if (ipp > 0) setExtraPalletsInput((q / ipp).toFixed(2));
+  }
+  function changeExtraPallets(v: string) {
+    setExtraPalletsInput(v);
+    const ipp = extraTarget ? extraProductPalletSize(extraTarget) : 0;
+    const p = parseFloat(v);
+    if (ipp > 0 && Number.isFinite(p)) setExtraQty(Math.round(p * ipp));
+  }
+  const extraMutation = useMutation({
+    mutationFn: async () => {
+      if (!extraTarget) throw new Error("Pick an item first");
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, {
+        barcode: extraTarget.barcode, qty: extraQty, extra: true, stv: selectedStv || null,
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to add extra");
+      return res.json() as Promise<ScanResponse>;
+    },
+    onSuccess: (data) => {
+      setSlip(data.slip);
+      setItems(data.items);
+      setAllComplete(data.allComplete);
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", data.slip.orderNumber] });
+      toast({ title: "Extra added", description: `${extraTarget?.name} · +${extraQty}` });
+      resetExtraDialog();
+    },
+    onError: (err: any) => toast({ title: "Could not add extra", description: err?.message, variant: "destructive" }),
+  });
   const itemInputRef = useRef<HTMLInputElement>(null);
   const [itemCameraReady, setItemCameraReady] = useState(false);
   const [itemCameraError, setItemCameraError] = useState<string | null>(null);
@@ -639,7 +870,8 @@ export default function LoadOperation() {
     setItemCameraReady(false);
   }
 
-  // Pending confirm dialog (opens for anything that isn't a clean full-pallet auto-scan).
+  // Pending confirm dialog (opens for anything that isn't a clean full-pallet auto-scan). Never
+  // an extra — that goes through its own dedicated Add Extra popup instead (extraDialogOpen).
   const [pending, setPending] = useState<{ barcode: string; item: ProformaItem | null } | null>(null);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
@@ -652,15 +884,20 @@ export default function LoadOperation() {
     { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean } | null
   >(null);
   const autoFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracked in state (not a direct DOM style flip on the <img> itself) so the text column
+  // actually reflows to fill the freed width when the image 404s — same pattern Order Scan's
+  // own confirm dialog uses (osImageFailed).
+  const [autoFeedbackImageFailed, setAutoFeedbackImageFailed] = useState(false);
   function showAutoFeedback(name: string, barcode: string, sapCode: string | null, scannedQty: number, remaining: number, isExtra: boolean) {
     if (autoFeedbackTimerRef.current) clearTimeout(autoFeedbackTimerRef.current);
+    setAutoFeedbackImageFailed(false);
     setAutoFeedback({ name, barcode, sapCode, scannedQty, remaining, isExtra });
     autoFeedbackTimerRef.current = setTimeout(() => setAutoFeedback(null), 5000);
   }
 
   const scanItemMutation = useMutation({
-    mutationFn: async ({ barcode, qty }: { barcode: string; qty: number }) => {
-      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, { barcode, qty });
+    mutationFn: async ({ barcode, qty, extra }: { barcode: string; qty: number; extra?: boolean }) => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, { barcode, qty, extra: !!extra, stv: selectedStv || null });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Scan failed");
       return res.json() as Promise<ScanResponse>;
     },
@@ -681,11 +918,16 @@ export default function LoadOperation() {
     onError: (err: any) => {
       const productMasterMissing = matchProductMasterMissingError(err);
       if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
+      const barcodeNotInSystem = matchBarcodeNotInSystemError(err);
+      if (barcodeNotInSystem) { setBarcodeNotInSystemMessage(barcodeNotInSystem); return; }
+      const extraNotAllowed = matchExtraNotAllowedError(err);
+      if (extraNotAllowed) { setExtraNotAllowedMessage(extraNotAllowed); return; }
       toast({ title: "Scan failed", description: err?.message, variant: "destructive" });
     },
     onSettled: () => { scanLockRef.current = false; },
   });
   const [productMasterMissingMessage, setProductMasterMissingMessage] = useState<string | null>(null);
+  const [barcodeNotInSystemMessage, setBarcodeNotInSystemMessage] = useState<string | null>(null);
 
   const completeMutation = useMutation({
     mutationFn: async () => {
@@ -717,7 +959,20 @@ export default function LoadOperation() {
     setPending({ barcode, item });
   }
 
-  function handleItemBarcode(rawBarcode: string) {
+  // A 404 here means this barcode genuinely isn't a real product at all — anything else
+  // (network hiccup, 500) shouldn't block a legitimate scan on our own connectivity/lookup
+  // failure, so those are treated as "assume known" rather than risk a false block.
+  async function isKnownProduct(barcode: string): Promise<boolean> {
+    try {
+      await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}`);
+      return true;
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err ?? "");
+      return !message.startsWith("404:");
+    }
+  }
+
+  async function handleItemBarcode(rawBarcode: string) {
     const barcode = rawBarcode.trim();
     if (!barcode || !slip || locked || scanLockRef.current || pending) return;
 
@@ -726,6 +981,11 @@ export default function LoadOperation() {
     // linked, so reaching here without one only happens via a stale gun-scan queued before the
     // section unmounted.
     if (!slip.vehicleNumber) return;
+
+    if (stvs.length > 0 && !selectedStv) {
+      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      return;
+    }
 
     // Same-barcode cooldown — a repeat of the exact barcode just accepted, within the window,
     // is discarded before anything else (no beep, no dialog): see SAME_BARCODE_COOLDOWN_MS above.
@@ -738,15 +998,37 @@ export default function LoadOperation() {
 
     const item = itemsRef.current.find((i) => normalize(i.barcode) === normalize(barcode)) ?? null;
 
-    // Not on this slip at all is still allowed through to the server (it may be a real product,
-    // logged as an Extra) — but a stock-zero item on THIS slip is stopped right here, before
-    // even opening the dialog, since there's nothing to load.
+    // A stock-zero item on THIS slip is stopped right here, before even opening the dialog,
+    // since there's nothing to load.
     if (item && (item.stockAvailable ?? 0) <= 0) {
       toast({ title: "No stock to load", description: `${item.itemName ?? barcode} has 0 stock at ${slip.plant} — cannot load it.`, variant: "destructive" });
       return;
     }
 
     scanLockRef.current = true;
+
+    // Not on this order's manifest at all — before walking the user through picking a qty,
+    // check whether it's even a real product at all. A barcode that's neither on this order NOR
+    // in Product Master has nothing legitimate to log (the server would reject it anyway — see
+    // BARCODE_NOT_IN_SYSTEM in loading.ts's own /scan handler); better to say so immediately
+    // than let the user fill in a dialog for a scan that can only ever fail.
+    if (!item) {
+      const known = await isKnownProduct(barcode);
+      if (!known) {
+        scanLockRef.current = false;
+        setItemBarcode("");
+        setBarcodeNotInSystemMessage(`"${barcode}" is not on this order and not in Product Master. It cannot be scanned.`);
+        return;
+      }
+      // A real product, but not on this slip — logging it at all can only ever be an Extra. A
+      // regular scan refuses this outright (see EXTRA_NOT_ALLOWED in loading.ts's /scan); only
+      // the dedicated Add Extra popup (opened straight from the "Add Extra" button, no scanning
+      // involved) may add it.
+      scanLockRef.current = false;
+      setItemBarcode("");
+      setExtraNotAllowedMessage(`"${barcode}" is not on this order. Extra items can't be scanned with a regular scan — use the "Add Extra" button instead.`);
+      return;
+    }
 
     // Full pallet (or more) still remaining → auto-scan exactly one pallet, no dialog, 5s image
     // feedback popup — same shape as Order Scan's Auto Scan path, gated by the SAME plant-level
@@ -831,6 +1113,196 @@ export default function LoadOperation() {
   const isVehicleClaimed = !!slip?.vehicleAssignedByCode;
   const canEditVehicle = !isVehicleClaimed || admin || slip?.vehicleAssignedByCode === currentUser()?.userCode;
 
+  // Load Totals — same shape/labels as Order Scan's own Order Totals card (Total/Loaded/
+  // Remaining/Extra tiles + a progress bar), built from this order's own items instead of
+  // duplicating it as three plain Items/Qty/Volume boxes.
+  const itemTotals = items.reduce(
+    (acc, it) => {
+      const extra = Math.max(0, it.loaded - it.expected);
+      const ipp = it.itemsPerPallet ?? 0;
+      acc.expected += it.expected;
+      acc.loaded += it.loaded;
+      acc.remaining += it.remaining;
+      acc.extra += extra;
+      if (ipp > 0) {
+        acc.pltExpected += it.expected / ipp;
+        acc.pltLoaded += it.loaded / ipp;
+        acc.pltRemaining += it.remaining / ipp;
+        acc.pltExtra += extra / ipp;
+      }
+      return acc;
+    },
+    { expected: 0, loaded: 0, remaining: 0, extra: 0, pltExpected: 0, pltLoaded: 0, pltRemaining: 0, pltExtra: 0 },
+  );
+  const itemPct = itemTotals.expected > 0 ? Math.min(100, Math.round((itemTotals.loaded / itemTotals.expected) * 100)) : 0;
+  const filteredItems = items.filter((it) => {
+    if (itemStatusFilter === "done" && !(it.loaded > 0)) return false;
+    if (itemStatusFilter === "remaining" && !(it.remaining > 0)) return false;
+    if (itemStatusFilter === "extra" && !(it.loaded > it.expected)) return false;
+    if (itemSearchText.trim()) {
+      const q = itemSearchText.trim().toLowerCase();
+      const hay = `${it.itemName ?? ""} ${it.barcode ?? ""} ${it.sapCode ?? ""}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  // Items table — same shared DataTable (navy sticky header, resizable/sortable columns, totals
+  // row) Order Scan and Unloading's own items tables use. Item Name and Barcode/SAP are merged
+  // into one column (name on top, barcode · SAP underneath) rather than two separate ones.
+  const loadingItemColumns: DataTableColumn<ProformaItem>[] = [
+    {
+      // minWidth kept low (not the ~180 a stacked name+barcode+pallet cell would suggest) so the
+      // resize grip can actually shrink this column — DataTable floors a drag at minWidth, and a
+      // high floor there is exactly what made this column impossible to narrow.
+      // align:"center" centers the HEADER label; cellClassName's text-left overrides the
+      // auto-applied text-center on the cell itself (DataTable's cn() twMerges the two, so the
+      // later one — cellClassName — wins), same header-centered/cell-left split the user wants
+      // only on this column, not the numeric ones.
+      id: "item", header: "Item Name", align: "center", width: 200, minWidth: 90, sortable: true,
+      accessor: (row) => `${row.itemName ?? ""} ${row.barcode ?? ""} ${row.sapCode ?? ""}`,
+      cellClassName: "whitespace-normal break-words text-left text-gray-700",
+      totalable: false,
+      render: (row) => (
+        <>
+          <span className="font-medium text-gray-900">{row.itemName ?? "—"}</span>
+          {(row.stockAvailable ?? 0) <= 0 && <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 text-[9px] font-bold text-red-700">NO STOCK</span>}
+          {row.isComplete && <CheckCircle2 className="ml-1.5 inline h-3.5 w-3.5 text-emerald-600" />}
+          <p className="mt-0.5 font-mono text-xs text-gray-400">
+            {row.barcode || "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+          </p>
+          {(row.itemsPerPallet ?? 0) > 0 && <p className="mt-0.5 text-xs font-semibold text-gray-500">{row.itemsPerPallet} per pallet</p>}
+        </>
+      ),
+    },
+    {
+      id: "expected", header: "Expected", align: "center", width: 75, minWidth: 65, sortable: true,
+      accessor: (row) => row.expected,
+      cellClassName: "text-gray-700",
+      render: (row) => (
+        <>
+          <span className="block">{row.expected}</span>
+          {(row.itemsPerPallet ?? 0) > 0 && <span className="block text-sm font-semibold text-gray-400">{(row.expected / row.itemsPerPallet!).toFixed(2)} plt</span>}
+        </>
+      ),
+    },
+    {
+      // No dedicated Extra column — extra only ever happens through the separate Add Extra flow
+      // (see EXTRA_NOT_ALLOWED in server/routes/loading.ts), so it stays a rare inline note on
+      // Loaded rather than a column that's blank for almost every row.
+      id: "loaded", header: "Loaded", align: "center", width: 75, minWidth: 65, sortable: true,
+      accessor: (row) => row.loaded,
+      cellClassName: "font-medium text-gray-900",
+      render: (row) => {
+        const extra = Math.max(0, row.loaded - row.expected);
+        return (
+          <>
+            <span className="block">{row.loaded}</span>
+            {(row.itemsPerPallet ?? 0) > 0 && <span className="block text-sm font-semibold text-gray-400">{(row.loaded / row.itemsPerPallet!).toFixed(2)} plt</span>}
+            {extra > 0 && <span className="block text-xs font-bold text-amber-600">+{extra} extra</span>}
+          </>
+        );
+      },
+    },
+    {
+      id: "remaining", header: "Remaining", align: "center", width: 80, minWidth: 65, sortable: true,
+      accessor: (row) => row.remaining,
+      cellClassName: "text-gray-700",
+      render: (row) => (
+        <>
+          <span className="block">{row.remaining}</span>
+          {(row.itemsPerPallet ?? 0) > 0 && <span className="block text-sm font-semibold text-gray-400">{(row.remaining / row.itemsPerPallet!).toFixed(2)} plt</span>}
+        </>
+      ),
+    },
+    {
+      id: "stock", header: "Stock", align: "center", width: 80, minWidth: 65, sortable: true, totalable: false,
+      accessor: (row) => row.stockAvailable ?? 0,
+      render: (row) => {
+        const outOfStock = (row.stockAvailable ?? 0) <= 0;
+        return (
+          <>
+            <span className={`block ${outOfStock ? "font-semibold text-red-600" : "text-gray-500"}`}>{row.stockAvailable ?? "—"}</span>
+            {(row.itemsPerPallet ?? 0) > 0 && <span className="block text-sm font-semibold text-gray-400">{((row.stockAvailable ?? 0) / row.itemsPerPallet!).toFixed(2)} plt</span>}
+          </>
+        );
+      },
+    },
+  ];
+
+  // Same "Export" affordance Order Scan/Master View offer on their own items tables — a plain
+  // client-side CSV of whatever's currently filtered/searched, not just the full unfiltered set.
+  function downloadLoadingItemsCsv() {
+    const headers = ["SKU", "Item Name", "Expected", "Loaded", "Remaining", "Stock"];
+    const rows = filteredItems.map((it) => [it.barcode ?? "", it.itemName ?? "", it.expected, it.loaded, it.remaining, it.stockAvailable ?? ""]);
+    const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+    a.download = `${slip?.orderNumber ?? "loading"}-items.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function renderLoadingItemHistoryPanel(item: ProformaItem) {
+    const itemEvents = (orderLoadHistoryQuery.data?.items ?? []).filter((ev) => normalize(ev.barcode) === normalize(item.barcode));
+    return (
+      <div className="border-b border-gray-200 bg-gray-50 p-3">
+        {orderLoadHistoryQuery.isLoading ? (
+          <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+        ) : itemEvents.length === 0 ? (
+          <p className="py-4 text-center text-xs text-gray-400">No scan history for this item yet.</p>
+        ) : (
+          <div className="max-h-60 overflow-y-auto overflow-x-auto border border-gray-200 bg-white">
+            <table className="w-full min-w-[520px] table-fixed border-collapse text-xs">
+              <thead>
+                <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                  <th className="w-[170px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
+                  <th className="border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
+                  <th className="w-16 border-r border-gray-200 px-2 py-2 text-right font-semibold">Qty</th>
+                  <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">STV</th>
+                  <th className="w-20 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
+                  {canResetLoad && <th className="w-14 px-2 py-2 text-right font-semibold">Void</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {itemEvents.map((ev, idx) => (
+                  <tr key={ev.id} className={`border-b border-gray-100 ${ev.voided ? "opacity-60" : "hover:bg-gray-50"} ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
+                    <td className="whitespace-nowrap border-r border-gray-100 px-2 py-2 text-gray-600">{new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
+                    <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
+                    <td className="border-r border-gray-100 px-2 py-2 text-right">
+                      <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
+                        {ev.isExtra ? "+" : ""}{ev.totalQty}
+                      </span>
+                    </td>
+                    <td className="truncate border-r border-gray-100 px-2 py-2 text-[11px]">
+                      {ev.voided ? (
+                        <span className="font-medium text-red-500">Voided</span>
+                      ) : ev.isExtra ? (
+                        <span className="font-semibold uppercase text-amber-700">Extra</span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    {canResetLoad && (
+                      <td className="px-2 py-2 text-right">
+                        {!ev.voided && (
+                          <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-gray-400 hover:bg-red-50 hover:text-red-600"
+                            onClick={() => setVoidTarget(ev)} title="Void this scan">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // Purely informational (never blocks scanning) — the order's own required volume (Product
   // Master, summed at import/scan time) vs. the linked vehicle's capacity (Vehicle Master).
   const isOverCapacity =
@@ -914,11 +1386,17 @@ export default function LoadOperation() {
   return (
     <div className="flex-1 overflow-y-auto px-2 py-6">
       <div className="w-full space-y-6">
-        <PageHeader
-          icon={Package}
-          title="Loading"
-          description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
-        />
+        {/* Page header only on the list — nothing there competes with it for room. The
+            create/scan view (an open order, often with many items to scroll through) skips it
+            entirely instead; that view's only collapsible header now is the global "Welcome"
+            bar (Layout.tsx's HEADER_HIDEABLE_PATHS), not this one. */}
+        {view === "list" && (
+          <PageHeader
+            icon={Package}
+            title="Loading"
+            description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
+          />
+        )}
 
         {/* ── Landing view — mirrors Load Operations' layout exactly: full-width search, a
              filter row (date + plant + status counters), status tabs, then a desktop table with
@@ -1046,28 +1524,31 @@ export default function LoadOperation() {
                 <div className="hidden md:block border rounded-md w-full">
                   <Table>
                     <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-12"></TableHead>
-                        <TableHead>Order Date</TableHead>
+                      {/* Same navy/white uppercase header every other table on the site uses,
+                          instead of the plain shadcn default (muted-gray text on white) — makes
+                          the header read as a header rather than blending into the rows. */}
+                      <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
+                        <TableHead className="w-12 text-[11px] font-semibold uppercase tracking-wide text-white"></TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Order Date</TableHead>
                         <TableHead
-                          className="cursor-pointer"
+                          className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
                           onClick={() => { setSortBy("orderNumber"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
                         >
                           Order Number {sortBy === "orderNumber" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
                         </TableHead>
-                        <TableHead>Party Name</TableHead>
-                        <TableHead>Plant</TableHead>
-                        <TableHead>Vehicle No.</TableHead>
-                        <TableHead>RTO No.</TableHead>
-                        <TableHead>Status</TableHead>
-                        <TableHead title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Party Name</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Plant</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Vehicle No.</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">RTO No.</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Status</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
                         <TableHead
-                          className="cursor-pointer"
+                          className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
                           onClick={() => { setSortBy("creationDate"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
                         >
                           Creator {sortBy === "creationDate" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
                         </TableHead>
-                        <TableHead className="text-right">Actions</TableHead>
+                        <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-white">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1261,26 +1742,99 @@ export default function LoadOperation() {
               </>
             )}
 
-            {!recordsQuery.isLoading && recordsItems.length > 0 && (
-              <div className="flex items-center justify-between border rounded-md px-4 py-3 text-xs text-gray-500">
-                <span>
-                  {recordsTotal > 0
-                    ? `Showing ${recordsOffset + 1}–${Math.min(recordsOffset + recordsItems.length, recordsTotal)} of ${recordsTotal.toLocaleString()} slips`
-                    : "No slips"}
-                </span>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" disabled={recordsPage <= 1}
-                    onClick={() => setRecordsPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                  <Button variant="outline" size="sm" disabled={!recordsHasMore}
-                    onClick={() => setRecordsPage((p) => p + 1)}>Next</Button>
+            {!recordsQuery.isLoading && recordsItems.length > 0 && (() => {
+              const recordsPageCount = Math.max(1, Math.ceil(recordsTotal / RECORDS_PAGE_SIZE));
+              const recordsPageIndex = recordsPage - 1; // buildPageList/DataTablePagination are 0-based
+              return (
+                <div className="grid grid-cols-3 items-center gap-2 border rounded-md px-4 py-3 text-xs text-gray-500">
+                  <span>
+                    {recordsTotal > 0
+                      ? `Showing ${recordsOffset + 1}–${Math.min(recordsOffset + recordsItems.length, recordsTotal)} of ${recordsTotal.toLocaleString()} slips`
+                      : "No slips"}
+                  </span>
+                  {/* Same numbered-page-button pattern (buildPageList) every other table on this
+                      site uses, centered in the footer — Prev/Next alone weren't a great fit once
+                      there was more than a couple of pages of slips. */}
+                  <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
+                    <Button variant="outline" size="sm" className="h-8 w-8 rounded-xl p-0" disabled={recordsPage <= 1}
+                      onClick={() => setRecordsPage((p) => Math.max(1, p - 1))} aria-label="Previous page">
+                      <ChevronLeft className="h-4 w-4" />
+                    </Button>
+                    {buildPageList(recordsPageIndex, recordsPageCount).map((pg, i) =>
+                      pg === "gap" ? (
+                        <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-sm text-gray-400">…</span>
+                      ) : (
+                        <Button
+                          key={pg}
+                          variant={pg === recordsPageIndex ? "default" : "outline"}
+                          size="sm"
+                          className={`h-8 min-w-8 rounded-xl px-2 tabular-nums ${pg === recordsPageIndex ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
+                          onClick={() => setRecordsPage(pg + 1)}
+                          aria-label={`Page ${pg + 1}`}
+                          aria-current={pg === recordsPageIndex ? "page" : undefined}
+                        >
+                          {pg + 1}
+                        </Button>
+                      ),
+                    )}
+                    <Button variant="outline" size="sm" className="h-8 w-8 rounded-xl p-0" disabled={!recordsHasMore}
+                      onClick={() => setRecordsPage((p) => p + 1)} aria-label="Next page">
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                  </nav>
+                  <span />
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </>
         )}
 
+        {/* A specific order is already being fetched (opened from the landing list, or the
+            silent last-order resume on page load) — a skeleton of Stage B's own shape instead of
+            a bare spinner on blank space, so the page reads as "already here, filling in" rather
+            than blank-then-sudden-layout. Without this at all, clicking a list row flashed the
+            full "search for an order" screen for however long the fetch took, even though the
+            user never wanted to search at all — they'd already picked the exact order. */}
+        {view === "create" && !slip && fetchSlipMutation.isPending && (
+          <div className="space-y-4 animate-pulse">
+            <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+              <div className="flex flex-col gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0 space-y-2">
+                  <div className="h-4 w-40 rounded bg-gray-200" />
+                  <div className="h-3 w-56 rounded bg-gray-100" />
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="h-8 w-24 rounded-full bg-gray-100" />
+                  <div className="h-8 w-24 rounded-full bg-gray-100" />
+                  <div className="h-9 w-24 rounded-lg bg-gray-100" />
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[38%_0.75rem_1fr]">
+              <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
+              <div className="hidden lg:block" />
+              <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
+            </div>
+            <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+              <div className="flex items-center gap-2 border-b border-gray-100 px-4 sm:px-5 py-3.5">
+                <div className="h-4 w-32 rounded bg-gray-200" />
+              </div>
+              <div className="divide-y divide-gray-100">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="flex items-center gap-4 px-4 sm:px-5 py-3">
+                    <div className="h-3.5 flex-1 rounded bg-gray-100" />
+                    <div className="h-3.5 w-14 rounded bg-gray-100" />
+                    <div className="h-3.5 w-14 rounded bg-gray-100" />
+                    <div className="h-3.5 w-14 rounded bg-gray-100" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── Stage A: find the order ─────────────────────────────────────── */}
-        {view === "create" && !slip && (
+        {view === "create" && !slip && !fetchSlipMutation.isPending && (
           // No overflow-hidden — same reason as the vehicle-search card below (Stage B): the
           // order-search suggestions dropdown is absolutely positioned and needs to render past
           // this card's bottom edge, not get clipped by it. Safe here with no rounding
@@ -1552,96 +2106,168 @@ export default function LoadOperation() {
             "no vehicle yet" placeholder that used to sit here is gone; this page simply doesn't
             mount until then. ──────────────────────────────────────────────────────────────── */}
         {view === "create" && slip && isVehicleClaimed && (
-          <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-4 items-start">
-            {/* Left: slip summary + vehicle link */}
-            <div className="space-y-4">
+          <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+              {/* Kiosk rotate — same floating button Order Scan/Unloading use, for a screen
+                  physically mounted at an angle next to the loading bay. Fixed positioning
+                  inside the (transform:rotate) wrapper above keeps it pinned to a natural
+                  on-screen corner from the viewer's rotated perspective. */}
+              <button
+                onClick={rotateNext}
+                className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+                title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
+              >
+                <RotateCw className="h-5 w-5" />
+              </button>
               {/* No overflow-hidden here — the vehicle-search dropdown below is absolutely
                   positioned and needs to be able to render past this card's edge; clipping it
                   made the suggestions invisible even though the search itself worked fine.
                   rounded-t-xl on the header strip below keeps the top corners clean without it. */}
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-                <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100 bg-[#001d6e]/5 rounded-t-xl">
-                  <div className="min-w-0">
-                    <div className="text-lg font-bold text-[#001d6e] truncate">#{slip.orderNumber}</div>
-                    <div className="text-xs text-gray-500 truncate">
-                      {slip.partyName}{slip.plant ? ` · ${slip.plant}` : ""}
-                      {slip.orderDate ? ` · ${new Date(slip.orderDate).toLocaleDateString("en-IN")}` : ""}
+                <div className="flex flex-col gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 bg-[#001d6e]/5 rounded-t-xl sm:flex-row sm:items-center sm:justify-between">
+                  {/* Slip identity — order#/party on one line, then plant (Plant Management's own
+                      color, same PlantBadge every other page uses), date, volume and the linked
+                      vehicle as a proper row of badges/text underneath, sized to actually be
+                      readable at a glance instead of one tiny catch-all line. */}
+                  <div className="min-w-0 space-y-1.5">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                      <span className="text-base font-bold text-[#001d6e] truncate">#{slip.orderNumber}</span>
+                      <span className="text-sm text-gray-600 truncate">{slip.partyName}</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {slip.plant && <PlantBadge plant={slip.plant} />}
+                      {slip.orderDate && (
+                        <span className="text-sm font-semibold text-gray-700">
+                          {new Date(slip.orderDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+                        </span>
+                      )}
+                      <span className="text-xs text-gray-400">{items.length} item{items.length === 1 ? "" : "s"}</span>
+                      <span className="text-xs text-gray-400">Qty {slip.totalQuantity ?? "—"}</span>
+                      {/* Loaded volume vs. the order's own required volume — same figure the
+                          removed Items/Total Qty/Volume stat card showed. Red once the order's
+                          own volume would overflow the vehicle's capacity (isOverCapacity),
+                          regardless of how much is loaded so far. */}
+                      {slip.totalVolume && (
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-sm font-bold ${
+                            isOverCapacity ? "bg-red-100 text-red-700" : "bg-indigo-100 text-indigo-700"
+                          }`}
+                          title={`${loadedVolume} loaded of ${slip.totalVolume} required`}
+                        >
+                          {loadedVolume}<span className="opacity-50">/</span>{slip.totalVolume}
+                        </span>
+                      )}
+                      {/* The vehicle's own capacity — a separate figure from the order's
+                          required volume above, so the two are never read as one number. */}
+                      {slip.vehicleVolume != null && (
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-sm font-bold ${
+                            isOverCapacity ? "bg-red-100 text-red-700" : "bg-sky-100 text-sky-700"
+                          }`}
+                          title="Vehicle capacity"
+                        >
+                          Cap {slip.vehicleVolume}
+                        </span>
+                      )}
+                      {slip.vehicleNumber && (
+                        <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
+                          {slip.vehicleNumber}{slip.rtoNumber ? ` · ${slip.rtoNumber}` : ""}
+                        </span>
+                      )}
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <Button size="sm" variant="ghost" onClick={resetToSearch} className="text-gray-500 hover:text-gray-700">
-                      <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> New
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={backToList} className="text-gray-500 hover:text-gray-700">
+
+                  {/* Actions — Back to List is the primary way out of this page, so it gets a
+                      visibly bigger, outlined treatment rather than reading as just another
+                      small pill alongside Change Vehicle/Complete. */}
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-2">
+                      <Progress value={itemPct} className="w-20 h-1.5" />
+                      <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{itemTotals.loaded}/{itemTotals.expected} loaded</span>
+                    </div>
+                    {/* STV — same per-plant picker Order Scan/Unloading have. Amber when nothing
+                        is picked (scanning is blocked until it is — see handleItemBarcode's
+                        "Select an STV before scanning" toast) so it reads as needing attention. */}
+                    {canWrite && !locked && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
+                        {stvs.length > 0 ? (
+                          <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
+                            <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
+                              selectedStv
+                                ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
+                                : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+                            }`}>
+                              <SelectValue placeholder="Select STV…" />
+                            </SelectTrigger>
+                            <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
+                              <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                              {stvs.map((st) => (
+                                <SelectItem key={st} value={st}>{st}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : !stvsQuery.isLoading && (
+                          <span className="rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
+                            No STV — create one in Plant Settings
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {canWrite && !locked && canEditVehicle && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 rounded-full px-3 text-xs"
+                        onClick={() => setVehiclePanelOpen((v) => !v)}
+                      >
+                        <Truck className="mr-1.5 h-3.5 w-3.5" /> Change Vehicle
+                      </Button>
+                    )}
+                    {canComplete && !locked && (
+                      <Button
+                        size="sm"
+                        className="h-8 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
+                        disabled={completeMutation.isPending}
+                        onClick={() => completeMutation.mutate()}
+                      >
+                        {completeMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                        Complete
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={backToList}
+                      className="h-9 px-4 text-sm font-semibold border-[#001d6e]/30 text-[#001d6e] hover:bg-[#001d6e]/5"
+                    >
                       Back to List
                     </Button>
                   </div>
                 </div>
 
                 {locked && (
-                  <div className="flex items-center gap-2.5 px-4 sm:px-5 py-3 bg-[#001d6e]/5 border-b border-gray-100">
-                    <Lock className="h-4 w-4 shrink-0 text-[#001d6e]" />
-                    <div className="text-sm text-[#001d6e]">
+                  <div className="flex items-center gap-2 px-3 sm:px-4 py-1.5 bg-[#001d6e]/5 border-b border-gray-100">
+                    <Lock className="h-3.5 w-3.5 shrink-0 text-[#001d6e]" />
+                    <div className="text-xs text-[#001d6e]">
                       Load completed {slip.loadingCompletedAt ? new Date(slip.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""}
                     </div>
                   </div>
                 )}
 
-                <div className={`grid ${statColumnCount === 5 ? "grid-cols-5" : statColumnCount === 4 ? "grid-cols-4" : "grid-cols-3"} divide-x divide-gray-100 border-b border-gray-100 text-center`}>
-                  <div className="px-2 py-3">
-                    <div className="text-lg font-extrabold text-gray-900">{items.length}</div>
-                    <div className="text-[10px] font-medium text-gray-500 mt-0.5">Items</div>
-                  </div>
-                  <div className="px-2 py-3">
-                    <div className="text-lg font-extrabold text-gray-900">{slip.totalQuantity ?? "-"}</div>
-                    <div className="text-[10px] font-medium text-gray-500 mt-0.5">Total Qty</div>
-                  </div>
-                  {slip.vehicleNumber && (
-                    <div className="px-2 py-3">
-                      <div className="text-lg font-extrabold text-gray-900">{loadedVolume}</div>
-                      <div className="text-[10px] font-medium text-gray-500 mt-0.5">Loaded Volume</div>
-                    </div>
-                  )}
-                  <div className="px-2 py-3">
-                    <div className={`text-lg font-extrabold ${isOverCapacity ? "text-red-600" : "text-gray-900"}`}>{slip.totalVolume ?? "-"}</div>
-                    <div className="text-[10px] font-medium text-gray-500 mt-0.5">Order Volume</div>
-                  </div>
-                  {slip.vehicleVolume != null && (
-                    <div className="px-2 py-3">
-                      <div className={`text-lg font-extrabold ${isOverCapacity ? "text-red-600" : "text-gray-900"}`}>{slip.vehicleVolume}</div>
-                      <div className="text-[10px] font-medium text-gray-500 mt-0.5">Vehicle Capacity</div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Stage B only mounts once isVehicleClaimed is true (see Stage B(pre) above), so
-                    this is always the "linked" state — the "on this order from Notion — confirm
-                    below" amber state used to live here, but that case is now handled by Stage
-                    B(pre)'s dialog before Stage B ever renders. isOverCapacity below is a
-                    separate, unrelated warning (order volume vs. vehicle capacity) that still
-                    applies regardless of how the vehicle got linked. */}
-                {isOverCapacity && (
-                  <div className="flex items-center gap-2.5 px-4 sm:px-5 py-2.5 bg-red-50 border-b border-red-100 text-sm text-red-700">
-                    <AlertTriangle className="h-4 w-4 shrink-0" />
-                    Order needs {slip.totalVolume} cu ft but {slip.vehicleNumber} only holds {slip.vehicleVolume} cu ft.
+                {/* The vehicle itself is already shown up in the header's identity line (the
+                    emerald "vehicle · RTO" badge) — this used to repeat it in its own banner.
+                    Only the one piece that badge can't carry — read-only access — still needs a
+                    line of its own. */}
+                {slip.vehicleNumber && !canEditVehicle && (
+                  <div className="px-4 sm:px-5 py-1.5 border-b border-gray-100 text-xs text-gray-500">
+                    Assigned by another user — you can view this but can't change it.
                   </div>
                 )}
 
-                {slip.vehicleNumber && (
-                  <div className="flex items-center gap-2.5 px-4 sm:px-5 py-3 border-b bg-emerald-50 border-emerald-100">
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
-                    <div className="text-sm text-emerald-800">
-                      <span className="font-semibold">{slip.vehicleNumber}</span> linked
-                      {slip.rtoNumber ? <> — RTO <span className="font-semibold">{slip.rtoNumber}</span></> : null}
-                      {!canEditVehicle && (
-                        <div className="mt-0.5 text-xs text-emerald-700/70">Assigned by another user — you can view this but can't change it.</div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {canWrite && !locked && canEditVehicle && (
-                  <div className="px-4 sm:px-5 py-4">
+                {/* Vehicle search/assign — collapsed behind the "Change Vehicle" button above
+                    instead of always open; same search/suggestions/Link content as before. */}
+                {canWrite && !locked && canEditVehicle && vehiclePanelOpen && (
+                  <div className="px-3 sm:px-4 py-2 border-b border-gray-100">
                     <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
                       <Truck className="h-3.5 w-3.5" /> Change vehicle
                     </label>
@@ -1712,6 +2338,103 @@ export default function LoadOperation() {
                 )}
               </div>
 
+          {/* Load Totals | Scan Items — same side-by-side layout as Order Scan's own Order
+              Totals + scanner controls row, instead of stacking everything in one narrow rail.
+              Two resizable columns on lg+ (the --totals-col variable drives the split so the
+              drag handle can change it without Tailwind needing a static class); below lg the
+              columns stack and the handle is hidden. Only resizable when Scan Items actually
+              renders (canWrite && !locked) — with nothing to drag against, it just falls back
+              to a single column. */}
+          <div
+            ref={totalsRowRef}
+            style={{ "--totals-col": `${totalsPct}%` } as React.CSSProperties}
+            className={`grid items-start gap-3 ${
+              // bigView (rotated kiosk, or a naturally portrait screen) always stacks — Tailwind's
+              // lg: breakpoint keys off the real (unrotated) window width, not the rotated
+              // container's effective width, so relying on it alone would crush the desktop grid
+              // into a narrow rotated band. Same fix Unloading's own kiosk view uses.
+              canWrite && !locked && !bigView ? "lg:grid-cols-[var(--totals-col)_0.75rem_minmax(0,1fr)] lg:gap-0" : "lg:grid-cols-1"
+            }`}
+          >
+            <div className="flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
+              <div className="flex items-baseline justify-between">
+                <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Load Totals</p>
+                {itemTotals.expected <= 0 ? (
+                  <p className="text-sm font-medium text-gray-400">—</p>
+                ) : itemPct >= 100 ? (
+                  <p className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+                    <CheckCircle2 className="h-4 w-4" /> Complete
+                  </p>
+                ) : (
+                  <p className="text-sm font-medium text-gray-400">{itemPct}% complete</p>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {([
+                  { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                  { key: "done" as const, label: "Loaded", value: itemTotals.loaded, plt: itemTotals.pltLoaded, dot: "bg-emerald-500", text: "text-emerald-600" },
+                  { key: "remaining" as const, label: "Remaining", value: itemTotals.remaining, plt: itemTotals.pltRemaining, dot: "bg-red-500", text: "text-red-600" },
+                  { key: "extra" as const, label: "Extra", value: itemTotals.extra, plt: itemTotals.pltExtra, dot: "bg-orange-500", text: itemTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                ]).map((s) => {
+                  const isActive = itemStatusFilter === s.key;
+                  return (
+                    <button
+                      key={s.label}
+                      type="button"
+                      onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
+                      aria-pressed={isActive}
+                      title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                      className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                        isActive ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30" : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                      }`}
+                    >
+                      <div className="flex items-center justify-center gap-1.5">
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                      </div>
+                      <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                      <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="space-y-1">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                  <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${itemPct}%` }} />
+                </div>
+                <div className="flex justify-between text-[10px] font-medium text-gray-400">
+                  <span>{itemTotals.loaded} loaded</span>
+                  <span>{itemTotals.remaining} remaining</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Drag handle — sits in the 0.75rem gutter column and trades width between the two
+                cards. Keyboard-accessible via arrow keys since a pointer drag isn't reachable
+                without a mouse. Only rendered alongside Scan Items — nothing to resize against
+                otherwise. */}
+            {canWrite && !locked && !bigView && (
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize totals and scanner columns"
+                aria-valuenow={Math.round(totalsPct)}
+                aria-valuemin={LOADING_TOTALS_PCT_MIN}
+                aria-valuemax={LOADING_TOTALS_PCT_MAX}
+                tabIndex={0}
+                onPointerDown={startTotalsResize}
+                onDoubleClick={() => setTotalsPct(50)}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowLeft") { e.preventDefault(); setTotalsPct((p) => Math.max(LOADING_TOTALS_PCT_MIN, p - 2)); }
+                  if (e.key === "ArrowRight") { e.preventDefault(); setTotalsPct((p) => Math.min(LOADING_TOTALS_PCT_MAX, p + 2)); }
+                }}
+                title="Drag to resize · double-click to reset"
+                className="group hidden cursor-col-resize touch-none select-none items-center justify-center rounded focus:outline-none focus:ring-2 focus:ring-[#001d6e]/40 lg:flex"
+              >
+                <span className="h-10 w-[3px] rounded-full bg-gray-200 transition-colors group-hover:bg-[#001d6e]" />
+              </div>
+            )}
+
               {/* Scan items — hidden once locked; a vehicle is guaranteed set by the time Stage B
                   ever mounts (see Stage B(pre) above), so there's no "not linked yet" case to
                   guard here anymore. Same Camera/Manual pattern as order search. */}
@@ -1720,6 +2443,19 @@ export default function LoadOperation() {
                   <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
                     <span className="text-sm font-semibold text-gray-900">Scan Items</span>
+                    {/* Deliberately loud/solid (not an outline pill like the other header
+                        buttons) — opens the dedicated Add Extra popup, the ONLY way to log an
+                        item not on this slip or more than what's remaining (a regular scan
+                        refuses it and points here instead), so it needs to read as distinct from
+                        a routine action. */}
+                    <button
+                      type="button"
+                      onClick={() => setExtraDialogOpen(true)}
+                      title="Add an item not on this slip, or more than what's remaining"
+                      className="ml-auto flex shrink-0 items-center gap-1.5 rounded-full bg-amber-500 px-3.5 py-2 text-sm font-bold text-white shadow-sm transition-colors hover:bg-amber-600"
+                    >
+                      <PackagePlus className="h-4 w-4" /> Add Extra
+                    </button>
                   </div>
                   <div className="px-4 sm:px-5 py-4 space-y-3">
                     <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
@@ -1771,135 +2507,52 @@ export default function LoadOperation() {
                   </div>
                 </div>
               )}
+          </div>
 
-              {canComplete && !locked && (
-                <Button
-                  className="w-full h-10 bg-emerald-600 text-white hover:bg-emerald-700"
-                  disabled={completeMutation.isPending}
-                  onClick={() => completeMutation.mutate()}
-                >
-                  {completeMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-1.5 h-4 w-4" />}
-                  {allComplete ? "Complete Load" : "Complete Load (items still short)"}
-                </Button>
-              )}
-            </div>
-
-            {/* Right: items table with live load progress */}
-            <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-              <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
+          {/* Items table with live load progress — full width below the totals/scanner row. */}
+          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+              <div className="flex flex-wrap items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                 <Package className="h-4 w-4 text-[#001d6e]" />
                 <span className="text-sm font-semibold text-gray-900">Items on this order</span>
-                <span className="text-xs text-gray-400">({items.length})</span>
-                {allComplete && <span className="ml-auto rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">ALL LOADED</span>}
+                <span className="text-xs text-gray-400">
+                  {itemStatusFilter || itemSearchText ? `(${filteredItems.length} of ${items.length})` : `(${items.length})`}
+                </span>
+                <div className="ml-auto flex items-center gap-2">
+                  {allComplete && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">ALL LOADED</span>}
+                  {items.length > 0 && (
+                    <button
+                      onClick={downloadLoadingItemsCsv}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                    >
+                      <Download className="h-3.5 w-3.5" /> Export
+                    </button>
+                  )}
+                  <CollapsibleSearch value={itemSearchText} onChange={setItemSearchText} placeholder="Search items…" />
+                </div>
               </div>
-              <div className="overflow-x-auto overflow-y-auto max-h-[65vh]">
-                <table className="w-full min-w-full caption-bottom border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-[#001d6e]">
-                      <th className="sticky top-0 z-10 w-8 bg-[#001d6e] border-r border-[#1a3a9c] px-2 py-2.5"></th>
-                      <th className="sticky top-0 z-10 bg-[#001d6e] whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">SKU</th>
-                      <th className="sticky top-0 z-10 bg-[#001d6e] whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Item Name</th>
-                      <th className="sticky top-0 z-10 bg-[#001d6e] whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Expected</th>
-                      <th className="sticky top-0 z-10 bg-[#001d6e] whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Loaded</th>
-                      <th className="sticky top-0 z-10 bg-[#001d6e] whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Remaining</th>
-                      <th className="sticky top-0 z-10 bg-[#001d6e] whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Stock</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.length === 0 ? (
-                      <tr><td colSpan={7} className="h-24 text-center text-sm text-muted-foreground">No items on this slip.</td></tr>
-                    ) : (
-                      items.map((it, i) => {
-                        const outOfStock = (it.stockAvailable ?? 0) <= 0;
-                        const isExpanded = !!it.barcode && expandedItemBarcode === it.barcode;
-                        const itemEvents = (orderLoadHistoryQuery.data?.items ?? []).filter((ev) => normalize(ev.barcode) === normalize(it.barcode));
-                        return (
-                          <>
-                            <tr
-                              key={it.id}
-                              onClick={() => it.barcode && setExpandedItemBarcode((cur) => (cur === it.barcode ? null : it.barcode))}
-                              className={`transition-colors ${it.barcode ? "cursor-pointer hover:bg-[#001d6e]/[0.04]" : ""} ${isExpanded ? "bg-[#001d6e]/[0.04]" : it.isComplete ? "bg-emerald-50/50" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
-                            >
-                              <td className="border-r border-b border-gray-200 px-2 py-2 text-center">
-                                {it.barcode && (
-                                  <ChevronDown className={`mx-auto h-3.5 w-3.5 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
-                                )}
-                              </td>
-                              <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-500">{it.barcode || "—"}</td>
-                              <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">
-                                {it.itemName ?? "—"}
-                                {outOfStock && <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 text-[9px] font-bold text-red-700">NO STOCK</span>}
-                                {it.isComplete && <CheckCircle2 className="ml-1.5 inline h-3.5 w-3.5 text-emerald-600" />}
-                              </td>
-                              <td className="border-r border-b border-gray-200 px-3 py-2 text-right text-gray-700">{it.expected}</td>
-                              <td className="border-r border-b border-gray-200 px-3 py-2 text-right font-medium text-gray-900">{it.loaded}</td>
-                              <td className="border-r border-b border-gray-200 px-3 py-2 text-right text-gray-700">{it.remaining}</td>
-                              <td className={`border-b border-gray-200 px-3 py-2 text-right ${outOfStock ? "font-semibold text-red-600" : "text-gray-500"}`}>{it.stockAvailable ?? "—"}</td>
-                            </tr>
-                            {isExpanded && (
-                              <tr key={`${it.id}-history`}>
-                                <td colSpan={7} className="border-b border-gray-200 bg-gray-50 p-3">
-                                  {orderLoadHistoryQuery.isLoading ? (
-                                    <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
-                                  ) : itemEvents.length === 0 ? (
-                                    <p className="py-4 text-center text-xs text-gray-400">No scan history for this item yet.</p>
-                                  ) : (
-                                    <div className="max-h-60 overflow-y-auto overflow-x-auto border border-gray-200 bg-white">
-                                      <table className="w-full min-w-[520px] table-fixed border-collapse text-xs">
-                                        <thead>
-                                          <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
-                                            <th className="w-[170px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
-                                            <th className="border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
-                                            <th className="w-16 border-r border-gray-200 px-2 py-2 text-right font-semibold">Qty</th>
-                                            <th className="w-20 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
-                                            {canResetLoad && <th className="w-14 px-2 py-2 text-right font-semibold">Void</th>}
-                                          </tr>
-                                        </thead>
-                                        <tbody>
-                                          {itemEvents.map((ev, idx) => (
-                                            <tr key={ev.id} className={`border-b border-gray-100 ${ev.voided ? "opacity-60" : "hover:bg-gray-50"} ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
-                                              <td className="whitespace-nowrap border-r border-gray-100 px-2 py-2 text-gray-600">{new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
-                                              <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
-                                              <td className="border-r border-gray-100 px-2 py-2 text-right">
-                                                <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
-                                                  {ev.isExtra ? "+" : ""}{ev.totalQty}
-                                                </span>
-                                              </td>
-                                              <td className="truncate border-r border-gray-100 px-2 py-2 text-[11px]">
-                                                {ev.voided ? (
-                                                  <span className="font-medium text-red-500">Voided</span>
-                                                ) : ev.isExtra ? (
-                                                  <span className="font-semibold uppercase text-amber-700">Extra</span>
-                                                ) : (
-                                                  <span className="text-gray-400">—</span>
-                                                )}
-                                              </td>
-                                              {canResetLoad && (
-                                                <td className="px-2 py-2 text-right">
-                                                  {!ev.voided && (
-                                                    <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-gray-400 hover:bg-red-50 hover:text-red-600"
-                                                      onClick={() => setVoidTarget(ev)} title="Void this scan">
-                                                      <Trash2 className="h-3.5 w-3.5" />
-                                                    </Button>
-                                                  )}
-                                                </td>
-                                              )}
-                                            </tr>
-                                          ))}
-                                        </tbody>
-                                      </table>
-                                    </div>
-                                  )}
-                                </td>
-                              </tr>
-                            )}
-                          </>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
+              <DataTable<ProformaItem>
+                containerClassName="rounded-none border-0"
+                headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+                columns={loadingItemColumns}
+                data={filteredItems}
+                getRowId={(row) => row.barcode ?? `row-${row.id}`}
+                enableZebraStripes
+                rowClassName={(row) => (row.isComplete ? "bg-emerald-50/50" : undefined)}
+                renderExpandedRow={renderLoadingItemHistoryPanel}
+                isRowExpandable={(row) => !!row.barcode}
+                expandedRowId={expandedItemBarcode}
+                onRowClick={(row) => row.barcode && setExpandedItemBarcode((cur) => (cur === row.barcode ? null : row.barcode!))}
+                emptyState="No items on this slip."
+                noResultsState="No items match this filter."
+                hasActiveFilters={!!itemStatusFilter || !!itemSearchText}
+                sortMode="client"
+                enableTotalsRow
+                totalsLabelColumnId="item"
+                enableColumnResizing
+                isStickyHeader
+                maxHeight={kioskTableMaxHeight}
+                showMobileSwipeHint
+              />
             </div>
           </div>
         )}
@@ -1911,24 +2564,30 @@ export default function LoadOperation() {
           scanning; no confirm needed. Rapid scans replace it and reset the 5s timer. ── */}
       {autoFeedback && (
         <div className="fixed inset-x-0 top-16 z-[90] flex justify-center px-4 pointer-events-none" role="status">
-          <div className="w-[calc(100%-2rem)] max-w-2xl sm:max-w-3xl min-h-[20rem] flex flex-col bg-white p-8 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2">
+          <div className="w-[calc(100%-2rem)] max-w-3xl sm:max-w-4xl min-h-[24rem] flex flex-col bg-white p-8 shadow-xl ring-1 ring-gray-200 animate-in fade-in slide-in-from-top-2">
             <div className={`flex items-center gap-2.5 ${autoFeedback.isExtra ? "text-amber-700" : "text-emerald-700"}`}>
               <Zap className="h-7 w-7 shrink-0" />
               <span className="text-2xl font-semibold">{autoFeedback.isExtra ? "Auto scanned (extra)" : "Auto scanned"}</span>
             </div>
             <div className="flex flex-1 gap-5 items-start pt-4">
-              <img
-                src={`/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`}
-                alt=""
-                className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
-                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-              />
+              {/* Rendered conditionally on state (not left in the DOM with display:none via
+                  onError) so the text column actually reflows to take the freed width when the
+                  product has no cached image, instead of leaving a blank gap where it was. */}
+              {!autoFeedbackImageFailed && (
+                <img
+                  key={autoFeedback.barcode}
+                  src={`/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`}
+                  alt=""
+                  className="h-64 w-64 shrink-0 object-contain bg-gray-50 border border-gray-100"
+                  onError={() => setAutoFeedbackImageFailed(true)}
+                />
+              )}
               <div className="flex-1 min-w-0 text-lg">
-                <p className="font-semibold text-gray-900 break-words text-xl">{autoFeedback.name}</p>
-                <p className="mt-1.5 font-mono text-base text-gray-400 break-all">
+                <p className="font-semibold text-gray-900 break-words text-2xl">{autoFeedback.name}</p>
+                <p className="mt-2 font-mono text-lg text-gray-400 break-all">
                   {autoFeedback.barcode}{autoFeedback.sapCode && ` · SAP: ${autoFeedback.sapCode}`}
                 </p>
-                <p className="mt-4 text-2xl">
+                <p className="mt-5 text-3xl">
                   <span className={`font-bold ${autoFeedback.isExtra ? "text-amber-600" : "text-emerald-600"}`}>+{autoFeedback.scannedQty}</span>
                   <span className="text-gray-500"> scanned</span>
                   {autoFeedback.remaining > 0 && (
@@ -2133,15 +2792,16 @@ export default function LoadOperation() {
         </DialogContent>
       </Dialog>
 
-      {/* Confirm dialog — loose/partial/extra scans, and anything not on this slip at all */}
+      {/* Confirm dialog — loose/partial regular scans. Extras never reach this — they go through
+          their own dedicated Add Extra popup below. portalRotate: Radix renders this into
+          document.body, outside the rotated kiosk container, so it needs the same turn applied
+          by hand or it opens upright while everything behind it is rotated. */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className={`max-w-sm ${portalRotate}`}>
           <DialogHeader>
             <DialogTitle>{pending?.item?.itemName ?? pending?.barcode ?? "Confirm scan"}</DialogTitle>
             <DialogDescription>
-              {pending?.item
-                ? `Expected ${pending.item.expected} · Loaded ${pending.item.loaded} · Remaining ${pending.item.remaining}`
-                : "Not on this order — will be logged as an extra."}
+              Expected {pending?.item?.expected} · Loaded {pending?.item?.loaded} · Remaining {pending?.item?.remaining}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -2181,12 +2841,24 @@ export default function LoadOperation() {
             {pending && (pending.item?.stockAvailable ?? Infinity) < dialogQty && (
               <p className="text-xs text-red-600">Only {pending.item?.stockAvailable} in stock — reduce the quantity.</p>
             )}
+            {/* Can never submit a qty beyond what's remaining — same rule the server enforces
+                (EXTRA_NOT_ALLOWED in loading.ts's /scan); Cancel and use "Add Extra" for the
+                amount beyond this. */}
+            {pending && pending.item && dialogQty > pending.item.remaining && (
+              <p className="text-xs text-amber-600">
+                Only {pending.item.remaining} remaining — the rest would be extra. Cancel and use "Add Extra" instead.
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setPending(null)}>Cancel</Button>
             <Button
               className="bg-[#001d6e] text-white hover:bg-[#001552]"
-              disabled={dialogQty <= 0 || scanItemMutation.isPending || (pending?.item?.stockAvailable ?? Infinity) < dialogQty}
+              disabled={
+                dialogQty <= 0 || scanItemMutation.isPending
+                || (pending?.item?.stockAvailable ?? Infinity) < dialogQty
+                || (!!pending && !!pending.item && dialogQty > pending.item.remaining)
+              }
               onClick={() => {
                 if (!pending) return;
                 scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty }, {
@@ -2198,6 +2870,201 @@ export default function LoadOperation() {
               Confirm
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Extra — the only way to log an item not on this slip, or more than what's
+          remaining for one that is (a regular scan refuses both — see EXTRA_NOT_ALLOWED in
+          loading.ts's /scan). Search the whole product catalog by name/barcode/SAP (same
+          catalog + pattern ExchangeProductDialog uses), confirm by sight via the product's own
+          image, then a qty/pallets pair defaulting to one full pallet. */}
+      <Dialog open={extraDialogOpen} onOpenChange={(open) => { if (!open) resetExtraDialog(); }}>
+        {/* Same two-column shell Order Scan's own scan-confirmation dialog uses — a real product
+            image on the left (only once one's picked; the search step has nothing to show yet),
+            everything else on the right — rather than a thumbnail strip above stacked fields. */}
+        {/* overflow-x-hidden alongside overflow-y-auto is deliberate — leaving x unset while y
+            is constrained computes x to auto per spec, which is exactly what put a horizontal
+            scrollbar under the search view (same fix as the page-level scroll container's own
+            comment about this elsewhere in this file). */}
+        <DialogContent className={`overflow-x-hidden overflow-y-auto p-0 ${extraTarget ? "sm:max-w-3xl" : "max-w-xl"} ${portalRotate}`}>
+          <div className={extraTarget ? "flex flex-col sm:flex-row" : ""}>
+            {extraTarget && (
+              <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-56 sm:border-b-0 sm:border-r">
+                <img
+                  key={extraTarget.id}
+                  src={`/api/products/image-by-name?name=${encodeURIComponent(extraTarget.name)}`}
+                  alt=""
+                  className="max-h-56 w-full object-contain sm:max-h-64"
+                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden"; }}
+                />
+              </div>
+            )}
+            <div className="min-w-0 flex-1 p-6">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2 text-amber-700">
+                  <PackagePlus className="h-4 w-4" /> Add Extra
+                </DialogTitle>
+                {!extraTarget && (
+                  <DialogDescription>
+                    Search for the item — this always logs as extra, whether or not it's on this order.
+                  </DialogDescription>
+                )}
+              </DialogHeader>
+
+              {extraTarget ? (() => {
+                // gjPlt/mpPlt (the real per-state pallet size), not itemsPerPallet — that field
+                // is "Packets" in the Product Master UI, a different concept.
+                const extraIpp = extraProductPalletSize(extraTarget);
+                return (
+                <div className="space-y-4 pt-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-lg font-bold leading-snug text-gray-900">{extraTarget.name}</p>
+                    <button
+                      type="button"
+                      onClick={() => setExtraTarget(null)}
+                      className="shrink-0 text-xs font-medium text-gray-400 underline decoration-dotted hover:text-gray-600"
+                    >
+                      Change
+                    </button>
+                  </div>
+                  <p className="font-mono text-sm text-gray-400">{extraTarget.barcode}</p>
+
+                  {/* Same info-box treatment Order Scan's own confirm dialog uses for SAP/pallet
+                      size, instead of small inline text. */}
+                  {(extraTarget.sapCode || extraIpp > 0) && (
+                    <div className="space-y-1 rounded-xl bg-gray-50 px-4 py-3 text-sm text-gray-600">
+                      {extraTarget.sapCode && <p>SAP: <span className="font-mono font-bold text-gray-700">{extraTarget.sapCode}</span></p>}
+                      {extraIpp > 0 && <p>Items per pallet: <strong>{extraIpp}</strong></p>}
+                    </div>
+                  )}
+
+                  {/* Same −/+ stepper boxes Order Scan's own confirm dialog uses for Qty/Pallets,
+                      instead of plain number inputs — easy to nudge by one box/pallet without
+                      having to type. */}
+                  <div className={`grid gap-3 ${extraIpp > 0 ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+                    <div className="space-y-1">
+                      <Label className="text-sm">Qty (boxes)</Label>
+                      <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-amber-500">
+                        <Button
+                          type="button" variant="ghost"
+                          className="h-12 w-11 shrink-0 rounded-none border-r border-gray-200 text-2xl font-bold text-gray-500 hover:bg-gray-100"
+                          onClick={() => changeExtraQty(String(Math.max(1, extraQty - 1)))}
+                          aria-label="Decrease quantity"
+                        >
+                          −
+                        </Button>
+                        <Input
+                          type="number" min={1}
+                          value={extraQty === 0 ? "" : extraQty}
+                          onChange={(e) => changeExtraQty(e.target.value)}
+                          className="h-12 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-xl font-bold focus-visible:ring-0 focus-visible:ring-offset-0"
+                        />
+                        <Button
+                          type="button" variant="ghost"
+                          className="h-12 w-11 shrink-0 rounded-none border-l border-gray-200 text-2xl font-bold text-gray-500 hover:bg-gray-100"
+                          onClick={() => changeExtraQty(String(extraQty + 1))}
+                          aria-label="Increase quantity"
+                        >
+                          +
+                        </Button>
+                      </div>
+                    </div>
+
+                    {extraIpp > 0 && (
+                      <div className="space-y-1">
+                        <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {extraIpp}/pallet</span></Label>
+                        <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-amber-300 bg-white focus-within:border-amber-500">
+                          <Button
+                            type="button" variant="ghost"
+                            className="h-12 w-11 shrink-0 rounded-none border-r border-amber-100 text-2xl font-bold text-amber-700 hover:bg-amber-50"
+                            onClick={() => changeExtraPallets(String(Math.max(0, Math.round(((parseFloat(extraPalletsInput) || 0) - 1) * 100) / 100)))}
+                            aria-label="Decrease pallets"
+                          >
+                            −
+                          </Button>
+                          <Input
+                            type="number" min={0} step="0.01"
+                            value={extraPalletsInput}
+                            onChange={(e) => changeExtraPallets(e.target.value)}
+                            className="h-12 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-xl font-bold text-amber-700 focus-visible:ring-0 focus-visible:ring-offset-0"
+                          />
+                          <Button
+                            type="button" variant="ghost"
+                            className="h-12 w-11 shrink-0 rounded-none border-l border-amber-100 text-2xl font-bold text-amber-700 hover:bg-amber-50"
+                            onClick={() => changeExtraPallets(String(Math.round(((parseFloat(extraPalletsInput) || 0) + 1) * 100) / 100))}
+                            aria-label="Increase pallets"
+                          >
+                            +
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                );
+              })() : (
+                <div className="space-y-1 pt-1">
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+                    <Input
+                      className="h-9 pl-8 text-sm"
+                      placeholder="Search item name, barcode or SAP code…"
+                      value={extraSearch}
+                      onChange={(e) => setExtraSearch(e.target.value)}
+                      autoFocus
+                    />
+                  </div>
+                  {allProductsQuery.isFetching && <p className="px-1 text-xs text-gray-400">Loading catalog…</p>}
+                  {/* scrollbar-none: the OS's own scrollbar (wide, classic-styled, with arrow
+                      buttons on this machine) was rendering past the rounded border no matter
+                      how it was resized — inconsistently, depending on how many rows there were
+                      to scroll. Hiding it outright is the only fix that holds regardless of
+                      result count; the list still scrolls fine by wheel/touch/drag without it. */}
+                  {extraSearch.trim() && !allProductsQuery.isFetching && (
+                    <div className="overflow-hidden rounded-md border">
+                      <div className="scrollbar-none max-h-56 divide-y overflow-y-auto">
+                        {extraSearchResults.length === 0 ? (
+                          <p className="px-3 py-3 text-xs text-gray-400">No matching item.</p>
+                        ) : (
+                          extraSearchResults.map((p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => pickExtraTarget(p)}
+                              className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-gray-50"
+                            >
+                              <img
+                                src={`/api/products/image-by-name?name=${encodeURIComponent(p.name)}`}
+                                alt=""
+                                className="h-9 w-9 shrink-0 rounded border bg-white object-contain"
+                                onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden"; }}
+                              />
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-medium text-gray-900">{p.name}</p>
+                                <p className="truncate font-mono text-xs text-gray-400">{p.barcode}{p.sapCode && ` · SAP ${p.sapCode}`}</p>
+                              </div>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <DialogFooter className="mt-5">
+                <Button variant="outline" onClick={resetExtraDialog} disabled={extraMutation.isPending}>Cancel</Button>
+                <Button
+                  className="bg-amber-600 text-white hover:bg-amber-700"
+                  disabled={!extraTarget || extraQty <= 0 || extraMutation.isPending}
+                  onClick={() => extraMutation.mutate()}
+                >
+                  {extraMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <PackagePlus className="mr-1.5 h-3.5 w-3.5" />}
+                  Add Extra
+                </Button>
+              </DialogFooter>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 
@@ -2234,7 +3101,7 @@ export default function LoadOperation() {
       {/* Void confirmation — a single scan event, same rule/effect as Scan History's own Void:
           stock reversed, kept in history marked Voided (never deleted). */}
       <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className={`max-w-sm ${portalRotate}`}>
           <DialogHeader>
             <DialogTitle>Void this scan?</DialogTitle>
           </DialogHeader>
@@ -2268,6 +3135,8 @@ export default function LoadOperation() {
       </Dialog>
 
       <ProductMasterMissingDialog message={productMasterMissingMessage} onClose={() => setProductMasterMissingMessage(null)} />
+      <ProductMasterMissingDialog message={barcodeNotInSystemMessage} onClose={() => setBarcodeNotInSystemMessage(null)} title="Barcode Not Found" />
+      <ProductMasterMissingDialog message={extraNotAllowedMessage} onClose={() => setExtraNotAllowedMessage(null)} title="Extra Not Allowed" />
     </div>
   );
 }

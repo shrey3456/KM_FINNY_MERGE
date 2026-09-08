@@ -483,6 +483,10 @@ export const loadingScanEvents = pgTable("loading_scan_events", {
   totalQty: integer("total_qty").default(0),
   isExtra: boolean("is_extra").default(false), // scanned beyond this item's proforma quantity
   plant: text("plant"),
+  // Sub-transfer voucher code (see plantStvs below) — same per-plant STV concept Order Scan and
+  // Unloading already record per event; picked once for the vehicle before scanning (see the
+  // STV selector in client/src/pages/Loading/LoadOperation.tsx), stored on every event.
+  stv: text("stv"),
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
   scannedByName: text("scanned_by_name"),
   scannedAt: timestamp("scanned_at").defaultNow(),
