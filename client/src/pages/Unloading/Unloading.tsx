@@ -598,8 +598,12 @@ export default function Unloading() {
   const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null; product: Product | null } | null>(null);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
-  const [dialogImageFailed, setDialogImageFailed] = useState(false);
-  useEffect(() => { setDialogImageFailed(false); }, [pending]);
+  // Tracks WHICH resolved name last failed to load, not a plain boolean — a boolean reset by a
+  // useEffect on [pending] left a one-render gap where a new dialog's very first paint still
+  // read the PREVIOUS item's "failed" flag (effects run after render, not before it), hiding an
+  // image that would have loaded fine. Comparing against the current name is race-free: a new
+  // name is never treated as failed until it specifically fails.
+  const [dialogImageFailed, setDialogImageFailed] = useState<string | null>(null);
   const dialogPlt = pending?.item?.itemsPerPallet ?? (pending?.product ? extraProductPalletSize(pending.product) : 0);
   const dialogResolvedImageName = pending?.item?.itemName ?? pending?.product?.name ?? pending?.barcode;
 
@@ -1740,14 +1744,21 @@ export default function Unloading() {
               layout as Order Scan's own confirm dialog (client/src/pages/Scanning/Scan.tsx). Under
               rotate-90, CSS-left maps to physical-top, so image-left reads as image-on-top. */}
           <div className="flex flex-col sm:flex-row">
-            {dialogResolvedImageName && !dialogImageFailed && (
+            {dialogResolvedImageName && dialogImageFailed !== dialogResolvedImageName && (
               <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
                 <img
                   key={dialogResolvedImageName}
-                  src={`/api/products/image-by-name?name=${encodeURIComponent(dialogResolvedImageName)}`}
+                  // pending.product's own id is stable across a rename — prefer it whenever
+                  // it's resolved (always true for "not in this batch"; a matched item has no
+                  // product id of its own yet, so it still falls back to the name lookup).
+                  src={
+                    pending?.product
+                      ? `/api/products/image-by-id?id=${pending.product.id}`
+                      : `/api/products/image-by-name?name=${encodeURIComponent(dialogResolvedImageName)}`
+                  }
                   alt=""
                   className="max-h-96 w-full object-contain sm:max-h-full"
-                  onError={() => setDialogImageFailed(true)}
+                  onError={() => setDialogImageFailed(dialogResolvedImageName)}
                 />
               </div>
             )}

@@ -5235,7 +5235,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
                   <img
                     key={osResolvedImageName}
-                    src={`/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`}
+                    // inventoryProduct's own id is stable across a rename — prefer it whenever
+                    // it's resolved; a matched CSV item has no product id of its own yet, so it
+                    // still falls back to the name lookup.
+                    src={
+                      osPending?.inventoryProduct
+                        ? `/api/products/image-by-id?id=${osPending.inventoryProduct.id}`
+                        : `/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`
+                    }
                     alt=""
                     className="max-h-96 w-full object-contain sm:max-h-full"
                     onError={() => setOsImageFailed(true)}

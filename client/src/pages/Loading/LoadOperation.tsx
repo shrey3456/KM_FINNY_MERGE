@@ -2892,7 +2892,7 @@ export default function LoadOperation() {
               <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-56 sm:border-b-0 sm:border-r">
                 <img
                   key={extraTarget.id}
-                  src={`/api/products/image-by-name?name=${encodeURIComponent(extraTarget.name)}`}
+                  src={`/api/products/image-by-id?id=${extraTarget.id}`}
                   alt=""
                   className="max-h-56 w-full object-contain sm:max-h-64"
                   onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden"; }}
@@ -3034,7 +3034,7 @@ export default function LoadOperation() {
                               className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-gray-50"
                             >
                               <img
-                                src={`/api/products/image-by-name?name=${encodeURIComponent(p.name)}`}
+                                src={`/api/products/image-by-id?id=${p.id}`}
                                 alt=""
                                 className="h-9 w-9 shrink-0 rounded border bg-white object-contain"
                                 onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden"; }}
