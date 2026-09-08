@@ -962,13 +962,17 @@ export default function LoadOperation() {
   // A 404 here means this barcode genuinely isn't a real product at all — anything else
   // (network hiccup, 500) shouldn't block a legitimate scan on our own connectivity/lookup
   // failure, so those are treated as "assume known" rather than risk a false block.
+  // Any failure here — a clean 404, or anything else (a timeout, a gateway error under
+  // production load, an odd/garbage barcode string) — means "not known": there's nothing
+  // legitimate to log either way, and letting an ambiguous error through as "assume it's a real
+  // product, log it as an extra" was actually the worse failure mode (silently opening a qty
+  // dialog for garbage input instead of a clear rejection the operator can just retry).
   async function isKnownProduct(barcode: string): Promise<boolean> {
     try {
       await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}`);
       return true;
-    } catch (err: any) {
-      const message = err instanceof Error ? err.message : String(err ?? "");
-      return !message.startsWith("404:");
+    } catch {
+      return false;
     }
   }
 

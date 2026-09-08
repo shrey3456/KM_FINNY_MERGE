@@ -643,13 +643,17 @@ export default function Unloading() {
   // (network hiccup, 500) shouldn't block a legitimate scan on our own connectivity/lookup
   // failure, so those are treated as "assume known" rather than risk a false block (product
   // comes back null in that case too — there's nothing to show, but the scan isn't refused).
+  // Any failure here — a clean 404, or anything else (a timeout, a gateway error under
+  // production load, an odd/garbage barcode string) — means "not known": there's nothing
+  // legitimate to log either way, and letting an ambiguous error through as "assume it's a real
+  // product, log it as an extra" was actually the worse failure mode (silently opening a qty
+  // dialog for garbage input instead of a clear rejection the operator can just retry).
   async function resolveProduct(barcode: string): Promise<{ known: boolean; product: Product | null }> {
     try {
       const res = await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}`);
       return { known: true, product: await res.json() };
-    } catch (err: any) {
-      const message = err instanceof Error ? err.message : String(err ?? "");
-      return { known: !message.startsWith("404:"), product: null };
+    } catch {
+      return { known: false, product: null };
     }
   }
 
@@ -1069,24 +1073,23 @@ export default function Unloading() {
             covers this header once rotated — hide it then and fold the page's identity into the
             rotated box's own header (the "Unloading" eyebrow above "Vehicles") instead, so the
             title stays visible rather than sitting hidden behind the fixed overlay. */}
-        {!rotated && (
-          <div className="space-y-2">
-            {/* Back to list sits above the title so the title row itself stays one clean identity
-                line: the vehicle on the bay and when/where, with status, STV and Complete
-                opposite it. */}
-            {view === "scan" && scanBackButton}
-            <PageHeader
-              // On the list this is the page; on a batch it's the vehicle, which is what the
-              // operator is actually looking at.
-              icon={view === "scan" ? Truck : PackageOpen}
-              title={view === "scan" && scanSession ? scanSession.vehicleNumber : "Unloading"}
-              // Only on the list, where it's the instruction for what to do next. Once a vehicle
-              // is on the bay it's stale advice taking a line under the batch you're scanning.
-              description={view === "list" ? "Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock." : undefined}
-              actions={view === "scan" ? scanStatusActions : undefined}
-            >
-              {view === "scan" ? scanVehicleSummary : undefined}
-            </PageHeader>
+        {!rotated && view === "list" && (
+          <PageHeader
+            icon={PackageOpen}
+            title="Unloading"
+            description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
+          />
+        )}
+
+        {/* Scan view: Back to List, the vehicle, and when/where all on one identity line —
+            same compact single-row header the Loading page's own scan view uses — instead of
+            Back to List sitting alone on a line above it. */}
+        {!rotated && view === "scan" && scanSession && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-sm">
+            {scanBackButton}
+            {scanVehicleTitle}
+            {scanVehicleSummary}
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
           </div>
         )}
 
