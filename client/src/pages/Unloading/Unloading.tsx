@@ -4,9 +4,10 @@ import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Camera, CheckCircle2, ChevronLeft, ChevronRight, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Camera, CheckCircle2, ChevronLeft, ChevronRight, FileBarChart, Keyboard, Loader2, Menu, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
+import { useSidebarContext } from "@/lib/sidebarContext";
 import PageHeader from "@/components/PageHeader";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
@@ -314,6 +315,10 @@ export default function Unloading() {
   const rotateNext = () => setRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
+  // Rotated kiosk mode is a fixed, full-viewport overlay, so it sits on top of Layout's own
+  // sidebar toggle — this floating button (same trick as the rotate button itself: fixed inside
+  // the rotated container, so it turns with the content) reopens a path back to real navigation.
+  const { openMobileMenu } = useSidebarContext();
   const quarterTurn = rotation === 90 || rotation === 270;
   // Natural portrait (window taller than wide) — a tablet or laptop turned upright should get the
   // same single-column layout as manual Rotate, just without the 90° CSS turn, since the screen is
@@ -1019,24 +1024,48 @@ export default function Unloading() {
     <div className="flex items-center gap-2">
       <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
       {stvs.length > 0 ? (
-        <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
-          {/* Amber when nothing is picked — scanning is blocked until it is (see
-              handleItemBarcode's "Select an STV before scanning" toast), so the control has to
-              read as needing attention, not as an idle dropdown. */}
-          <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
-            selectedStv
-              ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
-              : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
-          }`}>
-            <SelectValue placeholder="Select STV…" />
-          </SelectTrigger>
-          <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
-            <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+        rotated ? (
+          // Rotated: a plain native <select> instead of the Radix popover below — rotating a
+          // portalled popover to match the kiosk transform is unreliable (Radix positions it
+          // against the ALREADY-rotated trigger's real on-screen rect, then this codebase's own
+          // extra CSS rotation on the popover panel swings that correctly-placed box out to a
+          // different spot, which is what left part of it inside the rotated container's bounds
+          // and part of it clipped). A native select renders as an OS-level overlay entirely
+          // outside the page's own rotated DOM, so it's immune to this whole class of bug.
+          <select
+            value={selectedStv || NO_STV}
+            onChange={(e) => setSelectedStv(e.target.value === NO_STV ? "" : e.target.value)}
+            className={`h-7 w-36 rounded-full border px-2 text-center text-xs font-semibold ${
+              selectedStv
+                ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                : "border-amber-400 bg-amber-50 text-amber-800"
+            }`}
+          >
+            <option value={NO_STV}>— Select STV —</option>
             {stvs.map((st) => (
-              <SelectItem key={st} value={st}>{st}</SelectItem>
+              <option key={st} value={st}>{st}</option>
             ))}
-          </SelectContent>
-        </Select>
+          </select>
+        ) : (
+          <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
+            {/* Amber when nothing is picked — scanning is blocked until it is (see
+                handleItemBarcode's "Select an STV before scanning" toast), so the control has to
+                read as needing attention, not as an idle dropdown. */}
+            <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
+              selectedStv
+                ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
+                : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+            }`}>
+              <SelectValue placeholder="Select STV…" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+              {stvs.map((st) => (
+                <SelectItem key={st} value={st}>{st}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )
       ) : !stvsQuery.isLoading && (
         <span className="rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
           No STV — create one in Plant Settings
@@ -1095,6 +1124,15 @@ export default function Unloading() {
 
         {view === "list" && (
           <div className={`${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            {rotated && (
+              <button
+                onClick={openMobileMenu}
+                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-white px-4 py-3 text-[#001d6e] shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
+                title="Open sidebar menu"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+            )}
             <button
               onClick={rotateNext}
               className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -1113,6 +1151,13 @@ export default function Unloading() {
                 )}
                 <div className="text-lg font-bold text-[#001d6e]">Vehicles</div>
                 <div className="text-xs text-gray-400">{total} part(s){sessionPlantFilter ? ` · ${sessionPlantFilter}` : ""}</div>
+                {/* The unrotated PageHeader's own description — rotated has no PageHeader to
+                    show it (the fixed overlay covers it), so it's easy to lose here entirely. */}
+                {rotated && (
+                  <p className="mt-1 max-w-xs text-xs text-gray-500">
+                    Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock.
+                  </p>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 {importablePlants.length > 1 && (
@@ -1290,19 +1335,25 @@ export default function Unloading() {
                 <table className="w-full min-w-full caption-bottom border-collapse text-xs">
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">
-                      <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">
-                        <span title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">
-                          Batch
-                        </span>
-                      </th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Status</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Progress</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
-                      <th className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
+                      {/* Sr. No and Batch dropped in bigView — a rotated kiosk's short side
+                          can't fit all 9 columns without horizontal scroll, and these two are
+                          the least essential (the row order already conveys position; Batch is
+                          almost always "—" for a single-part vehicle). */}
+                      {!bigView && <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>}
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
+                      {!bigView && (
+                        <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">
+                          <span title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">
+                            Batch
+                          </span>
+                        </th>
+                      )}
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Status</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Progress</th>
+                      {!bigView && <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>}
+                      <th className="whitespace-nowrap px-2 sm:px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1313,23 +1364,27 @@ export default function Unloading() {
                             onClick={() => openSession(s)}
                             className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${s.scanStatus === "active" ? "bg-emerald-50/60" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                           >
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-400 tabular-nums">{offset + i + 1}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{s.orderDate}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2"><PlantBadge plant={s.plant} /></td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2">
-                              {s.partsCount > 1 ? (
-                                <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex} of {s.partsCount}</span>
-                              ) : (
-                                <span className="text-gray-400">—</span>
-                              )}
-                            </td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2">{statusBadge(s.scanStatus, s.canActivate)}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{s.scannedQty} / {s.expectedQty}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">
-                              {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className="border-b border-gray-200 px-3 py-2 text-right">
+                            {!bigView && <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-400 tabular-nums">{offset + i + 1}</td>}
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 text-gray-700">{s.orderDate}</td>
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2"><PlantBadge plant={s.plant} /></td>
+                            {!bigView && (
+                              <td className="border-r border-b border-gray-200 px-3 py-2">
+                                {s.partsCount > 1 ? (
+                                  <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex} of {s.partsCount}</span>
+                                ) : (
+                                  <span className="text-gray-400">—</span>
+                                )}
+                              </td>
+                            )}
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2">{statusBadge(s.scanStatus, s.canActivate)}</td>
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 text-gray-700 tabular-nums">{s.scannedQty} / {s.expectedQty}</td>
+                            {!bigView && (
+                              <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">
+                                {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
+                              </td>
+                            )}
+                            <td className="border-b border-gray-200 px-2 sm:px-3 py-2 text-right">
                               <div className="flex items-center justify-end gap-1.5">
                                 <Button
                                   size="sm" variant="outline" className="h-7 text-xs"
@@ -1431,6 +1486,15 @@ export default function Unloading() {
 
         {view === "scan" && (
           <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            {rotated && (
+              <button
+                onClick={openMobileMenu}
+                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-white px-4 py-3 text-[#001d6e] shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
+                title="Open sidebar menu"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+            )}
             <button
               onClick={rotateNext}
               className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -1438,24 +1502,16 @@ export default function Unloading() {
             >
               <RotateCw className="h-5 w-5" />
             </button>
-            {/* ── Rotated kiosk mode only. Unrotated, this whole header lives on the page's
-                PageHeader above; rotated, the fixed rotate overlay covers that, so the back
-                button, vehicle identity and the STV/status/Complete group fold into a card here
-                instead — same order, so the two orientations read the same. ── */}
+            {/* ── Rotated kiosk mode only. Unrotated, this whole header lives on the page's own
+                compact scan-header row above; rotated, the fixed rotate overlay covers that, so
+                the same pieces fold into a card here instead — same single merged row, so the
+                two orientations read the same. ── */}
             {rotated && (
-              <div className="space-y-2 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
-                {/* Same order the unrotated PageHeader uses: Back to list on its own line at the
-                    top, then one identity line — the vehicle and when/where — with status, STV
-                    and Complete opposite it. */}
+              <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
                 {scanBackButton}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    {scanVehicleTitle}
-                    {scanVehicleSummary && <span className="text-gray-300">&middot;</span>}
-                    {scanVehicleSummary}
-                  </div>
-                  <div className="flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
-                </div>
+                {scanVehicleTitle}
+                {scanVehicleSummary}
+                <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
               </div>
             )}
 

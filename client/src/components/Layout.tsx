@@ -7,6 +7,7 @@ import InstallPrompt from './InstallPrompt';
 import finnyLogo from '@assets/finny-logo.png';
 import { Home, Menu, ChevronUp, ChevronDown } from 'lucide-react';
 import { formatUsername } from '@/lib/format-username';
+import { SidebarContext } from '@/lib/sidebarContext';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -68,6 +69,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   };
 
   return (
+    <SidebarContext.Provider value={{ openMobileMenu: () => setMobileMenuOpen(true) }}>
     <div className="flex h-screen overflow-hidden bg-white">
       {/* Sidebar for desktop - conditionally shown based on sidebarVisible state */}
       {sidebarVisible && (
@@ -205,6 +207,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
       {/* Install prompt for "Add to Home Screen" functionality */}
       <InstallPrompt />
     </div>
+    </SidebarContext.Provider>
   );
 };
 

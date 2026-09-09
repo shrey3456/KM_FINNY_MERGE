@@ -1419,8 +1419,20 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         pps.updated_at                                     AS "lastArrived"
       FROM ${sourceSql} pps
       LEFT JOIN products p    ON p.id = pps.product_id
-      LEFT JOIN products p_bc ON p.id IS NULL AND LOWER(TRIM(p_bc.barcode)) = LOWER(TRIM(pps.barcode))
       LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(pps.plant)
+      -- LATERAL + LIMIT 1: a barcode can legitimately match more than one Product Master row
+      -- (the same barcode reused for a different plant's pack size) — a plain join here would
+      -- silently fan this one stock row out into two. Picks exactly one, preferring whichever
+      -- match's OWN plant is in the SAME STATE as this row's plant (pl.state), same state-level
+      -- rule pallet size already follows below.
+      LEFT JOIN LATERAL (
+        SELECT pr.*, UPPER(TRIM(prpl.state)) AS row_state
+        FROM products pr
+        LEFT JOIN plants prpl ON LOWER(prpl.name) = LOWER(pr.plant)
+        WHERE p.id IS NULL AND LOWER(TRIM(pr.barcode)) = LOWER(TRIM(pps.barcode))
+        ORDER BY (UPPER(TRIM(prpl.state)) = UPPER(TRIM(pl.state))) DESC NULLS LAST
+        LIMIT 1
+      ) p_bc ON true
       ${where}
       ORDER BY ${
         sort === 'stock' ? 'pps.in_stock DESC, "itemName" ASC'

@@ -191,7 +191,6 @@ const ALL_COLUMNS = [
   { key: "sale",        label: "Sale" },
   { key: "closing",     label: "Closing — date filter only" },
   { key: "remain",      label: "Remain (Purchase − Sale) — no-date view only" },
-  { key: "lastUpdated", label: "Last Updated" },
 ] as const;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -736,7 +735,6 @@ export default function OverallStock() {
       { id: "sale", label: "Sale", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
       { id: "closing", label: "Closing", filterType: "number", options: numberOptions((r) => r.closingStock), accessor: (r) => r.closingStock ?? null },
       { id: "remain", label: "Remain", filterType: "number", options: numberOptions((r) => totalStockOf(r)), accessor: (r) => totalStockOf(r) },
-      { id: "lastUpdated", label: "Last Updated", filterType: "date", options: dateOptions((r) => r.lastArrived), accessor: (r) => r.lastArrived },
     ];
   }, [rows]);
 
@@ -1031,23 +1029,23 @@ export default function OverallStock() {
   const expectedPalletsTotal = rows.reduce((s, r) => s + (r.expectedPallets ?? 0), 0);
   const salePalletsTotal = rows.reduce((s, r) => s + (r.salePallets ?? 0), 0);
 
-  // A State tab (not narrowed to one specific plant) used to just widen the plant filter to
-  // every plant in that state, so the same item showed up as one row PER plant — a confusing
-  // pile of "duplicate" entries for what's really one product. Combined into a single row per
-  // item instead: Stock/Extra/Sale/Expected/Opening/Closing summed across every plant in the
-  // state, with combinedPlants recording which plants went into it so the Details/History
-  // drill-down can still break it back down. A specific single plant is unaffected — there's
-  // only ever one row per item there already.
-  const isStateView = !activePlant && !!activeState;
+  // Not narrowed to one specific plant — a State tab (every plant in that state) OR the "All"
+  // tab (every plant the user can see) — used to just widen the plant filter, so the same item
+  // showed up as one row PER plant — a confusing pile of "duplicate" entries for what's really
+  // one product. Combined into a single row per item instead: Stock/Extra/Sale/Expected/Opening/
+  // Closing summed across every plant in view, with combinedPlants recording which plants went
+  // into it so the Details/History drill-down can still break it back down. A specific single
+  // plant is unaffected — there's only ever one row per item there already.
+  const isMergedView = !activePlant;
   const groupedByState = useMemo(() => {
-    if (!isStateView) return filtered;
+    if (!isMergedView) return filtered;
     const byBarcode = new Map<string, PlantStockRow>();
     for (const r of filtered) {
       if (r.isEmptyBox) continue; // empty boxes stay their own per-plant rows below, never merged
       const key = (r.barcode ?? r.itemName).toLowerCase();
       const existing = byBarcode.get(key);
       if (!existing) {
-        byBarcode.set(key, { ...r, plant: activeState, combinedPlants: [r.plant] });
+        byBarcode.set(key, { ...r, plant: activeState || "ALL", combinedPlants: [r.plant] });
         continue;
       }
       existing.inStock += r.inStock;
@@ -1066,7 +1064,7 @@ export default function OverallStock() {
       existing.combinedPlants!.push(r.plant);
     }
     return Array.from(byBarcode.values());
-  }, [filtered, isStateView, activeState]);
+  }, [filtered, isMergedView, activeState]);
 
   // Empty boxes as their OWN distinct rows (one per plant), appended below the stock rows.
   // Never mixed into stock/extra totals — the quantity shows only inside the "Empty Box" badge.
@@ -1180,6 +1178,56 @@ export default function OverallStock() {
     );
   };
 
+  // Exchange/Edit/Delete all need one exact (barcode, plant) target. A normal row already IS
+  // that; a merged row (All tab, or a State tab — see groupedByState) has more than one plant
+  // folded into it, so clicking straight through would act on the wrong (summed) numbers. For a
+  // merged row, this shows a small plant-picker menu instead, resolves the ONE real row for the
+  // plant picked (from the raw, ungrouped `rows`), and only then runs the action against it.
+  const plantScopedAction = (
+    row: PlantStockRow,
+    icon: React.ReactNode,
+    title: string,
+    hoverClass: string,
+    onPick: (target: PlantStockRow) => void,
+  ) => {
+    const plants = row.combinedPlants;
+    if (!plants || plants.length <= 1) {
+      return (
+        <Button
+          size="sm" variant="ghost" className={`h-7 w-7 p-0 text-gray-400 ${hoverClass}`} title={title}
+          onClick={(e) => { e.stopPropagation(); onPick(row); }}
+        >
+          {icon}
+        </Button>
+      );
+    }
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            size="sm" variant="ghost" className={`h-7 w-7 p-0 text-gray-400 ${hoverClass}`}
+            title={`${title} — pick a plant`} onClick={(e) => e.stopPropagation()}
+          >
+            {icon}
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {plants.map((plant) => (
+            <DropdownMenuItem
+              key={plant}
+              onClick={() => {
+                const target = rows.find((r) => r.barcode === row.barcode && r.plant === plant);
+                if (target) onPick(target);
+              }}
+            >
+              {plant}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  };
+
   const stockColumns: DataTableColumn<PlantStockRow>[] = [
     {
       id: "srNo",
@@ -1273,7 +1321,9 @@ export default function OverallStock() {
       cellClassName: `text-gray-700 ${cellBorder}`,
       render: (row) => row.brand ?? dash,
     },
-    {
+    // Only meaningful for a single specific plant — merged views (All, or a State tab) fold
+    // every plant into one row per item, so there's no one real plant left to show here.
+    ...(!isMergedView ? [{
       id: "plant",
       header: "Plant",
       hideable: false,
@@ -1284,7 +1334,7 @@ export default function OverallStock() {
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : dash),
-    },
+    } as DataTableColumn<PlantStockRow>] : []),
     {
       id: "expected",
       header: columnHeader("expected", "Expected"),
@@ -1466,16 +1516,6 @@ export default function OverallStock() {
         );
       },
     } as DataTableColumn<PlantStockRow>]),
-    {
-      id: "lastUpdated",
-      header: columnHeader("lastUpdated", "Last Updated"),
-      width: 120,
-      sortable: true,
-      accessor: (row) => row.lastArrived,
-      totalable: false,
-      cellClassName: "text-gray-500 whitespace-nowrap",
-      render: (row) => (row.lastArrived ? format(new Date(row.lastArrived), "MMM d, yyyy") : dash),
-    },
     ...(canExchange || isAdminOrSuper ? [{
       id: "actions",
       header: "",
@@ -1484,61 +1524,22 @@ export default function OverallStock() {
       width: isAdminOrSuper ? 96 : 48,
       align: "center" as const,
       render: (row: PlantStockRow) =>
-        // Exchange/Edit/Delete all need one exact (barcode, plant) target — hidden on a
-        // state-combined row (more than one plant folded into it), same as it would be on a
-        // row without a barcode at all.
-        !row.isEmptyBox && row.barcode && (!row.combinedPlants || row.combinedPlants.length <= 1) ? (
-          <div className="flex items-center justify-center gap-0.5">
-            {canExchange && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
-                title="Exchange this product for another"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setExchangeSource({
-                    barcode: row.barcode!,
-                    itemName: row.itemName,
-                    plant: row.plant,
-                    availableStock: row.inStock,
-                    itemsPerPallet: row.itemsPerPallet,
-                  });
-                }}
-              >
-                <ArrowLeftRight className="h-3.5 w-3.5" />
-              </Button>
+        !row.isEmptyBox && row.barcode ? (
+          <div className="flex items-center justify-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+            {canExchange && plantScopedAction(
+              row, <ArrowLeftRight className="h-3.5 w-3.5" />, "Exchange this product for another", "hover:text-[#001d6e]",
+              (target) => setExchangeSource({
+                barcode: target.barcode!, itemName: target.itemName, plant: target.plant,
+                availableStock: target.inStock, itemsPerPallet: target.itemsPerPallet,
+              }),
             )}
-            {isAdminOrSuper && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
-                title="Edit this item's stock"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setEditTarget(row);
-                  setEditQtyInput(String(row.inStock + row.extraQty));
-                  setEditReason("");
-                }}
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </Button>
+            {isAdminOrSuper && plantScopedAction(
+              row, <Pencil className="h-3.5 w-3.5" />, "Edit this item's stock", "hover:text-[#001d6e]",
+              (target) => { setEditTarget(target); setEditQtyInput(String(target.inStock + target.extraQty)); setEditReason(""); },
             )}
-            {isAdminOrSuper && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
-                title="Delete this item — removes it and its scan history entirely"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDeleteTarget(row);
-                  setDeleteConfirmText("");
-                }}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
+            {isAdminOrSuper && plantScopedAction(
+              row, <Trash2 className="h-3.5 w-3.5" />, "Delete this item — removes it and its scan history entirely", "hover:text-red-600",
+              (target) => { setDeleteTarget(target); setDeleteConfirmText(""); },
             )}
           </div>
         ) : null,
@@ -1568,6 +1569,7 @@ export default function OverallStock() {
         <thead>
           <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
             <th className="border-r border-gray-300 px-3 py-2 font-semibold">Plant</th>
+            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Expected</th>
             <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Stock</th>
             <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Extra</th>
             <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Sale</th>
@@ -1577,10 +1579,11 @@ export default function OverallStock() {
         </thead>
         <tbody>
           {sourceBreakdownLoading && !sourceBreakdownData ? (
-            <tr><td colSpan={6} className="py-8 text-center"><Loader2 className="mx-auto h-5 w-5 animate-spin text-[#001d6e]" /></td></tr>
+            <tr><td colSpan={7} className="py-8 text-center"><Loader2 className="mx-auto h-5 w-5 animate-spin text-[#001d6e]" /></td></tr>
           ) : detailPlantRows.map(({ plant, stock, breakdown }) => (
             <tr key={plant} className="border-b border-gray-200 bg-white">
               <td className="border-r border-gray-200 px-3 py-2 font-medium text-gray-900">{plant}</td>
+              <td className="border-r border-gray-200 px-3 py-2 text-right">{stackedCell(stock?.expectedQty, stock?.expectedPallets, "text-purple-700")}</td>
               <td className="border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums text-[#001d6e]">{stock?.inStock ?? 0}</td>
               <td className="border-r border-gray-200 px-3 py-2 text-right tabular-nums text-amber-600">{stock?.extraQty ? stock.extraQty : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-3 py-2 text-right tabular-nums text-emerald-600">{stock?.saleQty != null ? stock.saleQty : <span className="text-gray-300">—</span>}</td>
@@ -1959,7 +1962,13 @@ export default function OverallStock() {
         <TableCard
           icon={LayoutList}
           title="Stock by Plant"
-          subtitle={search ? `${filtered.length} of ${rows.length} rows` : `${rows.length} item · plant rows`}
+          subtitle={
+            search
+              ? `${filtered.length} of ${rows.length} rows`
+              : isMergedView
+                ? `${groupedByState.length} item${groupedByState.length === 1 ? "" : "s"} · combined across plants`
+                : `${rows.length} item · plant rows`
+          }
           className="rounded-xl shadow-none border-gray-300"
           headerActions={
             <>

@@ -32,6 +32,16 @@ function isAdmin(req: Request): boolean {
 
 const normalize = (value?: string | number | null) => String(value ?? '').trim().toLowerCase();
 
+// "Create Operation" already flips notionStatus to LOADING (see POST /start below) the first
+// time it's run for an order — so notionStatus === LOADING already means "someone already
+// started this load." Re-running Create Operation on the same order is refused using that same
+// field, rather than a separate flag: it doubles as a live link back to Notion too, since a sync
+// that changes "Finny Status :" away from LOADING on Notion's side automatically re-opens it here
+// the next time this slip is read, with no extra plumbing needed.
+function isAlreadyLoading(notionStatus?: string | null): boolean {
+  return String(notionStatus ?? '').trim().toUpperCase() === NOTION_LOADING_STATUS;
+}
+
 // Mirrors Order Scan's canCompletePart exactly (server/routes/order-scan.ts) — anyone can
 // complete a load EXCEPT designations "Loader"/"Helper"/"Driver"/"Scanner"; admin/super-admin
 // always allowed. This is the "force complete even if not everything is loaded" button.
@@ -120,7 +130,7 @@ async function withProgress(slip: any, items: any[]) {
   const loadedByBarcode = new Map<string, number>(loadedRows.map((r: any) => [normalize(r.barcode), r.loadedQty]));
 
   const progressItems = await Promise.all(items.map(async (item) => {
-    const product = item.barcode ? await storage.getProductByBarcode(item.barcode) : undefined;
+    const product = item.barcode ? await storage.getProductByBarcode(item.barcode, slip.plant) : undefined;
     const expected = item.quantity ?? 0;
     const loaded = loadedByBarcode.get(normalize(item.barcode)) ?? 0;
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
@@ -208,6 +218,13 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
   try {
     let slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+
+    // Already started — refuse a second Create Operation rather than silently reopening it.
+    // Resuming an in-progress load still works fine from the landing list (a plain GET, doesn't
+    // go through this endpoint at all) — this only guards the "start a new one" entry point.
+    if (isAlreadyLoading(slip.notionStatus)) {
+      return res.status(409).json({ message: 'Status is already Loading — not able to load.' });
+    }
 
     if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS) {
       const updated = await storage.updateProformaSlip(slip.id, { notionStatus: NOTION_LOADING_STATUS } as any);
@@ -406,7 +423,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(barcode));
-    const product = await storage.getProductByBarcode(barcode);
+    const product = await storage.getProductByBarcode(barcode, slip.plant);
 
     // Not on this slip AND not a known product at all — same refusal Order Scan gives for a
     // barcode it has no record of whatsoever, rather than quietly logging it as an extra. Tagged
@@ -424,7 +441,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     // error toast) in LoadOperation.tsx.
     if (matchedItem && !product) {
       return res.status(400).json({
-        message: `PRODUCT_MASTER_MISSING: "${barcode}" is on this order but has no matching entry in Product Master. Check Product Master and correct the barcode before scanning it.`,
+        message: `PRODUCT_MASTER_MISSING: Barcode "${barcode}" is not in the system — it's on this order but doesn't exactly match anything in Product Master (often a formatting difference, like a missing leading zero). Fix it by editing the CSV/order to use the correct barcode.`,
       });
     }
 
@@ -649,7 +666,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
     for (const event of events) {
       const qty = Number(event.total_qty ?? 0);
       if (qty > 0 && event.plant && event.barcode) {
-        const product = await storage.getProductByBarcode(event.barcode);
+        const product = await storage.getProductByBarcode(event.barcode, event.plant);
         await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
         await client.query(
           `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
@@ -732,7 +749,7 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
 
     const qty = Number(event.total_qty ?? 0);
     if (qty > 0 && event.plant && event.barcode) {
-      const product = await storage.getProductByBarcode(event.barcode);
+      const product = await storage.getProductByBarcode(event.barcode, event.plant);
       await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
       await client.query(
         `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
@@ -818,7 +835,7 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
 
     // Reverse the old qty's stock (Loading REMOVES stock, so reversing adds it back — same
     // direction the void handler above uses) before checking whether the new qty actually fits.
-    const product = await storage.getProductByBarcode(event.barcode);
+    const product = await storage.getProductByBarcode(event.barcode, event.plant);
     await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
     await client.query(
       `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()

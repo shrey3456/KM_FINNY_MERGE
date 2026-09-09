@@ -1035,12 +1035,25 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'
       const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
       let productMap = new Map<string, any>();
       if (barcodes.length > 0) {
+        // A barcode can legitimately match more than one Product Master row (the same barcode
+        // reused for a different plant's pack size). When that happens, prefer the row whose
+        // OWN plant is in the SAME STATE as this session's plant — the same state-level rule
+        // pallet size already follows (gj_plt/mp_plt) — instead of just letting whichever row
+        // the query happens to return last silently win.
         const prodResult = await client.query(
-          `SELECT barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
-           FROM products WHERE barcode = ANY($1)`,
+          `SELECT p.barcode, p.name, p.items_per_pallet, p.pallets, p.gj_plt, p.mp_plt,
+                  UPPER(TRIM(pl.state)) AS row_state
+           FROM products p
+           LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(p.plant)
+           WHERE p.barcode = ANY($1)`,
           [barcodes],
         );
-        prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
+        prodResult.rows.forEach((p: any) => {
+          const existing = productMap.get(p.barcode);
+          if (!existing || (state && p.row_state === state && existing.row_state !== state)) {
+            productMap.set(p.barcode, p);
+          }
+        });
       }
 
       const vals: any[] = [];
@@ -1628,7 +1641,7 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     if (onAnyPartCsv && !prodResult.rows[0]) {
       await client.query('ROLLBACK');
       return res.status(400).json({
-        message: `PRODUCT_MASTER_MISSING: "${barcode}" is on this order but has no matching entry in Product Master. Check Product Master and correct the barcode before scanning it.`,
+        message: `PRODUCT_MASTER_MISSING: Barcode "${barcode}" is not in the system — it's on this order but doesn't exactly match anything in Product Master (often a formatting difference, like a missing leading zero). Fix it by editing the CSV/order to use the correct barcode.`,
       });
     }
     const itemsPerPallet = resolvedIpp;

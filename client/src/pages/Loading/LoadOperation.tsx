@@ -78,6 +78,10 @@ type ProformaSlip = {
   vehicleVolume: number | null;
   loadingCompletedAt: string | null; loadingCompletedByCode: string | null;
   vehicleAssignedByCode: string | null;
+  // The order's real lifecycle stage from Notion's "Finny Status :" (this page also writes
+  // LOADING/READY≈DESP into it) — DISPATCHED/DELIVERED/SHORTAGE/UNLOADING mean it has moved past
+  // (or sideways from) loading, so the server refuses to start/scan/link a vehicle on it.
+  notionStatus: string | null;
   // Set server-side (see withRto in loading.ts) whenever vehicleInfoId already points at a
   // specific Vehicle Master row but nobody has confirmed it yet — the exact row to pre-select,
   // resolved by id rather than by re-matching vehicleNumber's text on the client.
@@ -151,6 +155,14 @@ function useDebounced<T>(value: T, delayMs: number): T {
 // a refresh) and coming back to /loading resumes exactly where you left off instead of
 // starting over at the search screen. Cleared only by an explicit "New" / reset.
 const LAST_ORDER_KEY = "loading_active_order_number";
+
+// Mirrors server/routes/loading.ts's isAlreadyLoading — Create Operation already flips
+// notionStatus to "LOADING" the first time it runs for an order, so this same field doubles as
+// "has someone already started this load." Checked here too so the preview dialog can warn and
+// disable the button up front, instead of only failing after the click.
+function isAlreadyLoading(notionStatus?: string | null): boolean {
+  return String(notionStatus ?? "").trim().toUpperCase() === "LOADING";
+}
 
 // A LoadHistoryEvent's id is the combined-table offset id (3000000000 + loading_scan_events.id —
 // see SCAN_HISTORY_COMBINED_SOURCE, server/routes/scan-sessions.ts). The void endpoint takes the
@@ -627,6 +639,9 @@ export default function LoadOperation() {
   // has been started — the one being previewed in the Create-Operation dialog, so a vehicle can be
   // linked or changed from there too.
   const vehicleTargetSlip = slip ?? pendingSlip?.slip ?? null;
+  // True when the previewed order was already started elsewhere — the server refuses a second
+  // Create Operation for it too; this just lets the dialog warn and disable the button up front.
+  const pendingSlipAlreadyLoading = isAlreadyLoading(pendingSlip?.slip?.notionStatus);
 
   const vehicleSuggestionsQuery = useQuery<{ results: VehicleSuggestion[] }>({
     queryKey: ["/api/loading/vehicles/search", debouncedVehicleSearch],
@@ -2650,12 +2665,18 @@ export default function LoadOperation() {
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Status:</span>
-                    <Badge variant="secondary" className="bg-purple-100 text-purple-800 hover:bg-purple-200">
-                      {pendingSlip?.slip?.loadingCompletedAt
-                        ? "READY≈DESP"
-                        : pendingSlip?.slip?.vehicleNumber
-                          ? "LOADING"
-                          : "PENDING"}
+                    {/* The real status stored on the slip (notionStatus) — not a guess derived
+                        from loadingCompletedAt/vehicleNumber, so an order already at some other
+                        real-world stage (DISPATCHED, SHORTAGE, ...) shows that, not "PENDING". */}
+                    <Badge
+                      variant="secondary"
+                      className={
+                        pendingSlipAlreadyLoading
+                          ? "bg-red-100 text-red-800 hover:bg-red-200"
+                          : "bg-purple-100 text-purple-800 hover:bg-purple-200"
+                      }
+                    >
+                      {pendingSlip?.slip?.notionStatus || "PENDING"}
                     </Badge>
                   </div>
                   <div className="flex justify-between items-center">
@@ -2663,6 +2684,11 @@ export default function LoadOperation() {
                     <span className="font-medium">{pendingSlip?.items?.length || 0}</span>
                   </div>
                 </div>
+                {pendingSlipAlreadyLoading && (
+                  <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    Status is already Loading — not able to load.
+                  </div>
+                )}
               </div>
 
               {/* Link / change the vehicle without leaving the dialog — same Vehicle Master
@@ -2777,7 +2803,7 @@ export default function LoadOperation() {
                 <Button
                   variant="default"
                   className="w-full bg-[#001d6e] hover:bg-[#001d6e]/90"
-                  disabled={startLoadMutation.isPending}
+                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading}
                   onClick={() => { if (pendingSlip) startLoadMutation.mutate(pendingSlip.slip.orderNumber); }}
                 >
                   {startLoadMutation.isPending ? (

@@ -83,7 +83,7 @@ async function withProgress(session: any) {
   const scannedByBarcode = new Map<string, number>(scannedRows.map((r: any) => [normalize(r.barcode), r.scannedQty]));
 
   const progressItems = await Promise.all(items.map(async (item: any) => {
-    const product = item.barcode ? await storage.getProductByBarcode(item.barcode) : undefined;
+    const product = item.barcode ? await storage.getProductByBarcode(item.barcode, session.plant) : undefined;
     const expected = item.quantity ?? 0;
     const scanned = scannedByBarcode.get(normalize(item.barcode)) ?? 0;
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
@@ -794,7 +794,7 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
       [id],
     );
     const matchedItem = itemRows.find((i: any) => normalize(i.barcode) === normalize(barcode));
-    const product = await storage.getProductByBarcode(barcode);
+    const product = await storage.getProductByBarcode(barcode, session.plant);
     // Tagged the same way PRODUCT_MASTER_MISSING is below — see matchBarcodeNotInSystemError's
     // client-side handling (a distinct centered popup, not the ordinary error toast) in
     // Unloading.tsx.
@@ -810,7 +810,7 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     // (a distinct centered popup, not the ordinary error toast) in Unloading.tsx.
     if (matchedItem && !product) {
       return res.status(400).json({
-        message: `PRODUCT_MASTER_MISSING: "${barcode}" is on this vehicle's manifest but has no matching entry in Product Master. Check Product Master and correct the barcode before scanning it.`,
+        message: `PRODUCT_MASTER_MISSING: Barcode "${barcode}" is not in the system — it's on this vehicle's manifest but doesn't exactly match anything in Product Master (often a formatting difference, like a missing leading zero). Fix it by editing the CSV/manifest to use the correct barcode.`,
       });
     }
 
@@ -1138,7 +1138,7 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
 
     const qty = Number(event.total_qty ?? 0);
     if (qty > 0 && event.plant && event.barcode) {
-      const product = await storage.getProductByBarcode(event.barcode);
+      const product = await storage.getProductByBarcode(event.barcode, event.plant);
       await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
       await client.query(
         `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
@@ -1217,7 +1217,7 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
     }
 
     const oldQty = Number(event.total_qty ?? 0);
-    const product = await storage.getProductByBarcode(event.barcode);
+    const product = await storage.getProductByBarcode(event.barcode, event.plant);
 
     // Reverse the old qty's stock — same direction the void handler above uses.
     await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);

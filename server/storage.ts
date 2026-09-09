@@ -71,7 +71,9 @@ export interface IStorage {
 
   // Product operations
   getProduct(id: number): Promise<Product | undefined>;
-  getProductByBarcode(barcode: string): Promise<Product | undefined>;
+  // plant is optional — only used to disambiguate when the same barcode exists under more than
+  // one Product Master row (see DBStorage's own implementation comment for why that happens).
+  getProductByBarcode(barcode: string, plant?: string | null): Promise<Product | undefined>;
   getProductByName(name: string): Promise<Product | undefined>;
   getProductsByIds(ids: number[]): Promise<Product[]>; // Batch get products by IDs
   createProduct(product: InsertProduct): Promise<Product>;
@@ -774,7 +776,7 @@ export class MemStorage implements IStorage {
     return this.products.get(id);
   }
 
-  async getProductByBarcode(barcode: string): Promise<Product | undefined> {
+  async getProductByBarcode(barcode: string, _plant?: string | null): Promise<Product | undefined> {
     return Array.from(this.products.values()).find(
       (product) => product.barcode === barcode,
     );
@@ -2374,9 +2376,27 @@ export class DBStorage implements IStorage {
     return result.length ? result[0] : undefined;
   }
 
-  async getProductByBarcode(barcode: string): Promise<Product | undefined> {
-    const result = await db.select().from(products).where(eq(products.barcode, barcode.trim())).limit(1);
-    return result.length ? result[0] : undefined;
+  // plant is optional and only matters when a barcode is shared by more than one Product Master
+  // row (a real, intentional case — the same barcode can mean a different pack/product per
+  // plant). Without it, or when there's only one match, this behaves exactly as before. With it,
+  // prefer the row whose OWN plant is in the SAME STATE as the plant given — the same state-level
+  // resolution already used for pallet size (products.gjPlt/mpPlt) — so scanning at Valsad never
+  // silently pulls back Indore's name/SAP code for a barcode both plants happen to share. Falls
+  // back to the first match if none share that state, so nothing changes for a single-row barcode.
+  async getProductByBarcode(barcode: string, plant?: string | null): Promise<Product | undefined> {
+    const matches = await db.select().from(products).where(eq(products.barcode, barcode.trim()));
+    if (matches.length <= 1 || !plant) return matches[0];
+
+    const targetPlant = await this.getPlantByName(plant);
+    const targetState = targetPlant?.state?.trim().toUpperCase() || null;
+    if (!targetState) return matches[0];
+
+    for (const candidate of matches) {
+      if (!candidate.plant) continue;
+      const candidatePlant = await this.getPlantByName(candidate.plant);
+      if (candidatePlant?.state?.trim().toUpperCase() === targetState) return candidate;
+    }
+    return matches[0];
   }
 
   async getProductByName(name: string): Promise<Product | undefined> {
