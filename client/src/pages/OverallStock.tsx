@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { format } from "date-fns";
 import * as XLSX from "xlsx";
@@ -176,6 +176,15 @@ type LoadingHistoryRow = {
 // contribution totals, not an attempt to attribute the current balance to a source (see
 // /reports/source-breakdown's own comment).
 type SourceBreakdownRow = { plant: string; scanningQty: number; unloadingQty: number };
+
+// One row per party for an item's Details drill-down "Parties" tab — quantity already summed
+// across every one of that party's proforma slips for this barcode (see /reports/party-breakdown's
+// own comment), so a party never shows up more than once. `orders` is the dropdown detail behind
+// that total — one entry per proforma slip (order number + order date) that contributed to it.
+type PartyBreakdownRow = {
+  partyName: string; qty: number; orderCount: number;
+  orders: { orderNumber: string; orderDate: string | null; qty: number }[];
+};
 
 // ─── Column config ────────────────────────────────────────────────────────────
 
@@ -398,14 +407,19 @@ export default function OverallStock() {
   }, [columnOrder]);
 
 
-  // Arrival-history / details drill-down — clicking a row opens a two-tab panel below it:
-  // "Details" (per-plant Stock + Scanning-vs-Unloading breakdown) and "History" (the dated
-  // ledger, itself split into a Scanning list and a separate Unloading list — see the History
-  // tab's own comment). A normal row has one plant; a state-combined row (see groupedByState)
-  // carries every plant folded into it via combinedPlants, so all three queries below run once
-  // per plant and merge — same shape either way, just one plant in the list instead of several.
+  // Arrival-history / details drill-down — clicking a row opens a three-tab panel below it:
+  // "Details" (per-plant Stock + Scanning-vs-Unloading breakdown), "Parties" (which parties
+  // ordered this item and how much, merged across every one of their orders), and "History"
+  // (the dated ledger, itself split into a Scanning list and a separate Unloading list — see the
+  // History tab's own comment). A normal row has one plant; a state-combined row (see
+  // groupedByState) carries every plant folded into it via combinedPlants, so all the queries
+  // below run once per plant and merge — same shape either way, just one plant in the list
+  // instead of several.
   const [detailRow, setDetailRow] = useState<PlantStockRow | null>(null);
-  const [detailTab, setDetailTab] = useState<"details" | "history">("details");
+  const [detailTab, setDetailTab] = useState<"details" | "parties" | "history">("details");
+  // Which party rows are expanded in the Parties tab, showing their own per-order dropdown
+  // (proforma slip number + order date). Reset whenever a different item is opened.
+  const [expandedParties, setExpandedParties] = useState<Set<string>>(new Set());
   const [historySource, setHistorySource] = useState<"scanning" | "unloading" | "loading">("scanning");
   const detailPlants = detailRow?.combinedPlants?.length ? detailRow.combinedPlants : (detailRow ? [detailRow.plant] : []);
 
@@ -451,6 +465,17 @@ export default function OverallStock() {
       apiRequest(
         "GET",
         buildUrl("/api/scan-sessions/reports/source-breakdown", { barcode: detailRow!.barcode!, plants: detailPlants.join(",") }),
+        undefined, false, true,
+      ),
+    enabled: !!detailRow?.barcode && detailPlants.length > 0,
+  });
+
+  const { data: partyBreakdownData, isLoading: partyBreakdownLoading } = useQuery<{ parties: PartyBreakdownRow[] }>({
+    queryKey: ["/api/scan-sessions/reports/party-breakdown", detailRow?.barcode, detailPlants.join(",")],
+    queryFn: () =>
+      apiRequest(
+        "GET",
+        buildUrl("/api/scan-sessions/reports/party-breakdown", { barcode: detailRow!.barcode!, plants: detailPlants.join(",") }),
         undefined, false, true,
       ),
     enabled: !!detailRow?.barcode && detailPlants.length > 0,
@@ -1269,6 +1294,7 @@ export default function OverallStock() {
               setDetailRow((cur) => (cur && cur.barcode === row.barcode && cur.plant === row.plant ? null : row));
               setDetailTab("details");
               setHistorySource("scanning");
+              setExpandedParties(new Set());
             }}
             className={`text-left underline decoration-dotted underline-offset-2 hover:text-[#001d6e] hover:decoration-[#001d6e] disabled:no-underline disabled:hover:text-inherit ${isOpen ? "text-[#001d6e] decoration-[#001d6e]" : "decoration-gray-300"}`}
           >
@@ -1596,6 +1622,88 @@ export default function OverallStock() {
     </div>
   );
 
+  // Parties tab — which parties ordered this item and how much, merged across every one of
+  // their orders (see /reports/party-breakdown's own comment) so a party that ordered it 5
+  // times shows as one row, not 5. Each row expands into a dropdown of the individual proforma
+  // slips (order number + order date) that made up its total.
+  const togglePartyExpanded = (partyName: string) => {
+    setExpandedParties((prev) => {
+      const next = new Set(prev);
+      if (next.has(partyName)) next.delete(partyName); else next.add(partyName);
+      return next;
+    });
+  };
+  const partiesTabContent = (
+    <div className="max-h-[360px] overflow-y-auto border border-gray-300">
+      <table className="w-full border-collapse text-xs">
+        <thead>
+          <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
+            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Party</th>
+            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Total Qty</th>
+            <th className="px-3 py-2 text-right font-semibold">Orders</th>
+          </tr>
+        </thead>
+        <tbody>
+          {partyBreakdownLoading && !partyBreakdownData ? (
+            <tr><td colSpan={3} className="py-8 text-center"><Loader2 className="mx-auto h-5 w-5 animate-spin text-[#001d6e]" /></td></tr>
+          ) : (partyBreakdownData?.parties?.length ?? 0) === 0 ? (
+            <tr><td colSpan={3} className="py-6 text-center text-gray-400">No proforma orders for this item yet.</td></tr>
+          ) : partyBreakdownData!.parties.map((p) => {
+            const isExpanded = expandedParties.has(p.partyName);
+            return (
+              <Fragment key={p.partyName}>
+                <tr
+                  className="cursor-pointer border-b border-gray-200 bg-white hover:bg-gray-50"
+                  onClick={() => togglePartyExpanded(p.partyName)}
+                >
+                  <td className="border-r border-gray-200 px-3 py-2 font-medium text-gray-900">
+                    <span className="flex items-center gap-1.5">
+                      <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-gray-400 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                      {p.partyName}
+                    </span>
+                  </td>
+                  <td className="border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums text-[#001d6e]">{p.qty.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-gray-700">{p.orderCount}</td>
+                </tr>
+                {isExpanded && (
+                  <tr className="border-b border-gray-200 bg-gray-50">
+                    <td colSpan={3} className="px-3 py-2">
+                      <table className="w-full border-collapse text-[11px]">
+                        <thead>
+                          <tr className="text-left text-gray-500">
+                            <th className="border-b border-gray-200 py-1 font-semibold">Proforma Slip No.</th>
+                            <th className="border-b border-gray-200 py-1 font-semibold">Order Date</th>
+                            <th className="border-b border-gray-200 py-1 text-right font-semibold">Qty</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {p.orders.map((o, i) => (
+                            <tr key={`${o.orderNumber}-${i}`}>
+                              <td className="py-1 text-gray-800">{o.orderNumber}</td>
+                              <td className="py-1 text-gray-600 whitespace-nowrap">
+                                {/* orderDate comes back as a full ISO datetime string (a `date`
+                                    column serialized through a JS Date), not plain YYYY-MM-DD —
+                                    slice to just the date part before treating it as local
+                                    midnight, or appending T00:00:00 onto an already-ISO string
+                                    produces an invalid date. */}
+                                {o.orderDate ? format(new Date(`${o.orderDate.slice(0, 10)}T00:00:00`), "MMM d, yyyy") : "—"}
+                              </td>
+                              <td className="py-1 text-right tabular-nums text-gray-800">{o.qty.toLocaleString()}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
   // History tab — Scanning and Unloading shown as two separate lists (their own separate
   // queries, see the two useQuery calls above), never merged into one table. A state-combined
   // row's entries carry a Plant column since they span more than one; a normal single-plant row
@@ -1773,10 +1881,11 @@ export default function OverallStock() {
 
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <button type="button" onClick={() => setDetailTab("details")} className={detailTabButton(detailTab === "details")}>Details</button>
+        <button type="button" onClick={() => setDetailTab("parties")} className={detailTabButton(detailTab === "parties")}>Parties</button>
         <button type="button" onClick={() => setDetailTab("history")} className={detailTabButton(detailTab === "history")}>History</button>
       </div>
 
-      {detailTab === "details" ? detailsTabContent : (
+      {detailTab === "details" ? detailsTabContent : detailTab === "parties" ? partiesTabContent : (
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-1.5">
             <button type="button" onClick={() => setHistorySource("scanning")} className={detailTabButton(historySource === "scanning")}>Scanning</button>

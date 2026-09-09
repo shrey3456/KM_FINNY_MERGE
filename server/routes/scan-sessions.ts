@@ -2053,4 +2053,59 @@ router.get('/reports/source-breakdown', async (req: Request, res: Response) => {
   }
 });
 
+// ── GET /api/scan-sessions/reports/party-breakdown?barcode=X&plants=A,B,C ────────────────────
+// Overall Stock's "which parties ordered this item, and how much in total" — one row per party,
+// summed across EVERY one of that party's proforma slips for this barcode (a party that ordered
+// it on 5 different dates still shows as a single row, not 5) — exactly the merge the Stock page
+// itself already does for plants, just applied to party instead. Each party also carries its own
+// `orders` list (proforma slip order number + order date + qty) so the client can show a
+// per-party dropdown of exactly which orders made up that total, without a second round trip.
+router.get('/reports/party-breakdown', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plants = typeof req.query.plants === 'string'
+      ? req.query.plants.split(',').map((p) => p.trim()).filter(Boolean)
+      : [];
+    if (!barcode || plants.length === 0) {
+      return res.status(400).json({ message: 'barcode and plants are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    const plantsLower = plants.map((p) => p.toLowerCase());
+    if (allowed !== null && plantsLower.some((p) => !allowed.includes(p))) {
+      return res.status(403).json({ message: 'Access denied for one or more of these plants' });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT ps.party_name AS "partyName",
+             ps.order_number AS "orderNumber",
+             ps.order_date  AS "orderDate",
+             COALESCE(SUM(psi.quantity), 0)::int AS qty
+      FROM proforma_slip_items psi
+      JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
+      WHERE LOWER(psi.barcode) = LOWER($1) AND LOWER(ps.plant) = ANY($2::text[])
+      GROUP BY ps.party_name, ps.order_number, ps.order_date
+      ORDER BY ps.party_name, ps.order_date DESC NULLS LAST
+    `, [barcode, plantsLower]);
+
+    const byParty = new Map<string, { partyName: string; qty: number; orderCount: number; orders: { orderNumber: string; orderDate: string | null; qty: number }[] }>();
+    for (const r of rows as any[]) {
+      let entry = byParty.get(r.partyName);
+      if (!entry) {
+        entry = { partyName: r.partyName, qty: 0, orderCount: 0, orders: [] };
+        byParty.set(r.partyName, entry);
+      }
+      entry.qty += r.qty;
+      entry.orderCount += 1;
+      entry.orders.push({ orderNumber: r.orderNumber, orderDate: r.orderDate, qty: r.qty });
+    }
+    const parties = Array.from(byParty.values()).sort((a, b) => b.qty - a.qty);
+
+    res.json({ parties });
+  } catch (error) {
+    console.error('Error fetching party breakdown:', error);
+    res.status(500).json({ error: 'Failed to fetch party breakdown' });
+  }
+});
+
 export default router;
