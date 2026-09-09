@@ -36,7 +36,7 @@ import CameraPermissionBanner from "@/components/CameraPermissionBanner";
 import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
-import { matchProductMasterMissingError } from "@/lib/apiError";
+import { matchProductMasterMissingError, parseApiErrorMessage } from "@/lib/apiError";
 import { useToast } from "@/hooks/use-toast";
 import { useUser } from "@/hooks/use-user";
 import { hasPageWriteAccess } from "@/lib/permissions";
@@ -76,6 +76,9 @@ type Product = {
   pallets?: number | null;
   mpPlt?: number | null;   // Madhya Pradesh pallet qty (was indPlt)
   gjPlt?: number | null;   // Gujarat pallet qty (was valPlt)
+  // Not always a single real plant name — can be a combined label like "VAL & IND" meaning
+  // this row applies to more than one plant/state at once. See resolveStatesForPlantLabel.
+  plant?: string | null;
 };
 
 type OsScanItem = {
@@ -177,17 +180,20 @@ const pltCell = (qty: number, ipp: number, className: string) =>
  * another to move it. Session-scoped, like the filters: a rearranged table is working context for
  * this sitting, not a permanent preference. An empty array means "declared order".
  */
+// localStorage (not sessionStorage) — a dragged column order is a preference, not working
+// context for one sitting, so it should survive closing the browser/logging out and only change
+// again when the user actually drags a column, same as every other column-order store below.
 function useColumnOrder(storageKey: string) {
   const [order, setOrder] = useState<string[]>(() => {
     try {
-      const parsed = JSON.parse(sessionStorage.getItem(storageKey) ?? "[]");
+      const parsed = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       return Array.isArray(parsed) ? parsed : [];
     } catch {
       return [];
     }
   });
   useEffect(() => {
-    try { sessionStorage.setItem(storageKey, JSON.stringify(order)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem(storageKey, JSON.stringify(order)); } catch { /* storage unavailable */ }
   }, [storageKey, order]);
   return [order, setOrder] as const;
 }
@@ -650,6 +656,22 @@ export default function ScanOrderPage() {
     if (stateCode === "MP") return Number(product.mpPlt) || 0;
     return 0;
   };
+  // Mirrors server/storage.ts's getProductByBarcode exactly — products.plant isn't always a
+  // single real plant name (e.g. "VAL & IND" means this row applies to both Valsad AND Indore
+  // together), so a plain plants-table lookup on that raw string finds nothing. Splits on any
+  // non-letter separator and resolves each piece to a real plant (exact match, or a prefix match
+  // for an abbreviation like "VAL"), collecting every state the label covers.
+  const resolveStatesForPlantLabel = (label: string | null | undefined): Set<string> => {
+    const states = new Set<string>();
+    if (!label || !allPlants) return states;
+    const tokens = label.split(/[^a-zA-Z]+/).map((t) => t.trim().toUpperCase()).filter(Boolean);
+    for (const token of tokens) {
+      const found = allPlants.find((p) => String(p.name ?? "").toUpperCase() === token)
+        ?? allPlants.find((p) => String(p.name ?? "").toUpperCase().startsWith(token));
+      if (found?.state) states.add(String(found.state).trim().toUpperCase());
+    }
+    return states;
+  };
   const autoScanEnabled = (() => {
     const plantName = (activeOrderScanSession?.plant ?? "").toLowerCase();
     if (!plantName) return false;
@@ -729,7 +751,7 @@ export default function ScanOrderPage() {
   // 5s non-blocking feedback shown after an Auto Scan auto-confirm — image + product details
   // so the operator sees what was scanned without needing to confirm/close anything.
   const [osAutoScanFeedback, setOsAutoScanFeedback] = useState<
-    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number } | null
+    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; productId: number | null } | null
   >(null);
   const osAutoScanFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (osAutoScanFeedbackTimerRef.current) clearTimeout(osAutoScanFeedbackTimerRef.current); }, []);
@@ -886,7 +908,7 @@ export default function ScanOrderPage() {
       setEmptyBoxNote("");
       toast({ title: "Empty box logged", description: `${data?.totalQty ?? 0} empty box(es) recorded for this order.` });
     },
-    onError: (err: any) => toast({ title: "Failed to log empty box", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Failed to log empty box", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   const osEmptyBoxUndoMutation = useMutation({
@@ -897,7 +919,7 @@ export default function ScanOrderPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
       toast({ title: "Empty box removed" });
     },
-    onError: (err: any) => toast({ title: "Failed to remove empty box", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Failed to remove empty box", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   const osSuggestions = useMemo(() => {
@@ -1061,7 +1083,7 @@ export default function ScanOrderPage() {
       }
       const productMasterMissing = matchProductMasterMissingError(err);
       if (productMasterMissing) { setOsProductMasterMissingMessage(productMasterMissing); return; }
-      toast({ title: "Scan failed", description: err?.message ?? "Unknown error", variant: "destructive" });
+      toast({ title: "Scan failed", description: parseApiErrorMessage(err) ?? "Unknown error", variant: "destructive" });
     },
   });
   const [osProductMasterMissingMessage, setOsProductMasterMissingMessage] = useState<string | null>(null);
@@ -1115,6 +1137,7 @@ export default function ScanOrderPage() {
       sapCode: match.sapCode ?? null,
       scannedQty,
       remaining,
+      productId: invProduct?.id ?? null,
     });
     osAutoScanFeedbackTimerRef.current = setTimeout(() => setOsAutoScanFeedback(null), 5000);
   };
@@ -1208,7 +1231,7 @@ export default function ScanOrderPage() {
     playScanBeep();
     const normBarcode = normalize(barcode);
     const matches = osItemsRef.current.filter((i) => normalize(i.barcode ?? "") === normBarcode);
-    const invProduct = productLookup.get(normalize(barcode)) ?? null;
+    const invProduct = resolveInvProduct(normalize(barcode), activeOrderScanSession?.plant ?? "");
 
     // Not on this part's CSV AND not a known product in Inventory at all — this isn't a
     // legitimate "extra" (early arrival of a real item), it's a barcode the system has no
@@ -1353,7 +1376,7 @@ export default function ScanOrderPage() {
       setShowForceComplete(false);
       toast({ title: "Order completed!", description: "Session closed. Great work!" });
     },
-    onError: (err: any) => toast({ title: "Failed to complete order", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Failed to complete order", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   // WebSocket subscription — receives push updates from every scan across the current
@@ -1574,16 +1597,45 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
   // ── Product lookup ────────────────────────────────────────────────────────
 
-  const productLookup = useMemo(() => {
-    const map = new Map<string, Product>();
+  // Collects EVERY product matching a key — a barcode/SAP/etc. can legitimately match more than
+  // one Product Master row (a plant-specific pack, or a combined "VAL & IND" label covering more
+  // than one plant's state at once). A plain overwriting map here (whichever product happened to
+  // come last in `products` wins) is what kept silently picking a row with no gj/mp PLT set, even
+  // after the server-side scan endpoint was fixed to prefer the state-matching row — this is that
+  // same fix, applied to this page's own client-side lookup. Resolved down to one product per key
+  // by resolveInvProduct below, given the plant actually relevant at that call site.
+  const productLookupAll = useMemo(() => {
+    const map = new Map<string, Product[]>();
     products.forEach((p) => {
       [p.barcode, p.itemNo, p.sapCode, p.srNo, p.name].forEach((key) => {
         const n = normalize(key);
-        if (n) map.set(n, p);
+        if (!n) return;
+        const arr = map.get(n);
+        if (arr) arr.push(p); else map.set(n, [p]);
       });
     });
     return map;
   }, [products]);
+
+  // Resolves productLookupAll's candidate list for `key` down to the ONE product that actually
+  // applies at `plantName` — preferring a candidate whose own plant (or combined-label plants)
+  // is in the SAME STATE as plantName, same rule pallet size already follows. Falls back to the
+  // first candidate when there's only one, no plant given, or no state-matching candidate — so a
+  // key with just one product is completely unaffected either way.
+  const resolveInvProduct = (key: string, plantName: string): Product | null => {
+    const list = productLookupAll.get(key);
+    if (!list || list.length === 0) return null;
+    if (list.length === 1 || !plantName) return list[0];
+    const targetStates = resolveStatesForPlantLabel(plantName);
+    if (targetStates.size === 0) return list[0];
+    for (const candidate of list) {
+      const candidateStates = resolveStatesForPlantLabel(candidate.plant);
+      for (const s of candidateStates) {
+        if (targetStates.has(s)) return candidate;
+      }
+    }
+    return list[0];
+  };
 
   // Pallet-count cell: qty ÷ items-per-pallet, or a muted 0.00 when not applicable. Shared by
   // Part Order's CSV Items table. Looks up the item's own GJ/MP PLT in Product Master (NOT the
@@ -1591,7 +1643,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // to treating the item as exactly one pallet sized to its own quantity when no PLT is defined.
   const impItemsPerPallet = (i: { barcode: string | null; quantity: number | null }): number => {
     const qty = i.quantity ?? 0;
-    const invProduct = i.barcode ? productLookup.get(normalize(i.barcode)) ?? null : null;
+    const invProduct = i.barcode ? resolveInvProduct(normalize(i.barcode), csvEffPlant) : null;
     const defined = invProduct ? getStatePalletSize(invProduct, getPlantState(csvEffPlant)) : 0;
     return defined > 0 ? defined : Math.max(1, qty || 1);
   };
@@ -1771,7 +1823,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       setMvVoidReason("");
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
     },
-    onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Failed to void scan", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   // Stable per-row id for the item-history expansion — barcode is already the merge/dedup key
@@ -1954,7 +2006,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
-          const invProduct = productLookup.get(normalize(item.barcode ?? item.itemName ?? "")) ?? null;
+          const invProduct = resolveInvProduct(normalize(item.barcode ?? item.itemName ?? ""), mvPlant);
           // Only the GJ/MP-PLT-defined size (0 if not defined) — the expected-qty fallback
           // needs this item's FINAL summed quantity across every contributing file, which
           // isn't known until the accumulation loop below finishes, so that fallback is
@@ -2143,7 +2195,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         }
         // Informational only — the item's real GJ/MP PLT pack size, never used in any qty/plt
         // calculation on this page (same treatment as the Scan tab and Scan Viewer).
-        const invProduct = i.barcode ? productLookup.get(normalize(i.barcode)) ?? null : null;
+        const invProduct = i.barcode ? resolveInvProduct(normalize(i.barcode), mvPlant) : null;
         const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
         return (
           <>
@@ -2695,7 +2747,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           // the scan-time-resolved itemsPerPallet (which can be a per-scan fallback when no
           // real pack size is set, so isn't a fact about the product itself). Shown so an
           // operator can see the pack size at a glance without it affecting any calculation.
-          const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+          const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "") : null;
           const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
           return (
             <>
@@ -2882,7 +2934,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const ippForBarcode = (barcode: string): number => {
       const match = osItems.find((i) => normalize(i.barcode ?? "") === normalize(barcode));
       if (match?.itemsPerPallet) return match.itemsPerPallet;
-      const invProduct = productLookup.get(normalize(barcode)) ?? null;
+      const invProduct = resolveInvProduct(normalize(barcode), activeOrderScanSession?.plant ?? "");
       return _computePlantPalletSize(null, invProduct);
     };
 
@@ -3044,7 +3096,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               </div>
               <div className="flex flex-1 gap-5 items-start pt-4">
                 <img
-                  src={`/api/products/image-by-name?name=${encodeURIComponent(osAutoScanFeedback.name)}`}
+                  key={osAutoScanFeedback.productId ?? osAutoScanFeedback.name}
+                  src={
+                    osAutoScanFeedback.productId != null
+                      ? `/api/products/image-by-id?id=${osAutoScanFeedback.productId}`
+                      : `/api/products/image-by-name?name=${encodeURIComponent(osAutoScanFeedback.name)}`
+                  }
                   alt=""
                   className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
                   onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
@@ -3601,7 +3658,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                               </p>
                               {(() => {
-                                const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+                                const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "") : null;
                                 const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
                                 return packSize > 0 ? (
                                   <p className="mt-0.5 text-sm font-semibold text-gray-600">{packSize} per pallet</p>
@@ -3722,7 +3779,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                               </p>
                               {(() => {
-                                const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+                                const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "") : null;
                                 const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
                                 return packSize > 0 ? (
                                   <p className="text-sm font-semibold text-gray-600 mt-0.5">{packSize} per pallet</p>
@@ -3919,7 +3976,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                                 </p>
                                 {(() => {
-                                  const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+                                  const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), mvPlant) : null;
                                   const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
                                   return packSize > 0 ? (
                                     <p className="mt-0.5 text-sm font-semibold text-gray-600">{packSize} per pallet</p>
@@ -4042,7 +4099,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                       {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                                     </p>
                                     {(() => {
-                                      const invProduct = item.barcode ? productLookup.get(normalize(item.barcode)) ?? null : null;
+                                      const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), mvPlant) : null;
                                       const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
                                       return packSize > 0 ? (
                                         <p className="text-sm font-semibold text-gray-600">{packSize} per pallet</p>

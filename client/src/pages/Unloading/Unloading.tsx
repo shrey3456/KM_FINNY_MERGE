@@ -11,7 +11,7 @@ import { useSidebarContext } from "@/lib/sidebarContext";
 import PageHeader from "@/components/PageHeader";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
-import { matchProductMasterMissingError, matchBarcodeNotInSystemError } from "@/lib/apiError";
+import { matchProductMasterMissingError, matchBarcodeNotInSystemError, parseApiErrorMessage } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -245,7 +245,7 @@ export default function Unloading() {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions/recent-complete"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Failed to reopen", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Failed to reopen", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
   function selectStatusTab(key: "available" | "active" | "completed" | "history" | "recent-complete") {
@@ -278,6 +278,11 @@ export default function Unloading() {
     queryKey: ["/api/unloading/sessions", activeSessionId],
     queryFn: () => apiRequest("GET", `/api/unloading/sessions/${activeSessionId}`).then((r) => r.json()),
     enabled: activeSessionId != null,
+    // Live refresh — while this batch is open, another session (a second scanner on the same
+    // vehicle, an admin edit, a void) can change its progress at any moment. Without this, the
+    // operator only sees fresh numbers after their OWN next scan happens to refetch it — same
+    // fix as Loading's own live slip/items poll (LoadOperation.tsx) and the Scan Viewer's.
+    refetchInterval: 15000,
   });
   const detail = activeSessionQuery.data;
   const locked = detail?.session?.scanStatus === "completed";
@@ -438,7 +443,7 @@ export default function Unloading() {
 
   const activateMutation = useMutation({
     mutationFn: (id: number) => apiRequest("POST", `/api/unloading/sessions/${id}/activate`, {}, false, true),
-    onError: (error: any) => toast({ title: "Can't start yet", description: error?.message || "This batch can't be activated right now.", variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Can't start yet", description: parseApiErrorMessage(error) || "This batch can't be activated right now.", variant: "destructive" }),
   });
 
   function enterSession(id: number) {
@@ -550,7 +555,7 @@ export default function Unloading() {
       if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
       const barcodeNotInSystem = matchBarcodeNotInSystemError(error);
       if (barcodeNotInSystem) { setBarcodeNotInSystemMessage(barcodeNotInSystem); return; }
-      toast({ title: "Scan failed", description: error?.message || "Could not record scan", variant: "destructive" });
+      toast({ title: "Scan failed", description: parseApiErrorMessage(error) || "Could not record scan", variant: "destructive" });
     },
     onSettled: () => { scanLockRef.current = false; },
   });
@@ -613,12 +618,12 @@ export default function Unloading() {
   const dialogResolvedImageName = pending?.item?.itemName ?? pending?.product?.name ?? pending?.barcode;
 
   const [autoFeedback, setAutoFeedback] = useState<
-    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean } | null
+    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean; productId: number | null } | null
   >(null);
   const autoFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  function showAutoFeedback(name: string, barcode: string, sapCode: string | null, scannedQty: number, remaining: number, isExtra: boolean) {
+  function showAutoFeedback(name: string, barcode: string, sapCode: string | null, scannedQty: number, remaining: number, isExtra: boolean, productId: number | null) {
     if (autoFeedbackTimerRef.current) clearTimeout(autoFeedbackTimerRef.current);
-    setAutoFeedback({ name, barcode, sapCode, scannedQty, remaining, isExtra });
+    setAutoFeedback({ name, barcode, sapCode, scannedQty, remaining, isExtra, productId });
     autoFeedbackTimerRef.current = setTimeout(() => setAutoFeedback(null), 5000);
   }
 
@@ -655,7 +660,8 @@ export default function Unloading() {
   // dialog for garbage input instead of a clear rejection the operator can just retry).
   async function resolveProduct(barcode: string): Promise<{ known: boolean; product: Product | null }> {
     try {
-      const res = await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}`);
+      const plant = detail?.session?.plant ? `?plant=${encodeURIComponent(detail.session.plant)}` : "";
+      const res = await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}${plant}`);
       return { known: true, product: await res.json() };
     } catch {
       return { known: false, product: null };
@@ -701,7 +707,7 @@ export default function Unloading() {
     const canAutoScan = autoScanEnabled && !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
       scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null }, {
-        onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra),
+        onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra, data.event.productId),
       });
       setItemBarcode("");
       return;
@@ -777,7 +783,7 @@ export default function Unloading() {
       if (activeSessionId != null) queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Void failed", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Void failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
   // Confirmation dialog before completing — same "Complete this part?" pattern as Order Scan's
@@ -791,7 +797,7 @@ export default function Unloading() {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Failed", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
   const reopenMutation = useMutation({
     mutationFn: () => apiRequest("POST", `/api/unloading/sessions/${activeSessionId}/reopen`, {}),
@@ -800,7 +806,7 @@ export default function Unloading() {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Failed", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
   // ─── Reports — same dialog Order Import uses (Summary/Activity/Hourly, per-part + whole-group),
@@ -825,7 +831,7 @@ export default function Unloading() {
       setDeleteTarget(null);
       if (view === "scan") backToList(); else queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Delete failed", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Delete failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
   // canActivate only matters for 'available' rows — an available batch that's next in line
@@ -1759,7 +1765,12 @@ export default function Unloading() {
                       </div>
                       <div className="flex flex-1 gap-5 items-start pt-4">
                         <img
-                          src={`/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`}
+                          key={autoFeedback.productId ?? autoFeedback.barcode}
+                          src={
+                            autoFeedback.productId != null
+                              ? `/api/products/image-by-id?id=${autoFeedback.productId}`
+                              : `/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`
+                          }
                           alt=""
                           className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
                           onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}

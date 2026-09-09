@@ -345,7 +345,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/products/barcode/:barcode",
     async (req: Request, res: Response) => {
       const barcode = req.params.barcode;
-      let product = await storage.getProductByBarcode(barcode);
+      // Optional — only matters when this barcode has more than one Product Master row (see
+      // getProductByBarcode's own comment). Without it, a shared barcode falls back to
+      // whichever row the query happens to return first, which is how Order Scan/Loading/
+      // Unloading's own barcode lookups kept picking the wrong row's pallet size even after the
+      // main /scan endpoints were fixed to pass plant through.
+      const plant = typeof req.query.plant === 'string' ? req.query.plant : undefined;
+      let product = await storage.getProductByBarcode(barcode, plant);
 
       // If not found by barcode, try to find by SKU (itemNo).
       if (!product) {

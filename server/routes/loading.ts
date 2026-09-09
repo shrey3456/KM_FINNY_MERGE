@@ -105,14 +105,23 @@ function requireLoadingVoidAccess(req: Request, res: Response, next: NextFunctio
 // Loading page's confirm dialog uses this to pre-select the exact row directly, rather than
 // re-deriving it from vehicleNumber text on the client (see LoadOperation.tsx's pre-fill effect).
 async function withRto(slip: any) {
-  if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null, vehicleVolume: null, suggestedVehicle: null };
+  // loadDate — when this order's load operation actually started (loading_records.created_at,
+  // the same value the landing table's own "Load Date" column shows), separate from the slip's
+  // own orderDate. Null until Create Operation has been run for this order at least once.
+  const { rows: loadRecordRows } = await pool.query(
+    `SELECT created_at FROM loading_records WHERE order_number = $1 ORDER BY created_at ASC LIMIT 1`,
+    [slip.orderNumber],
+  );
+  const loadDate = loadRecordRows[0]?.created_at ?? null;
+
+  if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null, vehicleVolume: null, suggestedVehicle: null, loadDate };
   const vehicle = slip.vehicleInfoId
     ? await storage.getVehicleInfo(slip.vehicleInfoId)
     : await storage.getVehicleInfoByVehicleNumberOrRto(slip.vehicleNumber);
   const suggestedVehicle = !slip.vehicleAssignedByCode && vehicle
     ? { id: vehicle.id, vehicleNumber: vehicle.vehicleNumber, rtoNumber: vehicle.rtoNumber, driver: vehicle.driver, company: vehicle.company, manufacturer: vehicle.manufacturer, volume: vehicle.volume }
     : null;
-  return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null, vehicleVolume: vehicle?.volume ?? null, suggestedVehicle };
+  return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null, vehicleVolume: vehicle?.volume ?? null, suggestedVehicle, loadDate };
 }
 
 // Attaches load progress to each proforma item (expected/loaded/remaining/itemsPerPallet,
@@ -291,6 +300,7 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 lr.party_name AS "partyName", lr.plant, lr.vehicle_number AS "vehicleNumber",
                 lr.rto_number AS "rtoNumber", lr.volume, lr.created_by_code AS "createdByCode",
                 lr.created_by_name AS "createdByName", lr.created_at AS "createdAt",
+                ps.order_date AS "orderDate",
                 ps.loading_completed_at AS "loadingCompletedAt"
          FROM loading_records lr
          LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
@@ -445,64 +455,86 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
       });
     }
 
-    // Stock check — the actual ask: an item already at zero (or short) for this plant cannot
-    // be loaded. Checked against the live ledger, not the proforma's planned quantity.
-    // Case/whitespace-insensitive match — see the comment on the identical query in
-    // withProgress() above for why (Notion-imported slip.plant casing vs. canonical
-    // product_plant_stock.plant casing).
-    const { rows: stockRows } = await client.query(
+    // Fast, UNLOCKED pre-check — just to fail obviously-bad requests (no stock at all) quickly
+    // and cheaply, before touching a transaction. NOT authoritative: two concurrent scans of the
+    // same barcode/plant could both read the same snapshot here and both pass. The real check
+    // (below, inside the transaction, against a FOR UPDATE-locked row) is what actually prevents
+    // stock from going negative when multiple scans happen at once.
+    const { rows: precheckRows } = await client.query(
       `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
       [barcode, slip.plant],
     );
-    const inStock = stockRows[0]?.inStock ?? 0;
-    if (inStock <= 0) {
+    const precheckInStock = precheckRows[0]?.inStock ?? 0;
+    if (precheckInStock <= 0) {
       return res.status(409).json({ message: `No stock available to load "${matchedItem?.itemName ?? product?.name ?? barcode}" at ${slip.plant} — current stock is 0.` });
-    }
-    if (qty > inStock) {
-      return res.status(409).json({ message: `Only ${inStock} in stock at ${slip.plant} — cannot load ${qty}.` });
-    }
-
-    // Same "split into a regular portion (capped at expected) + an extra portion" rule Order
-    // Scan uses (server/routes/order-scan.ts) — a single scan can legitimately be part
-    // regular, part extra, e.g. expected 10 / already loaded 8 / scanning 5 → 2 regular + 3 extra.
-    const { rows: loadedRows } = await client.query(
-      `SELECT COALESCE(SUM(total_qty), 0)::int AS "loaded" FROM loading_scan_events
-       WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE`,
-      [slip.orderNumber, barcode],
-    );
-    const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
-    const expected = matchedItem?.quantity ?? 0;
-    const remainingBefore = matchedItem ? Math.max(0, expected - alreadyLoaded) : 0;
-    // The Add Extra flow is a deliberate, explicit "log this as extra" action — the whole qty is
-    // extra even if the item still has room left in `remaining`, not just whatever spills past
-    // it. A regular scan keeps the ordinary split (capped at what's remaining; see the
-    // EXTRA_NOT_ALLOWED check right below, which refuses it whenever that split would leave any
-    // extra portion at all).
-    const regularQty = (matchedItem && !isExtraScan) ? Math.min(qty, remainingBefore) : 0;
-    const extraQty = qty - regularQty;
-
-    // Extra quantity (barcode not on this slip at all, or qty beyond what's still remaining for
-    // it) can only be logged through the dedicated Add Extra flow, never a regular scan — tagged
-    // for matchExtraNotAllowedError's client-side handling (a distinct centered popup) in
-    // LoadOperation.tsx. The Add Extra flow sends extra:true and skips this check entirely.
-    if (!isExtraScan && extraQty > 0) {
-      return res.status(400).json({
-        message: matchedItem
-          ? `EXTRA_NOT_ALLOWED: Only ${remainingBefore} left to load for "${matchedItem.itemName ?? barcode}" — scanning ${qty} would add ${extraQty} extra. Use Add Extra for the extra quantity.`
-          : `EXTRA_NOT_ALLOWED: "${barcode}" is not on this order. Use Add Extra to scan it.`,
-      });
     }
 
     // Same itemsPerPallet the Items table already shows for this row (withProgress uses the
     // identical resolvePalletSizeOrQty(product, state, expected) call) — so a scan's pallets/
     // loose split here always agrees with what the page displays, and with how Order Scan
-    // splits its own events (server/routes/order-scan.ts's writeScanEvents).
+    // splits its own events (server/routes/order-scan.ts's writeScanEvents). Doesn't depend on
+    // anything that can change between now and the lock below, so it's safe to resolve early.
+    const expected = matchedItem?.quantity ?? 0;
     const state = await getPlantStateCode(client, slip.plant ?? '');
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
 
     const { userCode, userName } = actor(req);
+    // Assigned inside the locked section below, but needed afterward too (for the response) —
+    // declared here so both sides of the transaction boundary can see them.
+    let regularQty = 0;
+    let extraQty = 0;
+    let remainingBefore = 0;
     await client.query('BEGIN');
     try {
+      // Lock this barcode's plant-stock row FIRST, before re-checking or touching anything else
+      // that depends on the current stock/loaded totals — this is what actually serializes
+      // concurrent scans of the same barcode+plant (from this order or any other) so a second
+      // request has to wait for the first to commit, then sees its real, post-commit numbers
+      // instead of racing against a stale snapshot taken before either transaction started.
+      const { rows: lockedStockRows } = await client.query(
+        `SELECT in_stock AS "inStock" FROM product_plant_stock
+         WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2)) FOR UPDATE`,
+        [barcode, slip.plant],
+      );
+      const inStock = lockedStockRows[0]?.inStock ?? 0;
+      if (inStock <= 0) {
+        throw Object.assign(new Error(`No stock available to load "${matchedItem?.itemName ?? product?.name ?? barcode}" at ${slip.plant} — current stock is 0.`), { status: 409 });
+      }
+      if (qty > inStock) {
+        throw Object.assign(new Error(`Only ${inStock} in stock at ${slip.plant} — cannot load ${qty}.`), { status: 409 });
+      }
+
+      // Same "split into a regular portion (capped at expected) + an extra portion" rule Order
+      // Scan uses (server/routes/order-scan.ts) — a single scan can legitimately be part
+      // regular, part extra, e.g. expected 10 / already loaded 8 / scanning 5 → 2 regular + 3
+      // extra. Re-read fresh, now that the stock row above is locked, so two concurrent scans of
+      // the same order+barcode can't both see the same stale "already loaded" and both think
+      // they're entirely regular.
+      const { rows: loadedRows } = await client.query(
+        `SELECT COALESCE(SUM(total_qty), 0)::int AS "loaded" FROM loading_scan_events
+         WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+        [slip.orderNumber, barcode],
+      );
+      const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
+      remainingBefore = matchedItem ? Math.max(0, expected - alreadyLoaded) : 0;
+      // The Add Extra flow is a deliberate, explicit "log this as extra" action — the whole qty
+      // is extra even if the item still has room left in `remaining`, not just whatever spills
+      // past it. A regular scan keeps the ordinary split (capped at what's remaining; see the
+      // EXTRA_NOT_ALLOWED check right below, which refuses it whenever that split would leave any
+      // extra portion at all).
+      regularQty = (matchedItem && !isExtraScan) ? Math.min(qty, remainingBefore) : 0;
+      extraQty = qty - regularQty;
+
+      // Extra quantity (barcode not on this slip at all, or qty beyond what's still remaining
+      // for it) can only be logged through the dedicated Add Extra flow, never a regular scan —
+      // tagged for matchExtraNotAllowedError's client-side handling (a distinct centered popup)
+      // in LoadOperation.tsx. The Add Extra flow sends extra:true and skips this check entirely.
+      if (!isExtraScan && extraQty > 0) {
+        throw Object.assign(new Error(matchedItem
+          ? `EXTRA_NOT_ALLOWED: Only ${remainingBefore} left to load for "${matchedItem.itemName ?? barcode}" — scanning ${qty} would add ${extraQty} extra. Use Add Extra for the extra quantity.`
+          : `EXTRA_NOT_ALLOWED: "${barcode}" is not on this order. Use Add Extra to scan it.`), { status: 400 });
+      }
+
       const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
         `INSERT INTO loading_scan_events
            (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name)
@@ -554,6 +586,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
         barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
         sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
         totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty),
+        productId: product?.id ?? null,
       },
     });
 
@@ -561,9 +594,142 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     if (allComplete && finalSlip !== slip) {
       void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
     }
-  } catch (error) {
+  } catch (error: any) {
+    // A rejection raised from inside the locked transaction above (stock/extra checks re-run
+    // against the FOR UPDATE-locked row) carries its own intended status — an expected business
+    // rejection, not a server error, so it shouldn't be logged as one or masked as a 500.
+    if (error?.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
     console.error('Error scanning item for loading:', error);
     res.status(500).json({ message: 'Failed to record scan' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/loading/proforma/:orderNumber/adjust-load — body: { barcode, delta }
+// The Items table's own +/- buttons: a manual correction to one item's loaded quantity, instead
+// of going through the barcode scanner. Same write access as a normal scan (requirePageWrite
+// below) — not admin-only. Always recorded as its own loading_scan_events row (delta's sign and
+// all), so it shows up in scan history exactly like a real scan, just distinguishable by having
+// come from here rather than a barcode. Deliberately skips the regular/extra "remaining" cap the
+// real scan enforces (EXTRA_NOT_ALLOWED) — this is an explicit correction tool the operator chose
+// to use, not an accidental over-scan, so it's always allowed as long as stock/loaded bounds
+// themselves aren't violated (checked below, under the same FOR UPDATE lock /scan uses).
+router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('loading'), async (req: Request, res: Response) => {
+  const client = await pool.connect();
+  try {
+    const barcode = String(req.body?.barcode ?? '').trim();
+    const delta = Math.round(Number(req.body?.delta));
+    if (!barcode) return res.status(400).json({ message: 'barcode is required' });
+    if (!Number.isFinite(delta) || delta === 0) return res.status(400).json({ message: 'delta must be a non-zero number' });
+
+    const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if ((slip as any).loadingCompletedAt) {
+      return res.status(409).json({ message: 'This load is already marked complete — reopen it before adjusting it.' });
+    }
+    if (!slip.vehicleNumber) {
+      return res.status(400).json({ message: 'Link a vehicle to this order before adjusting items.' });
+    }
+
+    const rawItems = await storage.getProformaSlipItems(slip.id);
+    const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(barcode));
+    const product = await storage.getProductByBarcode(barcode, slip.plant);
+    const expected = matchedItem?.quantity ?? 0;
+    const state = await getPlantStateCode(client, slip.plant ?? '');
+    const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
+    const { userCode, userName } = actor(req);
+
+    let newLoadedTotal = 0;
+    await client.query('BEGIN');
+    try {
+      // Same lock /scan takes, for the same reason — serializes this against any concurrent
+      // scan or adjustment on the same barcode+plant so the checks below are never stale.
+      const { rows: lockedStockRows } = await client.query(
+        `SELECT in_stock AS "inStock" FROM product_plant_stock
+         WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2)) FOR UPDATE`,
+        [barcode, slip.plant],
+      );
+      const inStock = lockedStockRows[0]?.inStock ?? 0;
+      if (delta > 0 && delta > inStock) {
+        throw Object.assign(new Error(`Only ${inStock} in stock at ${slip.plant} — cannot add ${delta}.`), { status: 409 });
+      }
+
+      const { rows: loadedRows } = await client.query(
+        `SELECT COALESCE(SUM(total_qty), 0)::int AS "loaded" FROM loading_scan_events
+         WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+        [slip.orderNumber, barcode],
+      );
+      const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
+      newLoadedTotal = alreadyLoaded + delta;
+      if (newLoadedTotal < 0) {
+        throw Object.assign(new Error(`Only ${alreadyLoaded} currently loaded for this item — cannot remove ${Math.abs(delta)}.`), { status: 409 });
+      }
+
+      const absDelta = Math.abs(delta);
+      const pallets = itemsPerPallet > 0 ? Math.floor(absDelta / itemsPerPallet) : 0;
+      const looseQty = itemsPerPallet > 0 ? absDelta % itemsPerPallet : absDelta;
+      const isExtra = newLoadedTotal > expected;
+
+      await client.query(
+        `INSERT INTO loading_scan_events
+           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [
+          slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
+          delta > 0 ? pallets : -pallets, delta > 0 ? looseQty : -looseQty, delta, isExtra, slip.plant, null, userCode ?? null, userName ?? null,
+        ],
+      );
+
+      await reconcileProductPlantStockBarcode(client, product?.id, slip.plant, barcode);
+      await client.query(
+        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+        [delta, barcode, slip.plant],
+      );
+      await client.query(
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6)`,
+        [
+          barcode, product?.id ?? null, slip.plant, -delta,
+          `Loaded quantity manually ${delta > 0 ? 'increased' : 'decreased'} by ${Math.abs(delta)} for order ${slip.orderNumber}`,
+          userCode ?? null,
+        ],
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    }
+
+    const { items: progressItems, allComplete, loadedVolume } = await withProgress(slip, rawItems);
+    let finalSlip: any = slip;
+    if (allComplete && !(slip as any).loadingCompletedAt) {
+      finalSlip = await storage.updateProformaSlip(slip.id, {
+        loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null,
+        notionStatus: NOTION_LOADING_COMPLETE_STATUS,
+      } as any) ?? slip;
+    }
+
+    res.json({
+      slip: await withRto(finalSlip), items: progressItems, allComplete, loadedVolume,
+      event: {
+        barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
+        sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
+        totalQty: delta, isExtra: newLoadedTotal > expected, remaining: Math.max(0, expected - newLoadedTotal),
+        productId: product?.id ?? null,
+      },
+    });
+    if (allComplete && finalSlip !== slip) {
+      void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
+    }
+  } catch (error: any) {
+    if (error?.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    console.error('Error adjusting loaded quantity:', error);
+    res.status(500).json({ message: 'Failed to adjust loaded quantity' });
   } finally {
     client.release();
   }

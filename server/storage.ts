@@ -2387,14 +2387,33 @@ export class DBStorage implements IStorage {
     const matches = await db.select().from(products).where(eq(products.barcode, barcode.trim()));
     if (matches.length <= 1 || !plant) return matches[0];
 
-    const targetPlant = await this.getPlantByName(plant);
-    const targetState = targetPlant?.state?.trim().toUpperCase() || null;
-    if (!targetState) return matches[0];
+    // products.plant isn't always a single real plant name — 136 rows use the combined label
+    // "VAL & IND" (this data applies to both Valsad AND Indore together), and some rows have no
+    // plant at all. Split on any non-letter separator and resolve each piece to a real plant
+    // (exact name match, or a prefix match for an abbreviation like "VAL"/"IND") so a combined
+    // label resolves to EVERY state it covers, not zero — a plain plants-table lookup on the raw
+    // "VAL & IND" string finds nothing and would otherwise always fall through to the wrong row.
+    const allPlants = await this.getAllPlants();
+    const resolveStates = (label: string | null | undefined): Set<string> => {
+      const states = new Set<string>();
+      if (!label) return states;
+      const tokens = label.split(/[^a-zA-Z]+/).map((t) => t.trim().toUpperCase()).filter(Boolean);
+      for (const token of tokens) {
+        const found = allPlants.find((p) => String(p.name).toUpperCase() === token)
+          ?? allPlants.find((p) => String(p.name).toUpperCase().startsWith(token));
+        if (found?.state) states.add(String(found.state).trim().toUpperCase());
+      }
+      return states;
+    };
+
+    const targetStates = resolveStates(plant);
+    if (targetStates.size === 0) return matches[0];
 
     for (const candidate of matches) {
-      if (!candidate.plant) continue;
-      const candidatePlant = await this.getPlantByName(candidate.plant);
-      if (candidatePlant?.state?.trim().toUpperCase() === targetState) return candidate;
+      const candidateStates = resolveStates(candidate.plant);
+      for (const s of candidateStates) {
+        if (targetStates.has(s)) return candidate;
+      }
     }
     return matches[0];
   }

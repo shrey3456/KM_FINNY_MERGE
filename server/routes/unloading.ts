@@ -768,25 +768,19 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     if (!barcode) return res.status(400).json({ message: 'barcode is required' });
     if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be a positive number' });
 
+    // Fast, UNLOCKED pre-checks — fail obviously-bad requests cheaply before opening a
+    // transaction. NOT authoritative for scan_status/alreadyScanned: two concurrent scans of the
+    // same barcode on this session could both read the same snapshot here. The real checks
+    // (below, inside the transaction, against a FOR UPDATE-locked session row) are what actually
+    // prevent two parallel scans from both computing the same stale "already scanned" and both
+    // crediting themselves as regular when together they should split into regular + extra —
+    // the same class of race fixed in Loading's own /scan handler (server/routes/loading.ts).
     const { rows: sessionRows } = await client.query(`SELECT * FROM unload_import_sessions WHERE id = $1`, [id]);
     const session = sessionRows[0];
     if (!session) return res.status(404).json({ message: 'Unloading session not found' });
     if (!canAccessPlant(req, session.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
     if (session.scan_status === 'completed') {
       return res.status(409).json({ message: 'This part is already complete — reopen it before scanning more.' });
-    }
-    // Self-healing: normally the client already called POST .../activate when "Scan" was
-    // clicked, but if a scan somehow lands here while still 'available' (e.g. an older client),
-    // activate transparently rather than rejecting it outright — as long as it's still eligible.
-    if (session.scan_status === 'available') {
-      const eligible = await isEligibleToActivate({ id: session.id, groupId: session.group_id, partIndex: session.part_index });
-      if (!eligible) return res.status(409).json({ message: 'Another batch for this vehicle must complete first.' });
-      const { userCode: activatorCode } = actor(req);
-      await client.query(
-        `UPDATE unload_import_sessions SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = NOW() WHERE id = $2`,
-        [activatorCode ?? null, id],
-      );
-      session.scan_status = 'active';
     }
 
     const { rows: itemRows } = await client.query(
@@ -814,23 +808,61 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
       });
     }
 
-    const { rows: scannedRows } = await client.query(
-      `SELECT COALESCE(SUM(total_qty), 0)::int AS "scanned" FROM unload_scan_events
-       WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE`,
-      [id, barcode],
-    );
-    const alreadyScanned = scannedRows[0]?.scanned ?? 0;
     const expected = matchedItem?.quantity ?? 0;
-    const remainingBefore = matchedItem ? Math.max(0, expected - alreadyScanned) : 0;
-    const regularQty = matchedItem ? Math.min(qty, remainingBefore) : 0;
-    const extraQty = qty - regularQty;
-
     const state = await getPlantStateCode(client, session.plant ?? '');
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     const { userCode, userName } = actor(req);
+    // Assigned inside the locked section below, but needed afterward too (for the response).
+    let regularQty = 0;
+    let extraQty = 0;
+    let remainingBefore = 0;
 
     await client.query('BEGIN');
     try {
+      // Lock this session's row FIRST, before re-checking status or re-reading how much of
+      // this barcode has already been scanned — this is what actually serializes concurrent
+      // scans on the same session (any barcode) so a second request waits for the first to
+      // commit, then sees real, post-commit numbers instead of racing a stale snapshot.
+      const { rows: lockedSessionRows } = await client.query(
+        `SELECT * FROM unload_import_sessions WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      const lockedSession = lockedSessionRows[0];
+      if (!lockedSession || lockedSession.scan_status === 'completed') {
+        throw Object.assign(new Error('This part is already complete — reopen it before scanning more.'), { status: 409 });
+      }
+
+      // Self-healing: normally the client already called POST .../activate when "Scan" was
+      // clicked, but if a scan somehow lands here while still 'available' (e.g. an older
+      // client), activate transparently rather than rejecting it outright — as long as it's
+      // still eligible. Done under the lock so two concurrent first-scans can't both pass the
+      // eligibility check and both try to activate.
+      if (lockedSession.scan_status === 'available') {
+        const eligible = await isEligibleToActivate({ id: lockedSession.id, groupId: lockedSession.group_id, partIndex: lockedSession.part_index });
+        if (!eligible) {
+          throw Object.assign(new Error('Another batch for this vehicle must complete first.'), { status: 409 });
+        }
+        const { userCode: activatorCode } = actor(req);
+        await client.query(
+          `UPDATE unload_import_sessions SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = NOW() WHERE id = $2`,
+          [activatorCode ?? null, id],
+        );
+        session.scan_status = 'active';
+      }
+
+      // Re-read fresh, now that the session row above is locked, so two concurrent scans of the
+      // same barcode on this session can't both see the same stale "already scanned" and both
+      // think they're entirely regular.
+      const { rows: scannedRows } = await client.query(
+        `SELECT COALESCE(SUM(total_qty), 0)::int AS "scanned" FROM unload_scan_events
+         WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE`,
+        [id, barcode],
+      );
+      const alreadyScanned = scannedRows[0]?.scanned ?? 0;
+      remainingBefore = matchedItem ? Math.max(0, expected - alreadyScanned) : 0;
+      regularQty = matchedItem ? Math.min(qty, remainingBefore) : 0;
+      extraQty = qty - regularQty;
+
       const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
         `INSERT INTO unload_scan_events
            (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name)
@@ -908,9 +940,16 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
         barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
         sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
         totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty),
+        productId: product?.id ?? null,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
+    // A rejection raised from inside the locked transaction above (status/eligibility re-checked
+    // against the FOR UPDATE-locked session row) carries its own intended status — an expected
+    // business rejection, not a server error, so it shouldn't be logged as one or masked as 500.
+    if (error?.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
     console.error('Error scanning item for unloading:', error);
     res.status(500).json({ message: 'Failed to record scan' });
   } finally {

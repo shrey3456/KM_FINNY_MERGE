@@ -386,16 +386,28 @@ export default function OverallStock() {
   // The calendar half opens separately from the quick-ranges half — two buttons, two
   // popovers, one shared date value.
   const [dateCalOpen, setDateCalOpen] = useState(false); // controls the Date popover
-  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
-    () => new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]),
-  );
+  // Column visibility/order are real preferences, not working context for one sitting — saved to
+  // localStorage (not sessionStorage) so choosing which columns to see survives closing the
+  // browser/logging out, and only changes again when the user actually touches it here.
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(() => {
+    const defaults = new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]);
+    try {
+      const raw = localStorage.getItem("overallStock:visibleColumnIds");
+      const parsed = raw ? JSON.parse(raw) : null;
+      return Array.isArray(parsed) ? new Set(parsed) : defaults;
+    } catch {
+      return defaults;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("overallStock:visibleColumnIds", JSON.stringify(Array.from(visibleColumnIds))); } catch { /* storage unavailable */ }
+  }, [visibleColumnIds]);
 
-  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
-  // a rearranged table is working context for this sitting, not a permanent preference. An empty
-  // array means "declared order", which is also what Reset order restores.
+  // Column order, remembered per page. An empty array means "declared order", which is also what
+  // Reset order restores.
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     try {
-      const raw = sessionStorage.getItem("overallStock:columnOrder");
+      const raw = localStorage.getItem("overallStock:columnOrder");
       const parsed = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -403,7 +415,7 @@ export default function OverallStock() {
     }
   });
   useEffect(() => {
-    try { sessionStorage.setItem("overallStock:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("overallStock:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
   }, [columnOrder]);
 
 

@@ -209,16 +209,28 @@ export default function ProformaSlips() {
     direction: 'asc'
   });
 
-  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
-    () => new Set(['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'invoiceNumber', 'actions']),
-  );
+  const DEFAULT_VISIBLE_COLUMN_IDS = ['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'invoiceNumber', 'actions'];
+  // Column visibility/order are real preferences, not working context for one sitting — saved to
+  // localStorage (not sessionStorage) so choosing which columns to see survives closing the
+  // browser/logging out, and only changes again when the user actually touches it here.
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("proformaSlips:visibleColumnIds");
+      const parsed = raw ? JSON.parse(raw) : null;
+      return Array.isArray(parsed) ? new Set(parsed) : new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+    } catch {
+      return new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("proformaSlips:visibleColumnIds", JSON.stringify(Array.from(visibleColumnIds))); } catch { /* storage unavailable */ }
+  }, [visibleColumnIds]);
 
-  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
-  // a rearranged table is working context for this sitting, not a permanent preference. An empty
-  // array means "declared order", which is also what Reset order restores.
+  // Column order, remembered per page. An empty array means "declared order", which is also what
+  // Reset order restores.
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     try {
-      const raw = sessionStorage.getItem("proformaSlips:columnOrder");
+      const raw = localStorage.getItem("proformaSlips:columnOrder");
       const parsed = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -226,7 +238,7 @@ export default function ProformaSlips() {
     }
   });
   useEffect(() => {
-    try { sessionStorage.setItem("proformaSlips:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("proformaSlips:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
   }, [columnOrder]);
 
   

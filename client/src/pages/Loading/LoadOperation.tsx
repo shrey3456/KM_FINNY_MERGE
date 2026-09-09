@@ -31,7 +31,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
-import { matchProductMasterMissingError, matchBarcodeNotInSystemError, matchExtraNotAllowedError } from "@/lib/apiError";
+import { matchProductMasterMissingError, matchBarcodeNotInSystemError, matchExtraNotAllowedError, parseApiErrorMessage } from "@/lib/apiError";
 
 // Width split (percent) between the Load Totals card and the Scan Items column — operator-
 // draggable, same mechanism (and same localStorage-key naming convention) as Order Scan's own
@@ -82,6 +82,9 @@ type ProformaSlip = {
   // LOADING/READY≈DESP into it) — DISPATCHED/DELIVERED/SHORTAGE/UNLOADING mean it has moved past
   // (or sideways from) loading, so the server refuses to start/scan/link a vehicle on it.
   notionStatus: string | null;
+  // When Create Operation was first run for this order (loading_records.created_at, set by
+  // withRto) — separate from orderDate, which is the slip's own order date. Null until started.
+  loadDate: string | null;
   // Set server-side (see withRto in loading.ts) whenever vehicleInfoId already points at a
   // specific Vehicle Master row but nobody has confirmed it yet — the exact row to pre-select,
   // resolved by id rather than by re-matching vehicleNumber's text on the client.
@@ -94,10 +97,14 @@ type VehicleSuggestion = {
 type LoadingRecord = {
   id: number; orderNumber: string; partyName: string | null; plant: string | null;
   vehicleNumber: string; rtoNumber: string | null; volume: string | null;
-  createdByCode: string | null; createdByName: string | null; createdAt: string;
+  createdByCode: string | null; createdByName: string | null;
+  // createdAt is when THIS load record was created (vehicle linked / load started) — shown as
+  // "Load Date", not the order's own date. orderDate is the proforma slip's real order date,
+  // straight from the source order data — the two can be days apart.
+  createdAt: string; orderDate: string | null;
   loadingCompletedAt: string | null;
 };
-type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number; event: { barcode: string; itemName: string; sapCode: string | null; totalQty: number; isExtra: boolean; remaining: number } };
+type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number; event: { barcode: string; itemName: string; sapCode: string | null; totalQty: number; isExtra: boolean; remaining: number; productId: number | null } };
 // One row of that order's own load-event history (the landing table's expand panel) — fetched
 // from the same Scan History endpoint the Reports page's Load Event tab uses, scoped to this
 // order (GET /api/scan-sessions/reports/scan-history?source=dispatch&order=X).
@@ -279,7 +286,7 @@ export default function LoadOperation() {
       return res.json();
     },
     onSuccess: () => { toast({ title: "Load reopened" }); recordsQuery.refetch(); },
-    onError: (err: any) => toast({ title: "Reopen failed", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Reopen failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   const [resetTarget, setResetTarget] = useState<LoadingRecord | null>(null);
@@ -295,7 +302,7 @@ export default function LoadOperation() {
       setExpandedRecordOrder(null);
       recordsQuery.refetch();
     },
-    onError: (err: any) => toast({ title: "Delete failed", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Delete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   // Void a single scan event — same action Scan History's Load Event tab offers, available here
@@ -324,7 +331,7 @@ export default function LoadOperation() {
       // list's Complete/In Progress badge needs a refresh too, not just the open order's view.
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
-    onError: (err: any) => toast({ title: "Void failed", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Void failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   // ─── Stage A: find a proforma slip ───────────────────────────────────────
@@ -468,6 +475,32 @@ export default function LoadOperation() {
     localStorage.setItem(LAST_ORDER_KEY, data.slip.orderNumber);
   }
 
+  // Live stock refresh — while this order is open, ANY page (another Loading session on the
+  // same order, Unloading, Order Scan, a manual admin adjust) can change this barcode's stock at
+  // any moment. Without this, the operator keeps seeing whatever "current stock" figures were
+  // true at the moment the order was opened (or last scanned), not the live truth, until their
+  // own next scan happens to pull a fresh copy. Silent — no toast, doesn't touch the pending/
+  // search state — just keeps slip/items in step with the server every few seconds, the same way
+  // the server's own /scan response already refreshes them after this page's OWN scans.
+  useEffect(() => {
+    if (view !== "create" || !slip) return;
+    const orderNumber = slip.orderNumber;
+    const id = setInterval(async () => {
+      try {
+        const res = await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(orderNumber)}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as SlipLookup;
+        setSlip(data.slip);
+        setItems(data.items);
+        setAllComplete(data.allComplete);
+        setLoadedVolume(data.loadedVolume);
+      } catch {
+        // Best-effort — a transient network hiccup just waits for the next tick.
+      }
+    }, 15000);
+    return () => clearInterval(id);
+  }, [view, slip?.orderNumber]);
+
   const fetchSlipMutation = useMutation({
     mutationFn: async (orderNumber: string) => {
       const res = await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(orderNumber)}`);
@@ -496,7 +529,7 @@ export default function LoadOperation() {
         return;
       }
       confirmRef.current = false;
-      toast({ title: "Order not found", description: err?.message, variant: "destructive" });
+      toast({ title: "Order not found", description: parseApiErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -514,7 +547,7 @@ export default function LoadOperation() {
       toast({ title: "Load operation created", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
-    onError: (err: any) => toast({ title: "Could not start load", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Could not start load", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   function openOrder(orderNumber: string, opts?: { silent?: boolean; confirm?: boolean }) {
@@ -676,7 +709,7 @@ export default function LoadOperation() {
       }
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
-    onError: (err: any) => toast({ title: "Link failed", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Link failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   function pickVehicle(v: VehicleSuggestion) {
@@ -761,6 +794,42 @@ export default function LoadOperation() {
     const state = getPlantState(slip?.plant ?? "");
     return Math.max(1, getStatePalletSize(product, state) || 1);
   }
+  // Mirrors server/storage.ts's getProductByBarcode exactly — products.plant isn't always a
+  // single real plant name (e.g. "VAL & IND" means this row applies to both Valsad AND Indore
+  // together), so a plain plants-table lookup on that raw string finds nothing. Splits on any
+  // non-letter separator and resolves each piece to a real plant (exact match, or a prefix match
+  // for an abbreviation like "VAL"), collecting every state the label covers.
+  function resolveStatesForPlantLabel(label: string | null | undefined): Set<string> {
+    const states = new Set<string>();
+    if (!label || !allPlants) return states;
+    const tokens = label.split(/[^a-zA-Z]+/).map((t) => t.trim().toUpperCase()).filter(Boolean);
+    for (const token of tokens) {
+      const found = allPlants.find((p: any) => String(p.name ?? "").toUpperCase() === token)
+        ?? allPlants.find((p: any) => String(p.name ?? "").toUpperCase().startsWith(token));
+      if (found?.state) states.add(String(found.state).trim().toUpperCase());
+    }
+    return states;
+  }
+  // Add Extra's own product lookup is entirely client-side (allProductsQuery, the full catalog)
+  // — when a barcode has more than one Product Master row (see the comment above), a plain
+  // .find() just grabs whichever one the API happened to return first, which is how this dialog
+  // kept defaulting to a row with no gj/mp PLT set (pallet size silently falling back to 1) even
+  // after the server-side scan path was fixed to prefer the state-matching row. Same fix, applied
+  // to this client-side lookup too.
+  function resolveExtraProductForBarcode(barcode: string): Product | undefined {
+    const q = barcode.trim().toLowerCase();
+    const matches = (allProductsQuery.data ?? []).filter((p) => (p.barcode ?? "").toLowerCase() === q);
+    if (matches.length <= 1) return matches[0];
+    const targetStates = resolveStatesForPlantLabel(slip?.plant ?? "");
+    if (targetStates.size === 0) return matches[0];
+    for (const candidate of matches) {
+      const candidateStates = resolveStatesForPlantLabel(candidate.plant);
+      for (const s of candidateStates) {
+        if (targetStates.has(s)) return candidate;
+      }
+    }
+    return matches[0];
+  }
 
   // STV — same per-plant picker Order Scan/Unloading have. Persisted per browser; dropped and
   // re-defaulted whenever it doesn't belong to the current plant's list (e.g. restored from a
@@ -822,6 +891,7 @@ export default function LoadOperation() {
     setExtraTarget(null);
     setExtraQty(1);
     setExtraPalletsInput("");
+    setExtraScanMode("manual");
   }
   function pickExtraTarget(p: Product) {
     setExtraTarget(p);
@@ -830,6 +900,21 @@ export default function LoadOperation() {
     const qty = ipp > 0 ? ipp : 1;
     setExtraQty(qty);
     setExtraPalletsInput(ipp > 0 ? "1.00" : "");
+  }
+  // A gun scan (or a full barcode pasted/typed) lands as an exact catalog match the moment
+  // it's complete — jump straight to the confirm step instead of making the operator click the
+  // one result that's already sitting there. Substring searches (name/SAP/partial barcode)
+  // still fall through to the normal results list below.
+  function tryAutoPickExtraBarcode(value: string): boolean {
+    const q = value.trim();
+    if (!q) return false;
+    const exact = resolveExtraProductForBarcode(q);
+    if (exact) { pickExtraTarget(exact); return true; }
+    return false;
+  }
+  function handleExtraSearchChange(value: string) {
+    setExtraSearch(value);
+    tryAutoPickExtraBarcode(value);
   }
   function changeExtraQty(v: string) {
     const q = parseInt(v, 10) || 0;
@@ -860,13 +945,90 @@ export default function LoadOperation() {
       toast({ title: "Extra added", description: `${extraTarget?.name} · +${extraQty}` });
       resetExtraDialog();
     },
-    onError: (err: any) => toast({ title: "Could not add extra", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Could not add extra", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
+
+  // Items table's own +/- on the Loaded column — a manual correction, confirmed first (same
+  // write access as scanning; no extra permission gate). The dialog defaults to 1 but lets the
+  // operator type any quantity before confirming either direction.
+  const [adjustTarget, setAdjustTarget] = useState<{ item: ProformaItem; direction: "add" | "remove" } | null>(null);
+  const [adjustQty, setAdjustQty] = useState(1);
+  function openAdjustDialog(item: ProformaItem, direction: "add" | "remove") {
+    setAdjustTarget({ item, direction });
+    setAdjustQty(1);
+  }
+  const adjustLoadMutation = useMutation({
+    mutationFn: async () => {
+      if (!adjustTarget || !slip) throw new Error("Nothing to adjust");
+      const delta = adjustTarget.direction === "add" ? adjustQty : -adjustQty;
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip.orderNumber)}/adjust-load`, {
+        barcode: adjustTarget.item.barcode, delta,
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to adjust quantity");
+      return res.json() as Promise<ScanResponse>;
+    },
+    onSuccess: (data) => {
+      setSlip(data.slip);
+      setItems(data.items);
+      setAllComplete(data.allComplete);
+      setLoadedVolume(data.loadedVolume);
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", data.slip.orderNumber] });
+      toast({
+        title: adjustTarget?.direction === "add" ? "Quantity added" : "Quantity removed",
+        description: `${adjustTarget?.item.itemName ?? adjustTarget?.item.barcode} · ${adjustTarget?.direction === "add" ? "+" : "−"}${adjustQty}`,
+      });
+      setAdjustTarget(null);
+    },
+    onError: (err: any) => toast({ title: "Could not adjust quantity", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
   const itemInputRef = useRef<HTMLInputElement>(null);
   const [itemCameraReady, setItemCameraReady] = useState(false);
   const [itemCameraError, setItemCameraError] = useState<string | null>(null);
   const itemVideoRef = useRef<HTMLVideoElement>(null);
   const itemScannerRef = useRef<BarcodeScanner | null>(null);
+
+  // Add Extra's own Camera/Manual toggle — same pattern as the regular item scanner above, just
+  // scoped to this dialog and only running during the search step (stopped once a target is
+  // picked, since there's nothing left to scan for).
+  const [extraScanMode, setExtraScanMode] = useState<"camera" | "manual">("manual");
+  const [extraCameraReady, setExtraCameraReady] = useState(false);
+  const [extraCameraError, setExtraCameraError] = useState<string | null>(null);
+  const extraVideoRef = useRef<HTMLVideoElement>(null);
+  const extraScannerRef = useRef<BarcodeScanner | null>(null);
+  function stopExtraCamera() {
+    extraScannerRef.current?.stop();
+    setExtraCameraReady(false);
+  }
+  useEffect(() => {
+    if (!extraDialogOpen || extraScanMode !== "camera" || extraTarget) { stopExtraCamera(); return; }
+    let cancelled = false;
+    const scanner = new BarcodeScanner({
+      onDetected: (result: Result) => {
+        const code = result.getText();
+        if (!code || cancelled) return;
+        if (!tryAutoPickExtraBarcode(code)) {
+          toast({ title: "Barcode not found", description: `"${code}" has no matching entry in Product Master.`, variant: "destructive" });
+        }
+      },
+      onError: (err: Error) => { if (!cancelled) { setExtraCameraError(err.message); setExtraScanMode("manual"); } },
+    });
+    extraScannerRef.current = scanner;
+    (async () => {
+      const videoEl = extraVideoRef.current;
+      if (!videoEl) return;
+      setExtraCameraError(null);
+      setExtraCameraReady(false);
+      try {
+        await scanner.initialize();
+        if (!cancelled) { await scanner.start(videoEl); if (!cancelled) setExtraCameraReady(true); }
+      } catch (err: any) {
+        if (!cancelled) { setExtraCameraError(err?.message ?? "Camera failed"); setExtraScanMode("manual"); }
+      }
+    })();
+    return () => { cancelled = true; scanner.stop(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extraDialogOpen, extraScanMode, extraTarget]);
   const itemsRef = useRef<ProformaItem[]>(items);
   itemsRef.current = items;
   const scanLockRef = useRef(false);
@@ -896,17 +1058,17 @@ export default function LoadOperation() {
   // the same plant-level Auto Scan toggle (autoScanEnabled above); anything less than a full
   // pallet, or Auto Scan being off for this plant, still opens the confirm dialog below.
   const [autoFeedback, setAutoFeedback] = useState<
-    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean } | null
+    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean; productId: number | null } | null
   >(null);
   const autoFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Tracked in state (not a direct DOM style flip on the <img> itself) so the text column
   // actually reflows to fill the freed width when the image 404s — same pattern Order Scan's
   // own confirm dialog uses (osImageFailed).
   const [autoFeedbackImageFailed, setAutoFeedbackImageFailed] = useState(false);
-  function showAutoFeedback(name: string, barcode: string, sapCode: string | null, scannedQty: number, remaining: number, isExtra: boolean) {
+  function showAutoFeedback(name: string, barcode: string, sapCode: string | null, scannedQty: number, remaining: number, isExtra: boolean, productId: number | null) {
     if (autoFeedbackTimerRef.current) clearTimeout(autoFeedbackTimerRef.current);
     setAutoFeedbackImageFailed(false);
-    setAutoFeedback({ name, barcode, sapCode, scannedQty, remaining, isExtra });
+    setAutoFeedback({ name, barcode, sapCode, scannedQty, remaining, isExtra, productId });
     autoFeedbackTimerRef.current = setTimeout(() => setAutoFeedback(null), 5000);
   }
 
@@ -937,7 +1099,7 @@ export default function LoadOperation() {
       if (barcodeNotInSystem) { setBarcodeNotInSystemMessage(barcodeNotInSystem); return; }
       const extraNotAllowed = matchExtraNotAllowedError(err);
       if (extraNotAllowed) { setExtraNotAllowedMessage(extraNotAllowed); return; }
-      toast({ title: "Scan failed", description: err?.message, variant: "destructive" });
+      toast({ title: "Scan failed", description: parseApiErrorMessage(err), variant: "destructive" });
     },
     onSettled: () => { scanLockRef.current = false; },
   });
@@ -958,7 +1120,7 @@ export default function LoadOperation() {
       toast({ title: "Load marked complete" });
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
-    onError: (err: any) => toast({ title: "Complete failed", description: err?.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   function defaultDialogQty(item: ProformaItem | null): number {
@@ -984,7 +1146,8 @@ export default function LoadOperation() {
   // dialog for garbage input instead of a clear rejection the operator can just retry).
   async function isKnownProduct(barcode: string): Promise<boolean> {
     try {
-      await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}`);
+      const plantQ = slip?.plant ? `?plant=${encodeURIComponent(slip.plant)}` : "";
+      await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}${plantQ}`);
       return true;
     } catch {
       return false;
@@ -1058,7 +1221,7 @@ export default function LoadOperation() {
       const qty = ipp;
       scanItemMutation.mutate({ barcode, qty }, {
         onSuccess: (data) =>
-          showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra),
+          showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra, data.event.productId),
       });
       setItemBarcode("");
       return;
@@ -1154,10 +1317,30 @@ export default function LoadOperation() {
     { expected: 0, loaded: 0, remaining: 0, extra: 0, pltExpected: 0, pltLoaded: 0, pltRemaining: 0, pltExtra: 0 },
   );
   const itemPct = itemTotals.expected > 0 ? Math.min(100, Math.round((itemTotals.loaded / itemTotals.expected) * 100)) : 0;
+  // Three separate lists via one tab, based on the order's own EXPECTED quantity per item (its
+  // planned amount) — not Loaded. Loaded starts at 0 for almost every item before scanning even
+  // begins, so basing this on Loaded left most items with neither a pallet nor a loose count and
+  // they vanished from both lists entirely. Expected is set from the start for every real item,
+  // so "Pallet" (needs at least one full pallet) and "Loose" (its planned qty is only a leftover
+  // that never completes one) both populate properly regardless of how far scanning has gotten.
+  // "All" shows every item, both numbers merged — never both lists' items at once otherwise, only
+  // one active list. An item with no pallet size configured (itemsPerPallet <= 0) has no pallet
+  // concept at all — its whole expected qty counts as loose, same as the fallback everywhere else.
+  const [itemUnitTab, setItemUnitTab] = useState<"all" | "pallet" | "loose">("all");
+  const expectedPalletsOf = (it: ProformaItem) => {
+    const ipp = it.itemsPerPallet ?? 0;
+    return ipp > 0 ? Math.floor(it.expected / ipp) : 0;
+  };
+  const expectedLooseOf = (it: ProformaItem) => {
+    const ipp = it.itemsPerPallet ?? 0;
+    return ipp > 0 ? it.expected % ipp : it.expected;
+  };
   const filteredItems = items.filter((it) => {
     if (itemStatusFilter === "done" && !(it.loaded > 0)) return false;
     if (itemStatusFilter === "remaining" && !(it.remaining > 0)) return false;
     if (itemStatusFilter === "extra" && !(it.loaded > it.expected)) return false;
+    if (itemUnitTab === "pallet" && !(expectedPalletsOf(it) > 0)) return false;
+    if (itemUnitTab === "loose" && !(expectedLooseOf(it) > 0)) return false;
     if (itemSearchText.trim()) {
       const q = itemSearchText.trim().toLowerCase();
       const hay = `${it.itemName ?? ""} ${it.barcode ?? ""} ${it.sapCode ?? ""}`.toLowerCase();
@@ -1169,6 +1352,22 @@ export default function LoadOperation() {
   // Items table — same shared DataTable (navy sticky header, resizable/sortable columns, totals
   // row) Order Scan and Unloading's own items tables use. Item Name and Barcode/SAP are merged
   // into one column (name on top, barcode · SAP underneath) rather than two separate ones.
+  // Splits a qty into whole pallets + the leftover that doesn't fill one, instead of one combined
+  // decimal ("2.33 plt") that makes the operator do the division themselves to see how much is a
+  // clean pallet vs. loose boxes. On "All" both (non-zero) lines show, stacked, same as before;
+  // on "Pallet"/"Loose" only that one line shows, matching the row-level filter above.
+  const renderPalletLoose = (qty: number, ipp: number) => {
+    if (ipp <= 0) return null;
+    const pallets = Math.floor(qty / ipp);
+    const loose = qty % ipp;
+    return (
+      <>
+        {itemUnitTab !== "loose" && pallets > 0 && <span className="block text-sm font-semibold text-gray-400">{pallets} plt</span>}
+        {itemUnitTab !== "pallet" && loose > 0 && <span className="block text-sm font-semibold text-gray-400">{loose} loose</span>}
+      </>
+    );
+  };
+
   const loadingItemColumns: DataTableColumn<ProformaItem>[] = [
     {
       // minWidth kept low (not the ~180 a stacked name+barcode+pallet cell would suggest) so the
@@ -1201,7 +1400,7 @@ export default function LoadOperation() {
       render: (row) => (
         <>
           <span className="block">{row.expected}</span>
-          {(row.itemsPerPallet ?? 0) > 0 && <span className="block text-sm font-semibold text-gray-400">{(row.expected / row.itemsPerPallet!).toFixed(2)} plt</span>}
+          {renderPalletLoose(row.expected, row.itemsPerPallet ?? 0)}
         </>
       ),
     },
@@ -1209,17 +1408,40 @@ export default function LoadOperation() {
       // No dedicated Extra column — extra only ever happens through the separate Add Extra flow
       // (see EXTRA_NOT_ALLOWED in server/routes/loading.ts), so it stays a rare inline note on
       // Loaded rather than a column that's blank for almost every row.
-      id: "loaded", header: "Loaded", align: "center", width: 75, minWidth: 65, sortable: true,
+      id: "loaded", header: "Loaded", align: "center", width: 140, minWidth: 120, sortable: true,
       accessor: (row) => row.loaded,
       cellClassName: "font-medium text-gray-900",
       render: (row) => {
         const extra = Math.max(0, row.loaded - row.expected);
         return (
-          <>
-            <span className="block">{row.loaded}</span>
-            {(row.itemsPerPallet ?? 0) > 0 && <span className="block text-sm font-semibold text-gray-400">{(row.loaded / row.itemsPerPallet!).toFixed(2)} plt</span>}
-            {extra > 0 && <span className="block text-xs font-bold text-amber-600">+{extra} extra</span>}
-          </>
+          <div className="flex items-center justify-center gap-3">
+            {canWrite && !locked && row.barcode && (
+              <Button
+                size="sm" variant="ghost"
+                className="h-8 w-8 shrink-0 rounded-full p-0 text-base font-bold bg-red-100 text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
+                disabled={row.loaded <= 0}
+                title="Remove from loaded quantity"
+                onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "remove"); }}
+              >
+                −
+              </Button>
+            )}
+            <span>
+              <span className="block">{row.loaded}</span>
+              {renderPalletLoose(row.loaded, row.itemsPerPallet ?? 0)}
+              {extra > 0 && <span className="block text-xs font-bold text-amber-600">+{extra} extra</span>}
+            </span>
+            {canWrite && !locked && row.barcode && (
+              <Button
+                size="sm" variant="ghost"
+                className="h-8 w-8 shrink-0 rounded-full p-0 text-base font-bold bg-emerald-100 text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
+                title="Add to loaded quantity"
+                onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}
+              >
+                +
+              </Button>
+            )}
+          </div>
         );
       },
     },
@@ -1230,7 +1452,7 @@ export default function LoadOperation() {
       render: (row) => (
         <>
           <span className="block">{row.remaining}</span>
-          {(row.itemsPerPallet ?? 0) > 0 && <span className="block text-sm font-semibold text-gray-400">{(row.remaining / row.itemsPerPallet!).toFixed(2)} plt</span>}
+          {renderPalletLoose(row.remaining, row.itemsPerPallet ?? 0)}
         </>
       ),
     },
@@ -1242,7 +1464,7 @@ export default function LoadOperation() {
         return (
           <>
             <span className={`block ${outOfStock ? "font-semibold text-red-600" : "text-gray-500"}`}>{row.stockAvailable ?? "—"}</span>
-            {(row.itemsPerPallet ?? 0) > 0 && <span className="block text-sm font-semibold text-gray-400">{((row.stockAvailable ?? 0) / row.itemsPerPallet!).toFixed(2)} plt</span>}
+            {renderPalletLoose(row.stockAvailable ?? 0, row.itemsPerPallet ?? 0)}
           </>
         );
       },
@@ -1262,61 +1484,78 @@ export default function LoadOperation() {
     URL.revokeObjectURL(a.href);
   }
 
+  // Column defs for the per-item scan history drill-down — a real DataTable (drag-to-resize,
+  // same as every other table on this page) instead of a plain fixed-width <table>, which is
+  // also what silently dropped STV: its header existed but nothing rendered a matching <td>,
+  // since a plain table has no single source of truth tying a header to its own cell.
+  const loadingItemHistoryColumns: DataTableColumn<LoadHistoryEvent>[] = [
+    {
+      id: "scannedAt", header: "Date & Time", width: 170, minWidth: 120, sortable: false, totalable: false,
+      accessor: (ev) => ev.scannedAt,
+      render: (ev) => <span className="whitespace-nowrap text-gray-600">{new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</span>,
+    },
+    {
+      id: "scannedByName", header: "Scanned By", width: 140, minWidth: 80, totalable: false,
+      accessor: (ev) => ev.scannedByName ?? "",
+      render: (ev) => <span className="truncate text-gray-600">{ev.scannedByName ?? "—"}</span>,
+    },
+    {
+      id: "totalQty", header: "Qty", width: 70, minWidth: 50, align: "right", totalable: false,
+      accessor: (ev) => ev.totalQty,
+      render: (ev) => (
+        <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
+          {ev.isExtra ? "+" : ""}{ev.totalQty}
+        </span>
+      ),
+    },
+    {
+      id: "stv", header: "STV", width: 70, minWidth: 50, totalable: false,
+      accessor: (ev) => ev.stv ?? "",
+      render: (ev) => <span className="text-[11px] text-gray-600">{ev.stv ?? "—"}</span>,
+    },
+    {
+      id: "status", header: "Status", width: 90, minWidth: 60, totalable: false,
+      accessor: (ev) => (ev.voided ? "Voided" : ev.isExtra ? "Extra" : ""),
+      render: (ev) =>
+        ev.voided ? (
+          <span className="text-[11px] font-medium text-red-500">Voided</span>
+        ) : ev.isExtra ? (
+          <span className="text-[11px] font-semibold uppercase text-amber-700">Extra</span>
+        ) : (
+          <span className="text-[11px] text-gray-400">—</span>
+        ),
+    },
+    ...(canResetLoad ? [{
+      id: "void", header: "", width: 56, minWidth: 56, align: "right" as const, hideable: false, totalable: false,
+      render: (ev: LoadHistoryEvent) =>
+        !ev.voided ? (
+          <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-gray-400 hover:bg-red-50 hover:text-red-600"
+            onClick={() => setVoidTarget(ev)} title="Void this scan">
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        ) : null,
+    } satisfies DataTableColumn<LoadHistoryEvent>] : []),
+  ];
+
   function renderLoadingItemHistoryPanel(item: ProformaItem) {
     const itemEvents = (orderLoadHistoryQuery.data?.items ?? []).filter((ev) => normalize(ev.barcode) === normalize(item.barcode));
     return (
       <div className="border-b border-gray-200 bg-gray-50 p-3">
         {orderLoadHistoryQuery.isLoading ? (
           <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
-        ) : itemEvents.length === 0 ? (
-          <p className="py-4 text-center text-xs text-gray-400">No scan history for this item yet.</p>
         ) : (
-          <div className="max-h-60 overflow-y-auto overflow-x-auto border border-gray-200 bg-white">
-            <table className="w-full min-w-[520px] table-fixed border-collapse text-xs">
-              <thead>
-                <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
-                  <th className="w-[170px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
-                  <th className="border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
-                  <th className="w-16 border-r border-gray-200 px-2 py-2 text-right font-semibold">Qty</th>
-                  <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">STV</th>
-                  <th className="w-20 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
-                  {canResetLoad && <th className="w-14 px-2 py-2 text-right font-semibold">Void</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {itemEvents.map((ev, idx) => (
-                  <tr key={ev.id} className={`border-b border-gray-100 ${ev.voided ? "opacity-60" : "hover:bg-gray-50"} ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
-                    <td className="whitespace-nowrap border-r border-gray-100 px-2 py-2 text-gray-600">{new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
-                    <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
-                    <td className="border-r border-gray-100 px-2 py-2 text-right">
-                      <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
-                        {ev.isExtra ? "+" : ""}{ev.totalQty}
-                      </span>
-                    </td>
-                    <td className="truncate border-r border-gray-100 px-2 py-2 text-[11px]">
-                      {ev.voided ? (
-                        <span className="font-medium text-red-500">Voided</span>
-                      ) : ev.isExtra ? (
-                        <span className="font-semibold uppercase text-amber-700">Extra</span>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
-                    </td>
-                    {canResetLoad && (
-                      <td className="px-2 py-2 text-right">
-                        {!ev.voided && (
-                          <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-gray-400 hover:bg-red-50 hover:text-red-600"
-                            onClick={() => setVoidTarget(ev)} title="Void this scan">
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        )}
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable<LoadHistoryEvent>
+            containerClassName="border border-gray-200 bg-white"
+            columns={loadingItemHistoryColumns}
+            data={itemEvents}
+            getRowId={(ev) => String(ev.id)}
+            rowClassName={(ev) => (ev.voided ? "opacity-60" : undefined)}
+            enableColumnResizing
+            enableZebraStripes
+            maxHeight="15rem"
+            isStickyHeader
+            emptyState="No scan history for this item yet."
+          />
         )}
       </div>
     );
@@ -1548,7 +1787,8 @@ export default function LoadOperation() {
                           the header read as a header rather than blending into the rows. */}
                       <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
                         <TableHead className="w-12 text-[11px] font-semibold uppercase tracking-wide text-white"></TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Order Date</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The proforma slip's own order date">Order Date</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The date this load operation was started (vehicle linked)">Load Date</TableHead>
                         <TableHead
                           className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
                           onClick={() => { setSortBy("orderNumber"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
@@ -1586,6 +1826,11 @@ export default function LoadOperation() {
                                 >
                                   <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
                                 </Button>
+                              </TableCell>
+                              <TableCell>
+                                {r.orderDate
+                                  ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
+                                  : "-"}
                               </TableCell>
                               <TableCell>{new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}</TableCell>
                               <TableCell>#{r.orderNumber}</TableCell>
@@ -1728,9 +1973,19 @@ export default function LoadOperation() {
                               )}
                             </div>
                             <div className="flex flex-col items-end">
-                              <div className="flex items-center text-xs">
+                              {r.orderDate && (
+                                <div className="flex items-center text-xs" title="Order date — the proforma slip's own date">
+                                  <Calendar className="h-3 w-3 mr-1 text-muted-foreground" />
+                                  <span className="text-muted-foreground">Ord</span>
+                                  <span className="font-medium ml-1">
+                                    {new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
+                                  </span>
+                                </div>
+                              )}
+                              <div className="flex items-center text-xs mt-0.5" title="Load date — when this load operation was started">
                                 <Calendar className="h-3 w-3 mr-1 text-muted-foreground" />
-                                <span className="font-medium">
+                                <span className="text-muted-foreground">Load</span>
+                                <span className="font-medium ml-1">
                                   {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
                                 </span>
                               </div>
@@ -2155,8 +2410,13 @@ export default function LoadOperation() {
                     <div className="flex flex-wrap items-center gap-2">
                       {slip.plant && <PlantBadge plant={slip.plant} />}
                       {slip.orderDate && (
-                        <span className="text-sm font-semibold text-gray-700">
-                          {new Date(slip.orderDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+                        <span className="text-sm font-semibold text-gray-700" title="Order date — the proforma slip's own date">
+                          Ord {new Date(`${String(slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+                        </span>
+                      )}
+                      {slip.loadDate && (
+                        <span className="text-sm font-semibold text-gray-500" title="Load date — when this load operation was started">
+                          Load {new Date(slip.loadDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
                         </span>
                       )}
                       <span className="text-xs text-gray-400">{items.length} item{items.length === 1 ? "" : "s"}</span>
@@ -2199,9 +2459,23 @@ export default function LoadOperation() {
                       visibly bigger, outlined treatment rather than reading as just another
                       small pill alongside Change Vehicle/Complete. */}
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <div className="flex items-center gap-2">
-                      <Progress value={itemPct} className="w-20 h-1.5" />
-                      <span className="text-xs font-medium text-gray-600 whitespace-nowrap">{itemTotals.loaded}/{itemTotals.expected} loaded</span>
+                    {/* Same pill treatment as the Volume/Capacity/Vehicle badges beside it — a
+                        bare, backgroundless w-20 sliver here (the old markup) had no visual
+                        weight at all next to those colored pills, reading as "not visible". */}
+                    <div
+                      className={`flex items-center gap-2 rounded-full px-2.5 py-1 ${
+                        itemPct >= 100 ? "bg-emerald-100" : "bg-gray-100"
+                      }`}
+                      title={`${itemTotals.loaded} of ${itemTotals.expected} loaded`}
+                    >
+                      <Progress
+                        value={itemPct}
+                        className={`w-24 h-2 ${itemPct >= 100 ? "bg-emerald-200" : "bg-gray-200"}`}
+                        indicatorClassName={itemPct >= 100 ? "bg-emerald-600" : "bg-[#001d6e]"}
+                      />
+                      <span className={`text-xs font-bold whitespace-nowrap ${itemPct >= 100 ? "text-emerald-700" : "text-gray-700"}`}>
+                        {itemTotals.loaded}/{itemTotals.expected} · {itemPct}%
+                      </span>
                     </div>
                     {/* STV — same per-plant picker Order Scan/Unloading have. Amber when nothing
                         is picked (scanning is blocked until it is — see handleItemBarcode's
@@ -2536,6 +2810,33 @@ export default function LoadOperation() {
                 <span className="text-xs text-gray-400">
                   {itemStatusFilter || itemSearchText ? `(${filteredItems.length} of ${items.length})` : `(${items.length})`}
                 </span>
+                {/* All/Pallet/Loose — three separate lists sharing one table. "All" shows every
+                    item with both numbers merged; "Pallet" and "Loose" each narrow the rows
+                    below to just that group (based on the Loaded column's own split), showing
+                    only that one figure — never both lists visible at once, only one active. */}
+                <div className="flex overflow-hidden rounded-full border border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => setItemUnitTab("all")}
+                    className={`px-3 py-1 text-xs font-semibold transition-colors ${itemUnitTab === "all" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setItemUnitTab("pallet")}
+                    className={`px-3 py-1 text-xs font-semibold transition-colors ${itemUnitTab === "pallet" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                  >
+                    Pallet
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setItemUnitTab("loose")}
+                    className={`px-3 py-1 text-xs font-semibold transition-colors ${itemUnitTab === "loose" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                  >
+                    Loose
+                  </button>
+                </div>
                 <div className="ml-auto flex items-center gap-2">
                   {allComplete && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">ALL LOADED</span>}
                   {items.length > 0 && (
@@ -2594,8 +2895,12 @@ export default function LoadOperation() {
                   product has no cached image, instead of leaving a blank gap where it was. */}
               {!autoFeedbackImageFailed && (
                 <img
-                  key={autoFeedback.barcode}
-                  src={`/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`}
+                  key={autoFeedback.productId ?? autoFeedback.barcode}
+                  src={
+                    autoFeedback.productId != null
+                      ? `/api/products/image-by-id?id=${autoFeedback.productId}`
+                      : `/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`
+                  }
                   alt=""
                   className="h-64 w-64 shrink-0 object-contain bg-gray-50 border border-gray-100"
                   onError={() => setAutoFeedbackImageFailed(true)}
@@ -2643,8 +2948,16 @@ export default function LoadOperation() {
                     <span className="text-muted-foreground">Order Date:</span>
                     <span className="font-medium">
                       {pendingSlip?.slip?.orderDate
-                        ? new Date(pendingSlip.slip.orderDate).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
+                        ? new Date(`${String(pendingSlip.slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
                         : "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Load Date:</span>
+                    <span className="font-medium">
+                      {pendingSlip?.slip?.loadDate
+                        ? new Date(pendingSlip.slip.loadDate).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
+                        : "Not started yet"}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">
@@ -2657,7 +2970,11 @@ export default function LoadOperation() {
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Vehicle Number:</span>
-                    <span className="font-medium">{pendingSlip?.slip?.vehicleNumber || "Not assigned"}</span>
+                    <span className="font-medium">
+                      {pendingSlip?.slip?.vehicleNumber
+                        ? `${pendingSlip.slip.vehicleNumber}${pendingSlip.slip.rtoNumber ? ` · ${pendingSlip.slip.rtoNumber}` : ""}`
+                        : "Not assigned"}
+                    </span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Driver Name:</span>
@@ -3033,17 +3350,54 @@ export default function LoadOperation() {
                 </div>
                 );
               })() : (
-                <div className="space-y-1 pt-1">
+                <div className="space-y-2 pt-1">
+                  {/* Camera/Manual toggle — same mobile-scanner pattern as the regular item
+                      scanner, so an operator can scan the extra straight in instead of typing. */}
+                  <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
+                    <button
+                      type="button"
+                      onClick={() => setExtraScanMode("camera")}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold transition-colors ${extraScanMode === "camera" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                    >
+                      <Camera className="h-3.5 w-3.5" /> Camera
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { stopExtraCamera(); setExtraScanMode("manual"); }}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold transition-colors ${extraScanMode === "manual" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                    >
+                      <Keyboard className="h-3.5 w-3.5" /> Manual
+                    </button>
+                  </div>
+
+                  <div className="relative w-full bg-black rounded-2xl overflow-hidden" style={{ display: extraScanMode === "camera" ? "block" : "none", height: "clamp(190px, 40vw, 260px)" }}>
+                    <video ref={extraVideoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
+                    <div className="pointer-events-none absolute inset-0" style={{ background: "radial-gradient(ellipse 70% 55% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%)" }} />
+                    {extraScanMode === "camera" && !extraCameraReady && !extraCameraError && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white z-10">
+                        <Loader2 className="h-7 w-7 animate-spin opacity-90" />
+                        <p className="text-xs font-medium opacity-80">Starting camera…</p>
+                      </div>
+                    )}
+                    {extraScanMode === "camera" && extraCameraError && (
+                      <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/85 px-3 py-2 text-xs text-white z-10">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {extraCameraError}
+                      </div>
+                    )}
+                  </div>
+
+                  {extraScanMode === "manual" && (
                   <div className="relative">
                     <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
                     <Input
                       className="h-9 pl-8 text-sm"
                       placeholder="Search item name, barcode or SAP code…"
                       value={extraSearch}
-                      onChange={(e) => setExtraSearch(e.target.value)}
+                      onChange={(e) => handleExtraSearchChange(e.target.value)}
                       autoFocus
                     />
                   </div>
+                  )}
                   {allProductsQuery.isFetching && <p className="px-1 text-xs text-gray-400">Loading catalog…</p>}
                   {/* scrollbar-none: the OS's own scrollbar (wide, classic-styled, with arrow
                       buttons on this machine) was rendering past the rounded border no matter
@@ -3159,6 +3513,67 @@ export default function LoadOperation() {
             >
               {voidMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
               Void Scan
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Items table's own +/- confirm — a manual correction to loaded qty, always confirmed
+          first (never fires straight off the click) with an editable quantity, defaulting to 1. */}
+      <Dialog open={!!adjustTarget} onOpenChange={(o) => { if (!o) setAdjustTarget(null); }}>
+        <DialogContent className={`max-w-sm ${portalRotate}`}>
+          <DialogHeader>
+            <DialogTitle className={adjustTarget?.direction === "add" ? "text-emerald-700" : "text-red-700"}>
+              {adjustTarget?.direction === "add" ? "Add to loaded quantity?" : "Remove from loaded quantity?"}
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-gray-600">
+            <span className="font-semibold text-gray-900">{adjustTarget?.item.itemName ?? adjustTarget?.item.barcode}</span>
+            {" "}— currently <strong>{adjustTarget?.item.loaded ?? 0}</strong> loaded.
+          </p>
+          <p className="text-sm text-gray-500">
+            {adjustTarget?.direction === "add"
+              ? "Removes this quantity from available stock and logs it in scan history, same as a real scan."
+              : "Adds this quantity back to available stock and logs the correction in scan history."}
+          </p>
+          <div className="space-y-1.5">
+            <Label className="text-sm">Quantity</Label>
+            <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
+              <Button
+                type="button" variant="ghost"
+                className="h-11 w-10 shrink-0 rounded-none border-r border-gray-200 text-xl font-bold text-gray-500 hover:bg-gray-100"
+                onClick={() => setAdjustQty((q) => Math.max(1, q - 1))}
+                aria-label="Decrease"
+              >
+                −
+              </Button>
+              <Input
+                type="number" min={1}
+                value={adjustQty === 0 ? "" : adjustQty}
+                onChange={(e) => setAdjustQty(Math.max(1, parseInt(e.target.value, 10) || 0))}
+                className="h-11 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-lg font-bold focus-visible:ring-0 focus-visible:ring-offset-0"
+              />
+              <Button
+                type="button" variant="ghost"
+                className="h-11 w-10 shrink-0 rounded-none border-l border-gray-200 text-xl font-bold text-gray-500 hover:bg-gray-100"
+                onClick={() => setAdjustQty((q) => q + 1)}
+                aria-label="Increase"
+              >
+                +
+              </Button>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setAdjustTarget(null)} disabled={adjustLoadMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              className={adjustTarget?.direction === "add" ? "bg-emerald-600 hover:bg-emerald-700 text-white" : "bg-red-600 hover:bg-red-700 text-white"}
+              disabled={adjustLoadMutation.isPending || adjustQty <= 0}
+              onClick={() => adjustLoadMutation.mutate()}
+            >
+              {adjustLoadMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+              {adjustTarget?.direction === "add" ? `Add ${adjustQty}` : `Remove ${adjustQty}`}
             </Button>
           </DialogFooter>
         </DialogContent>
