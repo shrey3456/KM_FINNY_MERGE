@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
-import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty } from './order-scan';
+import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
 import { pushOrderStatusToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
 
@@ -31,6 +31,122 @@ function isAdmin(req: Request): boolean {
 }
 
 const normalize = (value?: string | number | null) => String(value ?? '').trim().toLowerCase();
+
+// Mirrors unloading.ts's canAccessPlant exactly — admin/roles with no plant restriction
+// (getUserPlants returns null) can access anything; everyone else is limited to their assigned
+// plants, matched case/whitespace-insensitively against whatever casing the slip's plant uses.
+function canAccessPlant(req: Request, plant: string | null | undefined): boolean {
+  const userPlants = getUserPlants(req.user);
+  if (userPlants === null) return true;
+  return userPlants.includes(normalize(plant));
+}
+
+// Resolves who "owns" a load for both the view and scan gates below. Normally that's just the
+// slip's own loadingOwnerCode/Name (set on Start, moved by Claim). But a load started BEFORE the
+// shift-handoff feature existed has no loadingOwnerCode at all — falling back to "open to
+// anyone" for those would mean the very users this feature is meant to restrict (someone who
+// never touched the order) could still open/scan it, just because it happens to be old. So for
+// that case only, fall back to whoever's loading_records row actually created this load (the
+// same "Creator" the landing list already shows) — the earliest one, matching withRto's loadDate.
+async function resolveLoadOwner(slip: any): Promise<{ code: string | null; name: string | null }> {
+  if (slip.loadingOwnerCode) return { code: slip.loadingOwnerCode, name: slip.loadingOwnerName ?? null };
+  const { rows } = await pool.query(
+    `SELECT created_by_code AS "code", created_by_name AS "name" FROM loading_records
+     WHERE order_number = $1 ORDER BY created_at ASC LIMIT 1`,
+    [slip.orderNumber],
+  );
+  return { code: rows[0]?.code ?? null, name: rows[0]?.name ?? null };
+}
+
+// Reshapes loading_handoffs (a log of individual transfers) into the full ordered chain of
+// EVERY user who's held this load, each with the time window they held it AND how much they
+// personally loaded during that window (loadedQty) — "first creator, how much they used, then
+// new owner, how much they used", the actual per-owner contribution breakdown, not just names.
+// This is display/reporting only — the single "current owner" access control actually checks
+// (resolveLoadOwner/checkLoadOwnership/checkLoadViewAccess) never reads this.
+// `handoffRows` must be pre-sorted DESC by claimedAt (the shape the /handoffs endpoint already
+// queries in) — reversed internally to walk the chain oldest-first.
+async function buildOwnerTimeline(slip: any, handoffRowsDesc: any[]): Promise<Array<{ code: string | null; name: string | null; from: Date | null; to: Date | null; loadedQty: number }>> {
+  const handoffs = [...handoffRowsDesc].reverse(); // oldest first
+
+  const { rows: loadRecordRows } = await pool.query(
+    `SELECT created_at FROM loading_records WHERE order_number = $1 ORDER BY created_at ASC LIMIT 1`,
+    [slip.orderNumber],
+  );
+  const loadStart: Date | null = loadRecordRows[0]?.created_at ?? null;
+
+  // Every scan's own timestamp + qty for this order, in one query — kept ungrouped (not summed
+  // by scanned_by_code) because loadedQty has to be scoped to EACH ROW'S own time window, not to
+  // the person. If the same person owns this load twice (paused, handed off, then handed back to
+  // them later), they get two separate rows — one per stint — and each row must only count what
+  // happened during THAT stint, not their lifetime total, or both rows would show an identical
+  // (and misleadingly doubled-looking) grand total instead of what actually happened in each one.
+  const { rows: eventRows } = await pool.query(
+    `SELECT scanned_at AS "scannedAt", total_qty AS "totalQty"
+     FROM loading_scan_events WHERE order_number = $1 AND voided IS NOT TRUE`,
+    [slip.orderNumber],
+  );
+  const qtyBetween = (from: Date | null, to: Date | null) =>
+    eventRows.reduce((sum: number, ev: any) => {
+      const t = new Date(ev.scannedAt).getTime();
+      if (from && t < new Date(from).getTime()) return sum;
+      if (to && t >= new Date(to).getTime()) return sum;
+      return sum + Number(ev.totalQty ?? 0);
+    }, 0);
+
+  // Nobody has ever handed this off — the whole timeline is just whoever currently/originally
+  // owns it (resolveLoadOwner already covers "no explicit owner at all" via the creator fallback).
+  if (handoffs.length === 0) {
+    const owner = await resolveLoadOwner(slip);
+    if (!owner.code) return [];
+    const to = slip.loadingCompletedAt ?? null;
+    return [{ code: owner.code, name: owner.name, from: loadStart, to, loadedQty: qtyBetween(loadStart, to) }];
+  }
+
+  const timeline: Array<{ code: string | null; name: string | null; from: Date | null; to: Date | null; loadedQty: number }> = [];
+  // The very first owner, before any handoff — captured on the FIRST handoff row's "from"
+  // (that's who held it right up until that handoff's claim).
+  timeline.push({
+    code: handoffs[0].fromUserCode, name: handoffs[0].fromUserName,
+    from: loadStart, to: handoffs[0].claimedAt ?? null,
+    loadedQty: qtyBetween(loadStart, handoffs[0].claimedAt ?? null),
+  });
+  for (let i = 0; i < handoffs.length; i++) {
+    const next = handoffs[i + 1];
+    const from = handoffs[i].claimedAt ?? null;
+    const to = next ? (next.claimedAt ?? null) : (slip.loadingCompletedAt ?? null);
+    timeline.push({
+      code: handoffs[i].toUserCode, name: handoffs[i].toUserName,
+      from, to, loadedQty: qtyBetween(from, to),
+    });
+  }
+  return timeline;
+}
+
+// Shared by every action that actually touches a load (scan, adjust-load) — returns an error
+// message if this request shouldn't be allowed to proceed, or null if it's fine. No owner/
+// creator at all (a load created with no loading_records row either — vehicle never linked)
+// stays open to anyone with write access.
+function checkLoadOwnership(slip: any, req: Request, owner: { code: string | null; name: string | null }): string | null {
+  if (slip.loadingPausedAt) {
+    return 'This load is paused — claim it from the list before scanning.';
+  }
+  if (owner.code && owner.code !== actor(req).userCode && !isAdmin(req)) {
+    return `This load is currently owned by ${owner.name ?? owner.code} — ask them to pause it, or wait for a transfer.`;
+  }
+  return null;
+}
+
+// Gates OPENING a load into the scan view (not just scanning it) — stricter than
+// checkLoadOwnership in one way (a load someone else owns can't even be opened, not just
+// scanned) and looser in another (a PAUSED load can be opened by anyone, since that's exactly
+// how someone else previews/claims it).
+function checkLoadViewAccess(slip: any, req: Request, owner: { code: string | null; name: string | null }): string | null {
+  if (!owner.code) return null;
+  if (slip.loadingPausedAt) return null;
+  if (owner.code === actor(req).userCode || isAdmin(req)) return null;
+  return `This load is currently owned by ${owner.name ?? owner.code} — ask them to pause it before opening it.`;
+}
 
 // "Create Operation" already flips notionStatus to LOADING (see POST /start below) the first
 // time it's run for an order — so notionStatus === LOADING already means "someone already
@@ -184,14 +300,21 @@ router.get('/loading/proforma/search', requirePageAccess('loading'), async (req:
   try {
     const q = String(req.query.q ?? '').trim();
     if (q.length < 2) return res.json({ results: [] });
+    const userPlants = getUserPlants(req.user);
+    const params: any[] = [`%${q}%`];
+    let plantCondition = '';
+    if (userPlants !== null) {
+      params.push(userPlants);
+      plantCondition = `AND LOWER(plant) = ANY($${params.length})`;
+    }
     const { rows } = await pool.query(
       `SELECT id, order_number AS "orderNumber", party_name AS "partyName", plant, order_date AS "orderDate",
               vehicle_number AS "vehicleNumber"
        FROM proforma_slips
-       WHERE order_number ILIKE $1 OR party_name ILIKE $1
+       WHERE (order_number ILIKE $1 OR party_name ILIKE $1) ${plantCondition}
        ORDER BY created_at DESC
        LIMIT 8`,
-      [`%${q}%`],
+      params,
     );
     res.json({ results: rows });
   } catch (error) {
@@ -208,6 +331,9 @@ router.get('/loading/proforma/:orderNumber', requirePageAccess('loading'), async
     // changes its status. Starting the load is an explicit action — see POST /start below.
     const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    const viewError = checkLoadViewAccess(slip, req, await resolveLoadOwner(slip));
+    if (viewError) return res.status(403).json({ message: viewError });
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete, loadedVolume } = await withProgress(slip, rawItems);
@@ -227,6 +353,7 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
   try {
     let slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
 
     // Already started — refuse a second Create Operation rather than silently reopening it.
     // Resuming an in-progress load still works fine from the landing list (a plain GET, doesn't
@@ -241,12 +368,113 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
       void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
     }
 
+    // First-time owner assignment — whoever runs Create Operation becomes the one allowed to
+    // scan it, same as the old implicit "creator" idea, just tracked explicitly now so it can be
+    // paused/handed off. Never overwrites an existing owner (this endpoint is only reachable
+    // before loading starts anyway, per the isAlreadyLoading guard above).
+    if (!slip.loadingOwnerCode) {
+      const { userCode, userName } = actor(req);
+      const updated = await storage.updateProformaSlip(slip.id, {
+        loadingOwnerCode: userCode ?? null, loadingOwnerName: userName ?? null,
+      } as any);
+      if (updated) slip = updated;
+    }
+
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete, loadedVolume } = await withProgress(slip, rawItems);
     res.json({ slip: await withRto(slip), items, allComplete, loadedVolume });
   } catch (error) {
     console.error('Error starting load:', error);
     res.status(500).json({ message: 'Failed to start load' });
+  }
+});
+
+// POST /api/loading/proforma/:orderNumber/pause — the current owner (or admin) steps away from
+// this load. While paused, scanning/adjusting is blocked for EVERYONE — including the owner —
+// until someone runs Claim below. This is the "current slip pause" half of the handoff: pausing
+// alone never changes who owns it or writes a handoff row; that only happens on an actual Claim.
+router.post('/loading/proforma/:orderNumber/pause', requirePageWrite('loading'), async (req: Request, res: Response) => {
+  try {
+    const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if (slip.loadingCompletedAt) {
+      return res.status(409).json({ message: 'This load is already marked complete.' });
+    }
+    if (slip.loadingPausedAt) {
+      return res.status(409).json({ message: 'Already paused.' });
+    }
+    const { userCode } = actor(req);
+    const owner = await resolveLoadOwner(slip);
+    if (owner.code && owner.code !== userCode && !isAdmin(req)) {
+      return res.status(403).json({ message: `This load is currently owned by ${owner.name ?? owner.code} — only they (or an admin) can pause it.` });
+    }
+    const updated = await storage.updateProformaSlip(slip.id, { loadingPausedAt: new Date() } as any);
+    if (!updated) return res.status(500).json({ message: 'Failed to pause load' });
+    res.json({ slip: await withRto(updated) });
+  } catch (error) {
+    console.error('Error pausing load:', error);
+    res.status(500).json({ message: 'Failed to pause load' });
+  }
+});
+
+// POST /api/loading/proforma/:orderNumber/claim — anyone with write access to Loading may claim
+// a PAUSED load (that's the "anybody can activate" half) — this is the ONE action that actually
+// moves ownership and, only when the claimer is a genuinely different person than whoever paused
+// it, writes the handoff record ("who load and what time it['s] given to other").
+router.post('/loading/proforma/:orderNumber/claim', requirePageWrite('loading'), async (req: Request, res: Response) => {
+  try {
+    const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if (!slip.loadingPausedAt) {
+      return res.status(409).json({ message: 'This load is not paused — nothing to claim.' });
+    }
+    const { userCode, userName } = actor(req);
+    const owner = await resolveLoadOwner(slip);
+    const isHandoff = !!owner.code && owner.code !== userCode;
+    if (isHandoff) {
+      await pool.query(
+        `INSERT INTO loading_handoffs (order_number, from_user_code, from_user_name, to_user_code, to_user_name, paused_at, claimed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
+        [slip.orderNumber, owner.code, owner.name, userCode ?? null, userName ?? null, slip.loadingPausedAt],
+      );
+    }
+    const updated = await storage.updateProformaSlip(slip.id, {
+      loadingOwnerCode: userCode ?? null, loadingOwnerName: userName ?? null, loadingPausedAt: null,
+    } as any);
+    if (!updated) return res.status(500).json({ message: 'Failed to claim load' });
+    res.json({ slip: await withRto(updated) });
+  } catch (error) {
+    console.error('Error claiming load:', error);
+    res.status(500).json({ message: 'Failed to claim load' });
+  }
+});
+
+// GET /api/loading/proforma/:orderNumber/handoffs — the shift-handoff history for this order,
+// newest first. Empty for a load that's never actually changed hands.
+router.get('/loading/proforma/:orderNumber/handoffs', requirePageAccess('loading'), async (req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, order_number AS "orderNumber", from_user_code AS "fromUserCode", from_user_name AS "fromUserName",
+              to_user_code AS "toUserCode", to_user_name AS "toUserName", paused_at AS "pausedAt", claimed_at AS "claimedAt"
+       FROM loading_handoffs WHERE order_number = $1 ORDER BY claimed_at DESC`,
+      [req.params.orderNumber],
+    );
+
+    // `items` above is the raw log, newest first (unchanged — existing callers rely on that
+    // order for "latest handoff" display). `timeline` is the same data reshaped into the full
+    // ordered chain of who owned this load and for how long — every user who's ever touched it,
+    // not just the current one. Never used for access control (see checkLoadOwnership/
+    // checkLoadViewAccess, which only ever look at the CURRENT owner) — this is display/reporting
+    // only.
+    const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    const timeline = slip ? await buildOwnerTimeline(slip, rows) : [];
+
+    res.json({ items: rows, timeline });
+  } catch (error) {
+    console.error('Error fetching load handoffs:', error);
+    res.status(500).json({ message: 'Failed to fetch handoff history' });
   }
 });
 
@@ -275,24 +503,31 @@ router.get('/loading/vehicles/search', requirePageAccess('loading'), async (req:
   }
 });
 
-// GET /api/loading/records — the page's landing table. Admin/super-admin see every load
-// anyone created; everyone else sees only their own (enforced server-side, not just hidden
-// in the UI — a non-admin's request never even queries other users' rows). Server-paginated
-// (20/page, matching Scan History) and enriched with the slip's live completion status so the
-// client can show Reopen only where it applies, without a second round trip per row.
+// GET /api/loading/records — the page's landing table. Visible to EVERY user with page access,
+// not just admins/the creator — knowing what loads exist (and who currently owns each one) is
+// what lets someone spot a paused load and claim it. Write access to any one load is still
+// controlled separately, by checkLoadOwnership on the actual scan/adjust/pause actions, not by
+// hiding rows here. Server-paginated (20/page, matching Scan History) and enriched with the
+// slip's live completion/ownership status so the client can show Reopen/Claim only where they
+// apply, without a second round trip per row.
 router.get('/loading/records', requirePageAccess('loading'), async (req: Request, res: Response) => {
   try {
-    const { userCode } = actor(req);
     const limit  = Math.max(1, Math.min(100, parseInt(String(req.query.limit  ?? '20'), 10) || 20));
     const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
 
-    const conditions: string[] = [];
+    // Plant-scoped, same as everywhere else (unloading.ts's canAccessPlant/getUserPlants) —
+    // "list available to all" only ever meant all USERS, not all plants; a user with no access
+    // to a plant still shouldn't see that plant's loads here.
+    const userPlants = getUserPlants(req.user);
     const params: any[] = [];
-    if (!isAdmin(req)) {
-      params.push(userCode);
-      conditions.push(`lr.created_by_code = $${params.length}`);
+    let plantWhere = '';
+    if (userPlants !== null) {
+      params.push(userPlants);
+      plantWhere = `WHERE LOWER(lr.plant) = ANY($${params.length})`;
     }
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(limit, offset);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
@@ -301,15 +536,20 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 lr.rto_number AS "rtoNumber", lr.volume, lr.created_by_code AS "createdByCode",
                 lr.created_by_name AS "createdByName", lr.created_at AS "createdAt",
                 ps.order_date AS "orderDate",
-                ps.loading_completed_at AS "loadingCompletedAt"
+                ps.loading_completed_at AS "loadingCompletedAt",
+                ps.loading_owner_code AS "loadingOwnerCode", ps.loading_owner_name AS "loadingOwnerName",
+                ps.loading_paused_at AS "loadingPausedAt"
          FROM loading_records lr
          LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
-         ${where}
+         ${plantWhere}
          ORDER BY lr.created_at DESC
-         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-        [...params, limit, offset],
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        params,
       ),
-      pool.query(`SELECT COUNT(*) AS total FROM loading_records lr ${where}`, params),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM loading_records lr ${plantWhere}`,
+        userPlants !== null ? [userPlants] : [],
+      ),
     ]);
 
     res.json({
@@ -342,6 +582,7 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
 
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
 
     const { userCode, userName } = actor(req);
     const alreadyAssigned = !!slip.vehicleNumber && !!(slip as any).vehicleAssignedByCode;
@@ -422,9 +663,12 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
 
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
     if ((slip as any).loadingCompletedAt) {
       return res.status(409).json({ message: 'This load is already marked complete — reopen it before scanning more.' });
     }
+    const ownershipError = checkLoadOwnership(slip, req, await resolveLoadOwner(slip));
+    if (ownershipError) return res.status(403).json({ message: ownershipError });
     // Vehicle must be linked before any item can be scanned onto it — enforced here too, not
     // just hidden client-side, so a stale/bypassed client can't scan against an unassigned slip.
     if (!slip.vehicleNumber) {
@@ -627,9 +871,12 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('load
 
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
     if ((slip as any).loadingCompletedAt) {
       return res.status(409).json({ message: 'This load is already marked complete — reopen it before adjusting it.' });
     }
+    const ownershipError = checkLoadOwnership(slip, req, await resolveLoadOwner(slip));
+    if (ownershipError) return res.status(403).json({ message: ownershipError });
     if (!slip.vehicleNumber) {
       return res.status(400).json({ message: 'Link a vehicle to this order before adjusting items.' });
     }
@@ -742,6 +989,7 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
   try {
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
 
     const { userCode, userName } = actor(req);
     const updated = await storage.updateProformaSlip(slip.id, {
@@ -776,6 +1024,7 @@ router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading')
   try {
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
 
     const { userCode, userName } = actor(req);
     const updated = await storage.updateProformaSlip(slip.id, {
@@ -821,6 +1070,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
   try {
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
 
     const { userCode, userName } = actor(req);
     await client.query('BEGIN');
@@ -907,6 +1157,10 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
     if (!event) {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Load event not found' });
+    }
+    if (!canAccessPlant(req, event.plant)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
     }
     if (event.voided) {
       await client.query('ROLLBACK');

@@ -2,12 +2,13 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
-  Keyboard, Layers, Link2, Loader2, Lock, Package, PackagePlus, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
+  Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
+import { useSidebarContext } from "@/lib/sidebarContext";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
@@ -89,6 +90,10 @@ type ProformaSlip = {
   // specific Vehicle Master row but nobody has confirmed it yet — the exact row to pre-select,
   // resolved by id rather than by re-matching vehicleNumber's text on the client.
   suggestedVehicle: VehicleSuggestion | null;
+  // Shift handoff — who currently holds the right to scan (null on a slip from before this
+  // feature existed, treated as unowned/open). loadingPausedAt set = blocked for everyone,
+  // including the owner, until someone runs Claim.
+  loadingOwnerCode: string | null; loadingOwnerName: string | null; loadingPausedAt: string | null;
 };
 type VehicleSuggestion = {
   id: number; vehicleNumber: string; rtoNumber: string | null; driver: string | null;
@@ -103,6 +108,7 @@ type LoadingRecord = {
   // straight from the source order data — the two can be days apart.
   createdAt: string; orderDate: string | null;
   loadingCompletedAt: string | null;
+  loadingOwnerCode: string | null; loadingOwnerName: string | null; loadingPausedAt: string | null;
 };
 type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number; event: { barcode: string; itemName: string; sapCode: string | null; totalQty: number; isExtra: boolean; remaining: number; productId: number | null } };
 // One row of that order's own load-event history (the landing table's expand panel) — fetched
@@ -113,6 +119,53 @@ type LoadHistoryEvent = {
   isExtra: boolean; voided: boolean | null; scannedByName: string | null; scannedAt: string;
   stv: string | null;
 };
+// One period of ownership in the full "who held this load, and how much they loaded" chain —
+// see buildOwnerTimeline in server/routes/loading.ts. Display/reporting only, never used for
+// access control.
+type OwnerTimelineEntry = { code: string | null; name: string | null; from: string | null; to: string | null; loadedQty: number };
+type LoadHandoffsResponse = {
+  items: { id: number; fromUserCode: string | null; fromUserName: string | null; toUserCode: string | null; toUserName: string | null; pausedAt: string | null; claimedAt: string }[];
+  timeline: OwnerTimelineEntry[];
+};
+
+// "First creator, how much they loaded, then new owner, how much they loaded" — the full
+// ownership+contribution breakdown, oldest first. Shared between the scan view (a specific
+// order that's open) and the landing list's expand-row scan-history panel (any order in the
+// list) — same shape, same rendering, different place it's mounted.
+function OwnerTimelineSummary({ timeline }: { timeline: OwnerTimelineEntry[] }) {
+  if (timeline.length === 0) return null;
+  const fmt = (d: string | null) =>
+    d ? new Date(d).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Owner</TableHead>
+          <TableHead className="text-right">Loaded Qty</TableHead>
+          <TableHead>From</TableHead>
+          <TableHead>To</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {timeline.map((entry, idx) => (
+          <TableRow key={idx}>
+            <TableCell className="flex items-center gap-1.5">
+              <UserCircle2 className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+              {entry.name ?? entry.code ?? "—"}
+            </TableCell>
+            <TableCell className="text-right">
+              <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-200">{entry.loadedQty}</Badge>
+            </TableCell>
+            <TableCell className="text-muted-foreground whitespace-nowrap">{fmt(entry.from)}</TableCell>
+            <TableCell className="text-muted-foreground whitespace-nowrap">
+              {entry.to ? fmt(entry.to) : <span className="font-medium text-emerald-600">current</span>}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
 
 function currentUser(): any {
   try { return JSON.parse(localStorage.getItem("currentUser") || "{}"); } catch { return {}; }
@@ -192,14 +245,17 @@ export default function LoadOperation() {
   // mainly to review everyone's slips, not to be dropped back into whatever one they had open).
   const [view, setView] = useState<"list" | "create">(() => (!admin && localStorage.getItem(LAST_ORDER_KEY) ? "create" : "list"));
 
-  // Server-paginated (20/page, matching Scan History) rather than fetching every slip anyone's
-  // ever loaded in one request.
-  const RECORDS_PAGE_SIZE = 20;
+  // Server-paginated (20/page by default, matching Scan History) rather than fetching every
+  // slip anyone's ever loaded in one request. Page size is user-selectable (same options/pattern
+  // as Unloading's own "Show:" selector) — changing it resets back to page 1 since the old page
+  // number wouldn't line up against a different page size.
+  const RECORDS_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
   const [recordsPage, setRecordsPage] = useState(1);
-  const recordsOffset = (recordsPage - 1) * RECORDS_PAGE_SIZE;
+  const [recordsPageSize, setRecordsPageSize] = useState(20);
+  const recordsOffset = (recordsPage - 1) * recordsPageSize;
   const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number }>({
-    queryKey: ["/api/loading/records", recordsPage],
-    queryFn: async () => (await apiRequest("GET", `/api/loading/records?limit=${RECORDS_PAGE_SIZE}&offset=${recordsOffset}`)).json(),
+    queryKey: ["/api/loading/records", recordsPage, recordsPageSize],
+    queryFn: async () => (await apiRequest("GET", `/api/loading/records?limit=${recordsPageSize}&offset=${recordsOffset}`)).json(),
     enabled: view === "list",
   });
   const recordsTotal = recordsQuery.data?.total ?? 0;
@@ -231,6 +287,17 @@ export default function LoadOperation() {
   // Finny Status values this page pushes to Notion (server/services/notionOrderStatusSync.ts), so
   // the status shown here reads identically to Load Operations' own status column.
   const recordStatus = (r: LoadingRecord) => (r.loadingCompletedAt ? "READY≈DESP" : "LOADING");
+  // Colors the status badge AND (on the mobile card list) a left accent strip by the same
+  // three states — completed/paused/in-progress all looked identical purple before, which was
+  // part of why the card list read as flat/plain.
+  const recordStatusBadgeClass = (r: LoadingRecord) =>
+    r.loadingCompletedAt
+      ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
+      : r.loadingPausedAt
+      ? "bg-amber-100 text-amber-800 hover:bg-amber-200"
+      : "bg-blue-100 text-blue-800 hover:bg-blue-200";
+  const recordAccentBorderClass = (r: LoadingRecord) =>
+    r.loadingCompletedAt ? "border-l-4 border-l-emerald-400" : r.loadingPausedAt ? "border-l-4 border-l-amber-400" : "border-l-4 border-l-blue-400";
 
   const filteredRecords = recordsItems
     .filter((r) => {
@@ -266,6 +333,15 @@ export default function LoadOperation() {
   // Whichever row's history panel is currently open — click-to-expand, same idea as the Scan
   // History page's own drill-down (only one open at a time).
   const [expandedRecordOrder, setExpandedRecordOrder] = useState<string | null>(null);
+  // Which tab the expand panel is showing — "History" (individual scans) or "Owners" (the
+  // owner+contribution breakdown). Shared across rows since only one row is ever expanded at a
+  // time; reset to "history" whenever a different row is expanded (see setExpandedRecordOrder
+  // call sites below).
+  const [historyPanelTab, setHistoryPanelTab] = useState<"history" | "owners">("history");
+  function toggleExpandedRecord(orderNumber: string) {
+    setExpandedRecordOrder((cur) => (cur === orderNumber ? null : orderNumber));
+    setHistoryPanelTab("history");
+  }
   const recordHistoryQuery = useQuery<{ items: LoadHistoryEvent[] }>({
     queryKey: ["/api/scan-sessions/reports/scan-history", "loading-panel", expandedRecordOrder],
     queryFn: async () =>
@@ -273,6 +349,16 @@ export default function LoadOperation() {
         "GET",
         `/api/scan-sessions/reports/scan-history?source=dispatch&order=${encodeURIComponent(expandedRecordOrder ?? "")}&limit=100`,
       )).json(),
+    enabled: !!expandedRecordOrder,
+  });
+
+  // Same owner+contribution breakdown as the scan view's OwnerTimelineSummary, but for whichever
+  // order is currently expanded on the landing list — its own scan history panel is exactly
+  // where "how much did each owner load" is most useful to see at a glance.
+  const expandedRecordHandoffsQuery = useQuery<LoadHandoffsResponse>({
+    queryKey: ["/api/loading/proforma", expandedRecordOrder, "handoffs"],
+    queryFn: async () =>
+      (await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(expandedRecordOrder ?? "")}/handoffs`)).json(),
     enabled: !!expandedRecordOrder,
   });
 
@@ -349,6 +435,10 @@ export default function LoadOperation() {
   // routes/loading.ts) — distinct from slip.totalVolume (the order's full planned volume) and
   // slip.vehicleVolume (the vehicle's capacity).
   const [loadedVolume, setLoadedVolume] = useState(0);
+  // Owner+contribution history — collapsed by default (a Pause/Claim history table isn't
+  // something you need to see every time you open a load), a click on the summary line reveals
+  // it rather than it always taking up its own banner row.
+  const [ownerHistoryOpen, setOwnerHistoryOpen] = useState(false);
 
   // "Items on this order" table — click a row to expand it and see that item's own scan history.
   // Fetched once for the whole order (same endpoint the Loading landing table's own expand panel
@@ -368,6 +458,11 @@ export default function LoadOperation() {
   });
   useEffect(() => { localStorage.setItem(LOADING_ROTATION_STORAGE_KEY, String(rotation)); }, [rotation]);
   const rotateNext = () => setRotation((r) => LOADING_ROTATIONS[(LOADING_ROTATIONS.indexOf(r) + 1) % LOADING_ROTATIONS.length]);
+  // Rotated kiosk mode is a fixed, full-viewport overlay, so it sits on top of Layout's own
+  // sidebar toggle — this floating button (same trick as the rotate button itself: fixed inside
+  // the rotated container, so it turns with the content) reopens a path back to real
+  // navigation. Same pattern Unloading's own rotate view already uses.
+  const { openMobileMenu } = useSidebarContext();
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
   const quarterTurn = rotation === 90 || rotation === 270;
@@ -445,6 +540,17 @@ export default function LoadOperation() {
     enabled: !!slip,
   });
 
+  // Shift-handoff history — empty for a load that's never actually changed hands. `timeline` is
+  // the same data reshaped into the full ordered chain of every user who's held this load, each
+  // with how much they personally loaded (for display only — access control never reads this,
+  // only the slip's own current owner).
+  const loadHandoffsQuery = useQuery<LoadHandoffsResponse>({
+    queryKey: ["/api/loading/proforma", slip?.orderNumber, "handoffs"],
+    queryFn: async () =>
+      (await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(slip?.orderNumber ?? "")}/handoffs`)).json(),
+    enabled: !!slip,
+  });
+
   const orderSuggestionsQuery = useQuery<{ results: ProformaSuggestion[] }>({
     queryKey: ["/api/loading/proforma/search", debouncedOrderSearch],
     queryFn: async () => (await apiRequest("GET", `/api/loading/proforma/search?q=${encodeURIComponent(debouncedOrderSearch)}`)).json(),
@@ -456,6 +562,12 @@ export default function LoadOperation() {
   // rather than something the user just did — read inside the mutation's onSuccess/onError,
   // since mutate() itself doesn't pass arbitrary context through to those.
   const silentLookupRef = useRef(false);
+
+  // Set when a lookup came from clicking a row on the landing list (openOrderFromList) — lets
+  // the mutation's onError snap the view back to "list" instead of leaving the user stranded on
+  // a blank "create" screen when the server refuses to open a load they don't own (see
+  // checkLoadViewAccess on the server: another user's non-paused load can't be opened).
+  const openedFromListRef = useRef(false);
 
   // A freshly-looked-up slip waiting on the "Create Load Operation from Proforma" confirmation
   // dialog — same intermediate step Load Operations puts between finding a slip and actually
@@ -516,6 +628,8 @@ export default function LoadOperation() {
         return;
       }
       commitSlip(data);
+      if (openedFromListRef.current) setView("create");
+      openedFromListRef.current = false;
       if (!silentLookupRef.current) toast({ title: "Order found", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
       silentLookupRef.current = false;
     },
@@ -528,8 +642,14 @@ export default function LoadOperation() {
         setView("list");
         return;
       }
+      if (openedFromListRef.current) {
+        // Server refused to open it (someone else owns it, not paused) — stay on the list
+        // rather than landing on a blank "create" screen with nothing to show.
+        openedFromListRef.current = false;
+        setView("list");
+      }
       confirmRef.current = false;
-      toast({ title: "Order not found", description: parseApiErrorMessage(err), variant: "destructive" });
+      toast({ title: "Could not open order", description: parseApiErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -590,7 +710,7 @@ export default function LoadOperation() {
   }
 
   function openOrderFromList(orderNumber: string) {
-    setView("create");
+    openedFromListRef.current = true;
     openOrder(orderNumber);
   }
 
@@ -1041,6 +1161,12 @@ export default function LoadOperation() {
   const SAME_BARCODE_COOLDOWN_MS = 5000;
 
   const locked = !!slip?.loadingCompletedAt;
+  // Shift handoff — a slip with no owner recorded (created before this feature existed) stays
+  // open to anyone with write access, same as the server's own fallback. Paused blocks scanning
+  // for EVERYONE, including the owner, until someone claims it.
+  const isLoadPaused = !!slip?.loadingPausedAt;
+  const isLoadOwner = !slip?.loadingOwnerCode || slip.loadingOwnerCode === currentUser()?.userCode;
+  const canScanThisLoad = canWrite && !locked && !isLoadPaused && (isLoadOwner || admin);
 
   function stopItemCamera() {
     itemScannerRef.current?.stop();
@@ -1123,6 +1249,36 @@ export default function LoadOperation() {
     onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
+  // Shift handoff — Pause (current owner/admin steps away) and Claim (anyone with write access
+  // picks up a paused load). Both just refresh this same slip/items shape, same as every other
+  // load-affecting mutation on this page.
+  const pauseLoadMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/pause`, {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Pause failed");
+      return res.json() as Promise<{ slip: ProformaSlip }>;
+    },
+    onSuccess: (data) => {
+      setSlip(data.slip);
+      toast({ title: "Load paused", description: "Anyone with write access can now claim it." });
+      queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+    },
+    onError: (err: any) => toast({ title: "Could not pause", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+  const claimLoadMutation = useMutation({
+    mutationFn: async (orderNumber: string) => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(orderNumber)}/claim`, {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Claim failed");
+      return res.json() as Promise<{ slip: ProformaSlip }>;
+    },
+    onSuccess: (data) => {
+      if (slip?.orderNumber === data.slip.orderNumber) setSlip(data.slip);
+      toast({ title: "Load claimed", description: "You now own this load." });
+      queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+    },
+    onError: (err: any) => toast({ title: "Could not claim", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
   function defaultDialogQty(item: ProformaItem | null): number {
     if (!item) return 1;
     const ipp = item.itemsPerPallet || 1;
@@ -1157,6 +1313,19 @@ export default function LoadOperation() {
   async function handleItemBarcode(rawBarcode: string) {
     const barcode = rawBarcode.trim();
     if (!barcode || !slip || locked || scanLockRef.current || pending) return;
+
+    // Shift handoff — the server rejects this too (checkLoadOwnership in /scan), but catching it
+    // here avoids opening a confirm dialog for a scan that's just going to bounce anyway.
+    if (!canScanThisLoad) {
+      toast({
+        title: isLoadPaused ? "This load is paused" : "Not your load",
+        description: isLoadPaused
+          ? "Claim it from the header above before scanning."
+          : `Owned by ${slip.loadingOwnerName ?? slip.loadingOwnerCode} — ask them to pause it first.`,
+        variant: "destructive",
+      });
+      return;
+    }
 
     // Vehicle must be linked before anything can be scanned onto this order — server enforces
     // this too (POST /scan), but the Scan Items section is already hidden until a vehicle is
@@ -1377,9 +1546,13 @@ export default function LoadOperation() {
       // auto-applied text-center on the cell itself (DataTable's cn() twMerges the two, so the
       // later one — cellClassName — wins), same header-centered/cell-left split the user wants
       // only on this column, not the numeric ones.
-      id: "item", header: "Item Name", align: "center", width: 200, minWidth: 90, sortable: true,
+      id: "item", header: "Item Name", align: "center", width: 150, minWidth: 90, sortable: true,
       accessor: (row) => `${row.itemName ?? ""} ${row.barcode ?? ""} ${row.sapCode ?? ""}`,
-      cellClassName: "whitespace-normal break-words text-left text-gray-700",
+      // text-sm sm:text-sm overrides DataTable's own default cell size (text-[11px] sm:text-xs)
+      // for this table specifically — that default reads fine on a dense, full-width monitor but
+      // was too small once this table also has to work down to ~700-1024px (sidebar-open
+      // tablet-ish widths), which is most of what this table now actually renders at.
+      cellClassName: "whitespace-normal break-words text-left text-gray-700 text-sm sm:text-sm",
       totalable: false,
       render: (row) => (
         <>
@@ -1394,9 +1567,9 @@ export default function LoadOperation() {
       ),
     },
     {
-      id: "expected", header: "Expected", align: "center", width: 75, minWidth: 65, sortable: true,
+      id: "expected", header: "Expected", align: "center", width: 58, minWidth: 55, sortable: true,
       accessor: (row) => row.expected,
-      cellClassName: "text-gray-700",
+      cellClassName: "text-gray-700 text-sm sm:text-sm",
       render: (row) => (
         <>
           <span className="block">{row.expected}</span>
@@ -1408,17 +1581,17 @@ export default function LoadOperation() {
       // No dedicated Extra column — extra only ever happens through the separate Add Extra flow
       // (see EXTRA_NOT_ALLOWED in server/routes/loading.ts), so it stays a rare inline note on
       // Loaded rather than a column that's blank for almost every row.
-      id: "loaded", header: "Loaded", align: "center", width: 140, minWidth: 120, sortable: true,
+      id: "loaded", header: "Loaded", align: "center", width: 104, minWidth: 96, sortable: true,
       accessor: (row) => row.loaded,
-      cellClassName: "font-medium text-gray-900",
+      cellClassName: "font-medium text-gray-900 text-sm sm:text-sm",
       render: (row) => {
         const extra = Math.max(0, row.loaded - row.expected);
         return (
-          <div className="flex items-center justify-center gap-3">
-            {canWrite && !locked && row.barcode && (
+          <div className="flex items-center justify-center gap-1">
+            {canScanThisLoad && row.barcode && (
               <Button
                 size="sm" variant="ghost"
-                className="h-8 w-8 shrink-0 rounded-full p-0 text-base font-bold bg-red-100 text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
+                className="h-7 w-7 shrink-0 rounded-full p-0 text-sm font-bold bg-red-100 text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
                 disabled={row.loaded <= 0}
                 title="Remove from loaded quantity"
                 onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "remove"); }}
@@ -1431,10 +1604,10 @@ export default function LoadOperation() {
               {renderPalletLoose(row.loaded, row.itemsPerPallet ?? 0)}
               {extra > 0 && <span className="block text-xs font-bold text-amber-600">+{extra} extra</span>}
             </span>
-            {canWrite && !locked && row.barcode && (
+            {canScanThisLoad && row.barcode && (
               <Button
                 size="sm" variant="ghost"
-                className="h-8 w-8 shrink-0 rounded-full p-0 text-base font-bold bg-emerald-100 text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
+                className="h-7 w-7 shrink-0 rounded-full p-0 text-sm font-bold bg-emerald-100 text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
                 title="Add to loaded quantity"
                 onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}
               >
@@ -1446,9 +1619,9 @@ export default function LoadOperation() {
       },
     },
     {
-      id: "remaining", header: "Remaining", align: "center", width: 80, minWidth: 65, sortable: true,
+      id: "remaining", header: "Remaining", align: "center", width: 62, minWidth: 55, sortable: true,
       accessor: (row) => row.remaining,
-      cellClassName: "text-gray-700",
+      cellClassName: "text-gray-700 text-sm sm:text-sm",
       render: (row) => (
         <>
           <span className="block">{row.remaining}</span>
@@ -1457,7 +1630,8 @@ export default function LoadOperation() {
       ),
     },
     {
-      id: "stock", header: "Stock", align: "center", width: 80, minWidth: 65, sortable: true, totalable: false,
+      id: "stock", header: "Stock", align: "center", width: 62, minWidth: 55, sortable: true, totalable: false,
+      cellClassName: "text-sm sm:text-sm",
       accessor: (row) => row.stockAvailable ?? 0,
       render: (row) => {
         const outOfStock = (row.stockAvailable ?? 0) <= 0;
@@ -1555,6 +1729,7 @@ export default function LoadOperation() {
             maxHeight="15rem"
             isStickyHeader
             emptyState="No scan history for this item yet."
+            showMobileSwipeHint
           />
         )}
       </div>
@@ -1574,67 +1749,85 @@ export default function LoadOperation() {
 
   // That order's scan history, rendered under whichever row/card is expanded. One shared node
   // rather than two copies: only one record can be expanded at a time, and the desktop table and
-  // the mobile card list are never both visible.
-  const historyPanel = recordHistoryQuery.isLoading ? (
-    <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
-  ) : (recordHistoryQuery.data?.items.length ?? 0) === 0 ? (
-    <p className="py-4 text-center text-xs text-gray-400">No scan history for this order yet.</p>
-  ) : (
-    <div className="max-h-72 overflow-y-auto overflow-x-auto border rounded-md bg-white">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>SKU</TableHead>
-            <TableHead>Item</TableHead>
-            <TableHead>Date &amp; Time</TableHead>
-            <TableHead>Scanned By</TableHead>
-            <TableHead className="text-right">Qty</TableHead>
-            <TableHead>Status</TableHead>
-            {canResetLoad && <TableHead className="text-right">Void</TableHead>}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {(recordHistoryQuery.data?.items ?? []).map((ev) => (
-            <TableRow key={ev.id} className={ev.voided ? "opacity-60" : ""}>
-              <TableCell className="font-mono text-gray-500">{ev.barcode ?? "-"}</TableCell>
-              <TableCell>{ev.itemName ?? "-"}</TableCell>
-              <TableCell className="whitespace-nowrap text-muted-foreground">
-                {new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
-              </TableCell>
-              <TableCell className="text-muted-foreground">{ev.scannedByName ?? "-"}</TableCell>
-              <TableCell className="text-right">
-                <Badge className={ev.isExtra ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-purple-100 text-purple-800 hover:bg-purple-200"}>
-                  {ev.isExtra ? "+" : ""}{ev.totalQty}
-                </Badge>
-              </TableCell>
-              <TableCell className="text-xs">
-                {ev.voided ? (
-                  <span className="font-medium text-red-500">Voided</span>
-                ) : ev.isExtra ? (
-                  <span className="font-semibold uppercase text-amber-700">Extra</span>
-                ) : (
-                  <span className="text-muted-foreground">-</span>
-                )}
-              </TableCell>
-              {canResetLoad && (
-                <TableCell className="text-right">
-                  {!ev.voided && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
-                      onClick={() => setVoidTarget(ev)}
-                      title="Void this scan"
-                    >
-                      <Trash2 className="h-4 w-4 text-red-500" />
-                    </Button>
+  // the mobile card list are never both visible. A real tab switch — "History" (individual
+  // scans) vs "Owners" (the owner+contribution breakdown) — one shown at a time, not both
+  // stacked in the same box.
+  const historyPanel = (
+    <div className="border rounded-md bg-white overflow-hidden">
+      <Tabs value={historyPanelTab} onValueChange={(v) => setHistoryPanelTab(v as "history" | "owners")}>
+        <TabsList className="w-full justify-start rounded-none border-b bg-gray-50">
+          <TabsTrigger value="history">History</TabsTrigger>
+          <TabsTrigger value="owners">Owners</TabsTrigger>
+        </TabsList>
+      </Tabs>
+      {historyPanelTab === "owners" ? (
+        (expandedRecordHandoffsQuery.data?.timeline?.length ?? 0) === 0 ? (
+          <p className="py-4 text-center text-xs text-gray-400">No owner history for this order yet.</p>
+        ) : (
+          <OwnerTimelineSummary timeline={expandedRecordHandoffsQuery.data!.timeline} />
+        )
+      ) : recordHistoryQuery.isLoading ? (
+        <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+      ) : (recordHistoryQuery.data?.items.length ?? 0) === 0 ? (
+        <p className="py-4 text-center text-xs text-gray-400">No scan history for this order yet.</p>
+      ) : (
+        <div className="max-h-72 overflow-y-auto overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>SKU</TableHead>
+                <TableHead>Item</TableHead>
+                <TableHead>Date &amp; Time</TableHead>
+                <TableHead>Scanned By</TableHead>
+                <TableHead className="text-right">Qty</TableHead>
+                <TableHead>Status</TableHead>
+                {canResetLoad && <TableHead className="text-right">Void</TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {(recordHistoryQuery.data?.items ?? []).map((ev) => (
+                <TableRow key={ev.id} className={ev.voided ? "opacity-60" : ""}>
+                  <TableCell className="font-mono text-gray-500">{ev.barcode ?? "-"}</TableCell>
+                  <TableCell>{ev.itemName ?? "-"}</TableCell>
+                  <TableCell className="whitespace-nowrap text-muted-foreground">
+                    {new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">{ev.scannedByName ?? "-"}</TableCell>
+                  <TableCell className="text-right">
+                    <Badge className={ev.isExtra ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-purple-100 text-purple-800 hover:bg-purple-200"}>
+                      {ev.isExtra ? "+" : ""}{ev.totalQty}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {ev.voided ? (
+                      <span className="font-medium text-red-500">Voided</span>
+                    ) : ev.isExtra ? (
+                      <span className="font-semibold uppercase text-amber-700">Extra</span>
+                    ) : (
+                      <span className="text-muted-foreground">-</span>
+                    )}
+                  </TableCell>
+                  {canResetLoad && (
+                    <TableCell className="text-right">
+                      {!ev.voided && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
+                          onClick={() => setVoidTarget(ev)}
+                          title="Void this scan"
+                        >
+                          <Trash2 className="h-4 w-4 text-red-500" />
+                        </Button>
+                      )}
+                    </TableCell>
                   )}
-                </TableCell>
-              )}
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </div>
   );
 
@@ -1662,7 +1855,7 @@ export default function LoadOperation() {
         {view === "list" && (
           <>
             {/* Search bar (desktop) */}
-            <div className="w-full hidden md:block">
+            <div className="w-full hidden xl:block">
               <Input
                 placeholder="Search by order number, party name, vehicle or status..."
                 value={listSearch}
@@ -1671,8 +1864,10 @@ export default function LoadOperation() {
               />
             </div>
 
-            {/* Row with Date Filter, Plant Filter and Status Buttons */}
-            <div className="items-center flex-wrap gap-2 hidden md:flex">
+            {/* Row with Date Filter, Plant Filter and Status Buttons — shown at every width, not
+                just desktop; flex-wrap already lets it reflow onto extra lines on narrow
+                screens rather than needing a separate cut-down mobile version. */}
+            <div className="items-center flex-wrap gap-2 flex">
               <div className="flex-grow-0">
                 <SingleDateFilter
                   pageKey="loading-page"
@@ -1725,9 +1920,13 @@ export default function LoadOperation() {
                 </div>
               </Button>
 
+              {/* Desktop only — below xl this button moves next to the search box instead (see
+                  the compact search row further down), so it's not competing with the filter
+                  pills for room on a narrower screen (including a "desktop-width" window with
+                  the sidebar open, which eats ~256px of it). */}
               {canWrite && (
                 <Button
-                  className="ml-auto gap-1 bg-[#001d6e] text-white hover:bg-[#001552]"
+                  className="ml-auto gap-1 bg-[#001d6e] text-white hover:bg-[#001552] hidden xl:inline-flex"
                   onClick={startNewLoad}
                 >
                   <Plus className="h-4 w-4" /> Load New Slip
@@ -1736,7 +1935,7 @@ export default function LoadOperation() {
             </div>
 
             {/* Navigation Tabs (hidden on mobile) */}
-            <div className="mb-2 hidden md:block">
+            <div className="mb-2 hidden xl:block">
               <Tabs value={activeViewTab} onValueChange={setActiveViewTab} className="w-full">
                 <TabsList className="w-full justify-start">
                   <TabsTrigger value="overall" className="flex-1 max-w-[200px]">All Operations</TabsTrigger>
@@ -1746,16 +1945,23 @@ export default function LoadOperation() {
               </Tabs>
             </div>
 
-            {/* Mobile: search + new-slip button (the filter row above is desktop-only) */}
-            <div className="md:hidden space-y-2">
+            {/* Compact search + New Slip, merged onto one row and the button shrunk — the filter
+                row above still covers Date/Plant/Status at every width, but Load New Slip moves
+                here below xl instead of competing with those pills for space. */}
+            <div className="flex gap-2 xl:hidden">
               <Input
                 placeholder="Search order, party, vehicle..."
                 value={listSearch}
                 onChange={(e) => setListSearch(e.target.value)}
+                className="flex-1"
               />
               {canWrite && (
-                <Button className="w-full gap-1 bg-[#001d6e] text-white hover:bg-[#001552]" onClick={startNewLoad}>
-                  <Plus className="h-4 w-4" /> Load New Slip
+                <Button
+                  size="sm"
+                  className="shrink-0 gap-1 bg-[#001d6e] text-white hover:bg-[#001552]"
+                  onClick={startNewLoad}
+                >
+                  <Plus className="h-4 w-4" /> New
                 </Button>
               )}
             </div>
@@ -1778,17 +1984,31 @@ export default function LoadOperation() {
               </div>
             ) : (
               <>
-                {/* Desktop View - Loading Slips Table */}
-                <div className="hidden md:block border rounded-md w-full">
-                  <Table>
+                {/* Desktop View - Loading Slips Table. overflow-x-auto is a safety net, not the
+                    primary fit strategy — Order/Load Date and Vehicle/RTO are each merged into
+                    one stacked cell (below) specifically so this fits comfortably. The switch
+                    point is xl (1280px), not lg (1024px), because the app's own sidebar eats
+                    ~256px of viewport width when open — a "1100px" browser window can really
+                    only offer this table ~850px, well short of what 11 columns need — so this
+                    table only shows once there's enough SPARE width to survive that; anything
+                    narrower gets the card list instead (see the xl:hidden card view further
+                    down), which never scrolls horizontally at all. */}
+                <div className="hidden xl:block border rounded-md w-full overflow-x-auto">
+                  {/* [&_th]/[&_td]:px-2 shrinks this table's own cell padding from the shared
+                      Table component's default px-4 — 11 columns × 16px saved per side adds up
+                      to over 150px, which is what was pushing "Actions" past the edge at
+                      ~1024-1100px laptop widths even after merging Order/Load Date and
+                      Vehicle/RTO into single cells. Scoped to this table only via the
+                      descendant selector — doesn't touch the shared component or any other
+                      table on the site. */}
+                  <Table className="[&_th]:px-2 [&_td]:px-2">
                     <TableHeader>
                       {/* Same navy/white uppercase header every other table on the site uses,
                           instead of the plain shadcn default (muted-gray text on white) — makes
                           the header read as a header rather than blending into the rows. */}
                       <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
                         <TableHead className="w-12 text-[11px] font-semibold uppercase tracking-wide text-white"></TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The proforma slip's own order date">Order Date</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The date this load operation was started (vehicle linked)">Load Date</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Order date (top) — the proforma slip's own date; Load date (below) — when this load operation was started">Order / Load Date</TableHead>
                         <TableHead
                           className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
                           onClick={() => { setSortBy("orderNumber"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
@@ -1797,9 +2017,9 @@ export default function LoadOperation() {
                         </TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Party Name</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Plant</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Vehicle No.</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">RTO No.</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">Vehicle No.</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Status</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">Owner</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
                         <TableHead
                           className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
@@ -1815,33 +2035,69 @@ export default function LoadOperation() {
                         const isExpanded = expandedRecordOrder === r.orderNumber;
                         return (
                           <Fragment key={r.id}>
-                            <TableRow className="cursor-pointer" onClick={() => openOrderFromList(r.orderNumber)}>
+                            <TableRow
+                              className="cursor-pointer"
+                              onClick={() => toggleExpandedRecord(r.orderNumber)}
+                            >
                               <TableCell onClick={(e) => e.stopPropagation()}>
                                 <Button
                                   variant="ghost"
                                   size="icon"
                                   className="h-8 w-8 rounded-full"
                                   title="View scan history"
-                                  onClick={() => setExpandedRecordOrder((cur) => (cur === r.orderNumber ? null : r.orderNumber))}
+                                  onClick={() => toggleExpandedRecord(r.orderNumber)}
                                 >
                                   <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
                                 </Button>
                               </TableCell>
                               <TableCell>
-                                {r.orderDate
-                                  ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
-                                  : "-"}
+                                <div className="flex flex-col">
+                                  <span>
+                                    {r.orderDate
+                                      ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
+                                      : "-"}
+                                  </span>
+                                  <span className="text-xs text-muted-foreground">
+                                    Load: {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
+                                  </span>
+                                </div>
                               </TableCell>
-                              <TableCell>{new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}</TableCell>
                               <TableCell>#{r.orderNumber}</TableCell>
                               <TableCell>{r.partyName || "-"}</TableCell>
                               <TableCell>{r.plant ? <PlantBadge plant={r.plant} /> : "-"}</TableCell>
-                              <TableCell>{r.vehicleNumber || "-"}</TableCell>
-                              <TableCell>{r.rtoNumber || "-"}</TableCell>
                               <TableCell>
-                                <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-200">
+                                <div className="flex flex-col">
+                                  <span>{r.vehicleNumber || "-"}</span>
+                                  {r.rtoNumber && <span className="text-xs text-muted-foreground">RTO: {r.rtoNumber}</span>}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <Badge className={recordStatusBadgeClass(r)}>
                                   {recordStatus(r)}
                                 </Badge>
+                              </TableCell>
+                              <TableCell onClick={(e) => e.stopPropagation()}>
+                                {r.loadingCompletedAt ? (
+                                  "-"
+                                ) : r.loadingPausedAt ? (
+                                  <div className="flex flex-col gap-1">
+                                    <span className="text-xs text-amber-700">Paused · {r.loadingOwnerName ?? r.loadingOwnerCode ?? "—"}</span>
+                                    {canWrite && (
+                                      <Button
+                                        size="sm"
+                                        className="h-6 w-fit rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
+                                        disabled={claimLoadMutation.isPending}
+                                        onClick={() => claimLoadMutation.mutate(r.orderNumber)}
+                                      >
+                                        Claim
+                                      </Button>
+                                    )}
+                                  </div>
+                                ) : r.loadingOwnerName || r.loadingOwnerCode ? (
+                                  <span className="text-xs text-gray-600">{r.loadingOwnerName ?? r.loadingOwnerCode}</span>
+                                ) : (
+                                  <span className="text-xs text-gray-300">—</span>
+                                )}
                               </TableCell>
                               <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
                               <TableCell>
@@ -1909,102 +2165,109 @@ export default function LoadOperation() {
                 </div>
 
                 {/* Mobile View - card list */}
-                <div className="space-y-3 md:hidden">
+                <div className="space-y-2 xl:hidden">
                   {filteredRecords.map((r) => {
                     const isExpanded = expandedRecordOrder === r.orderNumber;
                     return (
-                      <Card key={r.id} className="overflow-hidden">
-                        <CardHeader className="pb-2 pt-3 cursor-pointer" onClick={() => openOrderFromList(r.orderNumber)}>
+                      <Card key={r.id} className={`overflow-hidden ${recordAccentBorderClass(r)}`}>
+                        <CardHeader
+                          className="pb-1.5 pt-2.5 cursor-pointer"
+                          onClick={() => toggleExpandedRecord(r.orderNumber)}
+                        >
                           <div className="flex justify-between items-start gap-2">
                             <div className="min-w-0">
                               <div className="font-medium text-md flex items-center gap-2">
                                 #{r.orderNumber}
                                 {r.plant && <PlantBadge plant={r.plant} />}
                               </div>
-                              <div className="text-sm text-muted-foreground mt-1 truncate">{r.partyName || "-"}</div>
+                              <div className="text-sm text-muted-foreground mt-0.5 truncate">{r.partyName || "-"}</div>
                             </div>
-                            <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-200 text-xs shrink-0">
+                            <Badge className={`${recordStatusBadgeClass(r)} text-xs shrink-0`}>
                               {recordStatus(r)}
                             </Badge>
                           </div>
                         </CardHeader>
-                        <CardContent className="pb-4 pt-0">
-                          <div className="flex justify-between items-center mt-2">
-                            <div className="flex items-center gap-2">
-                              {r.vehicleNumber && (
-                                <div
-                                  className="h-10 w-10 rounded-full bg-amber-50 flex items-center justify-center overflow-hidden shrink-0"
-                                  title={`${r.vehicleNumber}${r.rtoNumber ? ` — RTO ${r.rtoNumber}` : ""}`}
-                                >
-                                  <span className="text-orange-600 font-medium text-xs truncate px-1">{r.vehicleNumber}</span>
-                                </div>
-                              )}
+                        <CardContent className="pb-2.5 pt-0">
+                          {/* Icons on their own row, date/duration/creator info on the row below
+                              (flex-wrap, not squeezed against the icons) — the old side-by-side
+                              layout let the right-hand text get clipped past the card edge on
+                              narrow phones instead of wrapping. The chevron/expand toggle button
+                              is gone too: the whole card header is already tappable to expand
+                              (see CardHeader's onClick above), so a dedicated button for the
+                              same action was redundant clutter, not a second way in. */}
+                          <div className="flex items-center gap-1.5 mt-1.5">
+                            {r.vehicleNumber && (
+                              <div
+                                className="h-9 w-9 rounded-full bg-amber-50 flex items-center justify-center overflow-hidden shrink-0"
+                                title={`${r.vehicleNumber}${r.rtoNumber ? ` — RTO ${r.rtoNumber}` : ""}`}
+                              >
+                                <span className="text-orange-600 font-medium text-xs truncate px-1">{r.vehicleNumber}</span>
+                              </div>
+                            )}
+                            {/* The ONLY thing that opens a load into the scan view — nothing
+                                else on this card (not the header, not the row) does anymore,
+                                so there's exactly one unambiguous way to start scanning it. */}
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-9 w-9 p-0 rounded-full bg-blue-50 hover:bg-blue-100"
+                              title="Open this loading slip"
+                              onClick={() => openOrderFromList(r.orderNumber)}
+                            >
+                              <FileText className="h-4 w-4 text-[#001d6e]" />
+                            </Button>
+                            {r.loadingCompletedAt && admin && (
                               <Button
                                 variant="ghost"
                                 size="icon"
-                                className="h-10 w-10 p-0 rounded-full bg-blue-50 hover:bg-blue-100"
-                                title="View scan history"
-                                onClick={(e) => { e.stopPropagation(); setExpandedRecordOrder((cur) => (cur === r.orderNumber ? null : r.orderNumber)); }}
+                                className="h-9 w-9 p-0 rounded-full bg-amber-50 hover:bg-amber-100"
+                                disabled={reopenMutation.isPending}
+                                title="Reopen this load"
+                                onClick={(e) => { e.stopPropagation(); reopenMutation.mutate(r.orderNumber); }}
                               >
-                                <FileText className="h-5 w-5 text-[#001d6e]" />
+                                <RotateCcw className="h-4 w-4 text-amber-600" />
                               </Button>
-                              {r.loadingCompletedAt && admin && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-10 w-10 p-0 rounded-full bg-amber-50 hover:bg-amber-100"
-                                  disabled={reopenMutation.isPending}
-                                  title="Reopen this load"
-                                  onClick={(e) => { e.stopPropagation(); reopenMutation.mutate(r.orderNumber); }}
-                                >
-                                  <RotateCcw className="h-5 w-5 text-amber-600" />
-                                </Button>
-                              )}
-                              {canResetLoad && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-10 w-10 p-0 rounded-full bg-red-50 hover:bg-red-100"
-                                  title="Delete this loading slip"
-                                  onClick={(e) => { e.stopPropagation(); setResetTarget(r); }}
-                                >
-                                  <Trash2 className="h-5 w-5 text-red-500" />
-                                </Button>
-                              )}
-                            </div>
-                            <div className="flex flex-col items-end">
+                            )}
+                            {canResetLoad && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-9 w-9 p-0 rounded-full bg-red-50 hover:bg-red-100"
+                                title="Delete this loading slip"
+                                onClick={(e) => { e.stopPropagation(); setResetTarget(r); }}
+                              >
+                                <Trash2 className="h-4 w-4 text-red-500" />
+                              </Button>
+                            )}
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                            <span className="flex items-center whitespace-nowrap">
+                              <Calendar className="h-3 w-3 mr-1 shrink-0" />
                               {r.orderDate && (
-                                <div className="flex items-center text-xs" title="Order date — the proforma slip's own date">
-                                  <Calendar className="h-3 w-3 mr-1 text-muted-foreground" />
-                                  <span className="text-muted-foreground">Ord</span>
-                                  <span className="font-medium ml-1">
+                                <>
+                                  Ord{" "}
+                                  <span className="font-medium text-gray-700 ml-1">
                                     {new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
                                   </span>
-                                </div>
+                                  <span className="mx-1 text-gray-300">·</span>
+                                </>
                               )}
-                              <div className="flex items-center text-xs mt-0.5" title="Load date — when this load operation was started">
-                                <Calendar className="h-3 w-3 mr-1 text-muted-foreground" />
-                                <span className="text-muted-foreground">Load</span>
-                                <span className="font-medium ml-1">
-                                  {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
-                                </span>
-                              </div>
-                              <div className="text-xs text-muted-foreground mt-0.5" title="Time from when the vehicle was linked to when the load was marked complete">
-                                {formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}
-                              </div>
-                              <div className="text-xs text-muted-foreground mt-2 flex items-center">
-                                <UserCircle2 className="h-3 w-3 mr-1" />
-                                <span>
-                                  {r.createdByName ?? r.createdByCode ?? "Unknown"}
-                                  {" • "}
-                                  {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
-                                </span>
-                              </div>
-                            </div>
+                              Load{" "}
+                              <span className="font-medium text-gray-700 ml-1">
+                                {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
+                              </span>
+                            </span>
+                            <span className="whitespace-nowrap">{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</span>
+                            <span className="flex items-center whitespace-nowrap">
+                              <UserCircle2 className="h-3 w-3 mr-1 shrink-0" />
+                              {r.createdByName ?? r.createdByCode ?? "Unknown"}
+                              {" • "}
+                              {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
+                            </span>
                           </div>
 
                           {isExpanded && (
-                            <div className="mt-3 border-t border-gray-100 pt-3" onClick={(e) => e.stopPropagation()}>
+                            <div className="mt-2 border-t border-gray-100 pt-2">
                               {historyPanel}
                             </div>
                           )}
@@ -2017,7 +2280,7 @@ export default function LoadOperation() {
             )}
 
             {!recordsQuery.isLoading && recordsItems.length > 0 && (() => {
-              const recordsPageCount = Math.max(1, Math.ceil(recordsTotal / RECORDS_PAGE_SIZE));
+              const recordsPageCount = Math.max(1, Math.ceil(recordsTotal / recordsPageSize));
               const recordsPageIndex = recordsPage - 1; // buildPageList/DataTablePagination are 0-based
               return (
                 <div className="grid grid-cols-3 items-center gap-2 border rounded-md px-4 py-3 text-xs text-gray-500">
@@ -2056,7 +2319,19 @@ export default function LoadOperation() {
                       <ChevronRight className="h-4 w-4" />
                     </Button>
                   </nav>
-                  <span />
+                  <div className="flex items-center justify-end gap-1">
+                    <span className="text-xs whitespace-nowrap text-muted-foreground">Show:</span>
+                    <select
+                      className="h-7 rounded border bg-background px-1 text-xs"
+                      value={recordsPageSize}
+                      onChange={(e) => { setRecordsPageSize(Number(e.target.value)); setRecordsPage(1); }}
+                      aria-label="Rows per page"
+                    >
+                      {RECORDS_PAGE_SIZE_OPTIONS.map((size) => (
+                        <option key={size} value={size}>{size}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               );
             })()}
@@ -2381,6 +2656,20 @@ export default function LoadOperation() {
             mount until then. ──────────────────────────────────────────────────────────────── */}
         {view === "create" && slip && isVehicleClaimed && (
           <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+              {/* Rotated kiosk mode's fixed overlay sits on top of Layout's own sidebar toggle,
+                  making it unreachable by a normal click — this button (fixed INSIDE the
+                  rotated container, so it turns with the content and stays reachable/correctly
+                  oriented, same trick as the rotate button right below it) reopens the mobile
+                  sidebar drawer instead. Same pattern Unloading's own rotate view uses. */}
+              {rotated && (
+                <button
+                  onClick={openMobileMenu}
+                  className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-white px-4 py-3 text-[#001d6e] shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
+                  title="Open sidebar menu"
+                >
+                  <Menu className="h-5 w-5" />
+                </button>
+              )}
               {/* Kiosk rotate — same floating button Order Scan/Unloading use, for a screen
                   physically mounted at an angle next to the loading bay. Fixed positioning
                   inside the (transform:rotate) wrapper above keeps it pinned to a natural
@@ -2397,25 +2686,41 @@ export default function LoadOperation() {
                   made the suggestions invisible even though the search itself worked fine.
                   rounded-t-xl on the header strip below keeps the top corners clean without it. */}
               <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-                <div className="flex flex-col gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 bg-[#001d6e]/5 rounded-t-xl sm:flex-row sm:items-center sm:justify-between">
+                {/* xl (not sm) is deliberate here — this switches to a side-by-side row only once
+                    there's real room for both the identity badges AND the action buttons.
+                    min-w-0 below (on the identity block) plus shrink-0 (on the actions) means
+                    ALL of any width shortfall gets absorbed by the identity side — at sm (640px)
+                    that shortfall was severe on any "desktop-width" browser window with the
+                    sidebar open (which eats ~256px), squeezing badges down to where "Ord 31 Aug
+                    2026" wrapped onto four separate lines instead of just stacking the whole
+                    identity block above the actions, which is what happens correctly below xl.
+                    bigView (rotated kiosk or natural portrait) forces that same stacked layout
+                    regardless of xl — xl: is a raw-window-width query, so a rotated kiosk on a
+                    genuinely wide monitor would otherwise still pass it and get squeezed into
+                    the side-by-side row despite its real (rotated) width being narrow. */}
+                <div className={`flex flex-col gap-2 px-3 sm:px-4 py-2 border-b border-gray-100 bg-[#001d6e]/5 rounded-t-xl ${bigView ? "" : "xl:flex-row xl:items-center xl:justify-between"}`}>
                   {/* Slip identity — order#/party on one line, then plant (Plant Management's own
                       color, same PlantBadge every other page uses), date, volume and the linked
                       vehicle as a proper row of badges/text underneath, sized to actually be
                       readable at a glance instead of one tiny catch-all line. */}
-                  <div className="min-w-0 space-y-1.5">
+                  <div className="min-w-0 space-y-1">
                     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                       <span className="text-base font-bold text-[#001d6e] truncate">#{slip.orderNumber}</span>
                       <span className="text-sm text-gray-600 truncate">{slip.partyName}</span>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
+                    {/* text-xs (not text-sm) and a tighter gap here — this row can easily be
+                        6-7 badges deep (plant, dates, item/qty counts, two volume pills, the
+                        vehicle) and at text-sm each one claimed close to its own line on a phone,
+                        which is most of what was pushing this card's height out. */}
+                    <div className="flex flex-wrap items-center gap-1.5">
                       {slip.plant && <PlantBadge plant={slip.plant} />}
                       {slip.orderDate && (
-                        <span className="text-sm font-semibold text-gray-700" title="Order date — the proforma slip's own date">
+                        <span className="text-xs font-semibold text-gray-700" title="Order date — the proforma slip's own date">
                           Ord {new Date(`${String(slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
                         </span>
                       )}
                       {slip.loadDate && (
-                        <span className="text-sm font-semibold text-gray-500" title="Load date — when this load operation was started">
+                        <span className="text-xs font-semibold text-gray-500" title="Load date — when this load operation was started">
                           Load {new Date(slip.loadDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
                         </span>
                       )}
@@ -2427,7 +2732,7 @@ export default function LoadOperation() {
                           regardless of how much is loaded so far. */}
                       {slip.totalVolume && (
                         <span
-                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-sm font-bold ${
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold ${
                             isOverCapacity ? "bg-red-100 text-red-700" : "bg-indigo-100 text-indigo-700"
                           }`}
                           title={`${loadedVolume} loaded of ${slip.totalVolume} required`}
@@ -2439,7 +2744,7 @@ export default function LoadOperation() {
                           required volume above, so the two are never read as one number. */}
                       {slip.vehicleVolume != null && (
                         <span
-                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-sm font-bold ${
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold ${
                             isOverCapacity ? "bg-red-100 text-red-700" : "bg-sky-100 text-sky-700"
                           }`}
                           title="Vehicle capacity"
@@ -2448,44 +2753,45 @@ export default function LoadOperation() {
                         </span>
                       )}
                       {slip.vehicleNumber && (
-                        <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">
                           {slip.vehicleNumber}{slip.rtoNumber ? ` · ${slip.rtoNumber}` : ""}
                         </span>
                       )}
+                      {/* Progress lives in THIS row (not its own line in the actions block below)
+                          specifically so it shares a line with the vehicle badge instead of each
+                          claiming a separate row — one of the biggest single wins for shrinking
+                          this card's height. */}
+                      <div
+                        className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 ${
+                          itemPct >= 100 ? "bg-emerald-100" : "bg-gray-100"
+                        }`}
+                        title={`${itemTotals.loaded} of ${itemTotals.expected} loaded`}
+                      >
+                        <Progress
+                          value={itemPct}
+                          className={`w-16 h-1.5 ${itemPct >= 100 ? "bg-emerald-200" : "bg-gray-200"}`}
+                          indicatorClassName={itemPct >= 100 ? "bg-emerald-600" : "bg-[#001d6e]"}
+                        />
+                        <span className={`text-xs font-bold whitespace-nowrap ${itemPct >= 100 ? "text-emerald-700" : "text-gray-700"}`}>
+                          {itemTotals.loaded}/{itemTotals.expected} · {itemPct}%
+                        </span>
+                      </div>
                     </div>
                   </div>
 
                   {/* Actions — Back to List is the primary way out of this page, so it gets a
                       visibly bigger, outlined treatment rather than reading as just another
                       small pill alongside Change Vehicle/Complete. */}
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    {/* Same pill treatment as the Volume/Capacity/Vehicle badges beside it — a
-                        bare, backgroundless w-20 sliver here (the old markup) had no visual
-                        weight at all next to those colored pills, reading as "not visible". */}
-                    <div
-                      className={`flex items-center gap-2 rounded-full px-2.5 py-1 ${
-                        itemPct >= 100 ? "bg-emerald-100" : "bg-gray-100"
-                      }`}
-                      title={`${itemTotals.loaded} of ${itemTotals.expected} loaded`}
-                    >
-                      <Progress
-                        value={itemPct}
-                        className={`w-24 h-2 ${itemPct >= 100 ? "bg-emerald-200" : "bg-gray-200"}`}
-                        indicatorClassName={itemPct >= 100 ? "bg-emerald-600" : "bg-[#001d6e]"}
-                      />
-                      <span className={`text-xs font-bold whitespace-nowrap ${itemPct >= 100 ? "text-emerald-700" : "text-gray-700"}`}>
-                        {itemTotals.loaded}/{itemTotals.expected} · {itemPct}%
-                      </span>
-                    </div>
+                  <div className="flex flex-wrap items-center gap-1 shrink-0">
                     {/* STV — same per-plant picker Order Scan/Unloading have. Amber when nothing
                         is picked (scanning is blocked until it is — see handleItemBarcode's
                         "Select an STV before scanning" toast) so it reads as needing attention. */}
                     {canWrite && !locked && (
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1">
                         <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
                         {stvs.length > 0 ? (
                           <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
-                            <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
+                            <SelectTrigger className={`h-6 w-32 justify-center rounded-full text-center text-xs font-semibold ${
                               selectedStv
                                 ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
                                 : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
@@ -2510,7 +2816,7 @@ export default function LoadOperation() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-8 rounded-full px-3 text-xs"
+                        className="h-7 rounded-full px-3 text-xs"
                         onClick={() => setVehiclePanelOpen((v) => !v)}
                       >
                         <Truck className="mr-1.5 h-3.5 w-3.5" /> Change Vehicle
@@ -2519,7 +2825,7 @@ export default function LoadOperation() {
                     {canComplete && !locked && (
                       <Button
                         size="sm"
-                        className="h-8 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
+                        className="h-7 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
                         disabled={completeMutation.isPending}
                         onClick={() => completeMutation.mutate()}
                       >
@@ -2527,11 +2833,38 @@ export default function LoadOperation() {
                         Complete
                       </Button>
                     )}
+                    {/* Shift handoff — Pause (owner/admin only, while active) hands this load
+                        off to whoever claims it next; Claim (anyone with write access, only
+                        while paused) picks it up. Never both shown at once. */}
+                    {canWrite && !locked && !isLoadPaused && (isLoadOwner || admin) && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 rounded-full border-amber-300 px-3 text-xs text-amber-700 hover:bg-amber-50"
+                        disabled={pauseLoadMutation.isPending}
+                        title="Step away from this load — anyone with write access can then claim it"
+                        onClick={() => pauseLoadMutation.mutate()}
+                      >
+                        {pauseLoadMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                        Pause
+                      </Button>
+                    )}
+                    {canWrite && !locked && isLoadPaused && (
+                      <Button
+                        size="sm"
+                        className="h-7 rounded-full bg-amber-500 px-3 text-xs text-white hover:bg-amber-600"
+                        disabled={claimLoadMutation.isPending}
+                        onClick={() => claimLoadMutation.mutate(slip.orderNumber)}
+                      >
+                        {claimLoadMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                        Claim
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={backToList}
-                      className="h-9 px-4 text-sm font-semibold border-[#001d6e]/30 text-[#001d6e] hover:bg-[#001d6e]/5"
+                      className="h-8 px-3.5 text-xs font-semibold border-[#001d6e]/30 text-[#001d6e] hover:bg-[#001d6e]/5"
                     >
                       Back to List
                     </Button>
@@ -2544,6 +2877,57 @@ export default function LoadOperation() {
                     <div className="text-xs text-[#001d6e]">
                       Load completed {slip.loadingCompletedAt ? new Date(slip.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""}
                     </div>
+                  </div>
+                )}
+
+                {/* Shift handoff banners — paused (blocked for everyone until claimed) takes
+                    priority over the plain "someone else owns this" read-only notice, since a
+                    paused load is blocked for the owner too, not just other users. */}
+                {!locked && isLoadPaused && (
+                  <div className="flex flex-wrap items-center gap-2 px-3 sm:px-4 py-1.5 bg-amber-50 border-b border-amber-100">
+                    <PackagePlus className="h-3.5 w-3.5 shrink-0 text-amber-700" />
+                    <span className="text-xs text-amber-800">
+                      Paused by {slip.loadingOwnerName ?? slip.loadingOwnerCode ?? "someone"} — claim it to keep scanning.
+                    </span>
+                    {canWrite && (
+                      <Button
+                        size="sm"
+                        className="h-6 rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
+                        disabled={claimLoadMutation.isPending}
+                        onClick={() => claimLoadMutation.mutate(slip.orderNumber)}
+                      >
+                        Claim
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {!locked && !isLoadPaused && !isLoadOwner && !admin && (
+                  <div className="px-4 sm:px-5 py-1.5 border-b border-gray-100 text-xs text-gray-500">
+                    Owned by {slip.loadingOwnerName ?? slip.loadingOwnerCode} — you can view this but can't scan until they pause it.
+                  </div>
+                )}
+
+                {/* Full owner+contribution history — "the owner is an array": every user who's
+                    ever held this load, oldest first, with how much each one loaded. Display
+                    only — access control never reads this, only the slip's own current owner
+                    (see checkLoadOwnership/checkLoadViewAccess). Collapsed by default — a click
+                    on this line reveals the table instead of it always taking up a banner row. */}
+                {(loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
+                  <div className="px-4 sm:px-5 py-2 border-b border-gray-100">
+                    <button
+                      type="button"
+                      onClick={() => setOwnerHistoryOpen((v) => !v)}
+                      className="flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-[#001d6e]"
+                    >
+                      <UserCircle2 className="h-3.5 w-3.5 text-gray-400" />
+                      Owner history
+                      <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${ownerHistoryOpen ? "rotate-180" : ""}`} />
+                    </button>
+                    {ownerHistoryOpen && (
+                      <div className="mt-2 border rounded-md overflow-hidden bg-white">
+                        <OwnerTimelineSummary timeline={loadHandoffsQuery.data!.timeline} />
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -2731,7 +3115,7 @@ export default function LoadOperation() {
               {/* Scan items — hidden once locked; a vehicle is guaranteed set by the time Stage B
                   ever mounts (see Stage B(pre) above), so there's no "not linked yet" case to
                   guard here anymore. Same Camera/Manual pattern as order search. */}
-              {canWrite && !locked && (
+              {canScanThisLoad && (
                 <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                   <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
@@ -2850,9 +3234,15 @@ export default function LoadOperation() {
                   <CollapsibleSearch value={itemSearchText} onChange={setItemSearchText} placeholder="Search items…" />
                 </div>
               </div>
+              {/* Same wide table on every screen — mobile, tablet, and the rotated kiosk view
+                  all get the exact 5-column ITEM NAME/EXPECTED/LOADED/REMAINING/STOCK layout,
+                  not a separate cut-down design. showMobileSwipeHint surfaces DataTable's own
+                  "swipe to see more" affordance on any screen too narrow for all 5 columns at
+                  once, since its own overflow-x-auto keeps that contained to the table, never
+                  the page. */}
               <DataTable<ProformaItem>
                 containerClassName="rounded-none border-0"
-                headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
+                headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-xs"
                 columns={loadingItemColumns}
                 data={filteredItems}
                 getRowId={(row) => row.barcode ?? `row-${row.id}`}

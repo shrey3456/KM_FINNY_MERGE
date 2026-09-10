@@ -109,6 +109,20 @@ function fmtOrderDate(value: string | null): string {
   return isNaN(d.getTime()) ? value : format(d, "dd MMM yyyy");
 }
 
+// date-fns' format() has no timezone conversion built in — it just reads the Date object's
+// components in the BROWSER's own local timezone, which only happens to match IST if the
+// viewer's machine is set to one. Every other page (Loading, Unloading, OrderImport's own
+// fmtIST) explicitly forces Asia/Kolkata instead of relying on that, which is why this page's
+// start/complete times could disagree with theirs for the exact same underlying event.
+function fmtIST(value: string | Date | null | undefined): string {
+  if (!value) return "—";
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true,
+  });
+}
+
 // Same formula as palletsOf in Unloading.tsx — kept as an identical copy here rather than a
 // shared import, matching how this page already duplicates small display helpers rather than
 // reaching into a feature page's own module.
@@ -930,7 +944,7 @@ export default function ScanViewer() {
               {historyEvents.map((ev, idx) => (
                 <tr key={ev.id} className={`border-b border-gray-100 ${ev.voided ? "opacity-60" : "hover:bg-gray-50"} ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
                   <td className="border-r border-gray-100 px-2 py-2 font-mono text-gray-400">{idx + 1}</td>
-                  <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{format(new Date(ev.scannedAt), "MMM d · h:mm a")}</td>
+                  <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{fmtIST(ev.scannedAt)}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">
                     {ev.orderName?.replace(/\.csv$/i, "")}
@@ -1493,10 +1507,10 @@ export default function ScanViewer() {
                   Completed only shows once it's actually set; a still-in-progress part just
                   shows Started. */}
               {selectedSession?.scanActivatedAt && (
-                <span>· started {format(new Date(selectedSession.scanActivatedAt), "MMM d, h:mm a")}</span>
+                <span>· started {fmtIST(selectedSession.scanActivatedAt)}</span>
               )}
               {selectedSession?.scanCompletedAt && (
-                <span>· completed {format(new Date(selectedSession.scanCompletedAt), "MMM d, h:mm a")}</span>
+                <span>· completed {fmtIST(selectedSession.scanCompletedAt)}</span>
               )}
               {selectedSession?.scanActivatedAt && selectedSession?.scanCompletedAt && (() => {
                 const totalMinutes = Math.round(
@@ -2768,7 +2782,7 @@ function UnloadingViewerSection({
                     <tr key={m.id} className="border-b border-gray-200 bg-white">
                       <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
                         <div className="flex flex-col gap-1">
-                          <span>{m.scannedAt ? format(new Date(m.scannedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                          <span>{fmtIST(m.scannedAt)}</span>
                           {badge}
                         </div>
                       </td>

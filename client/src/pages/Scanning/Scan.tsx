@@ -1,6 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { format } from "date-fns";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -133,7 +132,12 @@ function scanFmtIST(dt: string | null | undefined): string {
   const s = String(dt);
   const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
   if (isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-IN", { timeZone: "UTC" });
+  // Was timeZone: "UTC" — that just re-displayed the raw stored digits unchanged and labeled
+  // them IST. These timestamps are written server-side via `new Date()` into a naive
+  // `timestamp` column, which stores true UTC wall-clock digits — so this was showing a time
+  // 5.5 hours BEHIND the real IST time, disagreeing with every other page (Loading, Unloading,
+  // ScanViewer) that converts the same underlying instant correctly.
+  return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 }
 
 // Order date — a bare "YYYY-MM-DD" (order_import_sessions.orderDate is a text column, not a
@@ -157,7 +161,7 @@ function scanFmtUploadDate(dt: string | null | undefined): string {
   const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
   if (isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-IN", {
-    timeZone: "UTC",
+    timeZone: "Asia/Kolkata",
     day: "2-digit",
     month: "short",
     year: "numeric",
@@ -1871,7 +1875,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   >
                     <td className="px-2 py-2 text-gray-400 font-mono border-r border-gray-100">{idx + 1}</td>
                     <td className="px-2 py-2 text-gray-800 truncate border-r border-gray-100">
-                      {format(new Date(ev.scannedAt), "MMM d · h:mm a")}
+                      {scanFmtIST(ev.scannedAt)}
                     </td>
                     <td className="px-2 py-2 text-gray-600 truncate border-r border-gray-100">{ev.scannedByName ?? "—"}</td>
                     <td className="px-2 py-2 text-gray-600 truncate border-r border-gray-100">
@@ -1934,7 +1938,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             >
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-gray-800">
-                  {format(new Date(ev.scannedAt), "MMM d · h:mm a")}
+                  {scanFmtIST(ev.scannedAt)}
                 </span>
                 <span className={`inline-flex items-center justify-center rounded-full text-[11px] font-bold px-2 py-0.5 shrink-0 ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
                   {ev.isExtra ? "+" : ""}{ev.totalQty}
@@ -5703,7 +5707,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             </td>
                             <td className="px-3 py-2 text-xs text-gray-500 max-w-[130px] truncate border-r border-gray-100">{ev.orderName ?? "—"}</td>
                             <td className="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">
-                              {ev.scannedAt ? new Date(ev.scannedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                              {scanFmtIST(ev.scannedAt)}
                             </td>
                           </tr>
                         );

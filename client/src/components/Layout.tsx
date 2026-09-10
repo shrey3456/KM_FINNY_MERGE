@@ -81,31 +81,49 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
       {/* Main content area — "sidebar-hidden" (see index.css) lets pages that center themselves
           with max-w-Nxl reclaim the width the sidebar used to take, instead of leaving it blank. */}
       <div className={`flex min-w-0 flex-col flex-1 overflow-hidden ${!sidebarVisible ? "sidebar-hidden" : ""}`}>
-        {/* Header for desktop with hamburger menu — collapsible on the scan page. */}
-        {!hideHeader && (
+        {/* Header for desktop with hamburger menu — collapsible on the scan page. The hamburger
+            is the ONLY way to bring the sidebar back once toggleSidebar has hidden it, so it
+            must stay outside the hideHeader gate below — it used to be nested inside the same
+            `{!hideHeader && (...)}` block as the rest of this bar, so hiding the header on
+            Loading/Unloading/Scan also hid the one button that could un-hide the sidebar,
+            stranding anyone who did both with no way back short of clearing localStorage.
+            It's still only rendered when the sidebar is ACTUALLY hidden (!sidebarVisible) —
+            when it's open, Sidebar's own "«" collapse arrow is right there to close it, so
+            showing this button too would just be a redundant second control.
+            Rotated kiosk mode (Loading/Unloading) covers this bar with its own fixed,
+            full-viewport overlay — that's handled by a floating button INSIDE the rotated
+            container itself (via SidebarContext.openMobileMenu, same trick the rotate button
+            uses), not by raising this bar's z-index above the overlay, which left a stray
+            sliver of the sidebar's border visible at the seam instead of actually fixing
+            reachability. */}
         <div className="hidden lg:flex items-center w-full bg-white border-b border-gray-200">
-          <button
-            onClick={toggleSidebar}
-            className="p-3 text-[#001d6e] hover:bg-gray-100 transition-colors rounded-md mx-2"
-            aria-label={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
-          >
-            <Menu className="h-6 w-6" />
-          </button>
-          <Header
-            userName={currentUser?.username || ''}
-            userRole={currentUser?.role || ''}
-          />
-          {isScanPage && (
+          {!sidebarVisible && (
             <button
-              onClick={() => setScanHeaderHidden(true)}
-              className="mr-3 ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 hover:text-[#001d6e]"
-              title="Hide header for more scanning space"
+              onClick={toggleSidebar}
+              className="p-3 text-[#001d6e] hover:bg-gray-100 transition-colors rounded-md mx-2"
+              aria-label="Show sidebar"
             >
-              <ChevronUp className="h-4 w-4" /> Hide header
+              <Menu className="h-6 w-6" />
             </button>
           )}
+          {!hideHeader && (
+            <>
+              <Header
+                userName={currentUser?.username || ''}
+                userRole={currentUser?.role || ''}
+              />
+              {isScanPage && (
+                <button
+                  onClick={() => setScanHeaderHidden(true)}
+                  className="mr-3 ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 hover:text-[#001d6e]"
+                  title="Hide header for more scanning space"
+                >
+                  <ChevronUp className="h-4 w-4" /> Hide header
+                </button>
+              )}
+            </>
+          )}
         </div>
-        )}
         
         {/* Mobile Header with tribe logo, welcome text and (on non-home pages) a home icon - Hidden on messages and profile */}
         {/* Mobile Sidebar Drawer */}
@@ -125,7 +143,14 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
           </div>
         )}
 
-        <div className={`lg:hidden bg-white border-b border-gray-200 p-4 w-full ${location === '/messages' || location === '/profile' || hideHeader ? 'hidden' : ''}`}>
+        {/* Same fix as the desktop bar above: the hamburger (the only way to open the mobile
+            sidebar drawer) must never be inside the hideHeader-hidden branch — it used to be,
+            so hiding the header on Loading/Unloading/Scan also removed the only way to reach
+            the sidebar on mobile. hideHeader now only trims the logo/welcome/home/logout content
+            and shrinks the padding, never the whole bar. (Rotated kiosk mode reaches the sidebar
+            through its own in-rotation floating button instead — see the comment on the desktop
+            bar above.) */}
+        <div className={`lg:hidden bg-white border-b border-gray-200 w-full ${hideHeader ? 'p-2' : 'p-4'} ${location === '/messages' || location === '/profile' ? 'hidden' : ''}`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-4">
               <button
@@ -135,47 +160,53 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
               >
                 <Menu className="h-5 w-5" />
               </button>
-              <div className="w-10 h-10 sm:w-12 sm:h-12">
-                <img
-                  src={finnyLogo}
-                  alt="Finny Logo"
-                  className="w-full h-full object-contain"
-                />
-              </div>
-              <div>
-                <h1 className="text-[#001d6e] font-bold text-xl sm:text-2xl">Welcome,</h1>
-                <p className="text-gray-600 text-sm font-medium">
-                  {formatUsername(currentUser?.username)}
-                </p>
-              </div>
-            </div>
-            
-            <div className="flex items-center space-x-2">
-              {/* Home navigation button (only visible on non-home pages) */}
-              {location !== '/' && (
-                <Link href="/" className="flex items-center justify-center w-10 h-10 rounded-full bg-blue-50 text-[#001d6e] hover:bg-blue-100 transition-colors">
-                  <Home className="h-5 w-5" />
-                </Link>
+              {!hideHeader && (
+                <>
+                  <div className="w-10 h-10 sm:w-12 sm:h-12">
+                    <img
+                      src={finnyLogo}
+                      alt="Finny Logo"
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
+                  <div>
+                    <h1 className="text-[#001d6e] font-bold text-xl sm:text-2xl">Welcome,</h1>
+                    <p className="text-gray-600 text-sm font-medium">
+                      {formatUsername(currentUser?.username)}
+                    </p>
+                  </div>
+                </>
               )}
-              
-              {/* Logout button in top right */}
-              <a 
-                href="/logout"
-                onClick={(e) => {
-                  if (onLogout) {
-                    e.preventDefault();
-                    onLogout();
-                  }
-                }}
-                className="flex items-center justify-center w-10 h-10 rounded-full bg-[#001d6e] text-white hover:bg-blue-900 transition-colors"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-                  <polyline points="16 17 21 12 16 7"></polyline>
-                  <line x1="21" y1="12" x2="9" y2="12"></line>
-                </svg>
-              </a>
             </div>
+
+            {!hideHeader && (
+              <div className="flex items-center space-x-2">
+                {/* Home navigation button (only visible on non-home pages) */}
+                {location !== '/' && (
+                  <Link href="/" className="flex items-center justify-center w-10 h-10 rounded-full bg-blue-50 text-[#001d6e] hover:bg-blue-100 transition-colors">
+                    <Home className="h-5 w-5" />
+                  </Link>
+                )}
+
+                {/* Logout button in top right */}
+                <a
+                  href="/logout"
+                  onClick={(e) => {
+                    if (onLogout) {
+                      e.preventDefault();
+                      onLogout();
+                    }
+                  }}
+                  className="flex items-center justify-center w-10 h-10 rounded-full bg-[#001d6e] text-white hover:bg-blue-900 transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                    <polyline points="16 17 21 12 16 7"></polyline>
+                    <line x1="21" y1="12" x2="9" y2="12"></line>
+                  </svg>
+                </a>
+              </div>
+            )}
           </div>
         </div>
         
