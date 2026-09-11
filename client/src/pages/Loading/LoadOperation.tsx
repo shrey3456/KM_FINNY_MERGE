@@ -752,8 +752,23 @@ export default function LoadOperation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, scanMode, slip]);
 
+  // Barcode gun for finding an order — now active on the landing list too, not just once you've
+  // already clicked into the "create"/search screen. A gun scan is just a burst of very fast
+  // keystrokes (rapid enough that a human typing normally can't produce the same gaps), so this
+  // only has to tell that burst apart from someone deliberately typing into a real field — it
+  // never needs to know or care which screen happens to be showing:
+  //   - Landing on the list (view === "list", no order open yet)? Straight to this listener.
+  //   - Already have an order open (`slip` set)? This steps aside — the item-barcode listener
+  //     below takes over instead, so a scan there adds/removes stock, not a second order lookup.
+  //   - Focus is inside any real input/textarea (including the landing list's own search box,
+  //     or the create screen's order box) — this listener explicitly skips those keystrokes, so
+  //     manually typing/searching there behaves exactly as before: it just filters/searches,
+  //     and picking an order is still a deliberate click or Enter press, never auto-triggered.
+  // The dialog this opens (pendingSlip's confirm modal) is a plain state-driven Dialog, not tied
+  // to `view` at all, so it pops up correctly over the list exactly like it already does over
+  // the create screen's own search UI.
   useEffect(() => {
-    if (view !== "create" || slip) return;
+    if (slip) return;
     const MAX_GAP_MS = 50;
     const BURST_END_MS = 80;
     let buffer = "";
@@ -770,7 +785,10 @@ export default function LoadOperation() {
       buffer += e.key;
       if (flushTimer) clearTimeout(flushTimer);
       flushTimer = setTimeout(() => {
-        if (buffer.length >= 3) { setScanMode("manual"); orderInputRef.current?.focus(); setOrderSearch(buffer); openOrder(buffer, { confirm: true }); }
+        if (buffer.length >= 3) {
+          if (view === "create") { setScanMode("manual"); orderInputRef.current?.focus(); setOrderSearch(buffer); }
+          openOrder(buffer, { confirm: true });
+        }
         buffer = "";
       }, BURST_END_MS);
     };
@@ -1844,7 +1862,7 @@ export default function LoadOperation() {
   // own wrapper is a container-fluid, which is a no-op here) — kept inside this page's scroll
   // container so the app shell still scrolls it the same way.
   return (
-    <div className="flex-1 overflow-y-auto px-2 py-6">
+    <div className="flex-1 overflow-y-auto px-2 pt-1 pb-4">
       <div className="w-full space-y-6">
         {/* ── Landing view — mirrors Load Operations' layout exactly: full-width search, a
              filter row (date + plant + status counters), status tabs, then a desktop table with
@@ -2772,7 +2790,7 @@ export default function LoadOperation() {
                           }`}
                           title="Vehicle capacity"
                         >
-                          Cap {slip.vehicleVolume}
+                          Vech vol: {slip.vehicleVolume}
                         </span>
                       )}
                       {slip.vehicleNumber && (
