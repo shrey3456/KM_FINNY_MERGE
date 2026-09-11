@@ -930,7 +930,7 @@ export default function NotionInventory() {
                             >
                               {col.key === "productImage" && !isEmpty ? (
                                 <img
-                                  src={`/api/products/image-by-name?name=${encodeURIComponent(product.name)}`}
+                                  src={`/api/products/image-by-id?id=${product.id}`}
                                   alt=""
                                   className="h-8 w-8 rounded border border-gray-200 bg-gray-50 object-contain"
                                   onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}

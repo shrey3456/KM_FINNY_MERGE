@@ -71,7 +71,9 @@ export interface IStorage {
 
   // Product operations
   getProduct(id: number): Promise<Product | undefined>;
-  getProductByBarcode(barcode: string): Promise<Product | undefined>;
+  // plant is optional — only used to disambiguate when the same barcode exists under more than
+  // one Product Master row (see DBStorage's own implementation comment for why that happens).
+  getProductByBarcode(barcode: string, plant?: string | null): Promise<Product | undefined>;
   getProductByName(name: string): Promise<Product | undefined>;
   getProductsByIds(ids: number[]): Promise<Product[]>; // Batch get products by IDs
   createProduct(product: InsertProduct): Promise<Product>;
@@ -211,6 +213,8 @@ export interface IStorage {
   createVehicleInfo(vehicle: InsertVehicleInfo): Promise<VehicleInfo>;
   getVehicleInfo(id: number): Promise<VehicleInfo | undefined>;
   getVehicleInfoByVehicleNumber(vehicleNumber: string): Promise<VehicleInfo | undefined>;
+  getVehicleInfoByVehicleNumberOrRto(value: string): Promise<VehicleInfo | undefined>;
+  getVehicleInfoFromNotionText(raw: string): Promise<VehicleInfo | undefined>;
   updateVehicleInfo(id: number, vehicle: Partial<InsertVehicleInfo>): Promise<VehicleInfo | undefined>;
   deleteVehicleInfo(id: number): Promise<boolean>;
   listVehicleInfo(limit?: number, offset?: number): Promise<VehicleInfo[]>;
@@ -772,7 +776,7 @@ export class MemStorage implements IStorage {
     return this.products.get(id);
   }
 
-  async getProductByBarcode(barcode: string): Promise<Product | undefined> {
+  async getProductByBarcode(barcode: string, _plant?: string | null): Promise<Product | undefined> {
     return Array.from(this.products.values()).find(
       (product) => product.barcode === barcode,
     );
@@ -2372,9 +2376,46 @@ export class DBStorage implements IStorage {
     return result.length ? result[0] : undefined;
   }
 
-  async getProductByBarcode(barcode: string): Promise<Product | undefined> {
-    const result = await db.select().from(products).where(eq(products.barcode, barcode.trim())).limit(1);
-    return result.length ? result[0] : undefined;
+  // plant is optional and only matters when a barcode is shared by more than one Product Master
+  // row (a real, intentional case — the same barcode can mean a different pack/product per
+  // plant). Without it, or when there's only one match, this behaves exactly as before. With it,
+  // prefer the row whose OWN plant is in the SAME STATE as the plant given — the same state-level
+  // resolution already used for pallet size (products.gjPlt/mpPlt) — so scanning at Valsad never
+  // silently pulls back Indore's name/SAP code for a barcode both plants happen to share. Falls
+  // back to the first match if none share that state, so nothing changes for a single-row barcode.
+  async getProductByBarcode(barcode: string, plant?: string | null): Promise<Product | undefined> {
+    const matches = await db.select().from(products).where(eq(products.barcode, barcode.trim()));
+    if (matches.length <= 1 || !plant) return matches[0];
+
+    // products.plant isn't always a single real plant name — 136 rows use the combined label
+    // "VAL & IND" (this data applies to both Valsad AND Indore together), and some rows have no
+    // plant at all. Split on any non-letter separator and resolve each piece to a real plant
+    // (exact name match, or a prefix match for an abbreviation like "VAL"/"IND") so a combined
+    // label resolves to EVERY state it covers, not zero — a plain plants-table lookup on the raw
+    // "VAL & IND" string finds nothing and would otherwise always fall through to the wrong row.
+    const allPlants = await this.getAllPlants();
+    const resolveStates = (label: string | null | undefined): Set<string> => {
+      const states = new Set<string>();
+      if (!label) return states;
+      const tokens = label.split(/[^a-zA-Z]+/).map((t) => t.trim().toUpperCase()).filter(Boolean);
+      for (const token of tokens) {
+        const found = allPlants.find((p) => String(p.name).toUpperCase() === token)
+          ?? allPlants.find((p) => String(p.name).toUpperCase().startsWith(token));
+        if (found?.state) states.add(String(found.state).trim().toUpperCase());
+      }
+      return states;
+    };
+
+    const targetStates = resolveStates(plant);
+    if (targetStates.size === 0) return matches[0];
+
+    for (const candidate of matches) {
+      const candidateStates = resolveStates(candidate.plant);
+      for (const s of candidateStates) {
+        if (targetStates.has(s)) return candidate;
+      }
+    }
+    return matches[0];
   }
 
   async getProductByName(name: string): Promise<Product | undefined> {
@@ -4273,6 +4314,55 @@ eq(loadingOperations.status, status),
       console.error("Error getting vehicle info by vehicle number:", error);
       return undefined;
     }
+  }
+
+  // Notion's dispatch DB "Vehi No:" rollup isn't reliably formatted — depending on how that row
+  // was filled in, the sync (see extractVehicleCode in proformaNotionSync.ts) can end up storing
+  // the bare vehicle code ("112"), the RTO plate number alone ("GJ-15-AV-8225"), or occasionally
+  // something else, onto proforma_slips.vehicleNumber — not always the vehicle_number value a
+  // plain getVehicleInfoByVehicleNumber lookup expects. This tries both columns, case-
+  // insensitively, so Loading's vehicle-confirm step still finds the right Vehicle Master row
+  // whichever piece Notion happened to write.
+  async getVehicleInfoByVehicleNumberOrRto(value: string): Promise<VehicleInfo | undefined> {
+    try {
+      const [result] = await db.select().from(vehicleInfo)
+        .where(or(ilike(vehicleInfo.vehicleNumber, value), ilike(vehicleInfo.rtoNumber, value)))
+        .limit(1);
+      return result;
+    } catch (error) {
+      console.error("Error getting vehicle info by vehicle number or RTO:", error);
+      return undefined;
+    }
+  }
+
+  // Resolves Notion's raw "Vehi No:" text (e.g. "112 {GJ-15-AV-8225}", or occasionally just the
+  // bare code or just the RTO plate alone) down to the ONE specific Vehicle Master row it means,
+  // so an order can be linked by that row's stable id instead of by this text — the id survives
+  // even if the vehicle's own number/RTO text is later edited in Vehicle Master, whereas a fresh
+  // text match could silently land on a different (or no) row after such an edit. When the text
+  // has both pieces, requires them to match the SAME row (higher confidence than either alone);
+  // falls back to matching either column alone when only one piece is present, or the combined
+  // match found nothing.
+  async getVehicleInfoFromNotionText(raw: string): Promise<VehicleInfo | undefined> {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    const idx = trimmed.indexOf(' {');
+    if (idx >= 0) {
+      const code = trimmed.slice(0, idx).trim();
+      const rto = trimmed.slice(idx + 2).replace(/\}\s*$/, '').trim();
+      if (code && rto) {
+        try {
+          const [combined] = await db.select().from(vehicleInfo)
+            .where(and(ilike(vehicleInfo.vehicleNumber, code), ilike(vehicleInfo.rtoNumber, rto)))
+            .limit(1);
+          if (combined) return combined;
+        } catch (error) {
+          console.error("Error getting vehicle info by combined vehicle number + RTO:", error);
+        }
+      }
+      return this.getVehicleInfoByVehicleNumberOrRto(code || trimmed);
+    }
+    return this.getVehicleInfoByVehicleNumberOrRto(trimmed);
   }
 
   async updateVehicleInfo(id: number, vehicle: Partial<InsertVehicleInfo>): Promise<VehicleInfo | undefined> {

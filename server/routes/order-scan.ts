@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer } from 'http';
 import passport from 'passport';
 import { db, pool } from '../db';
+import { storage } from '../storage';
 import {
   orderImportSessions, orderScanItems, orderScanEvents,
   users, plants, plantStvs,
@@ -352,26 +353,29 @@ async function seedSessionItemsWithClient(client: any, id: number, plant: string
 
   const state = await getPlantStateCode(client, plant);
   const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
-  const productMap = new Map<string, any>();
   // Normalized (trim + lowercase) on both sides, same as every other product lookup in this
   // app — an exact match here would silently miss a product whenever the two barcodes differ
   // only by case or incidental whitespace (a CSV cell padded from an Excel export, etc.).
   const normKey = (b: string) => b.trim().toLowerCase();
-  if (barcodes.length > 0) {
-    const prodResult = await client.query(
-      `SELECT barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
-       FROM products WHERE LOWER(TRIM(barcode)) = ANY($1)`,
-      [barcodes.map(normKey)],
-    );
-    prodResult.rows.forEach((p: any) => productMap.set(normKey(p.barcode), p));
-  }
+  // storage.getProductByBarcode (not a raw bulk query) — a barcode can legitimately match more
+  // than one Product Master row (a plant-specific pack, or a combined "VAL & IND" label
+  // covering more than one plant's state at once); passing this session's plant through makes
+  // it prefer the row that actually applies here, instead of a plain bulk SELECT where whichever
+  // row comes back last for a shared barcode silently wins regardless of plant/state.
+  const uniqueBarcodes = Array.from(new Set(barcodes.map(normKey)))
+    .map((key) => barcodes.find((b: string) => normKey(b) === key)!);
+  const productMap = new Map<string, any>();
+  await Promise.all(uniqueBarcodes.map(async (barcode) => {
+    const prod = await storage.getProductByBarcode(barcode, plant);
+    if (prod) productMap.set(normKey(barcode), prod);
+  }));
 
   const vals: any[] = [];
   const placeholders: string[] = [];
   let pi = 1;
   for (const item of importItems) {
     const prod = item.barcode ? productMap.get(normKey(item.barcode)) : null;
-    const prodObj = prod ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt } : null;
+    const prodObj = prod ? { gjPlt: prod.gjPlt, mpPlt: prod.mpPlt } : null;
     const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
     vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
     placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
@@ -1032,23 +1036,25 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'
 
     if (importItems.length > 0) {
       const state = await getPlantStateCode(client, session.plant);
-      const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
-      let productMap = new Map<string, any>();
-      if (barcodes.length > 0) {
-        const prodResult = await client.query(
-          `SELECT barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
-           FROM products WHERE barcode = ANY($1)`,
-          [barcodes],
-        );
-        prodResult.rows.forEach((p: any) => productMap.set(p.barcode, p));
-      }
+      const barcodes: string[] = importItems.map((i: any) => i.barcode).filter(Boolean);
+      // storage.getProductByBarcode (not a raw bulk query) — a barcode can legitimately match
+      // more than one Product Master row (a plant-specific pack, or a combined "VAL & IND"
+      // label covering more than one plant's state at once); passing this session's plant
+      // through makes it prefer the row that actually applies here, instead of a plain bulk
+      // SELECT where whichever row comes back last for a shared barcode silently wins.
+      const uniqueBarcodes = Array.from(new Set(barcodes));
+      const productMap = new Map<string, any>();
+      await Promise.all(uniqueBarcodes.map(async (barcode) => {
+        const prod = await storage.getProductByBarcode(barcode, session.plant);
+        if (prod) productMap.set(barcode, prod);
+      }));
 
       const vals: any[] = [];
       const placeholders: string[] = [];
       let pi = 1;
       for (const item of importItems) {
         const prod = item.barcode ? productMap.get(item.barcode) : null;
-        const prodObj = prod ? { gjPlt: prod.gj_plt, mpPlt: prod.mp_plt } : null;
+        const prodObj = prod ? { gjPlt: prod.gjPlt, mpPlt: prod.mpPlt } : null;
         const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
         vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
         placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
@@ -1606,16 +1612,16 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     let resolvedItemName: string | null = anchorItem?.item_name ?? null;
     const anchorExpectedQty = Number(anchorItem?.expected_qty ?? 0);
     let resolvedIpp = Number(anchorItem?.items_per_pallet ?? 0);
-    const prodResult = await client.query(
-      `SELECT name, gj_plt, mp_plt
-       FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
-      [barcode],
-    );
-    if (prodResult.rows[0]) {
-      const p = prodResult.rows[0];
-      resolvedItemName = resolvedItemName ?? p.name ?? null;
+    // storage.getProductByBarcode (not a raw LIMIT 1 query) — a barcode can legitimately match
+    // more than one Product Master row (a plant-specific pack, or a combined "VAL & IND" label
+    // covering more than one plant's state at once); passing the plant through makes it prefer
+    // the row that actually applies here instead of whichever one the query happens to return
+    // first, which is what silently kept picking a row with no gj/mp PLT set otherwise.
+    const resolvedProduct = await storage.getProductByBarcode(barcode, anchorSession.plant);
+    if (resolvedProduct) {
+      resolvedItemName = resolvedItemName ?? resolvedProduct.name ?? null;
       const state = await getPlantStateCode(client, anchorSession.plant ?? '');
-      resolvedIpp = resolvePalletSizeOrQty({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state, anchorExpectedQty);
+      resolvedIpp = resolvePalletSizeOrQty({ gjPlt: resolvedProduct.gjPlt, mpPlt: resolvedProduct.mpPlt }, state, anchorExpectedQty);
     }
 
     // On some part's CSV (regardless of whether it still has remaining capacity — a barcode
@@ -1625,10 +1631,10 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // Unloading's own equivalent check. A barcode not on ANY part's CSV at all keeps today's
     // existing behavior (logged as a pure Extra) — this is deliberately narrower than that.
     const onAnyPartCsv = sessions.some((s: any) => itemRowsBySession.get(s.id) != null);
-    if (onAnyPartCsv && !prodResult.rows[0]) {
+    if (onAnyPartCsv && !resolvedProduct) {
       await client.query('ROLLBACK');
       return res.status(400).json({
-        message: `PRODUCT_MASTER_MISSING: "${barcode}" is on this order but has no matching entry in Product Master. Check Product Master and correct the barcode before scanning it.`,
+        message: `PRODUCT_MASTER_MISSING: Barcode "${barcode}" is not in the system — it's on this order but doesn't exactly match anything in Product Master (often a formatting difference, like a missing leading zero). Fix it by editing the CSV/order to use the correct barcode.`,
       });
     }
     const itemsPerPallet = resolvedIpp;

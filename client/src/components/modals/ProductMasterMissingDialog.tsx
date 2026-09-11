@@ -7,14 +7,18 @@ import {
 type ProductMasterMissingDialogProps = {
   message: string | null;
   onClose: () => void;
+  // Defaults to the original "Not in Product Master" case this was built for. Also reused as-is
+  // (just a different title) for the sibling "barcode not on the manifest/order AT ALL, and not
+  // in Product Master either" rejection — see matchBarcodeNotInSystemError in apiError.ts —
+  // rather than duplicating this same centered-popup shell a second time.
+  title?: string;
 };
 
-// The one shared popup for a scan blocked because its barcode is on the CSV/manifest/order but
-// has no matching row in Product Master (see matchProductMasterMissingError in
-// client/src/lib/apiError.ts) — used identically from Order Scan, Loading, and Unloading so this
-// specific failure always looks the same regardless of which page hit it, distinct from the
-// ordinary "scan failed" toast every other error still gets.
-export default function ProductMasterMissingDialog({ message, onClose }: ProductMasterMissingDialogProps) {
+// The one shared popup for a scan blocked at a barcode-lookup step (see matchProductMasterMissingError
+// / matchBarcodeNotInSystemError in client/src/lib/apiError.ts) — used identically from Order Scan,
+// Loading, and Unloading so these failures always look the same regardless of which page hit them,
+// distinct from the ordinary "scan failed" toast every other error still gets.
+export default function ProductMasterMissingDialog({ message, onClose, title = "Not in Product Master" }: ProductMasterMissingDialogProps) {
   return (
     <Dialog open={!!message} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="max-w-sm text-center sm:text-center">
@@ -22,7 +26,7 @@ export default function ProductMasterMissingDialog({ message, onClose }: Product
           <span className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
             <AlertTriangle className="h-6 w-6 text-red-600" />
           </span>
-          <DialogTitle className="text-red-700">Not in Product Master</DialogTitle>
+          <DialogTitle className="text-red-700">{title}</DialogTitle>
           <DialogDescription className="text-sm text-gray-600">
             {message}
           </DialogDescription>

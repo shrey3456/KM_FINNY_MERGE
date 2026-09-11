@@ -378,6 +378,17 @@ export const proformaSlips = pgTable("proforma_slips", {
   // in the Loading page's vehicle search, instead of re-guessing by number. Null on slips linked
   // before this column existed — those fall back to a by-number lookup.
   vehicleInfoId: integer("vehicle_info_id"),
+  // Shift handoff — whoever currently holds the right to scan this load. Set to the creator on
+  // Start; only this user (or an admin) may scan/adjust while loadingPausedAt is null. Null on
+  // slips created before this existed, which the server treats as "unowned" (open to anyone with
+  // write access, the old behavior) rather than locking everyone out retroactively.
+  loadingOwnerCode: text("loading_owner_code"),
+  loadingOwnerName: text("loading_owner_name"),
+  // Set by the current owner's own explicit Pause action — while non-null, scanning is blocked
+  // for EVERYONE (including the owner) until someone runs Claim, which is what actually records
+  // the handoff (loading_handoffs) and moves ownership. Pausing itself is not a handoff by
+  // itself — resuming as the same person who paused never creates a handoff row.
+  loadingPausedAt: timestamp("loading_paused_at"),
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
@@ -389,8 +400,24 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
   createdByCode: true, notes: true, isBackedUp: true, isPrintLocked: true,
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
   loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,
-  vehicleInfoId: true,
+  vehicleInfoId: true, loadingOwnerCode: true, loadingOwnerName: true, loadingPausedAt: true,
 });
+
+// One row per actual shift handoff on a Loading order — "who load and what time it['s] given to
+// other". Only written when Claim actually moves ownership to a DIFFERENT person than whoever
+// paused it; a person resuming their own paused load never adds a row here.
+export const loadingHandoffs = pgTable("loading_handoffs", {
+  id: serial("id").primaryKey(),
+  orderNumber: text("order_number").notNull(),
+  fromUserCode: text("from_user_code"),
+  fromUserName: text("from_user_name"),
+  toUserCode: text("to_user_code"),
+  toUserName: text("to_user_name"),
+  pausedAt: timestamp("paused_at"),
+  claimedAt: timestamp("claimed_at").defaultNow(),
+});
+
+export type LoadingHandoff = typeof loadingHandoffs.$inferSelect;
 
 // IMPORTANT: All fields below are IMMUTABLE SNAPSHOTS of product data at import
 // time. They must NEVER be updated after the slip is created, even if the live
@@ -483,6 +510,10 @@ export const loadingScanEvents = pgTable("loading_scan_events", {
   totalQty: integer("total_qty").default(0),
   isExtra: boolean("is_extra").default(false), // scanned beyond this item's proforma quantity
   plant: text("plant"),
+  // Sub-transfer voucher code (see plantStvs below) — same per-plant STV concept Order Scan and
+  // Unloading already record per event; picked once for the vehicle before scanning (see the
+  // STV selector in client/src/pages/Loading/LoadOperation.tsx), stored on every event.
+  stv: text("stv"),
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
   scannedByName: text("scanned_by_name"),
   scannedAt: timestamp("scanned_at").defaultNow(),

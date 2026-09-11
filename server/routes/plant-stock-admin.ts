@@ -92,7 +92,7 @@ router.post('/plant-stock/adjust', requireAdminRole, async (req: Request, res: R
     const delta = newQty - currentTotal;
 
     if (delta !== 0) {
-      const product = await storage.getProductByBarcode(barcode);
+      const product = await storage.getProductByBarcode(barcode, plant);
       const productId = existing?.product_id ?? product?.id ?? null;
       if (existing) {
         await client.query(

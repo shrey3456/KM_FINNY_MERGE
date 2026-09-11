@@ -115,7 +115,7 @@ export async function computeUnloadGroupReport(groupId: number): Promise<UnloadG
   const ippByBarcode = new Map<string, number>();
   async function ippFor(barcode: string, fallbackQty: number): Promise<number> {
     if (ippByBarcode.has(barcode)) return ippByBarcode.get(barcode)!;
-    const product = await storage.getProductByBarcode(barcode);
+    const product = await storage.getProductByBarcode(barcode, plant);
     const ipp = resolvePalletSizeOrQty(product ?? null, state, fallbackQty);
     ippByBarcode.set(barcode, ipp);
     return ipp;
