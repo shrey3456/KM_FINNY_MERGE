@@ -871,7 +871,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       true AS "isDispatch",
       false AS "isUnload",
       NULL::text AS "emptyBoxNote",
-      NULL::text AS stv,
+      lse.stv,
       lse.scanned_by_code   AS "scannedByCode",
       lse.scanned_by_name   AS "scannedByName",
       lse.scanned_at        AS "scannedAt",
@@ -904,7 +904,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isDispatch",
       true AS "isUnload",
       NULL::text AS "emptyBoxNote",
-      NULL::text AS stv,
+      use.stv,
       use.scanned_by_code   AS "scannedByCode",
       use.scanned_by_name   AS "scannedByName",
       use.scanned_at        AS "scannedAt",
@@ -1038,12 +1038,13 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const toParam      = typeof req.query.to      === 'string' && req.query.to.trim()      ? req.query.to.trim()      : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
     const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange'].includes(req.query.type) ? req.query.type : null;
-    // Three distinct sections on the Scan History page (client tabs) — "Scan History" (receiving
-    // + exchange corrections, the original page), "Load Event" (Loading's own item-scanning
-    // history, server/routes/loading.ts), and "Unload Event" (Unloading's own scan history,
-    // server/routes/unloading.ts). Default stays 'receiving' so any older/other caller that never
-    // sends this param keeps seeing exactly what it always saw.
-    const sourceParam  = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : 'receiving';
+    // Three distinct sections on the Scan History page (client dropdown) — "Scan History"
+    // (receiving + exchange corrections, the original page), "Load Event" (Loading's own
+    // item-scanning history, server/routes/loading.ts), and "Unload Event" (Unloading's own scan
+    // history, server/routes/unloading.ts) — plus 'all', which merges all three (no source
+    // condition added below at all). Default stays 'receiving' so any older/other caller that
+    // never sends this param keeps seeing exactly what it always saw.
+    const sourceParam  = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'all' ? 'all' : 'receiving';
     // Scopes to one proforma order's own events — used by the Loading page's own landing table
     // (server/routes/loading.ts), whose "click a row to expand" panel re-uses this same endpoint
     // rather than a dedicated one.
@@ -1076,11 +1077,14 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // Section split — see sourceParam comment above. Applied before the Type filter below so
     // 'regular'/'extra' inside the Load/Unload Event tabs only ever match their own rows, never
     // receiving ones (and vice versa), without any filter needing to know about the others.
-    conditions.push(
-      sourceParam === 'dispatch' ? `"isDispatch" = true`
-      : sourceParam === 'unload' ? `"isUnload" = true`
-      : `NOT "isDispatch" AND NOT "isUnload"`,
-    );
+    // 'all' adds no condition here at all — every source's rows pass through together.
+    if (sourceParam !== 'all') {
+      conditions.push(
+        sourceParam === 'dispatch' ? `"isDispatch" = true`
+        : sourceParam === 'unload' ? `"isUnload" = true`
+        : `NOT "isDispatch" AND NOT "isUnload"`,
+      );
+    }
     // Empty boxes and exchanges ARE shown in scan history as their own distinct statuses, but
     // they're never product scans — so 'regular'/'extra' filters must exclude both, and the
     // box/pallet totals below exclude them too (they don't count toward order quantity). A
@@ -1101,7 +1105,10 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // Summary tiles are about genuine scanning activity — always exclude exchanges from them
     // regardless of the active type filter, so "Total Boxes"/"Total Pallets" never mix in a
     // stock-correction quantity.
-    const summaryWhere = `${where} AND NOT "isExchange"`;
+    // where can be '' (no conditions at all — e.g. an admin with source=all and no other filter
+    // picked), so this can't unconditionally append "AND ..." onto it — that leaves a bare "AND"
+    // with no WHERE before it, a SQL syntax error.
+    const summaryWhere = where ? `${where} AND NOT "isExchange"` : `WHERE NOT "isExchange"`;
     const summaryFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${summaryWhere}`;
 
     // Destructuring order must track the array below: data, count, summary, column totals, scanners.
@@ -1184,13 +1191,20 @@ router.get('/reports/scan-history/filter-values', async (req: Request, res: Resp
       return res.json(empty);
     }
     // Same tab scoping as GET /reports/scan-history — Values checklists on the Load/Unload Event
-    // tabs shouldn't offer barcodes/plants/etc. that only ever appear on other rows, and vice versa.
-    const sourceParam = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : 'receiving';
+    // tabs shouldn't offer barcodes/plants/etc. that only ever appear on other rows, and vice
+    // versa. 'all' merges every source, so no source condition at all.
+    const sourceParam = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'all' ? 'all' : 'receiving';
     const sourceCond =
       sourceParam === 'dispatch' ? `"isDispatch" = true`
       : sourceParam === 'unload' ? `"isUnload" = true`
+      : sourceParam === 'all' ? null
       : `NOT "isDispatch" AND NOT "isUnload"`;
-    const plantWhere = allowedPlants !== null ? `WHERE LOWER("plant") = ANY($1::text[]) AND ${sourceCond}` : `WHERE ${sourceCond}`;
+    // Always starts with WHERE (falling back to the no-op "WHERE TRUE") — every call site below
+    // unconditionally appends "AND ..." after this, which is a syntax error if this were ever ''
+    // (an admin with source=all and no plant restriction has nothing else to put here).
+    const plantWhere = allowedPlants !== null
+      ? (sourceCond ? `WHERE LOWER("plant") = ANY($1::text[]) AND ${sourceCond}` : `WHERE LOWER("plant") = ANY($1::text[])`)
+      : (sourceCond ? `WHERE ${sourceCond}` : 'WHERE TRUE');
     const plantParams = allowedPlants !== null ? [allowedPlants] : [];
 
     const entries = Object.entries(SCAN_HISTORY_FILTER_COLUMNS);
@@ -1405,8 +1419,20 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         pps.updated_at                                     AS "lastArrived"
       FROM ${sourceSql} pps
       LEFT JOIN products p    ON p.id = pps.product_id
-      LEFT JOIN products p_bc ON p.id IS NULL AND LOWER(TRIM(p_bc.barcode)) = LOWER(TRIM(pps.barcode))
       LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(pps.plant)
+      -- LATERAL + LIMIT 1: a barcode can legitimately match more than one Product Master row
+      -- (the same barcode reused for a different plant's pack size) — a plain join here would
+      -- silently fan this one stock row out into two. Picks exactly one, preferring whichever
+      -- match's OWN plant is in the SAME STATE as this row's plant (pl.state), same state-level
+      -- rule pallet size already follows below.
+      LEFT JOIN LATERAL (
+        SELECT pr.*, UPPER(TRIM(prpl.state)) AS row_state
+        FROM products pr
+        LEFT JOIN plants prpl ON LOWER(prpl.name) = LOWER(pr.plant)
+        WHERE p.id IS NULL AND LOWER(TRIM(pr.barcode)) = LOWER(TRIM(pps.barcode))
+        ORDER BY (UPPER(TRIM(prpl.state)) = UPPER(TRIM(pl.state))) DESC NULLS LAST
+        LIMIT 1
+      ) p_bc ON true
       ${where}
       ORDER BY ${
         sort === 'stock' ? 'pps.in_stock DESC, "itemName" ASC'
@@ -1567,8 +1593,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // parent row), not the item, so every item in a slip is grouped under that one slip's plant.
     // Reliable sales tracking only starts SALES_TRACKING_START — earlier proforma data is not
     // dependable, so unlike Expected Qty's true all-time sum, the "all dates" default floors
-    // there instead of summing everything that ever existed.
-    const SALES_TRACKING_START = '2026-08-01';
+    // there instead of summing everything that ever existed. Admin-editable on the Settings page
+    // (sales_settings — see server/index.ts's migration / server/routes/settings-admin.ts's
+    // GET/PUT /settings/sales-tracking-start) rather than a hardcoded constant.
+    const { rows: salesSettingsRows } = await pool.query(
+      `SELECT sales_tracking_start_date AS "salesTrackingStartDate" FROM sales_settings ORDER BY id LIMIT 1`,
+    );
+    const SALES_TRACKING_START = salesSettingsRows[0]?.salesTrackingStartDate ?? '2026-08-01';
     const saleByKey = new Map<string, number>();
     let saleTotal = 0;
     const saleOnlyRows: typeof items = [];
@@ -1711,8 +1742,10 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       // "all dates" mode, where expectedTotal is a sum across every order ever uploaded instead.
       expectedDate: singleDate, expectedTotal: hasExpected ? expectedTotal : null,
       // saleDate mirrors expectedDate — null in "all dates" mode, where saleTotal is a sum from
-      // SALES_TRACKING_START onward rather than one explicit date's sales.
-      saleDate: singleDate, saleTotal: hasSale ? saleTotal : null,
+      // SALES_TRACKING_START onward rather than one explicit date's sales. salesTrackingStart is
+      // sent along so the client can label that "since ..." text with the real, admin-editable
+      // date (Settings > Sales Tracking Start) instead of hardcoding it.
+      saleDate: singleDate, saleTotal: hasSale ? saleTotal : null, salesTrackingStart: SALES_TRACKING_START,
     });
   } catch (error) {
     console.error('Error generating plant stock report:', error);
@@ -1878,6 +1911,200 @@ router.get('/reports/stock-movements', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching stock movement history:', error);
     res.status(500).json({ error: 'Failed to fetch stock movement history' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/unloading-history?barcode=X&plant=Y ──────────────────────
+// Unloading's own arrival history for ONE item at ONE plant — deliberately separate from
+// /reports/stock-movements above rather than folded into it: that query's session_id join only
+// ever resolves against order_import_sessions, so an Unloading-sourced row there shows up with
+// no order/vehicle/date at all (session_id doesn't record which sessions table it points to —
+// see stock_movements' own comment). Going straight to unload_scan_events (which already carries
+// plant and vehicleNumber directly, no ambiguous join needed) sidesteps that entirely, so Overall
+// Stock's History view shows Scanning and Unloading as two clean, separately-sourced lists
+// instead of trying to make one query understand both.
+router.get('/reports/unloading-history', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!barcode || !plant) {
+      return res.status(400).json({ message: 'barcode and plant are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT
+        e.id, e.total_qty AS qty, e.pallets, e.loose_qty AS "looseQty", e.is_extra AS "isExtra",
+        e.voided, e.void_reason AS "voidReason", e.scanned_at AS "scannedAt",
+        e.scanned_by_name AS "scannedByName", e.stv,
+        e.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate", s.part_index AS "partIndex"
+      FROM unload_scan_events e
+      LEFT JOIN unload_import_sessions s ON s.id = e.session_id
+      WHERE LOWER(e.barcode) = LOWER($1) AND LOWER(e.plant) = LOWER($2)
+      ORDER BY e.scanned_at DESC
+      LIMIT 500
+    `, [barcode, plant]);
+
+    res.json({ items: rows });
+  } catch (error) {
+    console.error('Error fetching unloading history:', error);
+    res.status(500).json({ error: 'Failed to fetch unloading history' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/loading-history?barcode=X&plant=Y ────────────────────────
+// Loading's own dispatch history for ONE item at ONE plant — same separate-by-source spirit as
+// unloading-history above: loading_scan_events already carries plant directly, joined to
+// proforma_slips only for the order's own date (loading_scan_events has no date column of its
+// own). A third clean list alongside Scanning and Unloading, not merged into either.
+router.get('/reports/loading-history', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!barcode || !plant) {
+      return res.status(400).json({ message: 'barcode and plant are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT
+        e.id, e.total_qty AS qty, e.pallets, e.loose_qty AS "looseQty", e.is_extra AS "isExtra",
+        e.voided, e.void_reason AS "voidReason", e.scanned_at AS "scannedAt",
+        e.scanned_by_name AS "scannedByName",
+        e.order_number AS "orderNumber", ps.order_date AS "orderDate"
+      FROM loading_scan_events e
+      LEFT JOIN proforma_slips ps ON ps.order_number = e.order_number
+      WHERE LOWER(e.barcode) = LOWER($1) AND LOWER(e.plant) = LOWER($2)
+      ORDER BY e.scanned_at DESC
+      LIMIT 500
+    `, [barcode, plant]);
+
+    res.json({ items: rows });
+  } catch (error) {
+    console.error('Error fetching loading history:', error);
+    res.status(500).json({ error: 'Failed to fetch loading history' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/source-breakdown?barcode=X&plants=A,B,C ───────────────────
+// Overall Stock's per-plant "how much of this came from Scanning vs. Unloading" split, shown in
+// the state-combined view's Details tab. Two independent sums (not a merged query, same
+// separate-by-source spirit as unloading-history above) — Order Scan's own receiving events
+// (joined to order_import_sessions for plant, since order_scan_events itself carries no plant
+// column) vs Unloading's own (plant is direct on unload_scan_events). This is a contribution
+// total ("how much has this plant received via each channel"), not an attempt to attribute the
+// CURRENT balance to a source — Loading dispatch draws down the combined pool without recording
+// which channel it came from, so a precise current-balance split isn't something the data supports.
+router.get('/reports/source-breakdown', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plants = typeof req.query.plants === 'string'
+      ? req.query.plants.split(',').map((p) => p.trim()).filter(Boolean)
+      : [];
+    if (!barcode || plants.length === 0) {
+      return res.status(400).json({ message: 'barcode and plants are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    const plantsLower = plants.map((p) => p.toLowerCase());
+    if (allowed !== null && plantsLower.some((p) => !allowed.includes(p))) {
+      return res.status(403).json({ message: 'Access denied for one or more of these plants' });
+    }
+
+    const [scanRes, unloadRes] = await Promise.all([
+      pool.query(`
+        SELECT s.plant, COALESCE(SUM(e.total_qty), 0)::int AS qty
+        FROM order_scan_events e JOIN order_import_sessions s ON s.id = e.session_id
+        WHERE e.voided IS NOT TRUE AND LOWER(e.barcode) = LOWER($1) AND LOWER(s.plant) = ANY($2::text[])
+        GROUP BY s.plant
+      `, [barcode, plantsLower]),
+      pool.query(`
+        SELECT e.plant, COALESCE(SUM(e.total_qty), 0)::int AS qty
+        FROM unload_scan_events e
+        WHERE e.voided IS NOT TRUE AND LOWER(e.barcode) = LOWER($1) AND LOWER(e.plant) = ANY($2::text[])
+        GROUP BY e.plant
+      `, [barcode, plantsLower]),
+    ]);
+
+    const byPlant = new Map<string, { plant: string; scanningQty: number; unloadingQty: number }>(
+      plants.map((p) => [p.toLowerCase(), { plant: p, scanningQty: 0, unloadingQty: 0 }]),
+    );
+    for (const r of scanRes.rows as any[]) {
+      const entry = byPlant.get(String(r.plant).toLowerCase());
+      if (entry) entry.scanningQty = r.qty;
+    }
+    for (const r of unloadRes.rows as any[]) {
+      const entry = byPlant.get(String(r.plant).toLowerCase());
+      if (entry) entry.unloadingQty = r.qty;
+    }
+
+    res.json({ breakdown: Array.from(byPlant.values()) });
+  } catch (error) {
+    console.error('Error fetching source breakdown:', error);
+    res.status(500).json({ error: 'Failed to fetch source breakdown' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/party-breakdown?barcode=X&plants=A,B,C ────────────────────
+// Overall Stock's "which parties ordered this item, and how much in total" — one row per party,
+// summed across EVERY one of that party's proforma slips for this barcode (a party that ordered
+// it on 5 different dates still shows as a single row, not 5) — exactly the merge the Stock page
+// itself already does for plants, just applied to party instead. Each party also carries its own
+// `orders` list (proforma slip order number + order date + qty) so the client can show a
+// per-party dropdown of exactly which orders made up that total, without a second round trip.
+router.get('/reports/party-breakdown', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plants = typeof req.query.plants === 'string'
+      ? req.query.plants.split(',').map((p) => p.trim()).filter(Boolean)
+      : [];
+    if (!barcode || plants.length === 0) {
+      return res.status(400).json({ message: 'barcode and plants are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    const plantsLower = plants.map((p) => p.toLowerCase());
+    if (allowed !== null && plantsLower.some((p) => !allowed.includes(p))) {
+      return res.status(403).json({ message: 'Access denied for one or more of these plants' });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT ps.party_name AS "partyName",
+             ps.order_number AS "orderNumber",
+             ps.order_date  AS "orderDate",
+             COALESCE(SUM(psi.quantity), 0)::int AS qty
+      FROM proforma_slip_items psi
+      JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
+      WHERE LOWER(psi.barcode) = LOWER($1) AND LOWER(ps.plant) = ANY($2::text[])
+      GROUP BY ps.party_name, ps.order_number, ps.order_date
+      ORDER BY ps.party_name, ps.order_date DESC NULLS LAST
+    `, [barcode, plantsLower]);
+
+    const byParty = new Map<string, { partyName: string; qty: number; orderCount: number; orders: { orderNumber: string; orderDate: string | null; qty: number }[] }>();
+    for (const r of rows as any[]) {
+      let entry = byParty.get(r.partyName);
+      if (!entry) {
+        entry = { partyName: r.partyName, qty: 0, orderCount: 0, orders: [] };
+        byParty.set(r.partyName, entry);
+      }
+      entry.qty += r.qty;
+      entry.orderCount += 1;
+      entry.orders.push({ orderNumber: r.orderNumber, orderDate: r.orderDate, qty: r.qty });
+    }
+    const parties = Array.from(byParty.values()).sort((a, b) => b.qty - a.qty);
+
+    res.json({ parties });
+  } catch (error) {
+    console.error('Error fetching party breakdown:', error);
+    res.status(500).json({ error: 'Failed to fetch party breakdown' });
   }
 });
 

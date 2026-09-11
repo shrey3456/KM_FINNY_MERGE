@@ -378,6 +378,17 @@ export const proformaSlips = pgTable("proforma_slips", {
   // in the Loading page's vehicle search, instead of re-guessing by number. Null on slips linked
   // before this column existed — those fall back to a by-number lookup.
   vehicleInfoId: integer("vehicle_info_id"),
+  // Shift handoff — whoever currently holds the right to scan this load. Set to the creator on
+  // Start; only this user (or an admin) may scan/adjust while loadingPausedAt is null. Null on
+  // slips created before this existed, which the server treats as "unowned" (open to anyone with
+  // write access, the old behavior) rather than locking everyone out retroactively.
+  loadingOwnerCode: text("loading_owner_code"),
+  loadingOwnerName: text("loading_owner_name"),
+  // Set by the current owner's own explicit Pause action — while non-null, scanning is blocked
+  // for EVERYONE (including the owner) until someone runs Claim, which is what actually records
+  // the handoff (loading_handoffs) and moves ownership. Pausing itself is not a handoff by
+  // itself — resuming as the same person who paused never creates a handoff row.
+  loadingPausedAt: timestamp("loading_paused_at"),
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
@@ -389,8 +400,24 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
   createdByCode: true, notes: true, isBackedUp: true, isPrintLocked: true,
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
   loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,
-  vehicleInfoId: true,
+  vehicleInfoId: true, loadingOwnerCode: true, loadingOwnerName: true, loadingPausedAt: true,
 });
+
+// One row per actual shift handoff on a Loading order — "who load and what time it['s] given to
+// other". Only written when Claim actually moves ownership to a DIFFERENT person than whoever
+// paused it; a person resuming their own paused load never adds a row here.
+export const loadingHandoffs = pgTable("loading_handoffs", {
+  id: serial("id").primaryKey(),
+  orderNumber: text("order_number").notNull(),
+  fromUserCode: text("from_user_code"),
+  fromUserName: text("from_user_name"),
+  toUserCode: text("to_user_code"),
+  toUserName: text("to_user_name"),
+  pausedAt: timestamp("paused_at"),
+  claimedAt: timestamp("claimed_at").defaultNow(),
+});
+
+export type LoadingHandoff = typeof loadingHandoffs.$inferSelect;
 
 // IMPORTANT: All fields below are IMMUTABLE SNAPSHOTS of product data at import
 // time. They must NEVER be updated after the slip is created, even if the live
@@ -483,6 +510,10 @@ export const loadingScanEvents = pgTable("loading_scan_events", {
   totalQty: integer("total_qty").default(0),
   isExtra: boolean("is_extra").default(false), // scanned beyond this item's proforma quantity
   plant: text("plant"),
+  // Sub-transfer voucher code (see plantStvs below) — same per-plant STV concept Order Scan and
+  // Unloading already record per event; picked once for the vehicle before scanning (see the
+  // STV selector in client/src/pages/Loading/LoadOperation.tsx), stored on every event.
+  stv: text("stv"),
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
   scannedByName: text("scanned_by_name"),
   scannedAt: timestamp("scanned_at").defaultNow(),
@@ -1169,6 +1200,10 @@ export const unloadScanEvents = pgTable("unload_scan_events", {
   looseQty: integer("loose_qty").default(0),
   totalQty: integer("total_qty").default(0),
   isExtra: boolean("is_extra").default(false), // scanned beyond this item's expected quantity
+  // Sub-transfer voucher code (see plantStvs above) — same per-plant STV concept Order Scan
+  // already records per event; picked once for the vehicle before scanning (see the STV
+  // selector in client/src/pages/Unloading/Unloading.tsx), stored on every event.
+  stv: text("stv"),
   plant: text("plant"),
   vehicleNumber: text("vehicle_number"),
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
@@ -1202,7 +1237,7 @@ export const insertUnloadImportItemSchema = createInsertSchema(unloadImportItems
 });
 export const insertUnloadScanEventSchema = createInsertSchema(unloadScanEvents).pick({
   sessionId: true, barcode: true, itemName: true, sapCode: true, pallets: true, looseQty: true,
-  totalQty: true, isExtra: true, plant: true, vehicleNumber: true, scannedByCode: true, scannedByName: true,
+  totalQty: true, isExtra: true, stv: true, plant: true, vehicleNumber: true, scannedByCode: true, scannedByName: true,
 });
 
 export type UnloadImportSession = typeof unloadImportSessions.$inferSelect;
@@ -1282,6 +1317,24 @@ export const backupSettings = pgTable("backup_settings", {
 export const insertBackupSettingsSchema = createInsertSchema(backupSettings).pick({
   lastBackupDate: true, autoBackupEnabled: true, backupFrequencyHours: true,
 });
+
+// Single-row settings table — same pattern as backupSettings above. Currently holds just the
+// Sales tracking start date (Overall Stock's ledger: proforma data before this date isn't
+// reliable, so the "all dates" Sales total starts counting from here instead of the true
+// beginning — see SALES_TRACKING_START's old hardcoded home in server/routes/scan-sessions.ts).
+// Room to grow if another admin-editable, no-code-change setting shows up later.
+export const salesSettings = pgTable("sales_settings", {
+  id: serial("id").primaryKey(),
+  salesTrackingStartDate: text("sales_tracking_start_date").notNull().default('2026-08-01'),
+  updatedAt: timestamp("updated_at").defaultNow(),
+  updatedByCode: text("updated_by_code").references(() => users.userCode),
+});
+
+export const insertSalesSettingsSchema = createInsertSchema(salesSettings).pick({
+  salesTrackingStartDate: true, updatedByCode: true,
+});
+export type SalesSettings = typeof salesSettings.$inferSelect;
+export type InsertSalesSettings = z.infer<typeof insertSalesSettingsSchema>;
 
 export type BackupSettings = typeof backupSettings.$inferSelect;
 export type InsertBackupSettings = z.infer<typeof insertBackupSettingsSchema>;

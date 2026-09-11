@@ -61,17 +61,28 @@ function newTempKey() {
 type EditCsvDialogProps = {
   sessionId: number | null;
   onClose: () => void;
+  // Which API family to hit — "order-import" (default) or "unloading" (one vehicle's CSV,
+  // opened from a vehicle chip in OrderImport.tsx's own "Unloading" mode CSV History). Both
+  // expose the identical items/save shape (server/routes/unloading-edit.ts mirrors
+  // order-import-edit.ts's barcode-relink/quantity-resplit fixes), gated by the SAME
+  // "order-import-edit" permission either way — see unloading-edit.ts's own comment for why.
+  // The one real difference: unloading items have no "Expected Pallets" field (Unloading doesn't
+  // store one — pallet size is resolved live from the product/plant state), so that column is
+  // hidden in unloading mode.
+  basePath?: "order-import" | "unloading";
 };
 
 // Fixes a mistake in an already-uploaded, not-yet-completed CSV (e.g. one wrong barcode)
 // without deleting and re-uploading the whole file — opened from a row's Edit button in
-// OrderImport.tsx's Available/Active tabs. Gated by its own "order-import-edit" page key
+// OrderImport.tsx's Available/Active tabs (and, via basePath="unloading", a vehicle chip in
+// its own "Unloading" mode CSV History). Gated by its own "order-import-edit" page key
 // (allowedPages = read-only view, pageWriteAccess = can save), independent of the caller's
-// own Order Import access, plus the same plant scoping enforced server-side.
-export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps) {
+// own Order Import/Unloading access, plus the same plant scoping enforced server-side.
+export default function EditCsvDialog({ sessionId, onClose, basePath = "order-import" }: EditCsvDialogProps) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const canWrite = hasPageWriteAccess("order-import-edit");
+  const isUnloading = basePath === "unloading";
 
   const [rows, setRows] = useState<EditableItem[]>([]);
 
@@ -155,9 +166,9 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
   }
 
   const itemsQuery = useQuery({
-    queryKey: ["/api/order-import-edit/sessions", sessionId, "items"],
+    queryKey: [`/api/${basePath}-edit/sessions`, sessionId, "items"],
     queryFn: async (): Promise<{ session: any; items: any[] }> =>
-      (await apiRequest("GET", `/api/order-import-edit/sessions/${sessionId}/items`)).json(),
+      (await apiRequest("GET", `/api/${basePath}-edit/sessions/${sessionId}/items`)).json(),
     enabled: sessionId != null,
   });
 
@@ -189,7 +200,7 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
           expectedPallets: r.expectedPallets === "" ? null : Number(r.expectedPallets),
         })),
       };
-      return (await apiRequest("PUT", `/api/order-import-edit/sessions/${sessionId}`, payload)).json();
+      return (await apiRequest("PUT", `/api/${basePath}-edit/sessions/${sessionId}`, payload)).json();
     },
     onSuccess: async () => {
       toast({
@@ -197,8 +208,13 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
         description: "The CSV's items have been updated.",
         className: "bg-emerald-50 border-emerald-200 text-emerald-900",
       });
-      await qc.invalidateQueries({ queryKey: ["/api/order-import-edit/sessions", sessionId, "items"] });
-      await qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+      await qc.invalidateQueries({ queryKey: [`/api/${basePath}-edit/sessions`, sessionId, "items"] });
+      if (isUnloading) {
+        await qc.invalidateQueries({ queryKey: ["/api/unloading/csv-history"] });
+        await qc.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
+      } else {
+        await qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+      }
       onClose();
     },
     onError: (error: any) => {
@@ -253,7 +269,7 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
                 <span className="block text-base font-bold leading-tight">Edit CSV</span>
                 {session && (
                   <span className="block truncate text-xs font-normal text-gray-500">
-                    {session.plant} · {session.csvFileName}
+                    {session.plant}{session.vehicleNumber ? ` · ${session.vehicleNumber}` : ""} · {session.csvFileName}
                   </span>
                 )}
               </span>
@@ -292,17 +308,20 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
                   <col />{/* Item Name — takes all remaining width */}
                   <col className="w-24" />{/* SAP */}
                   <col className="w-16" />{/* Qty */}
-                  <col className="w-16" />{/* Pallets */}
+                  {!isUnloading && <col className="w-16" />}{/* Pallets — order-import only */}
                   <col className="w-20" />{/* Scanned */}
                   <col className="w-12" />{/* remove */}
                 </colgroup>
                 <thead>
                   <tr className="bg-[#001d6e]">
-                    {["#", "Barcode", "Item Name", "SAP", "Qty", "Plt", "Scanned", ""].map((h, i) => (
+                    {(isUnloading
+                      ? ["#", "Barcode", "Item Name", "SAP", "Qty", "Scanned", ""]
+                      : ["#", "Barcode", "Item Name", "SAP", "Qty", "Plt", "Scanned", ""]
+                    ).map((h, i, arr) => (
                       <th
                         key={h || i}
                         className={`sticky top-0 z-10 whitespace-nowrap border-r border-[#1a3a9c] bg-[#001d6e] px-2.5 py-2 font-semibold uppercase tracking-wide text-white ${
-                          i >= 4 && i <= 6 ? "text-right" : "text-left"
+                          i >= 4 && i <= arr.length - 2 ? "text-right" : "text-left"
                         }`}
                       >
                         {h}
@@ -347,15 +366,17 @@ export default function EditCsvDialog({ sessionId, onClose }: EditCsvDialogProps
                           onChange={(e) => updateRow(row.key, "quantity", e.target.value)}
                         />
                       </td>
-                      <td className="border-r border-gray-100 px-1.5 py-1">
-                        <Input
-                          className="h-7 rounded-md text-right text-xs tabular-nums"
-                          type="number"
-                          value={row.expectedPallets}
-                          disabled={!canWrite}
-                          onChange={(e) => updateRow(row.key, "expectedPallets", e.target.value)}
-                        />
-                      </td>
+                      {!isUnloading && (
+                        <td className="border-r border-gray-100 px-1.5 py-1">
+                          <Input
+                            className="h-7 rounded-md text-right text-xs tabular-nums"
+                            type="number"
+                            value={row.expectedPallets}
+                            disabled={!canWrite}
+                            onChange={(e) => updateRow(row.key, "expectedPallets", e.target.value)}
+                          />
+                        </td>
+                      )}
                       <td className="border-r border-gray-100 px-2 py-1.5 text-right">
                         {row.scannedQty > 0 ? (
                           <Badge variant="outline" className="text-emerald-700 border-emerald-200 bg-emerald-50">

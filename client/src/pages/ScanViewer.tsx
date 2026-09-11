@@ -109,6 +109,40 @@ function fmtOrderDate(value: string | null): string {
   return isNaN(d.getTime()) ? value : format(d, "dd MMM yyyy");
 }
 
+// date-fns' format() has no timezone conversion built in — it just reads the Date object's
+// components in the BROWSER's own local timezone, which only happens to match IST if the
+// viewer's machine is set to one. Every other page (Loading, Unloading, OrderImport's own
+// fmtIST) explicitly forces Asia/Kolkata instead of relying on that, which is why this page's
+// start/complete times could disagree with theirs for the exact same underlying event.
+function fmtIST(value: string | Date | null | undefined): string {
+  if (!value) return "—";
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true,
+  });
+}
+
+// Same formula as palletsOf in Unloading.tsx — kept as an identical copy here rather than a
+// shared import, matching how this page already duplicates small display helpers rather than
+// reaching into a feature page's own module.
+const palletsOf = (qty: number, itemsPerPallet: number | null | undefined) =>
+  (qty > 0 && (itemsPerPallet ?? 0) > 0 ? (qty / (itemsPerPallet as number)).toFixed(2) : "0.00");
+
+// Same colors/shape as statusBadge in Unloading.tsx (minus the canActivate "Locked" case, which
+// doesn't apply here — this section can open any batch, not just the next-in-line one), so
+// "which vehicle is actually active right now" is as obvious in this dropdown as it is on the
+// real Unloading page's own session list, instead of just plain "· active" text.
+function uSessionStatusBadge(status: string | null) {
+  if (status === "completed") return <span className="rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700">Completed</span>;
+  if (status === "active") return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Active
+    </span>
+  );
+  return <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Available</span>;
+}
+
 // Kiosk rotation steps — a full turn, so a screen mounted at any angle can be matched. Mirrors the
 // Scan Order page's own control (see .kiosk-rotate-* in index.css for the mechanics).
 const ROTATIONS = [0, 90, 180, 270] as const;
@@ -265,6 +299,10 @@ export default function ScanViewer() {
   // happens via the "Select part…" picker in the tab row (always visible, next to the date
   // picker), which drives this same "scan" tab directly instead of needing its own tab.
   const [viewerTab, setViewerTab] = useState<"master-view" | "scan" | "part-order">("master-view");
+  // Order Scan (this page's original scope) vs Unloading — a second, entirely independent
+  // picker/table/history flow (see UnloadingViewerSection below), not another mode threaded
+  // through the Order Scan state above.
+  const [viewerSource, setViewerSource] = useState<"order-scan" | "unloading">("order-scan");
   // Part Order lists each CSV part of this order on its own, expandable to its rows — the
   // read-only counterpart of the Scan Order page's own Part Order tab.
   const [partExpId, setPartExpId] = useState<number | null>(null);
@@ -896,7 +934,7 @@ export default function ScanViewer() {
                 <th className="w-7 border-r border-gray-200 px-2 py-2 font-semibold">#</th>
                 <th className="w-[122px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
-                <th className="border-r border-gray-200 px-2 py-2 font-semibold">Order / Part</th>
+                <th className="border-r border-gray-200 px-2 py-2 font-semibold">Order</th>
                 <th className="w-14 border-r border-gray-200 px-2 py-2 text-center font-semibold">Qty</th>
                 <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
                 {canVoidScan && <th className="w-14 px-2 py-2 text-right font-semibold">Action</th>}
@@ -906,10 +944,10 @@ export default function ScanViewer() {
               {historyEvents.map((ev, idx) => (
                 <tr key={ev.id} className={`border-b border-gray-100 ${ev.voided ? "opacity-60" : "hover:bg-gray-50"} ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}>
                   <td className="border-r border-gray-100 px-2 py-2 font-mono text-gray-400">{idx + 1}</td>
-                  <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{format(new Date(ev.scannedAt), "MMM d · h:mm a")}</td>
+                  <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{fmtIST(ev.scannedAt)}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">
-                    {ev.orderName?.replace(/\.csv$/i, "")}{ev.partIndex ? ` · Part ${ev.partIndex}` : ""}
+                    {ev.orderName?.replace(/\.csv$/i, "")}
                   </td>
                   <td className="border-r border-gray-100 px-2 py-2 text-center">
                     <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
@@ -1358,6 +1396,33 @@ export default function ScanViewer() {
       )}
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
 
+        {/* Source switch — Order Scan (this page's original scope) vs Unloading, added as a
+            second, independent picker/table/history flow below rather than threaded through the
+            Order Scan state above, which stays completely untouched by picking Unloading. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {([
+            { key: "order-scan", label: "Order Scan" },
+            { key: "unloading", label: "Unloading" },
+          ] as const).map((s) => (
+            <button
+              key={s.key}
+              type="button"
+              onClick={() => setViewerSource(s.key)}
+              className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                viewerSource === s.key
+                  ? "bg-[#001d6e] text-white ring-2 ring-[#001d6e]/30"
+                  : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {viewerSource === "unloading" ? (
+          <UnloadingViewerSection plantOptions={plantOptions} getPlantColorCfg={getPlantColorCfg} />
+        ) : (
+        <>
         {/* Session header — combines the plant/date/part CONTROLS (always visible, so they're
             still there to change even when the chosen plant/date has no order at all) with the
             rest of the order info (title, loaded-by, timing, progress), which only exists once
@@ -1442,10 +1507,10 @@ export default function ScanViewer() {
                   Completed only shows once it's actually set; a still-in-progress part just
                   shows Started. */}
               {selectedSession?.scanActivatedAt && (
-                <span>· started {format(new Date(selectedSession.scanActivatedAt), "MMM d, h:mm a")}</span>
+                <span>· started {fmtIST(selectedSession.scanActivatedAt)}</span>
               )}
               {selectedSession?.scanCompletedAt && (
-                <span>· completed {format(new Date(selectedSession.scanCompletedAt), "MMM d, h:mm a")}</span>
+                <span>· completed {fmtIST(selectedSession.scanCompletedAt)}</span>
               )}
               {selectedSession?.scanActivatedAt && selectedSession?.scanCompletedAt && (() => {
                 const totalMinutes = Math.round(
@@ -2379,6 +2444,8 @@ export default function ScanViewer() {
           </TableCard>
           </>
         )}
+        </>
+        )}
       </div>
 
       {/* Void confirmation — same rule as Scan/Scan History's own void dialog. */}
@@ -2415,5 +2482,525 @@ export default function ScanViewer() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// ── Unloading viewer ──────────────────────────────────────────────────────────
+// A second, self-contained read-only flow alongside the Order Scan one above — deliberately
+// NOT threaded through any of that component's state, since Unloading's own data model doesn't
+// line up with it: a session there is plant + VEHICLE + date, not just plant + date, and there's
+// no "merge every vehicle's CSV into one Master View" concept the way Order Scan merges parts of
+// one order. So this picks its own plant, then a specific vehicle's session for a date (same
+// picker shape the Unloading page itself uses), and shows that one session's live progress —
+// no Master View / Part Order tabs, since there's nothing here to merge across.
+
+// Matches GET /api/unloading/sessions' row shape (only the fields this section needs).
+type UnloadingSessionOption = {
+  id: number; plant: string; vehicleNumber: string; orderDate: string | null;
+  partIndex: number | null; scanStatus: string | null;
+};
+
+// Matches the item shape GET /api/unloading/sessions/:id returns (withProgress in unloading.ts).
+type UnloadingProgressItem = {
+  id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
+  quantity: number; expected: number; scanned: number; remaining: number;
+  itemsPerPallet: number; isComplete: boolean;
+};
+
+// Matches GET /api/scan-sessions/reports/unloading-history's item shape (see its own comment in
+// server/routes/scan-sessions.ts for why this is a separate query from Order Scan's history,
+// never merged with it).
+type UnloadingHistoryEvent = {
+  id: number; qty: number; pallets: number | null; looseQty: number | null; isExtra: boolean;
+  voided: boolean; voidReason: string | null; scannedAt: string; scannedByName: string | null;
+  stv: string | null; vehicleNumber: string | null; orderDate: string | null;
+};
+
+function UnloadingViewerSection({
+  plantOptions, getPlantColorCfg,
+}: {
+  plantOptions: string[];
+  getPlantColorCfg: (plantName: string | null | undefined) => Plant | null;
+}) {
+  const [uPlant, setUPlant] = useState("");
+  const [uDate, setUDate] = useState(() => getLocalISODate());
+  // Set the moment the user picks a date themselves (including clearing it to "All") — once
+  // true, the today-has-nothing auto-resolve effect below never overrides their own choice
+  // again. Re-armed on a plant change (see the plant Select's onValueChange).
+  const uDateTouchedRef = useRef(false);
+  const [uSessionId, setUSessionId] = useState<number | null>(null);
+  // uExpandedItemId is the DataTable row identity (matches getRowId below); uHistoryBarcode/
+  // uHistoryItemName are set alongside it purely to drive the history query/panel heading —
+  // barcode alone can't be the row identity since that's what getRowId/expandedRowId compare.
+  const [uExpandedItemId, setUExpandedItemId] = useState<number | null>(null);
+  const [uHistoryBarcode, setUHistoryBarcode] = useState<string | null>(null);
+  const [uHistoryItemName, setUHistoryItemName] = useState<string | null>(null);
+  // Item search — same collapsible icon-toggle pattern as the real Unloading page's own items
+  // table (itemSearchOpen in Unloading.tsx).
+  const [uItemSearchOpen, setUItemSearchOpen] = useState(false);
+  const [uItemSearchText, setUItemSearchText] = useState("");
+
+  useEffect(() => {
+    if (!uPlant && plantOptions.length > 0) setUPlant(plantOptions[0]);
+  }, [plantOptions.join(","), uPlant]);
+
+  // A blank date means "every date" — the sessions query below simply omits orderDate, and the
+  // underlying /unloading/sessions endpoint already returns everything for the plant when it's
+  // not given (see its own params handling). Plant alone is all this section actually needs.
+  const uFiltersReady = !!uPlant;
+
+  const uSessionsQuery = useQuery<{ sessions: UnloadingSessionOption[]; total: number }>({
+    queryKey: ["/api/unloading/sessions", "scan-viewer", uPlant, uDate],
+    queryFn: () =>
+      apiRequest(
+        "GET",
+        `/api/unloading/sessions?plant=${encodeURIComponent(uPlant)}${uDate ? `&orderDate=${encodeURIComponent(uDate)}` : ""}&limit=50`,
+      ).then((r) => r.json()),
+    enabled: uFiltersReady,
+  });
+  // Sorted by date first (newest first) so "All dates" reads sensibly instead of interleaving
+  // vehicles across unrelated dates — a single specific date naturally sorts as one group anyway.
+  const uSessionOptions = (uSessionsQuery.data?.sessions ?? [])
+    .slice()
+    .sort((a, b) =>
+      (b.orderDate ?? "").localeCompare(a.orderDate ?? "")
+      || (a.vehicleNumber || "").localeCompare(b.vehicleNumber || "")
+      || (a.partIndex ?? 0) - (b.partIndex ?? 0));
+
+  // Default to the first vehicle session once the list for this plant/date loads, or clear the
+  // selection if the filters changed and it no longer applies — same pattern as the Order Scan
+  // sessionOptions effect above.
+  useEffect(() => {
+    if (uSessionOptions.length === 0) { setUSessionId(null); return; }
+    if (!uSessionOptions.some((s) => s.id === uSessionId)) setUSessionId(uSessionOptions[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uSessionOptions.map((s) => s.id).join(",")]);
+
+  // Today (the initial default) can easily have nothing for a given plant — rather than sit on
+  // an empty "today", once that becomes clear this looks up whichever date actually has a
+  // live/available batch and snaps to it instead, mirroring the Order Scan side's own
+  // active-order-date default above (activeDateByPlant/selectPlant) — just resolved here once
+  // the "today" query comes back empty rather than known up front. Skips entirely once the user
+  // has touched the date themselves.
+  const uTodayEmpty = !uSessionsQuery.isLoading && !!uDate && uSessionOptions.length === 0;
+  const uActiveQuery = useQuery<{ sessions: UnloadingSessionOption[] }>({
+    queryKey: ["/api/unloading/sessions", "scan-viewer-active", uPlant],
+    queryFn: () =>
+      apiRequest("GET", `/api/unloading/sessions?plant=${encodeURIComponent(uPlant)}&status=available&limit=50`)
+        .then((r) => r.json()),
+    enabled: !!uPlant && !uDateTouchedRef.current && uTodayEmpty,
+  });
+  useEffect(() => {
+    if (uDateTouchedRef.current) return;
+    const sessions = uActiveQuery.data?.sessions ?? [];
+    if (sessions.length === 0) return;
+    const active = sessions.find((s) => s.scanStatus === "active") ?? sessions[0];
+    if (active?.orderDate && active.orderDate !== uDate) setUDate(active.orderDate);
+  }, [uActiveQuery.data]);
+
+  const uSessionDetailQuery = useQuery<{ session: any; items: UnloadingProgressItem[]; allComplete: boolean }>({
+    queryKey: ["/api/unloading/sessions", "scan-viewer-detail", uSessionId],
+    queryFn: () => apiRequest("GET", `/api/unloading/sessions/${uSessionId}`).then((r) => r.json()),
+    enabled: uSessionId != null,
+  });
+  const uItems = uSessionDetailQuery.data?.items ?? [];
+  const uSelectedSession = uSessionDetailQuery.data?.session ?? null;
+
+  // Batch totals — same card the real Unloading page builds for its own item totals (itemTotals/
+  // itemPct in Unloading.tsx): Total/Received/Remaining/Extra tiles (each a click-to-filter
+  // toggle) plus a progress bar with received/remaining under it. Replaces the earlier Available/
+  // Active/Completed session-status card — this is the selected BATCH's own item progress, not a
+  // count of how many sessions are in each state.
+  const uItemTotals = useMemo(() => {
+    const acc = { expected: 0, received: 0, remaining: 0, extra: 0, pltExpected: 0, pltReceived: 0, pltRemaining: 0, pltExtra: 0 };
+    for (const item of uItems) {
+      const extra = Math.max(0, item.scanned - item.expected);
+      const ipp = item.itemsPerPallet ?? 0;
+      acc.expected += item.expected;
+      acc.received += item.scanned;
+      acc.remaining += item.remaining;
+      acc.extra += extra;
+      if (ipp > 0) {
+        acc.pltExpected += item.expected / ipp;
+        acc.pltReceived += item.scanned / ipp;
+        acc.pltRemaining += item.remaining / ipp;
+        acc.pltExtra += extra / ipp;
+      }
+    }
+    return acc;
+  }, [uItems]);
+  const uItemPct = uItemTotals.expected > 0 ? Math.min(100, Math.round((uItemTotals.received / uItemTotals.expected) * 100)) : 0;
+  const [uItemStatusFilter, setUItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
+
+  const uHistoryQuery = useQuery<{ items: UnloadingHistoryEvent[] }>({
+    queryKey: ["/api/scan-sessions/reports/unloading-history", uHistoryBarcode, uPlant],
+    queryFn: () =>
+      apiRequest("GET", `/api/scan-sessions/reports/unloading-history?barcode=${encodeURIComponent(uHistoryBarcode!)}&plant=${encodeURIComponent(uPlant)}`)
+        .then((r) => r.json()),
+    enabled: !!uHistoryBarcode && !!uPlant,
+  });
+
+  const uFullyDone = uItems.filter((i) => i.expected > 0 && i.scanned >= i.expected).length;
+  const uTotalReal = uItems.filter((i) => i.expected > 0).length;
+  const uPct = uTotalReal > 0 ? Math.round((uFullyDone / uTotalReal) * 100) : 0;
+
+  const uFilteredItems = useMemo(() => {
+    let list = uItems;
+    if (uItemStatusFilter === "done") list = list.filter((i) => i.expected > 0 && i.scanned >= i.expected);
+    else if (uItemStatusFilter === "remaining") list = list.filter((i) => i.remaining > 0);
+    else if (uItemStatusFilter === "extra") list = list.filter((i) => i.scanned > i.expected);
+    if (uItemSearchText.trim()) {
+      const q = uItemSearchText.trim().toLowerCase();
+      list = list.filter((i) =>
+        (i.itemName ?? "").toLowerCase().includes(q)
+        || (i.barcode ?? "").toLowerCase().includes(q)
+        || (i.sapCode ?? "").toLowerCase().includes(q));
+    }
+    return list;
+  }, [uItems, uItemSearchText, uItemStatusFilter]);
+
+  // Same Item/Exp/Received/Remain/Extra/Status column set, same widths, same pallet sub-values
+  // and Partial/Pending status badges as the real Unloading page's own items table (itemColumns
+  // in Unloading.tsx) — this is meant to look and read identically, not just show the same data.
+  const uItemColumns: DataTableColumn<UnloadingProgressItem>[] = [
+    {
+      id: "item",
+      header: "Item",
+      accessor: (row) => row.itemName ?? row.barcode ?? "",
+      width: 240,
+      minWidth: 140,
+      render: (row) => (
+        <div>
+          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug text-sm">{row.itemName ?? "—"}</p>
+          <p className="text-gray-400 font-mono whitespace-normal break-words text-xs">
+            {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+          </p>
+          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold mt-0.5 text-xs">{row.itemsPerPallet} per pallet</p>}
+        </div>
+      ),
+    },
+    {
+      id: "exp", header: "Exp", align: "right", width: 80, minWidth: 60, sortable: true,
+      accessor: (row) => row.expected,
+      render: (row) => (
+        <>
+          <span className="block text-base font-semibold">{row.expected || "—"}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.expected, row.itemsPerPallet)} plt</span>
+        </>
+      ),
+    },
+    {
+      id: "received", header: "Received", align: "right", width: 90, minWidth: 60, sortable: true,
+      accessor: (row) => row.scanned,
+      cellClassName: "font-semibold text-gray-900",
+      render: (row) => (
+        <>
+          <span className="block text-base">{row.scanned}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.scanned, row.itemsPerPallet)} plt</span>
+        </>
+      ),
+    },
+    {
+      id: "left", header: "Remain", align: "right", width: 80, minWidth: 60, sortable: true,
+      accessor: (row) => row.remaining,
+      render: (row) => (
+        <>
+          <span className={`block text-base font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.remaining, row.itemsPerPallet)} plt</span>
+        </>
+      ),
+    },
+    {
+      id: "extra", header: "Extra", align: "right", width: 80, minWidth: 60,
+      accessor: (row) => Math.max(0, row.scanned - row.expected),
+      render: (row) => {
+        const extra = Math.max(0, row.scanned - row.expected);
+        return (
+          <>
+            <span className={`block text-base ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>
+            <span className="block text-xs font-semibold text-gray-400">{palletsOf(extra, row.itemsPerPallet)} plt</span>
+          </>
+        );
+      },
+    },
+    {
+      id: "status", header: "Status", align: "center", width: 90, minWidth: 70, hideable: false, totalable: false,
+      accessor: (row) => (row.isComplete ? "Received" : row.scanned > 0 ? "Partial" : "Pending"),
+      render: (row) => {
+        const status = row.isComplete ? "complete" : row.scanned > 0 ? "partial" : "pending";
+        return (
+          <span className={`inline-block font-semibold px-2 py-1 text-xs rounded ${
+            status === "complete" ? "bg-emerald-100 text-emerald-700" :
+            status === "partial" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+          }`}>
+            {status === "complete" ? "Received" : status === "partial" ? "Partial" : "Pending"}
+          </span>
+        );
+      },
+    },
+  ];
+
+  const uItemRowClassName = (row: UnloadingProgressItem) => {
+    const extra = Math.max(0, row.scanned - row.expected);
+    return extra > 0 ? "bg-orange-50/40" : "";
+  };
+
+  // Same expanded-row history panel shape as the real Unloading page's own renderItemHistoryPanel
+  // — just backed by /reports/unloading-history (plant-wide, all-time) instead of that page's own
+  // per-session scan events, since this is a read-only cross-session viewer, not the live batch.
+  function renderUItemHistoryPanel(row: UnloadingProgressItem) {
+    return (
+      <div className="bg-gray-50 p-3">
+        <div className="mb-2 flex items-center gap-2 text-[#001d6e]">
+          <ScanLine className="h-4 w-4 shrink-0" />
+          <span className="text-sm font-semibold">{row.itemName ?? "Item"}</span>
+          <span className="font-mono text-xs text-gray-400">{row.barcode}</span>
+        </div>
+        {uHistoryQuery.isLoading ? (
+          <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+        ) : (uHistoryQuery.data?.items?.length ?? 0) === 0 ? (
+          <p className="py-4 text-center text-sm text-gray-400">No unloading history yet for this item.</p>
+        ) : (
+          <div className="max-h-[300px] overflow-y-auto border border-gray-300">
+            <table className="w-full border-collapse text-xs">
+              <thead>
+                <tr className="sticky top-0 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                  <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
+                  <th className="border-r border-gray-300 px-3 py-2 font-semibold">Vehicle</th>
+                  <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order Date</th>
+                  <th className="px-3 py-2 text-right font-semibold">Qty</th>
+                </tr>
+              </thead>
+              <tbody>
+                {uHistoryQuery.data!.items.map((m) => {
+                  const badge = m.voided
+                    ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Voided</span>
+                    : m.isExtra
+                    ? <span className="inline-block bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">Extra</span>
+                    : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
+                  return (
+                    <tr key={m.id} className="border-b border-gray-200 bg-white">
+                      <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
+                        <div className="flex flex-col gap-1">
+                          <span>{fmtIST(m.scannedAt)}</span>
+                          {badge}
+                        </div>
+                      </td>
+                      <td className="border-r border-gray-200 px-3 py-2 text-gray-600">{m.vehicleNumber ?? "—"}</td>
+                      <td className="border-r border-gray-200 px-3 py-2 text-gray-600 whitespace-nowrap">
+                        {m.orderDate ? format(new Date(`${m.orderDate}T00:00:00`), "MMM d, yyyy") : "—"}
+                      </td>
+                      <td className={`px-3 py-2 text-right font-bold tabular-nums ${m.voided ? "text-gray-400 line-through" : "text-[#001d6e]"}`}>
+                        {m.qty}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+            <Select
+              value={uPlant}
+              onValueChange={(p) => {
+                setUPlant(p);
+                setUSessionId(null);
+                // Re-arm the today-has-nothing auto-resolve for the newly picked plant, same as
+                // the Order Scan side's own selectPlant snapping to whatever's actually live.
+                uDateTouchedRef.current = false;
+                setUDate(getLocalISODate());
+              }}
+            >
+              <SelectTrigger
+                className="h-7 w-auto gap-1 rounded-full text-[11px] font-semibold"
+                style={(() => {
+                  const cfg = getPlantColorCfg(uPlant);
+                  return cfg ? { backgroundColor: cfg.bgColor ?? undefined, color: cfg.textColor ?? undefined, borderColor: cfg.borderColor ?? undefined } : undefined;
+                })()}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {plantOptions.map((p) => (
+                  <SelectItem key={p} value={p}>{p}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              type="date"
+              className="h-7 w-auto rounded-full text-xs"
+              value={uDate}
+              onChange={(e) => { uDateTouchedRef.current = true; setUDate(e.target.value); setUSessionId(null); }}
+            />
+            {uDate && (
+              <button
+                type="button"
+                onClick={() => { uDateTouchedRef.current = true; setUDate(""); setUSessionId(null); }}
+                className="text-[11px] text-gray-400 underline hover:text-gray-600"
+                title="Show every date for this plant"
+              >
+                All dates
+              </button>
+            )}
+            {uSessionOptions.length > 0 && (
+              <Select value={uSessionId ? String(uSessionId) : ""} onValueChange={(v) => setUSessionId(Number(v))}>
+                <SelectTrigger className="h-7 w-56 rounded-full text-xs"><SelectValue placeholder="Select vehicle…" /></SelectTrigger>
+                <SelectContent>
+                  {uSessionOptions.map((so) => (
+                    <SelectItem key={so.id} value={String(so.id)}>
+                      <span className="flex items-center gap-1.5">
+                        <span>
+                          {so.vehicleNumber}{so.partIndex && so.partIndex > 1 ? ` (Batch ${so.partIndex})` : ""}
+                          {!uDate ? ` · ${fmtOrderDate(so.orderDate)}` : ""}
+                        </span>
+                        {uSessionStatusBadge(so.scanStatus)}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {uSelectedSession?.scanStatus && uSessionStatusBadge(uSelectedSession.scanStatus)}
+          </div>
+        </div>
+      </div>
+
+      {/* Batch totals — same card the real Unloading page shows for the selected batch's own
+          item progress (itemTotals/itemPct in Unloading.tsx): a percent top-right, four
+          click-to-filter tiles, and a progress bar with received/remaining under it. */}
+      {uSessionId != null && uItems.length > 0 && (
+        <div className="flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
+          <div className="flex items-baseline justify-end gap-2">
+            {uItemTotals.expected <= 0 ? (
+              <p className="text-sm font-medium text-gray-400">—</p>
+            ) : uItemPct >= 100 ? (
+              <p className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+                <CheckCircle2 className="h-4 w-4" /> Complete
+              </p>
+            ) : (
+              <p className="text-sm font-medium text-gray-400">{uItemPct}% complete</p>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {([
+              { key: "" as const, label: "Total", value: uItemTotals.expected, plt: uItemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
+              { key: "done" as const, label: "Received", value: uItemTotals.received, plt: uItemTotals.pltReceived, dot: "bg-emerald-500", text: "text-emerald-600" },
+              { key: "remaining" as const, label: "Remaining", value: uItemTotals.remaining, plt: uItemTotals.pltRemaining, dot: "bg-red-500", text: "text-red-600" },
+              { key: "extra" as const, label: "Extra", value: uItemTotals.extra, plt: uItemTotals.pltExtra, dot: "bg-orange-500", text: uItemTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+            ]).map((s) => {
+              const isActive = uItemStatusFilter === s.key;
+              return (
+                <button
+                  key={s.label}
+                  type="button"
+                  onClick={() => setUItemStatusFilter(isActive ? "" : s.key)}
+                  aria-pressed={isActive}
+                  title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                  className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                    isActive ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30" : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                  }`}
+                >
+                  <div className="flex items-center justify-center gap-1.5">
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                  </div>
+                  <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                  <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                </button>
+              );
+            })}
+          </div>
+          <div className="space-y-1">
+            <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+              <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${uItemPct}%` }} />
+            </div>
+            <div className="flex justify-between text-[10px] font-medium text-gray-400">
+              <span>{uItemTotals.received} received</span>
+              <span>{uItemTotals.remaining} remaining</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!uFiltersReady ? (
+        <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
+          Pick a plant to view an unloading batch's progress.
+        </div>
+      ) : uSessionsQuery.isLoading || (uTodayEmpty && uActiveQuery.isLoading) ? (
+        <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+      ) : uSessionOptions.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
+          No unloading batches for {uPlant}{uDate ? ` on ${fmtOrderDate(uDate)}` : ""}.
+        </div>
+      ) : uSessionDetailQuery.isLoading ? (
+        <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+      ) : (
+        // Same plain bordered-card wrapper (not TableCard) + collapsible search header the real
+        // Unloading page uses for its own items table, so this reads as the identical UI.
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+          <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5 bg-white">
+            <span className="text-xs font-medium text-gray-500">{uFilteredItems.length} item{uFilteredItems.length === 1 ? "" : "s"}</span>
+            <button
+              onClick={() => setUItemSearchOpen((v) => !v)}
+              title="Search items"
+              className={`ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
+                uItemSearchOpen ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+              }`}
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
+            {uItemSearchOpen && (
+              <div className="relative w-full sm:w-64">
+                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                <input
+                  value={uItemSearchText}
+                  onChange={(e) => setUItemSearchText(e.target.value)}
+                  placeholder="Search items…"
+                  autoFocus
+                  className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30"
+                />
+                {uItemSearchText && (
+                  <button type="button" onClick={() => setUItemSearchText("")} className="absolute right-2 top-2 text-gray-400 hover:text-gray-600">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          <DataTable<UnloadingProgressItem>
+            containerClassName="rounded-none border-0"
+            headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-sm"
+            columns={uItemColumns}
+            data={uFilteredItems}
+            getRowId={(row) => String(row.id)}
+            rowClassName={uItemRowClassName}
+            renderExpandedRow={renderUItemHistoryPanel}
+            isRowExpandable={(row) => !!row.barcode}
+            expandedRowId={uExpandedItemId != null ? String(uExpandedItemId) : null}
+            onRowClick={(row) => {
+              const opening = uExpandedItemId !== row.id;
+              setUExpandedItemId(opening ? row.id : null);
+              setUHistoryBarcode(opening ? row.barcode : null);
+              setUHistoryItemName(opening ? row.itemName : null);
+            }}
+            enableColumnResizing
+            enableTotalsRow
+            emptyState="No items on this batch."
+            noResultsState="No items match your search."
+            hasActiveFilters={!!uItemSearchText || !!uItemStatusFilter}
+            maxHeight="62vh"
+          />
+        </div>
+      )}
+    </>
   );
 }

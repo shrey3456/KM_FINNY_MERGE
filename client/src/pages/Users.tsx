@@ -236,16 +236,28 @@ const Users = () => {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<Partial<User> | null>(null);
-  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
-    () => new Set(['avatar', 'name', 'username', 'designation', 'role', 'plants', 'actions']),
-  );
+  const DEFAULT_VISIBLE_COLUMN_IDS = ['avatar', 'name', 'username', 'designation', 'role', 'plants', 'actions'];
+  // Column visibility/order are real preferences, not working context for one sitting — saved to
+  // localStorage (not sessionStorage) so choosing which columns to see survives closing the
+  // browser/logging out, and only changes again when the user actually touches it here.
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("users:visibleColumnIds");
+      const parsed = raw ? JSON.parse(raw) : null;
+      return Array.isArray(parsed) ? new Set(parsed) : new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+    } catch {
+      return new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("users:visibleColumnIds", JSON.stringify(Array.from(visibleColumnIds))); } catch { /* storage unavailable */ }
+  }, [visibleColumnIds]);
 
-  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
-  // a rearranged table is working context for this sitting, not a permanent preference. An empty
-  // array means "declared order", which is also what Reset order restores.
+  // Column order, remembered per page. An empty array means "declared order", which is also what
+  // Reset order restores.
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     try {
-      const raw = sessionStorage.getItem("users:columnOrder");
+      const raw = localStorage.getItem("users:columnOrder");
       const parsed = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -253,7 +265,7 @@ const Users = () => {
     }
   });
   useEffect(() => {
-    try { sessionStorage.setItem("users:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("users:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
   }, [columnOrder]);
 
   const { toast } = useToast();

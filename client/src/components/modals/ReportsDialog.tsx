@@ -408,14 +408,19 @@ export type ReportsDialogSession = {
 type ReportsDialogProps = {
   session: ReportsDialogSession | null;
   onClose: () => void;
+  // Which API family to hit — "order-import" (default) for Order Import/Scan Order, "unloading"
+  // for Unloading. Both expose the identical part-report/group-report/scan-activity shape (see
+  // server/lib/unloadGroupReport.ts, mirroring server/lib/orderGroupReport.ts), so this dialog's
+  // UI and export/view logic are shared as-is — only the URL prefix differs.
+  basePath?: "order-import" | "unloading";
 };
 
 // Per-CSV (and, when the CSV is part of a FIFO batch, per-group) Summary/Activity reports —
 // view in-browser or download CSV/Excel/PDF. Opened from a row's Reports action in
-// OrderImport.tsx's Active/Completed/History tabs; replaces the old standalone Order Reports
-// page, minus its delete button (deleting a CSV stays Order Import's own, more careful,
-// replace-vs-discard flow).
-export default function ReportsDialog({ session, onClose }: ReportsDialogProps) {
+// OrderImport.tsx's Active/Completed/History tabs (and, via basePath="unloading",
+// Unloading.tsx's own landing tabs); replaces the old standalone Order Reports page, minus its
+// delete button (deleting a CSV stays each page's own, more careful, replace-vs-discard flow).
+export default function ReportsDialog({ session, onClose, basePath = "order-import" }: ReportsDialogProps) {
   const { toast } = useToast();
   const [busy, setBusy] = useState<string | null>(null);
   const [viewData, setViewData] = useState<{ title: string; rows: Row[] } | null>(null);
@@ -427,11 +432,11 @@ export default function ReportsDialog({ session, onClose }: ReportsDialogProps) 
   } | null>(null);
 
   const fetchPartReport = (sessionId: number) =>
-    apiRequest("GET", `/api/order-import/sessions/${sessionId}/part-report`).then((r) => r.json()) as Promise<GroupReportPart>;
+    apiRequest("GET", `/api/${basePath}/sessions/${sessionId}/part-report`).then((r) => r.json()) as Promise<GroupReportPart>;
   const fetchGroupReport = (groupId: number) =>
-    apiRequest("GET", `/api/order-import/sessions/${groupId}/group-report`).then((r) => r.json()) as Promise<GroupReport>;
+    apiRequest("GET", `/api/${basePath}/sessions/${groupId}/group-report`).then((r) => r.json()) as Promise<GroupReport>;
   const fetchActivity = (sessionId: number, scope: "part" | "group") =>
-    apiRequest("GET", `/api/order-import/sessions/${sessionId}/scan-activity?scope=${scope}`).then((r) => r.json()) as Promise<ScanActivity>;
+    apiRequest("GET", `/api/${basePath}/sessions/${sessionId}/scan-activity?scope=${scope}`).then((r) => r.json()) as Promise<ScanActivity>;
 
   async function downloadPart(fmt: Fmt) {
     if (!session) return;

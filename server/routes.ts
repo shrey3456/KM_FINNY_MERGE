@@ -109,10 +109,12 @@ import vehicleInfoRoutes from "./routes/vehicle-info";
 import loadingRoutes from "./routes/loading";
 import orderImportRoutes from "./routes/order-import";
 import orderImportEditRoutes from "./routes/order-import-edit";
+import unloadingEditRoutes from "./routes/unloading-edit";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import settingsAdminRoutes from "./routes/settings-admin";
 import unloadingRoutes from "./routes/unloading";
 import openingStockRoutes from "./routes/opening-stock";
+import plantStockAdminRoutes from "./routes/plant-stock-admin";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
 import { requirePageWrite, requirePageAccess } from "./lib/pageAccess";
@@ -343,7 +345,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/products/barcode/:barcode",
     async (req: Request, res: Response) => {
       const barcode = req.params.barcode;
-      let product = await storage.getProductByBarcode(barcode);
+      // Optional — only matters when this barcode has more than one Product Master row (see
+      // getProductByBarcode's own comment). Without it, a shared barcode falls back to
+      // whichever row the query happens to return first, which is how Order Scan/Loading/
+      // Unloading's own barcode lookups kept picking the wrong row's pallet size even after the
+      // main /scan endpoints were fixed to pass plant through.
+      const plant = typeof req.query.plant === 'string' ? req.query.plant : undefined;
+      let product = await storage.getProductByBarcode(barcode, plant);
 
       // If not found by barcode, try to find by SKU (itemNo).
       if (!product) {
@@ -8154,11 +8162,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount order import edit routes (fix a mistake in an already-uploaded, not-yet-completed CSV)
   apiRouter.use(orderImportEditRoutes);
 
+  // Mount unloading edit routes (same idea, for an unloading vehicle's CSV)
+  apiRouter.use(unloadingEditRoutes);
+
   // Mount order scan routes
   apiRouter.use(orderScanRoutes);
 
   // Mount Settings > Clear Stock admin routes
   apiRouter.use(settingsAdminRoutes);
+
+  // Mount Overall Stock > per-row Edit/Delete admin routes
+  apiRouter.use(plantStockAdminRoutes);
 
   // Mount Unloading routes (vehicle-wise receiving)
   apiRouter.use(unloadingRoutes);

@@ -147,6 +147,79 @@ function autoMatch(headers: string[]): Mapping {
   };
 }
 
+// ── Unloading mode's own target columns — a distinct field set from TARGET_FIELDS above (adds
+// Vehicle Number, since one unload CSV can span multiple vehicles; no Expected Pallets, unload
+// doesn't track that) — moved here from client/src/pages/Unloading/Unloading.tsx's own import
+// flow, which no longer has one (see this page's "Unloading" mode section further down). ────────
+const UNLOAD_TARGET_FIELDS = [
+  { key: "vehicleNumber", label: "Vehicle Number" },
+  { key: "barcode", label: "Barcode / SKU" },
+  { key: "itemName", label: "Item Name" },
+  { key: "sapCode", label: "SAP Code" },
+  { key: "quantity", label: "Quantity" },
+] as const;
+type UnloadTargetKey = (typeof UNLOAD_TARGET_FIELDS)[number]["key"];
+type UnloadMapping = Record<UnloadTargetKey, string>;
+
+function unloadAutoMatch(headers: string[]): UnloadMapping {
+  const norm = headers.map((h) => h.toLowerCase().replace(/[\s_\-+*]/g, ""));
+  const best = (...kws: string[]) => {
+    for (const kw of kws) {
+      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
+      const i = norm.findIndex((h) => h === k);
+      if (i !== -1) return headers[i];
+    }
+    for (const kw of kws) {
+      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
+      const i = norm.findIndex((h) => h.startsWith(k));
+      if (i !== -1) return headers[i];
+    }
+    for (const kw of kws) {
+      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
+      const i = norm.findIndex((h) => h.includes(k));
+      if (i !== -1) return headers[i];
+    }
+    return SKIP;
+  };
+  const bestExact = (...kws: string[]) => {
+    for (const kw of kws) {
+      const k = kw.toLowerCase().replace(/[\s_\-+*]/g, "");
+      const i = norm.findIndex((h) => h === k);
+      if (i !== -1) return headers[i];
+    }
+    return SKIP;
+  };
+  const quantityMatch = best("total qty", "total quantity", "quantity", "qty", "boxes", "nos", "pcs", "count", "units");
+  return {
+    vehicleNumber: best("vehicle no", "vehicle number", "vehicleno", "vehicle", "truck no", "truckno", "vehicle reg", "vehicle regno"),
+    barcode: best("barcode", "bar code", "bar_code", "sku", "product code", "productcode", "item code", "itemcode", "code"),
+    itemName: best("product name", "productname", "item name", "itemname", "description", "name", "item", "product", "material"),
+    sapCode: best("sap code", "sapcode", "sap_code", "sap", "material code", "materialcode"),
+    quantity: quantityMatch !== SKIP ? quantityMatch : bestExact("total", "grand total"),
+  };
+}
+
+// Decimal-safe qty parsing (a plain digit-strip would turn "200.00" into "20000" by eating the
+// decimal point) — same fix Unloading's own import carried before this moved here.
+function parseUnloadQtyCell(raw: string): number {
+  const n = parseFloat(raw.replace(/,/g, "").trim());
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
+
+// Mirrors getUserPlants in server/routes/order-scan.ts — null = admin, sees every plant;
+// otherwise exactly the plants assigned on the Users page, lowercased. Used to filter the
+// Unloading-mode Plant picker down to what this user could actually import for.
+function getUserPlantsClient(): string[] | null {
+  let u: any = {};
+  try { u = JSON.parse(localStorage.getItem("currentUser") || "{}"); } catch { /* default {} */ }
+  const role = (u.role ?? "").toLowerCase().trim();
+  if (role === "admin" || role === "super-admin") return null;
+  try {
+    const parsed = typeof u.plants === "string" ? JSON.parse(u.plants) : u.plants;
+    return Array.isArray(parsed) ? parsed.map((p: string) => String(p).toLowerCase().trim()) : [];
+  } catch { return []; }
+}
+
 type ScanSession = {
   id: number; plant: string; csvFileName: string; rowCount: number;
   // Ordered totals across this CSV's rows — rowCount is only how many LINES it has, which isn't
@@ -176,12 +249,18 @@ function fmtIST(dt: string | Date | null | undefined): string {
   const s = dt instanceof Date ? dt.toISOString() : String(dt);
   const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
   if (isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-IN", { timeZone: "UTC" });
+  // Bug: this used to format with timeZone: "UTC", which just re-displayed the raw stored
+  // digits unchanged and labeled them IST. scan_activated_at/scan_completed_at are written
+  // server-side via `new Date()` through node-postgres into a naive `timestamp` column, which
+  // stores true UTC wall-clock digits (see server/routes/order-scan.ts) — so displaying them
+  // meant this page showed a time exactly 5.5 hours BEHIND the real IST time, while ScanViewer
+  // (elsewhere) converted the same underlying instant correctly, hence the two pages disagreeing.
+  return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 }
 
 // "Time taken" — wall-clock time from when a session was activated (opened for scanning) to
 // when it was marked complete. A constant timezone offset cancels out in a subtraction, so this
-// doesn't need fmtIST's UTC-relabeling trick — plain Date parsing is fine here. Same measure
+// doesn't need fmtIST's Asia/Kolkata conversion — plain Date parsing is fine here. Same measure
 // used on Loading's and Unloading's own landing tables.
 function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
   if (!startIso || !endIso) return null;
@@ -255,6 +334,23 @@ export default function OrderImport() {
   });
   const [showMappingDialog, setShowMappingDialog] = useState(false);
 
+  // ─── "Unloading" page mode — a second, independent CSV-import + history pane sharing this
+  // page's layout (see the mode switcher in the JSX below). Its own parallel state, entirely
+  // separate from the Order Import state above, since a user could conceivably have either
+  // dialog open in principle (they can't in practice — switching modes doesn't close an open
+  // dialog — but keeping them independent avoids one flow's state leaking into the other's UI). ──
+  const [pageMode, setPageMode] = useState<"order-import" | "unloading">("order-import");
+  const [unloadImportPlant, setUnloadImportPlant] = useState("");
+  const [unloadImportDate, setUnloadImportDate] = useState("");
+  const [unloadImportFile, setUnloadImportFile] = useState<File | null>(null);
+  const unloadFileRef = useRef<HTMLInputElement>(null);
+  const [isUnloadImporting, setIsUnloadImporting] = useState(false);
+  const [unloadCsvData, setUnloadCsvData] = useState<{ name: string; headers: string[]; rows: Record<string, string>[] } | null>(null);
+  const [unloadMapping, setUnloadMapping] = useState<UnloadMapping>({
+    vehicleNumber: SKIP, barcode: SKIP, itemName: SKIP, sapCode: SKIP, quantity: SKIP,
+  });
+  const [showUnloadMappingDialog, setShowUnloadMappingDialog] = useState(false);
+
   // Session view
   const [showHistory, setShowHistory] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -313,10 +409,9 @@ export default function OrderImport() {
   const [activePlant, setActivePlant] = useState("");
   const [activeDate, setActiveDate] = useState("");
 
-  // Completed Sessions card — own plant filter, collapsed by default. No date filter (see the
-  // Completed tab's own comment — it can never reach past the server's 48h recent window anyway).
+  // Completed Sessions card — collapsed by default. No plant filter: the Completed tab now always
+  // shows every plant's latest completion at once (see completedScanSessions below).
   const [showCompleted, setShowCompleted] = useState(false);
-  const [completedPlant, setCompletedPlant] = useState("");
 
   // Live-sync transport status. A successful WS handshake (joined-import) only
   // proves the upgrade succeeded — it does NOT prove that spontaneous server-push
@@ -1076,7 +1171,163 @@ export default function OrderImport() {
   // Plant colors from Plant Management, keyed by upper-cased name, for the plant tab pills.
   const plantColorByName = new Map(plantOptions.map((p) => [p.name.toUpperCase(), p]));
 
+  // ── Unloading mode: plant list restricted the same way Unloading's own import dialog was,
+  // and CSV History (moved here from client/src/pages/Unloading/Unloading.tsx — its own CSV
+  // History tab is gone; this is the only place to browse unload CSV uploads now). ─────────────
+  const unloadUserPlants = getUserPlantsClient();
+  const unloadImportablePlants = plantOptions.filter(
+    (p) => unloadUserPlants === null || unloadUserPlants.includes(p.name.toLowerCase()),
+  );
+  type UnloadCsvHistoryUpload = {
+    csvFileName: string; plant: string; orderDate: string; importedByCode: string | null;
+    importedByName: string | null; uploadedAt: string; vehicleCount: number; totalRows: number;
+    vehicleNumbers: string[]; sessionIds: number[]; vehicles: { vehicleNumber: string; sessionId: number }[];
+  };
+  const [unloadHistoryOffset, setUnloadHistoryOffset] = useState(0);
+  const [unloadHistoryPlantFilter, setUnloadHistoryPlantFilter] = useState("");
+  const [unloadHistoryDateFilter, setUnloadHistoryDateFilter] = useState("");
+  const UNLOAD_HISTORY_LIMIT = 20;
+  const unloadCsvHistoryQuery = useQuery<{ uploads: UnloadCsvHistoryUpload[]; total: number }>({
+    queryKey: ["/api/unloading/csv-history", unloadHistoryOffset, unloadHistoryPlantFilter, unloadHistoryDateFilter],
+    queryFn: () => apiRequest(
+      "GET",
+      `/api/unloading/csv-history?limit=${UNLOAD_HISTORY_LIMIT}&offset=${unloadHistoryOffset}${unloadHistoryPlantFilter ? `&plant=${encodeURIComponent(unloadHistoryPlantFilter)}` : ""}${unloadHistoryDateFilter ? `&orderDate=${encodeURIComponent(unloadHistoryDateFilter)}` : ""}`,
+    ).then((r) => r.json()),
+    enabled: pageMode === "unloading",
+  });
+  const unloadCsvUploads = unloadCsvHistoryQuery.data?.uploads ?? [];
+  const unloadCsvHistoryTotal = unloadCsvHistoryQuery.data?.total ?? 0;
+  const [expandedUnloadCsvUpload, setExpandedUnloadCsvUpload] = useState<string | null>(null);
+
+  // ── Delete a CSV upload — mirrors Order Import's own per-session delete dialog (replace vs
+  // discard, same two options either way), just aggregated across every vehicle session this one
+  // upload created (see UnloadCsvHistoryUpload.sessionIds) since one CSV can span several
+  // vehicles. The preview is summed across all of them so the dialog's copy reflects whether ANY
+  // of them already has scan activity, not just the first. ──────────────────────────────────────
+  // Edit a vehicle's items — same EditCsvDialog Order Import's own Edit uses (basePath="unloading"),
+  // opened from a vehicle chip in the expanded CSV History row (see u.vehicles above). Session id
+  // only, since EditCsvDialog resolves everything else (plant, csvFileName, items) itself.
+  const [unloadEditSessionId, setUnloadEditSessionId] = useState<number | null>(null);
+
+  const [unloadDeleteTarget, setUnloadDeleteTarget] = useState<UnloadCsvHistoryUpload | null>(null);
+  const [unloadDeletePreview, setUnloadDeletePreview] = useState<{
+    scannedBarcodeCount: number; scannedQtyTotal: number; extraQtyTotal: number; stockApplied: boolean;
+  } | null>(null);
+  const [isLoadingUnloadDeletePreview, setIsLoadingUnloadDeletePreview] = useState(false);
+
+  async function openUnloadDeleteConfirm(u: UnloadCsvHistoryUpload) {
+    setUnloadDeleteTarget(u);
+    setUnloadDeletePreview(null);
+    setIsLoadingUnloadDeletePreview(true);
+    try {
+      const previews: Array<{ scannedBarcodeCount: number; scannedQtyTotal: number; extraQtyTotal: number; stockApplied: boolean }> =
+        await Promise.all(u.sessionIds.map((id) => apiRequest("GET", `/api/unloading/sessions/${id}/delete-preview`).then((r) => r.json())));
+      setUnloadDeletePreview(previews.reduce((acc, p) => ({
+        scannedBarcodeCount: acc.scannedBarcodeCount + (p.scannedBarcodeCount ?? 0),
+        scannedQtyTotal: acc.scannedQtyTotal + (p.scannedQtyTotal ?? 0),
+        extraQtyTotal: acc.extraQtyTotal + (p.extraQtyTotal ?? 0),
+        stockApplied: acc.stockApplied || !!p.stockApplied,
+      }), { scannedBarcodeCount: 0, scannedQtyTotal: 0, extraQtyTotal: 0, stockApplied: false }));
+    } catch {
+      // Leave preview null — the dialog falls back to its generic (no-preview) copy below.
+    } finally {
+      setIsLoadingUnloadDeletePreview(false);
+    }
+  }
+
+  const unloadDeleteMutation = useMutation({
+    mutationFn: async ({ sessionIds, mode }: { sessionIds: number[]; mode: "replace" | "discard" }) => {
+      await Promise.all(sessionIds.map((id) => apiRequest("DELETE", `/api/unloading/sessions/${id}?mode=${mode}`)));
+      return { mode };
+    },
+    onSuccess: ({ mode }) => {
+      qc.invalidateQueries({ queryKey: ["/api/unloading/csv-history"] });
+      const target = unloadDeleteTarget;
+      setUnloadDeleteTarget(null);
+      setUnloadDeletePreview(null);
+      if (mode === "replace" && target) {
+        setUnloadImportPlant(target.plant);
+        setUnloadImportDate(target.orderDate);
+        toast({ title: "Pick the corrected CSV", description: "Plant and Order Date are filled in — choose the file to continue." });
+        unloadFileRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        unloadFileRef.current?.click();
+      }
+    },
+    onError: (error: any) => toast({ title: "Delete failed", description: error?.message, variant: "destructive" }),
+  });
+
+  function resetUnloadImportForm() {
+    setUnloadImportPlant(""); setUnloadImportDate(""); setUnloadImportFile(null);
+    if (unloadFileRef.current) unloadFileRef.current.value = "";
+  }
+
+  async function handleUnloadFileChosen(file: File) {
+    const parsed = await parseCsvRaw(file);
+    if (!parsed) return;
+    setUnloadCsvData(parsed);
+    setUnloadMapping(unloadAutoMatch(parsed.headers));
+    setShowUnloadMappingDialog(true);
+  }
+
+  function handleUnloadImportClick() {
+    if (!unloadImportPlant.trim()) { toast({ title: "Select a plant first", variant: "destructive" }); return; }
+    if (!unloadImportDate.trim()) { toast({ title: "Select an Order Date first", variant: "destructive" }); return; }
+    if (!unloadImportFile) { toast({ title: "Select a CSV file first", variant: "destructive" }); return; }
+    handleUnloadFileChosen(unloadImportFile);
+  }
+
+  async function handleConfirmUnloadImport() {
+    if (!unloadCsvData) return;
+    const get = (row: Record<string, string>, key: UnloadTargetKey) => {
+      const col = unloadMapping[key];
+      return col && col !== SKIP ? (row[col] ?? "") : "";
+    };
+    if (unloadMapping.vehicleNumber === SKIP) { toast({ title: "Map the Vehicle Number column", variant: "destructive" }); return; }
+    if (unloadMapping.barcode === SKIP) { toast({ title: "Map the Barcode column", variant: "destructive" }); return; }
+    if (unloadMapping.quantity === SKIP) { toast({ title: "Map the Quantity column", variant: "destructive" }); return; }
+
+    const items = unloadCsvData.rows.map((row) => ({
+      vehicleNumber: get(row, "vehicleNumber").trim(),
+      barcode: get(row, "barcode").trim(),
+      itemName: get(row, "itemName").trim() || null,
+      sapCode: get(row, "sapCode").trim() || null,
+      quantity: parseUnloadQtyCell(get(row, "quantity")),
+    })).filter((it) => it.vehicleNumber || it.barcode);
+
+    setIsUnloadImporting(true);
+    try {
+      const data = await apiRequest("POST", "/api/unloading/import", {
+        plant: unloadImportPlant, orderDate: unloadImportDate, csvFileName: unloadCsvData.name, items,
+      }, false, true);
+
+      toast({
+        title: "Imported",
+        description: `${unloadCsvData.name} — ${data.vehicles.length} vehicle(s): ${data.vehicles.map((v: any) => `${v.vehicleNumber} (${v.rowCount})${v.replacesSessionId ? " · replaced" : ""}`).join(", ")}`,
+      });
+      qc.invalidateQueries({ queryKey: ["/api/unloading/csv-history"] });
+      setShowUnloadMappingDialog(false);
+      setUnloadCsvData(null);
+      resetUnloadImportForm();
+    } catch (error: any) {
+      toast({ title: "Import failed", description: error?.message || "Could not import CSV", variant: "destructive" });
+    } finally {
+      setIsUnloadImporting(false);
+    }
+  }
+
   const _allScanSessions = scanSessionsQuery.data ?? [];
+
+  // Recent Complete tab — one row per PLANT, whichever session completed most recently there, no
+  // matter how long ago (unlike scanSessionsQuery above, not limited to the last 48h). Always
+  // every plant the user can see, ignoring the tab's own plant filter — the point is a one-glance
+  // "what just finished, what can I reopen right now" view across plants. Every row here is by
+  // construction the single most-recently-completed session for its plant, so it's always
+  // reopen-eligible.
+  const recentCompleteQuery = useQuery<ScanSession[]>({
+    queryKey: ["/api/order-scan/sessions/recent-complete"],
+    queryFn: () => apiRequest("GET", "/api/order-scan/sessions/recent-complete").then((r) => r.json()),
+  });
+  const recentCompleteSessions = recentCompleteQuery.data ?? [];
 
   // Plants that currently have an active session — UNFILTERED by the Active tab's own
   // plant/date filters, since this drives whether Load is disabled on the Available tab
@@ -1103,19 +1354,16 @@ export default function OrderImport() {
     (!plantTab     || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase()) &&
     (!activeDate   || (s.orderDate ?? "").slice(0, 10) === activeDate)
   );
-  const completedScanSessions = _allScanSessions.filter(s =>
-    s.scanStatus === "completed" &&
-    (!completedPlant || (s.plant ?? "").toLowerCase() === completedPlant.toLowerCase()) &&
-    (!plantTab       || (s.plant ?? "").toLowerCase() === plantTab.toLowerCase())
-  );
-  // Reopen is only ever offered for the SINGLE most-recently-completed session per plant —
-  // computed over every completed session (unfiltered by the tab's own plant/date pickers,
-  // same as activePlantsSet above), so the button stays correct regardless of what's filtered
-  // into view. The server enforces the same rule independently; this just keeps the button
-  // from ever being shown where it would immediately 400.
+  // Recent Complete: one row per plant (the most recently completed session there), regardless
+  // of age — sourced from recentCompleteQuery, not the 48h-windowed _allScanSessions. Always shows
+  // every plant the user can see; the tab's own plant picker is intentionally not applied here.
+  const completedScanSessions = recentCompleteSessions;
+  // Every row in completedScanSessions is already the plant's latest by construction, so Reopen is
+  // always valid for it — this map is kept only because the render block below already reads from
+  // it, and it doubles as a safety net matching the server's independently-enforced rule.
   const lastCompletedIdByPlant = new Map<string, { id: number; completedAt: string }>();
-  for (const s of _allScanSessions) {
-    if (s.scanStatus !== "completed" || !s.scanCompletedAt) continue;
+  for (const s of recentCompleteSessions) {
+    if (!s.scanCompletedAt) continue;
     const key = (s.plant ?? "").toLowerCase();
     const cur = lastCompletedIdByPlant.get(key);
     if (!cur || s.scanCompletedAt > cur.completedAt || (s.scanCompletedAt === cur.completedAt && s.id > cur.id)) {
@@ -1131,8 +1379,8 @@ export default function OrderImport() {
     ).length;
   const availableCount = countByStatus("available", scanDate);
   const activeCount    = countByStatus("active", activeDate);
-  // No date filter on this tab anymore (see its own comment) — always the full recent-completed count.
-  const completedCount = countByStatus("completed", "");
+  // One row per plant now (see completedScanSessions above) — count is just how many plants qualify.
+  const completedCount = recentCompleteSessions.length;
 
   const activeId = activeSessionQuery.data?.id ?? null;
 
@@ -1207,6 +1455,33 @@ export default function OrderImport() {
             </button>
           </div>
         </div>
+
+        {/* ── Page mode switcher — "Order Import" is this page's original content, unchanged.
+            "Unloading" is a second, independent CSV-import + history pane (Unloading's own
+            vehicle-wise import, moved here from the Unloading page — see its own section below);
+            the actual scan workflow still lives entirely on the Unloading page. ── */}
+        <div className="flex gap-1.5">
+          {(
+            [
+              { key: "order-import" as const, label: "Order Import" },
+              { key: "unloading" as const, label: "Unloading" },
+            ]
+          ).map((m) => (
+            <button
+              key={m.key}
+              onClick={() => setPageMode(m.key)}
+              className={
+                pageMode === m.key
+                  ? "rounded-full bg-[#001d6e] text-white px-4 py-1.5 text-sm font-medium"
+                  : "rounded-full bg-white border border-gray-200 text-gray-600 px-4 py-1.5 text-sm font-medium hover:bg-gray-50"
+              }
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        {pageMode === "order-import" && (<>
 
         {/* ── Upload Card ── */}
         <div className="border border-gray-200 bg-white shadow-sm">
@@ -1373,8 +1648,9 @@ export default function OrderImport() {
             </div>
 
             {/* Plant tabs — built from the sessions present in the tab above, so they track the
-                data rather than a hard-coded list. Shown on all four status tabs. */}
-            {plantTabs.length > 0 && (
+                data rather than a hard-coded list. Shown on Available/Active/History; hidden on
+                Completed since that tab now always shows every plant's latest at once. */}
+            {activeTab !== "completed" && plantTabs.length > 0 && (
               <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3">
                 <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
                   Plant
@@ -1737,18 +2013,19 @@ export default function OrderImport() {
           {/* ── Tab: Completed ── */}
           {activeTab === "completed" && (
             <div>
-              {/* This tab only ever holds the last 48h (server-side, see /api/order-scan/sessions) —
-                  a date filter here can't reach further back than that no matter what's picked, so
-                  it's deliberately not offered. Use the History tab for anything older. */}
+              {/* One row per plant — whichever session completed most recently there, replaced the
+                  moment a newer one finishes for that plant. Ignores the plant/date pickers on
+                  purpose: the point is a one-glance view of every plant's latest, always eligible
+                  to Reopen. Use the History tab to see everything that's ever completed. */}
               <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-b border-gray-50">
-                <p className="text-xs text-gray-400">Last 48 hours · see History for everything</p>
+                <p className="text-xs text-gray-400">Latest completed per plant · see History for everything</p>
                 <Button size="sm" variant="outline" className="h-8 w-8 p-0 rounded-full"
-                  onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
-                  <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
+                  onClick={() => recentCompleteQuery.refetch()} disabled={recentCompleteQuery.isFetching}>
+                  <RefreshCw className={`h-3.5 w-3.5 ${recentCompleteQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
               </div>
               {/* Content */}
-              {scanSessionsQuery.isFetching && completedScanSessions.length === 0 ? (
+              {recentCompleteQuery.isFetching && completedScanSessions.length === 0 ? (
                 <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-green-600" />
                 </div>
@@ -1756,7 +2033,7 @@ export default function OrderImport() {
                 <div className="flex flex-col items-center justify-center py-12 text-gray-400">
                   <CheckCircle2 className="h-10 w-10 mb-3 opacity-20" />
                   <p className="text-sm font-medium">No completed sessions</p>
-                  <p className="text-xs mt-1">Sessions completed in the last 48 hours appear here</p>
+                  <p className="text-xs mt-1">The latest completed session for each plant appears here</p>
                 </div>
               ) : (
                 <div className="divide-y">
@@ -2122,6 +2399,204 @@ export default function OrderImport() {
           )}
         </div>
 
+        </>)}
+
+        {pageMode === "unloading" && (
+          <>
+            {/* ── Upload Card — same layout/style as Order Import's own above, wired to
+                Unloading's vehicle-wise CSV import instead (one CSV can span multiple
+                vehicles; Map & Import still goes through a column-mapping step). ── */}
+            <div className="border border-gray-200 bg-white shadow-sm">
+              <div className="flex items-center gap-2 border-b border-gray-100 px-6 py-4">
+                <Upload className="h-5 w-5 text-[#001d6e]" />
+                <h2 className="text-base font-semibold text-gray-900">Upload Unloading CSV</h2>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-12 sm:items-end sm:gap-4">
+                  <div className="sm:col-span-3 grid gap-1.5">
+                    <Label className="text-xs font-medium text-gray-600">Plant</Label>
+                    {unloadImportablePlants.length > 0 ? (
+                      <Select value={unloadImportPlant || "_none_"} onValueChange={(v) => setUnloadImportPlant(v === "_none_" ? "" : v)}>
+                        <SelectTrigger className="h-10 text-sm rounded-full"><SelectValue placeholder="Select…" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="_none_">— Select —</SelectItem>
+                          {unloadImportablePlants.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <Input className="h-10 text-sm rounded-full" value={unloadImportPlant} onChange={(e) => setUnloadImportPlant(e.target.value)} placeholder="Plant…" />
+                    )}
+                  </div>
+                  <div className="sm:col-span-2 grid gap-1.5">
+                    <Label className="text-xs font-medium text-gray-600">Order Date</Label>
+                    <Input type="date" className="h-10 text-sm w-full rounded-full" value={unloadImportDate} onChange={(e) => setUnloadImportDate(e.target.value)} />
+                  </div>
+                  <div className="sm:col-span-4 grid gap-1.5">
+                    <Label className="text-xs font-medium text-gray-600 truncate">
+                      CSV File{unloadImportFile && <span className="text-green-600 font-medium"> · {unloadImportFile.name}</span>}
+                    </Label>
+                    <Input ref={unloadFileRef} type="file" accept=".csv" className="h-10 text-sm rounded-full"
+                      onChange={(e) => setUnloadImportFile(e.target.files?.[0] ?? null)} disabled={isUnloadImporting} />
+                  </div>
+                  <div className="sm:col-span-3 flex gap-2">
+                    <Button variant="outline" className="h-10 shrink-0 rounded-full" onClick={resetUnloadImportForm} disabled={!unloadImportFile && !unloadImportPlant && !unloadImportDate}>
+                      <X className="h-4 w-4" />
+                    </Button>
+                    <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-full" onClick={handleUnloadImportClick}
+                      disabled={!unloadImportFile || !unloadImportPlant.trim() || !unloadImportDate.trim() || isUnloadImporting}>
+                      {isUnloadImporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                      Map & Import
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-400">One CSV can contain multiple vehicles — every row must have a Vehicle Number column.</p>
+              </div>
+            </div>
+
+            {/* ── CSV History — moved here from the Unloading page's own "CSV History" tab. ── */}
+            <div className="border border-gray-200 bg-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 px-6 py-4">
+                <div className="flex items-center gap-2">
+                  <History className="h-5 w-5 text-[#001d6e]" />
+                  <h2 className="text-base font-semibold text-gray-900">CSV History</h2>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    type="date"
+                    value={unloadHistoryDateFilter}
+                    onChange={(e) => { setUnloadHistoryDateFilter(e.target.value); setUnloadHistoryOffset(0); }}
+                    className="h-9 w-auto text-sm"
+                  />
+                  {unloadHistoryDateFilter && (
+                    <Button
+                      size="sm" variant="ghost" className="h-9 w-9 p-0 text-gray-400 hover:text-red-500"
+                      onClick={() => { setUnloadHistoryDateFilter(""); setUnloadHistoryOffset(0); }}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                  {unloadImportablePlants.length > 1 && (
+                    <Select value={unloadHistoryPlantFilter || "all"} onValueChange={(v) => { setUnloadHistoryPlantFilter(v === "all" ? "" : v); setUnloadHistoryOffset(0); }}>
+                      <SelectTrigger className="h-9 w-[160px]"><SelectValue placeholder="All Plants" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All Plants</SelectItem>
+                        {unloadImportablePlants.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
+              </div>
+              {unloadCsvHistoryQuery.isLoading ? (
+                <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              ) : unloadCsvUploads.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">
+                    <Upload className="h-7 w-7 text-[#001d6e]/40" />
+                  </div>
+                  <div className="mb-1 text-sm font-semibold text-[#001d6e]">No CSVs imported yet</div>
+                  <p className="mb-4 max-w-xs text-xs text-muted-foreground">Import a CSV above to get started.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-full caption-bottom border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-[#001d6e]">
+                          <th className="w-8 border-r border-[#1a3a9c] px-2 py-2.5"></th>
+                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">CSV File</th>
+                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
+                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
+                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicles</th>
+                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Total Rows</th>
+                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Uploaded By</th>
+                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Uploaded At</th>
+                          <th className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {unloadCsvUploads.map((u, i) => {
+                          const rowKey = `${u.csvFileName}::${u.plant}::${u.uploadedAt}`;
+                          const isExpanded = expandedUnloadCsvUpload === rowKey;
+                          return (
+                            <>
+                              <tr
+                                key={rowKey}
+                                onClick={() => setExpandedUnloadCsvUpload((cur) => (cur === rowKey ? null : rowKey))}
+                                className={`cursor-pointer transition-colors hover:bg-[#001d6e]/[0.06] ${isExpanded ? "bg-[#001d6e]/[0.04]" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
+                              >
+                                <td className="border-r border-b border-gray-200 px-2 py-2 text-center">
+                                  <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
+                                </td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]" title={u.csvFileName}>{u.csvFileName}</td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2"><PlantBadge plant={u.plant} /></td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.orderDate}</td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.vehicleCount}</td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.totalRows.toLocaleString()}</td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.importedByName ?? u.importedByCode ?? "—"}</td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 whitespace-nowrap">{new Date(u.uploadedAt).toLocaleString()}</td>
+                                <td className="border-b border-gray-200 px-3 py-2 text-right">
+                                  <button
+                                    className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600"
+                                    title="Delete this CSV"
+                                    onClick={(e) => { e.stopPropagation(); openUnloadDeleteConfirm(u); }}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </td>
+                              </tr>
+                              {isExpanded && (
+                                <tr>
+                                  <td colSpan={9} className="border-b border-gray-200 bg-gray-50 px-6 py-3">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Vehicles</span>
+                                      <span className="text-[11px] text-gray-400">(click one to edit its items)</span>
+                                    </div>
+                                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                      {u.vehicles.map((v) => (
+                                        <button
+                                          key={v.sessionId}
+                                          type="button"
+                                          onClick={(e) => { e.stopPropagation(); setUnloadEditSessionId(v.sessionId); }}
+                                          className="flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100"
+                                          title={`Edit ${v.vehicleNumber}'s items`}
+                                        >
+                                          {v.vehicleNumber}
+                                          <Pencil className="h-3 w-3" />
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {unloadCsvHistoryTotal > UNLOAD_HISTORY_LIMIT && (
+                    <div className="flex items-center justify-between gap-2 border-t border-gray-100 px-4 py-2.5">
+                      <span className="text-xs text-gray-500">
+                        Showing {unloadHistoryOffset + 1}–{Math.min(unloadHistoryOffset + UNLOAD_HISTORY_LIMIT, unloadCsvHistoryTotal)} of {unloadCsvHistoryTotal}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <Button size="sm" variant="outline" className="h-8 w-8 p-0" disabled={unloadHistoryOffset === 0}
+                          onClick={() => setUnloadHistoryOffset((o) => Math.max(0, o - UNLOAD_HISTORY_LIMIT))} aria-label="Previous page">
+                          <ChevronLeft className="h-4 w-4" />
+                        </Button>
+                        <Button size="sm" variant="outline" className="h-8 w-8 p-0" disabled={unloadHistoryOffset + UNLOAD_HISTORY_LIMIT >= unloadCsvHistoryTotal}
+                          onClick={() => setUnloadHistoryOffset((o) => o + UNLOAD_HISTORY_LIMIT)} aria-label="Next page">
+                          <ChevronRight className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </>
+        )}
+
       </div>{/* end max-w-5xl */}
 
       {/* ── Column mapping dialog ── */}
@@ -2256,6 +2731,151 @@ export default function OrderImport() {
         </DialogContent>
       </Dialog>
 
+      {/* ── Unloading mode's own column mapping dialog — same pattern as the one above, moved
+          here from client/src/pages/Unloading/Unloading.tsx's own import flow. ── */}
+      <Dialog open={showUnloadMappingDialog} onOpenChange={(open) => { if (!open) { setShowUnloadMappingDialog(false); setUnloadCsvData(null); } }}>
+        <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col rounded-xl">
+          <DialogHeader>
+            <DialogTitle>Map CSV Columns</DialogTitle>
+            <DialogDescription>
+              {unloadCsvData ? `"${unloadCsvData.name}" — ${unloadCsvData.rows.length} rows detected. Match each target field to a CSV column.` : "Map columns."}
+            </DialogDescription>
+          </DialogHeader>
+
+          {unloadCsvData && (
+            <div className="flex flex-col gap-4 overflow-y-auto flex-1 min-h-0 pr-1">
+              <div className="border border-blue-100 bg-blue-50 px-4 py-3">
+                <p className="mb-2 text-xs font-semibold text-blue-700">{unloadCsvData.headers.length} columns detected in "{unloadCsvData.name}"</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {unloadCsvData.headers.map((h) => (
+                    <span key={h} className="border border-blue-200 bg-white px-2 py-0.5 text-xs text-blue-800 font-mono">{h}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="border bg-gray-50 p-4">
+                <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Map each target field → CSV column</p>
+                <div className="grid grid-cols-1 gap-3">
+                  {UNLOAD_TARGET_FIELDS.map((field) => {
+                    const matched = unloadMapping[field.key] !== SKIP && unloadMapping[field.key] !== "";
+                    return (
+                      <div key={field.key} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                        <div className="flex w-full items-center gap-1.5 sm:w-[160px] sm:shrink-0">
+                          <span className={`h-2 w-2 rounded-full ${matched ? "bg-green-500" : "bg-gray-300"}`} />
+                          <Label className="text-sm">{field.label}</Label>
+                        </div>
+                        <Select value={unloadMapping[field.key] || SKIP} onValueChange={(v) => setUnloadMapping((m) => ({ ...m, [field.key]: v }))}>
+                          <SelectTrigger className={`sm:flex-1 h-9 text-sm rounded-full ${!matched ? "border-dashed text-gray-400" : ""}`}>
+                            <SelectValue placeholder="— skip this field —" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={SKIP}>— skip this field —</SelectItem>
+                            {unloadCsvData.headers.map((h) => (<SelectItem key={h} value={h}>{h}</SelectItem>))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Preview — first {Math.min(5, unloadCsvData.rows.length)} of {unloadCsvData.rows.length} rows
+                </p>
+                <div className="overflow-x-auto border">
+                  <table className="w-max min-w-full border-collapse text-xs">
+                    <thead>
+                      <tr>
+                        {UNLOAD_TARGET_FIELDS.map((f) => {
+                          const col = unloadMapping[f.key];
+                          const matched = col && col !== SKIP;
+                          return (
+                            <th key={f.key} className={`sticky top-0 whitespace-nowrap border-b border-r px-3 py-2 text-left font-semibold ${matched ? "bg-green-50 text-green-800" : "bg-gray-100 text-gray-400"}`}>
+                              {f.label}
+                              {matched && <div className="font-normal text-green-600 text-xs mt-0.5">← {col}</div>}
+                            </th>
+                          );
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {unloadCsvData.rows.slice(0, 5).map((row, i) => (
+                        <tr key={i} className="border-b hover:bg-gray-50">
+                          {UNLOAD_TARGET_FIELDS.map((f) => {
+                            const col = unloadMapping[f.key];
+                            const val = col && col !== SKIP ? (row[col] ?? "") : "";
+                            return (
+                              <td key={f.key} className={`max-w-[180px] truncate whitespace-nowrap border-r px-3 py-2 ${val ? "" : "text-gray-300"}`} title={val}>{val || "—"}</td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="mt-2 gap-2">
+            <Button variant="outline" className="rounded-xl"
+              onClick={() => { setShowUnloadMappingDialog(false); setUnloadCsvData(null); }}
+              disabled={isUnloadImporting}>
+              Cancel
+            </Button>
+            <Button onClick={handleConfirmUnloadImport} disabled={isUnloadImporting || !unloadCsvData} className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl">
+              {isUnloadImporting ? (<><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>) : (<><Upload className="mr-1.5 h-4 w-4" />Import {unloadCsvData?.rows.length ?? 0} rows</>)}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Unloading mode's own delete confirmation — same "replace vs discard" two-option
+          pattern as Order Import's own delete dialog above (Delete, I'll re-upload / Remove
+          permanently), applied across every vehicle session this ONE CSV upload created. ── */}
+      <AlertDialog open={unloadDeleteTarget !== null} onOpenChange={(open) => { if (!open) { setUnloadDeleteTarget(null); setUnloadDeletePreview(null); } }}>
+        <AlertDialogContent className="rounded-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this CSV?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {isLoadingUnloadDeletePreview ? (
+                "Checking scan activity…"
+              ) : unloadDeletePreview && unloadDeletePreview.scannedBarcodeCount > 0 ? (
+                <>
+                  {unloadDeletePreview.scannedBarcodeCount} barcode(s) already scanned across {unloadDeleteTarget?.vehicleCount} vehicle(s) in this file
+                  ({unloadDeletePreview.scannedQtyTotal} total qty
+                  {unloadDeletePreview.extraQtyTotal > 0 ? `, ${unloadDeletePreview.extraQtyTotal} extra qty` : ""}
+                  {unloadDeletePreview.stockApplied ? ", stock applied" : ""}).
+                  {" "}Will you re-upload a corrected version for this plant/date?
+                  <br /><br />
+                  <b>Delete, I'll re-upload:</b> these scans are held and carried forward automatically onto the corrected CSV.
+                  <br />
+                  <b>Remove permanently:</b> these scans are reverted{unloadDeletePreview.stockApplied ? " and stock is rolled back" : ""}, and your next upload for this vehicle+date is treated as brand-new.
+                </>
+              ) : (
+                <>
+                  Will you re-upload a corrected version for this plant/date?
+                  {" "}Choose <b>Delete, I'll re-upload</b> to keep this slot for the corrected CSV, or
+                  {" "}<b>Remove permanently</b> to treat your next upload as brand-new.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <AlertDialogCancel className="mt-0">Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-red-600 text-white hover:bg-red-700"
+              onClick={() => unloadDeleteTarget && unloadDeleteMutation.mutate({ sessionIds: unloadDeleteTarget.sessionIds, mode: "discard" })}
+              disabled={unloadDeleteMutation.isPending || isLoadingUnloadDeletePreview}>
+              {unloadDeleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Remove permanently"}
+            </AlertDialogAction>
+            <AlertDialogAction
+              onClick={() => unloadDeleteTarget && unloadDeleteMutation.mutate({ sessionIds: unloadDeleteTarget.sessionIds, mode: "replace" })}
+              disabled={unloadDeleteMutation.isPending || isLoadingUnloadDeletePreview}>
+              {unloadDeleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Delete, I'll re-upload"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* ── Deactivate confirmation ── */}
       <AlertDialog open={deactivateTarget !== null} onOpenChange={(open) => { if (!open) setDeactivateTarget(null); }}>
         <AlertDialogContent className="rounded-xl">
@@ -2361,6 +2981,7 @@ export default function OrderImport() {
       </AlertDialog>
 
       <EditCsvDialog sessionId={editSessionId} onClose={() => setEditSessionId(null)} />
+      <EditCsvDialog sessionId={unloadEditSessionId} onClose={() => setUnloadEditSessionId(null)} basePath="unloading" />
       <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} />
     </main>
   );
