@@ -249,12 +249,18 @@ function fmtIST(dt: string | Date | null | undefined): string {
   const s = dt instanceof Date ? dt.toISOString() : String(dt);
   const d = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z");
   if (isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-IN", { timeZone: "UTC" });
+  // Bug: this used to format with timeZone: "UTC", which just re-displayed the raw stored
+  // digits unchanged and labeled them IST. scan_activated_at/scan_completed_at are written
+  // server-side via `new Date()` through node-postgres into a naive `timestamp` column, which
+  // stores true UTC wall-clock digits (see server/routes/order-scan.ts) — so displaying them
+  // meant this page showed a time exactly 5.5 hours BEHIND the real IST time, while ScanViewer
+  // (elsewhere) converted the same underlying instant correctly, hence the two pages disagreeing.
+  return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 }
 
 // "Time taken" — wall-clock time from when a session was activated (opened for scanning) to
 // when it was marked complete. A constant timezone offset cancels out in a subtraction, so this
-// doesn't need fmtIST's UTC-relabeling trick — plain Date parsing is fine here. Same measure
+// doesn't need fmtIST's Asia/Kolkata conversion — plain Date parsing is fine here. Same measure
 // used on Loading's and Unloading's own landing tables.
 function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
   if (!startIso || !endIso) return null;

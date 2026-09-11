@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Result } from "@zxing/library";
+import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Camera, CheckCircle2, ChevronLeft, ChevronRight, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Camera, CheckCircle2, ChevronLeft, ChevronRight, FileBarChart, Keyboard, Loader2, Menu, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
+import { useSidebarContext } from "@/lib/sidebarContext";
 import PageHeader from "@/components/PageHeader";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
-import { matchProductMasterMissingError } from "@/lib/apiError";
+import { matchProductMasterMissingError, matchBarcodeNotInSystemError, parseApiErrorMessage } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -243,7 +245,7 @@ export default function Unloading() {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions/recent-complete"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Failed to reopen", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Failed to reopen", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
   function selectStatusTab(key: "available" | "active" | "completed" | "history" | "recent-complete") {
@@ -276,6 +278,11 @@ export default function Unloading() {
     queryKey: ["/api/unloading/sessions", activeSessionId],
     queryFn: () => apiRequest("GET", `/api/unloading/sessions/${activeSessionId}`).then((r) => r.json()),
     enabled: activeSessionId != null,
+    // Live refresh — while this batch is open, another session (a second scanner on the same
+    // vehicle, an admin edit, a void) can change its progress at any moment. Without this, the
+    // operator only sees fresh numbers after their OWN next scan happens to refetch it — same
+    // fix as Loading's own live slip/items poll (LoadOperation.tsx) and the Scan Viewer's.
+    refetchInterval: 15000,
   });
   const detail = activeSessionQuery.data;
   const locked = detail?.session?.scanStatus === "completed";
@@ -313,6 +320,17 @@ export default function Unloading() {
   const rotateNext = () => setRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
+  // Rotated kiosk mode is a fixed, full-viewport overlay, so it sits on top of Layout's own
+  // sidebar toggle — this floating button (same trick as the rotate button itself: fixed inside
+  // the rotated container, so it turns with the content) reopens a path back to real navigation.
+  const { openMobileMenu, openSidebar, setKioskRotateClass: setSidebarKioskRotateClass } = useSidebarContext();
+  // Keeps Layout's sidebar turning in sync with this page's own rotation, so opening it while
+  // rotated doesn't pop it up unrotated on top of everything else. Cleared on unmount — leaving
+  // a stale rotation class behind would wrongly rotate the sidebar on whatever page loads next.
+  useEffect(() => {
+    setSidebarKioskRotateClass(kioskRotateClass);
+    return () => setSidebarKioskRotateClass("");
+  }, [kioskRotateClass, setSidebarKioskRotateClass]);
   const quarterTurn = rotation === 90 || rotation === 270;
   // Natural portrait (window taller than wide) — a tablet or laptop turned upright should get the
   // same single-column layout as manual Rotate, just without the 90° CSS turn, since the screen is
@@ -432,7 +450,7 @@ export default function Unloading() {
 
   const activateMutation = useMutation({
     mutationFn: (id: number) => apiRequest("POST", `/api/unloading/sessions/${id}/activate`, {}, false, true),
-    onError: (error: any) => toast({ title: "Can't start yet", description: error?.message || "This batch can't be activated right now.", variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Can't start yet", description: parseApiErrorMessage(error) || "This batch can't be activated right now.", variant: "destructive" }),
   });
 
   function enterSession(id: number) {
@@ -492,6 +510,31 @@ export default function Unloading() {
     return p?.isAutoScanEnabled === true;
   })();
 
+  // Pallet size is a per-STATE fact (products.gjPlt/mpPlt), not per-plant — a plant just knows
+  // which state it's in (plants.state). Same pair Order Scan uses (getPlantState/
+  // getStatePalletSize in Scan.tsx) — itemsPerPallet ("Packets" in the Product Master UI) is a
+  // different concept and is NOT an equivalent fallback for the actual pallet size.
+  const getPlantState = (plantName: string): string | null => {
+    const name = (plantName ?? "").trim().toLowerCase();
+    if (!name || !allPlants) return null;
+    const match = allPlants.find((p: any) => String(p.name ?? "").trim().toLowerCase() === name);
+    const state = match?.state;
+    return state ? String(state).trim().toUpperCase() : null;
+  };
+  const getStatePalletSize = (product: Product | null, stateCode: string | null): number => {
+    if (!product) return 0;
+    if (stateCode === "GJ") return Number(product.gjPlt) || 0;
+    if (stateCode === "MP") return Number(product.mpPlt) || 0;
+    return 0;
+  };
+  // For an item not in this vehicle's batch: no server-resolved snapshot to start from (unlike
+  // a matched SessionItem), so this is just the GJ/MP-PLT override, or 1 when the product has
+  // none defined for this plant's state.
+  const extraProductPalletSize = (product: Product | null): number => {
+    const state = getPlantState(detail?.session?.plant ?? "");
+    return Math.max(1, getStatePalletSize(product, state) || 1);
+  };
+
   const scanMutation = useMutation({
     mutationFn: ({ barcode, qty, stv }: { barcode: string; qty: number; stv?: string | null }) =>
       apiRequest("POST", `/api/unloading/sessions/${activeSessionId}/scan`, { barcode, qty, stv: stv ?? null }, false, true),
@@ -517,11 +560,14 @@ export default function Unloading() {
     onError: (error: any) => {
       const productMasterMissing = matchProductMasterMissingError(error);
       if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
-      toast({ title: "Scan failed", description: error?.message || "Could not record scan", variant: "destructive" });
+      const barcodeNotInSystem = matchBarcodeNotInSystemError(error);
+      if (barcodeNotInSystem) { setBarcodeNotInSystemMessage(barcodeNotInSystem); return; }
+      toast({ title: "Scan failed", description: parseApiErrorMessage(error) || "Could not record scan", variant: "destructive" });
     },
     onSettled: () => { scanLockRef.current = false; },
   });
   const [productMasterMissingMessage, setProductMasterMissingMessage] = useState<string | null>(null);
+  const [barcodeNotInSystemMessage, setBarcodeNotInSystemMessage] = useState<string | null>(null);
 
   // ─── Manual/Camera barcode input, same-barcode cooldown, auto-scan popup — mirrors
   // client/src/pages/Loading/LoadOperation.tsx's item-scanning UX exactly. ─────────────────────
@@ -562,21 +608,29 @@ export default function Unloading() {
   const lastScanRef = useRef<{ barcode: string; at: number } | null>(null);
   const SAME_BARCODE_COOLDOWN_MS = 5000;
 
-  const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null } | null>(null);
+  // product: the resolved Product Master row when the barcode isn't on this vehicle's batch at
+  // all (pending.item null) — carries name/SAP/itemsPerPallet so the dialog can still show a
+  // real identity and default the qty to a full pallet, same as Order Scan's own
+  // inventoryProduct for an unmatched scan, instead of a bare barcode defaulting to 1.
+  const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null; product: Product | null } | null>(null);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
-  const [dialogImageFailed, setDialogImageFailed] = useState(false);
-  useEffect(() => { setDialogImageFailed(false); }, [pending]);
-  const dialogPlt = pending?.item?.itemsPerPallet ?? 0;
-  const dialogResolvedImageName = pending?.item?.itemName ?? pending?.barcode;
+  // Tracks WHICH resolved name last failed to load, not a plain boolean — a boolean reset by a
+  // useEffect on [pending] left a one-render gap where a new dialog's very first paint still
+  // read the PREVIOUS item's "failed" flag (effects run after render, not before it), hiding an
+  // image that would have loaded fine. Comparing against the current name is race-free: a new
+  // name is never treated as failed until it specifically fails.
+  const [dialogImageFailed, setDialogImageFailed] = useState<string | null>(null);
+  const dialogPlt = pending?.item?.itemsPerPallet ?? (pending?.product ? extraProductPalletSize(pending.product) : 0);
+  const dialogResolvedImageName = pending?.item?.itemName ?? pending?.product?.name ?? pending?.barcode;
 
   const [autoFeedback, setAutoFeedback] = useState<
-    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean } | null
+    { name: string; barcode: string; sapCode: string | null; scannedQty: number; remaining: number; isExtra: boolean; productId: number | null } | null
   >(null);
   const autoFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  function showAutoFeedback(name: string, barcode: string, sapCode: string | null, scannedQty: number, remaining: number, isExtra: boolean) {
+  function showAutoFeedback(name: string, barcode: string, sapCode: string | null, scannedQty: number, remaining: number, isExtra: boolean, productId: number | null) {
     if (autoFeedbackTimerRef.current) clearTimeout(autoFeedbackTimerRef.current);
-    setAutoFeedback({ name, barcode, sapCode, scannedQty, remaining, isExtra });
+    setAutoFeedback({ name, barcode, sapCode, scannedQty, remaining, isExtra, productId });
     autoFeedbackTimerRef.current = setTimeout(() => setAutoFeedback(null), 5000);
   }
 
@@ -585,19 +639,43 @@ export default function Unloading() {
     setItemCameraReady(false);
   }
 
-  function defaultDialogQty(item: SessionItem | null): number {
-    if (!item) return 1;
-    const ipp = item.itemsPerPallet || 1;
+  // ipp: item's own server-resolved snapshot when matched to this batch, else the GJ/MP-PLT
+  // override for the resolved Product Master row (NOT its plain itemsPerPallet — that field is
+  // "Packets" in the Product Master UI, a different concept from the actual pallet size) — same
+  // "full pallet, unless a partial amount is genuinely all that's left" rule either way.
+  function defaultDialogQty(item: SessionItem | null, product: Product | null): number {
+    const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 1);
+    if (!item) return ipp;
     return item.remaining > 0 && item.remaining < ipp ? item.remaining : ipp;
   }
-  function openConfirmDialog(barcode: string, item: SessionItem | null) {
-    const qty = defaultDialogQty(item);
+  function openConfirmDialog(barcode: string, item: SessionItem | null, product: Product | null) {
+    const qty = defaultDialogQty(item, product);
+    const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 0);
     setDialogQty(qty);
-    setDialogPalletsInput(item && item.itemsPerPallet > 0 ? (qty / item.itemsPerPallet).toFixed(2) : "");
-    setPending({ barcode, item });
+    setDialogPalletsInput(ipp > 0 ? (qty / ipp).toFixed(2) : "");
+    setPending({ barcode, item, product });
   }
 
-  function handleItemBarcode(rawBarcode: string) {
+  // A 404 here means this barcode genuinely isn't a real product at all — anything else
+  // (network hiccup, 500) shouldn't block a legitimate scan on our own connectivity/lookup
+  // failure, so those are treated as "assume known" rather than risk a false block (product
+  // comes back null in that case too — there's nothing to show, but the scan isn't refused).
+  // Any failure here — a clean 404, or anything else (a timeout, a gateway error under
+  // production load, an odd/garbage barcode string) — means "not known": there's nothing
+  // legitimate to log either way, and letting an ambiguous error through as "assume it's a real
+  // product, log it as an extra" was actually the worse failure mode (silently opening a qty
+  // dialog for garbage input instead of a clear rejection the operator can just retry).
+  async function resolveProduct(barcode: string): Promise<{ known: boolean; product: Product | null }> {
+    try {
+      const plant = detail?.session?.plant ? `?plant=${encodeURIComponent(detail.session.plant)}` : "";
+      const res = await apiRequest("GET", `/api/products/barcode/${encodeURIComponent(barcode)}${plant}`);
+      return { known: true, product: await res.json() };
+    } catch {
+      return { known: false, product: null };
+    }
+  }
+
+  async function handleItemBarcode(rawBarcode: string) {
     const barcode = rawBarcode.trim();
     if (!barcode || !detail || locked || scanLockRef.current || pending) return;
 
@@ -615,18 +693,35 @@ export default function Unloading() {
     scanLockRef.current = true;
     scanItemRef.current = item;
 
+    // Not in this vehicle's batch — before walking the user through picking an STV/qty to
+    // "log as Extra", resolve whether it's even a real product at all, and if so pull its own
+    // Product Master details (name/SAP/itemsPerPallet) so the dialog can still show a real
+    // identity and default the qty to a full pallet — same as Order Scan's own inventoryProduct
+    // fallback for an unmatched scan — instead of a bare barcode defaulting to 1.
+    let resolvedProduct: Product | null = null;
+    if (!item) {
+      const { known, product } = await resolveProduct(barcode);
+      if (!known) {
+        scanLockRef.current = false;
+        setItemBarcode("");
+        setBarcodeNotInSystemMessage(`"${barcode}" is not in this vehicle's batch and not in Product Master. It cannot be scanned.`);
+        return;
+      }
+      resolvedProduct = product;
+    }
+
     const ipp = item?.itemsPerPallet ?? 0;
     const canAutoScan = autoScanEnabled && !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
       scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null }, {
-        onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra),
+        onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra, data.event.productId),
       });
       setItemBarcode("");
       return;
     }
 
     scanLockRef.current = false;
-    openConfirmDialog(barcode, item);
+    openConfirmDialog(barcode, item, resolvedProduct);
     setItemBarcode("");
   }
 
@@ -695,7 +790,7 @@ export default function Unloading() {
       if (activeSessionId != null) queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Void failed", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Void failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
   // Confirmation dialog before completing — same "Complete this part?" pattern as Order Scan's
@@ -709,7 +804,7 @@ export default function Unloading() {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Failed", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
   const reopenMutation = useMutation({
     mutationFn: () => apiRequest("POST", `/api/unloading/sessions/${activeSessionId}/reopen`, {}),
@@ -718,7 +813,7 @@ export default function Unloading() {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Failed", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
   // ─── Reports — same dialog Order Import uses (Summary/Activity/Hourly, per-part + whole-group),
@@ -743,7 +838,7 @@ export default function Unloading() {
       setDeleteTarget(null);
       if (view === "scan") backToList(); else queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
     },
-    onError: (error: any) => toast({ title: "Delete failed", description: error?.message, variant: "destructive" }),
+    onError: (error: any) => toast({ title: "Delete failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
   // canActivate only matters for 'available' rows — an available batch that's next in line
@@ -768,9 +863,10 @@ export default function Unloading() {
   // Widths kept compact (total ~660px, close to Order Scan's own kiosk table's 640px) so the
   // rotated/kiosk view never needs horizontal scrolling — DataTable floors the table at the sum
   // of every column's width, so a narrower baseline here is what keeps it fitting in a rotated
-  // viewport instead of scrolling sideways. Text sizes bumped a step up from the original 10-11px
-  // micro-text in both views; the existing global .kiosk-rotate-* CSS (index.css) bumps these
-  // again automatically while rotated, on top of this baseline increase.
+  // viewport instead of scrolling sideways. Text sizes dropped one Tailwind step back down from
+  // an earlier bump (text-base/text-lg felt oversized outside the kiosk/rotated view) — the
+  // existing global .kiosk-rotate-* CSS (index.css) still bumps these up automatically while
+  // rotated, independent of this baseline.
   const itemColumns: DataTableColumn<SessionItem>[] = [
     {
       id: "item",
@@ -780,11 +876,11 @@ export default function Unloading() {
       minWidth: 140,
       render: (row) => (
         <div>
-          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug text-base">{row.itemName ?? "—"}</p>
-          <p className="text-gray-400 font-mono whitespace-normal break-words text-sm">
+          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug text-sm">{row.itemName ?? "—"}</p>
+          <p className="text-gray-400 font-mono whitespace-normal break-words text-xs">
             {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
           </p>
-          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold mt-0.5 text-sm">{row.itemsPerPallet} per pallet</p>}
+          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold mt-0.5 text-xs">{row.itemsPerPallet} per pallet</p>}
         </div>
       ),
     },
@@ -793,8 +889,8 @@ export default function Unloading() {
       accessor: (row) => row.expected,
       render: (row) => (
         <>
-          <span className="block text-lg font-semibold">{row.expected || "—"}</span>
-          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.expected, row.itemsPerPallet)} plt</span>
+          <span className="block text-base font-semibold">{row.expected || "—"}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.expected, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
@@ -804,8 +900,8 @@ export default function Unloading() {
       cellClassName: "font-semibold text-gray-900",
       render: (row) => (
         <>
-          <span className="block text-lg">{row.scanned}</span>
-          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.scanned, row.itemsPerPallet)} plt</span>
+          <span className="block text-base">{row.scanned}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.scanned, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
@@ -814,8 +910,8 @@ export default function Unloading() {
       accessor: (row) => row.remaining,
       render: (row) => (
         <>
-          <span className={`block text-lg font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
-          <span className="block text-sm font-semibold text-gray-400">{palletsOf(row.remaining, row.itemsPerPallet)} plt</span>
+          <span className={`block text-base font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
+          <span className="block text-xs font-semibold text-gray-400">{palletsOf(row.remaining, row.itemsPerPallet)} plt</span>
         </>
       ),
     },
@@ -826,8 +922,8 @@ export default function Unloading() {
         const extra = Math.max(0, row.scanned - row.expected);
         return (
           <>
-            <span className={`block text-lg ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>
-            <span className="block text-sm font-semibold text-gray-400">{palletsOf(extra, row.itemsPerPallet)} plt</span>
+            <span className={`block text-base ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>
+            <span className="block text-xs font-semibold text-gray-400">{palletsOf(extra, row.itemsPerPallet)} plt</span>
           </>
         );
       },
@@ -838,7 +934,7 @@ export default function Unloading() {
       render: (row) => {
         const status = row.isComplete ? "complete" : row.scanned > 0 ? "partial" : "pending";
         return (
-          <span className={`inline-block font-semibold px-2 py-1 text-sm rounded ${
+          <span className={`inline-block font-semibold px-2 py-1 text-xs rounded ${
             status === "complete" ? "bg-emerald-100 text-emerald-700" :
             status === "partial" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
           }`}>
@@ -941,24 +1037,48 @@ export default function Unloading() {
     <div className="flex items-center gap-2">
       <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
       {stvs.length > 0 ? (
-        <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
-          {/* Amber when nothing is picked — scanning is blocked until it is (see
-              handleItemBarcode's "Select an STV before scanning" toast), so the control has to
-              read as needing attention, not as an idle dropdown. */}
-          <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
-            selectedStv
-              ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
-              : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
-          }`}>
-            <SelectValue placeholder="Select STV…" />
-          </SelectTrigger>
-          <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
-            <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+        rotated ? (
+          // Rotated: a plain native <select> instead of the Radix popover below — rotating a
+          // portalled popover to match the kiosk transform is unreliable (Radix positions it
+          // against the ALREADY-rotated trigger's real on-screen rect, then this codebase's own
+          // extra CSS rotation on the popover panel swings that correctly-placed box out to a
+          // different spot, which is what left part of it inside the rotated container's bounds
+          // and part of it clipped). A native select renders as an OS-level overlay entirely
+          // outside the page's own rotated DOM, so it's immune to this whole class of bug.
+          <select
+            value={selectedStv || NO_STV}
+            onChange={(e) => setSelectedStv(e.target.value === NO_STV ? "" : e.target.value)}
+            className={`h-7 w-36 rounded-full border px-2 text-center text-xs font-semibold ${
+              selectedStv
+                ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
+                : "border-amber-400 bg-amber-50 text-amber-800"
+            }`}
+          >
+            <option value={NO_STV}>— Select STV —</option>
             {stvs.map((st) => (
-              <SelectItem key={st} value={st}>{st}</SelectItem>
+              <option key={st} value={st}>{st}</option>
             ))}
-          </SelectContent>
-        </Select>
+          </select>
+        ) : (
+          <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
+            {/* Amber when nothing is picked — scanning is blocked until it is (see
+                handleItemBarcode's "Select an STV before scanning" toast), so the control has to
+                read as needing attention, not as an idle dropdown. */}
+            <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
+              selectedStv
+                ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
+                : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+            }`}>
+              <SelectValue placeholder="Select STV…" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+              {stvs.map((st) => (
+                <SelectItem key={st} value={st}>{st}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )
       ) : !stvsQuery.isLoading && (
         <span className="rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
           No STV — create one in Plant Settings
@@ -995,29 +1115,37 @@ export default function Unloading() {
             covers this header once rotated — hide it then and fold the page's identity into the
             rotated box's own header (the "Unloading" eyebrow above "Vehicles") instead, so the
             title stays visible rather than sitting hidden behind the fixed overlay. */}
-        {!rotated && (
-          <div className="space-y-2">
-            {/* Back to list sits above the title so the title row itself stays one clean identity
-                line: the vehicle on the bay and when/where, with status, STV and Complete
-                opposite it. */}
-            {view === "scan" && scanBackButton}
-            <PageHeader
-              // On the list this is the page; on a batch it's the vehicle, which is what the
-              // operator is actually looking at.
-              icon={view === "scan" ? Truck : PackageOpen}
-              title={view === "scan" && scanSession ? scanSession.vehicleNumber : "Unloading"}
-              // Only on the list, where it's the instruction for what to do next. Once a vehicle
-              // is on the bay it's stale advice taking a line under the batch you're scanning.
-              description={view === "list" ? "Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock." : undefined}
-              actions={view === "scan" ? scanStatusActions : undefined}
-            >
-              {view === "scan" ? scanVehicleSummary : undefined}
-            </PageHeader>
+        {!rotated && view === "list" && (
+          <PageHeader
+            icon={PackageOpen}
+            title="Unloading"
+            description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
+          />
+        )}
+
+        {/* Scan view: Back to List, the vehicle, and when/where all on one identity line —
+            same compact single-row header the Loading page's own scan view uses — instead of
+            Back to List sitting alone on a line above it. */}
+        {!rotated && view === "scan" && scanSession && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-sm">
+            {scanBackButton}
+            {scanVehicleTitle}
+            {scanVehicleSummary}
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
           </div>
         )}
 
         {view === "list" && (
           <div className={`${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            {rotated && (
+              <button
+                onClick={() => { openMobileMenu(); openSidebar(); }}
+                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+                title="Open sidebar menu"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+            )}
             <button
               onClick={rotateNext}
               className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -1036,6 +1164,13 @@ export default function Unloading() {
                 )}
                 <div className="text-lg font-bold text-[#001d6e]">Vehicles</div>
                 <div className="text-xs text-gray-400">{total} part(s){sessionPlantFilter ? ` · ${sessionPlantFilter}` : ""}</div>
+                {/* The unrotated PageHeader's own description — rotated has no PageHeader to
+                    show it (the fixed overlay covers it), so it's easy to lose here entirely. */}
+                {rotated && (
+                  <p className="mt-1 max-w-xs text-xs text-gray-500">
+                    Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock.
+                  </p>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 {importablePlants.length > 1 && (
@@ -1213,19 +1348,23 @@ export default function Unloading() {
                 <table className="w-full min-w-full caption-bottom border-collapse text-xs">
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">
+                      {/* Sr. No/Batch/Time Taken used to drop in bigView (a rotated kiosk's
+                          short side couldn't fit all 9 columns without horizontal scroll) — now
+                          always shown, matching the desktop table exactly; kioskTableBoxClass's
+                          own scroll container handles any overflow instead. */}
                       <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">
                         <span title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">
                           Batch
                         </span>
                       </th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Status</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Progress</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Status</th>
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Progress</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
-                      <th className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
+                      <th className="whitespace-nowrap px-2 sm:px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1237,9 +1376,9 @@ export default function Unloading() {
                             className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${s.scanStatus === "active" ? "bg-emerald-50/60" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                           >
                             <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-400 tabular-nums">{offset + i + 1}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{s.orderDate}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2"><PlantBadge plant={s.plant} /></td>
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 text-gray-700">{s.orderDate}</td>
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2"><PlantBadge plant={s.plant} /></td>
                             <td className="border-r border-b border-gray-200 px-3 py-2">
                               {s.partsCount > 1 ? (
                                 <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex} of {s.partsCount}</span>
@@ -1247,12 +1386,12 @@ export default function Unloading() {
                                 <span className="text-gray-400">—</span>
                               )}
                             </td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2">{statusBadge(s.scanStatus, s.canActivate)}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{s.scannedQty} / {s.expectedQty}</td>
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2">{statusBadge(s.scanStatus, s.canActivate)}</td>
+                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 text-gray-700 tabular-nums">{s.scannedQty} / {s.expectedQty}</td>
                             <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">
                               {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
                             </td>
-                            <td className="border-b border-gray-200 px-3 py-2 text-right">
+                            <td className="border-b border-gray-200 px-2 sm:px-3 py-2 text-right">
                               <div className="flex items-center justify-end gap-1.5">
                                 <Button
                                   size="sm" variant="outline" className="h-7 text-xs"
@@ -1354,6 +1493,15 @@ export default function Unloading() {
 
         {view === "scan" && (
           <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            {rotated && (
+              <button
+                onClick={() => { openMobileMenu(); openSidebar(); }}
+                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+                title="Open sidebar menu"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+            )}
             <button
               onClick={rotateNext}
               className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -1361,24 +1509,16 @@ export default function Unloading() {
             >
               <RotateCw className="h-5 w-5" />
             </button>
-            {/* ── Rotated kiosk mode only. Unrotated, this whole header lives on the page's
-                PageHeader above; rotated, the fixed rotate overlay covers that, so the back
-                button, vehicle identity and the STV/status/Complete group fold into a card here
-                instead — same order, so the two orientations read the same. ── */}
+            {/* ── Rotated kiosk mode only. Unrotated, this whole header lives on the page's own
+                compact scan-header row above; rotated, the fixed rotate overlay covers that, so
+                the same pieces fold into a card here instead — same single merged row, so the
+                two orientations read the same. ── */}
             {rotated && (
-              <div className="space-y-2 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
-                {/* Same order the unrotated PageHeader uses: Back to list on its own line at the
-                    top, then one identity line — the vehicle and when/where — with status, STV
-                    and Complete opposite it. */}
+              <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
                 {scanBackButton}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    {scanVehicleTitle}
-                    {scanVehicleSummary && <span className="text-gray-300">&middot;</span>}
-                    {scanVehicleSummary}
-                  </div>
-                  <div className="flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
-                </div>
+                {scanVehicleTitle}
+                {scanVehicleSummary}
+                <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
               </div>
             )}
 
@@ -1626,7 +1766,12 @@ export default function Unloading() {
                       </div>
                       <div className="flex flex-1 gap-5 items-start pt-4">
                         <img
-                          src={`/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`}
+                          key={autoFeedback.productId ?? autoFeedback.barcode}
+                          src={
+                            autoFeedback.productId != null
+                              ? `/api/products/image-by-id?id=${autoFeedback.productId}`
+                              : `/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`
+                          }
                           alt=""
                           className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
                           onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
@@ -1670,14 +1815,21 @@ export default function Unloading() {
               layout as Order Scan's own confirm dialog (client/src/pages/Scanning/Scan.tsx). Under
               rotate-90, CSS-left maps to physical-top, so image-left reads as image-on-top. */}
           <div className="flex flex-col sm:flex-row">
-            {dialogResolvedImageName && !dialogImageFailed && (
+            {dialogResolvedImageName && dialogImageFailed !== dialogResolvedImageName && (
               <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
                 <img
                   key={dialogResolvedImageName}
-                  src={`/api/products/image-by-name?name=${encodeURIComponent(dialogResolvedImageName)}`}
+                  // pending.product's own id is stable across a rename — prefer it whenever
+                  // it's resolved (always true for "not in this batch"; a matched item has no
+                  // product id of its own yet, so it still falls back to the name lookup).
+                  src={
+                    pending?.product
+                      ? `/api/products/image-by-id?id=${pending.product.id}`
+                      : `/api/products/image-by-name?name=${encodeURIComponent(dialogResolvedImageName)}`
+                  }
                   alt=""
                   className="max-h-96 w-full object-contain sm:max-h-full"
-                  onError={() => setDialogImageFailed(true)}
+                  onError={() => setDialogImageFailed(dialogResolvedImageName)}
                 />
               </div>
             )}
@@ -1689,16 +1841,16 @@ export default function Unloading() {
               : "text-[#001d6e]"
             }`}>
               {!pending?.item
-                ? <><AlertTriangle className="h-7 w-7" /> Not on manifest</>
+                ? <><AlertTriangle className="h-7 w-7" /> Not in this batch</>
                 : pending.item.isComplete
                   ? <><AlertTriangle className="h-7 w-7" /> Extra item</>
                   : <><CheckCircle2 className="h-7 w-7" /> Match found</>}
             </DialogTitle>
             <DialogDescription className="text-left space-y-1.5 min-w-0 pt-3">
-              <p className="font-bold text-gray-900 text-2xl leading-snug">{pending?.item?.itemName ?? pending?.barcode}</p>
+              <p className="font-bold text-gray-900 text-2xl leading-snug">{pending?.item?.itemName ?? pending?.product?.name ?? pending?.barcode}</p>
               <p className="font-mono text-lg text-gray-400">{pending?.barcode}</p>
               {!pending?.item && (
-                <p className="text-lg text-red-600 mt-1">Not on this vehicle's manifest — will be logged as an extra.</p>
+                <p className="text-lg text-red-600 mt-1">Not in this vehicle's batch — will be logged as an extra.</p>
               )}
               {pending?.item?.isComplete && (
                 <p className="text-lg text-amber-600 mt-1">Item already complete — these extra units will be logged separately.</p>
@@ -1707,6 +1859,19 @@ export default function Unloading() {
           </DialogHeader>
 
           <div className="space-y-4 py-1">
+            {/* Not in this batch, but a real Product Master row — same info box shape as a
+                matched item, just SAP + pallet size (there's no Expected/Received/Remaining to
+                show without a batch row backing it). */}
+            {!pending?.item && pending?.product && (
+              <div className="rounded-xl bg-gray-50 px-4 py-3 text-base text-gray-600 space-y-1.5">
+                {pending.product.sapCode && (
+                  <p>SAP: <span className="font-mono font-bold text-gray-700">{pending.product.sapCode}</span></p>
+                )}
+                {extraProductPalletSize(pending.product) > 0 && (
+                  <p>Items per pallet: <strong>{extraProductPalletSize(pending.product)}</strong></p>
+                )}
+              </div>
+            )}
             {pending?.item && (
               <div className="rounded-xl bg-gray-50 px-4 py-3 text-base text-gray-600 space-y-1.5">
                 {pending.item.sapCode && (
@@ -1919,6 +2084,7 @@ export default function Unloading() {
 
       <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} basePath="unloading" />
       <ProductMasterMissingDialog message={productMasterMissingMessage} onClose={() => setProductMasterMissingMessage(null)} />
+      <ProductMasterMissingDialog message={barcodeNotInSystemMessage} onClose={() => setBarcodeNotInSystemMessage(null)} title="Barcode Not Found" />
 
       {/* ── Delete confirmation — replace (soft, carries forward on re-upload) vs discard
           (reverses stock, voids history, self-resolves) ─────────────────────────────────── */}

@@ -252,7 +252,7 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import-edit')
             const newOrderQty = Math.min(physicalQty, quantity);
             const newExtraQty = physicalQty - newOrderQty;
 
-            const product = await storage.getProductByBarcode(barcode);
+            const product = await storage.getProductByBarcode(barcode, session.plant);
             const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, quantity);
 
             await resplitUnloadEventsExtraFlag(client, eventRows, newOrderQty, itemsPerPallet);

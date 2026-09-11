@@ -613,16 +613,27 @@ const Reports = () => {
   const [editFilterKey, setEditFilterKey] = useState("");
   const editFilterColumn = filterableColumns.find((c) => c.id === editFilterKey) ?? null;
 
-  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(
-    () => new Set(HISTORY_OPTIONAL_COLUMNS),
-  );
+  // Column visibility/order are real preferences, not working context for one sitting — saved to
+  // localStorage (not sessionStorage) so choosing which columns to see survives closing the
+  // browser/logging out, and only changes again when the user actually touches it here.
+  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("scanHistory:visibleColumnIds");
+      const parsed = raw ? JSON.parse(raw) : null;
+      return Array.isArray(parsed) ? new Set(parsed) : new Set(HISTORY_OPTIONAL_COLUMNS);
+    } catch {
+      return new Set(HISTORY_OPTIONAL_COLUMNS);
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("scanHistory:visibleColumnIds", JSON.stringify(Array.from(visibleColumnIds))); } catch { /* storage unavailable */ }
+  }, [visibleColumnIds]);
 
-  // Column order, remembered per page. Kept in the same session-scoped storage the filters use —
-  // a rearranged table is working context for this sitting, not a permanent preference. An empty
-  // array means "declared order", which is also what Reset order restores.
+  // Column order, remembered per page. An empty array means "declared order", which is also what
+  // Reset order restores.
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     try {
-      const raw = sessionStorage.getItem("scanHistory:columnOrder");
+      const raw = localStorage.getItem("scanHistory:columnOrder");
       const parsed = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -630,7 +641,7 @@ const Reports = () => {
     }
   });
   useEffect(() => {
-    try { sessionStorage.setItem("scanHistory:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("scanHistory:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
   }, [columnOrder]);
 
   const toggleColumn = (key: string) =>

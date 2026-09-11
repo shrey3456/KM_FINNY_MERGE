@@ -29,3 +29,28 @@ export function matchProductMasterMissingError(error: unknown): string | null {
   if (!message.startsWith(PRODUCT_MASTER_MISSING_PREFIX)) return null;
   return message.slice(PRODUCT_MASTER_MISSING_PREFIX.length).trim();
 }
+
+// The sibling rejection: a barcode that's on NEITHER the manifest/order NOR in Product Master at
+// all — Loading and Unloading's own /scan handlers already refuse this outright (a 400, tagged
+// with this prefix the same way PRODUCT_MASTER_MISSING is); this just lets the client recognize
+// it and show the same centered popup (ProductMasterMissingDialog, with its "Barcode Not Found"
+// title) instead of the ordinary error toast. Order Scan has no equivalent — an unmatched
+// barcode there is deliberately allowed through as a plain Extra, not rejected.
+const BARCODE_NOT_IN_SYSTEM_PREFIX = "BARCODE_NOT_IN_SYSTEM:";
+export function matchBarcodeNotInSystemError(error: unknown): string | null {
+  const message = parseApiErrorMessage(error);
+  if (!message.startsWith(BARCODE_NOT_IN_SYSTEM_PREFIX)) return null;
+  return message.slice(BARCODE_NOT_IN_SYSTEM_PREFIX.length).trim();
+}
+
+// Loading's own rule: a regular scan that would produce any extra quantity (barcode not on the
+// slip at all, or qty beyond what's still remaining for that item) is refused outright rather
+// than silently logged as an extra — the operator has to use the dedicated "Add Extra" flow
+// instead. Tagged the same way as the two matchers above so LoadOperation.tsx's onError can
+// recognize it and show the same centered popup instead of the ordinary error toast.
+const EXTRA_NOT_ALLOWED_PREFIX = "EXTRA_NOT_ALLOWED:";
+export function matchExtraNotAllowedError(error: unknown): string | null {
+  const message = parseApiErrorMessage(error);
+  if (!message.startsWith(EXTRA_NOT_ALLOWED_PREFIX)) return null;
+  return message.slice(EXTRA_NOT_ALLOWED_PREFIX.length).trim();
+}

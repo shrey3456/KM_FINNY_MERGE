@@ -207,6 +207,42 @@ router.get('/products/image-by-name', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/products/image-by-id?id=...
+// Same as image-by-name above, but keyed on the product's own (stable, unique) primary key
+// instead of its name — immune to a product being renamed (a Notion resync, a typo fix), which
+// silently broke image-by-name's lookup even though the cached file itself never moved. Prefer
+// this everywhere a full Product row is already in hand; image-by-name stays as-is for the
+// scan-feedback popups that currently only have a bare item name (see notionPageId/productId
+// follow-up in server/routes/loading.ts's own /scan response for those).
+router.get('/products/image-by-id', async (req: Request, res: Response) => {
+  try {
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+    const id = parseInt(String(req.query.id ?? ''), 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id is required' });
+
+    const product = await storage.getProduct(id);
+    if (!product?.productImage || !product.productImageHash) {
+      return res.status(404).json({ message: 'No image for this product' });
+    }
+
+    res.set({
+      'Cache-Control': 'public, max-age=3600',
+      'ETag': product.productImageHash,
+    });
+    if (req.headers['if-none-match'] === product.productImageHash) {
+      return res.status(304).end();
+    }
+
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), (err) => {
+      if (err && !res.headersSent) res.status(404).json({ message: 'Image file missing' });
+    });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve product image' });
+  }
+});
+
 // POST /api/products/csv-import
 router.post('/products/csv-import', requireAdminRole, async (req: Request, res: Response) => {
   try {

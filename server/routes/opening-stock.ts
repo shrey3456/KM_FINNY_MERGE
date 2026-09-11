@@ -73,7 +73,7 @@ router.post('/opening-stock/import', requireAdminRole, async (req: Request, res:
 
     let rowsSet = 0;
     for (const row of rows) {
-      const product = await storage.getProductByBarcode(row.barcode);
+      const product = await storage.getProductByBarcode(row.barcode, plant);
       // Fold any stock still parked under a stale (old) barcode for this product into the
       // current one first — otherwise it's left behind as an orphaned phantom row once this
       // import overwrites the current barcode's own value. See stockBarcodeReconcile.ts.
