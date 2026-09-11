@@ -30,6 +30,10 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  // Pushed up by whichever page is active (Loading/Unloading/Scan) via
+  // useSidebarContext().setKioskRotateClass, so the sidebar rotates WITH the page's own
+  // rotated content instead of popping up unrotated on top of it. Empty when not rotated.
+  const [kioskRotateClass, setKioskRotateClass] = useState("");
   // Scanning pages: let the operator collapse the "Welcome" header to reclaim vertical space for
   // the items table. Remembered across reloads since a scanning station keeps the same preference
   // — one shared key rather than one per page, because it's the same physical station either way.
@@ -67,13 +71,31 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
     setSidebarVisible(newVisibility);
     localStorage.setItem('sidebarVisible', newVisibility.toString());
   };
+  // Unconditionally shows the desktop sidebar (not a toggle) — what a kiosk-rotate page's
+  // floating button needs: it should always mean "show me the sidebar", never accidentally
+  // hide an already-visible one.
+  const openSidebar = () => {
+    setSidebarVisible(true);
+    localStorage.setItem('sidebarVisible', 'true');
+  };
 
   return (
-    <SidebarContext.Provider value={{ openMobileMenu: () => setMobileMenuOpen(true) }}>
+    <SidebarContext.Provider value={{ openMobileMenu: () => setMobileMenuOpen(true), openSidebar, setKioskRotateClass }}>
     <div className="flex h-screen overflow-hidden bg-white">
-      {/* Sidebar for desktop - conditionally shown based on sidebarVisible state */}
+      {/* Sidebar for desktop - conditionally shown based on sidebarVisible state.
+          relative z-40: Loading/Unloading/Scan's kiosk-rotate wrapper (index.css) is a fixed,
+          full-viewport overlay at z-index 30 — without a higher z-index here, opening the
+          sidebar via a rotated page's floating menu button correctly flipped sidebarVisible to
+          true, but the sidebar itself stayed invisible, painted UNDER that overlay. Safe here
+          (unlike raising the thin header bar, which left a stray border sliver at the seam
+          where its elevated strip met the un-elevated main content below it) because this is a
+          solid, full-height panel with no such boundary to leak through.
+          kioskRotateClass (pushed up by the active page) turns the sidebar to match — it's the
+          exact same fixed/rotated box the page's own content uses, so the sidebar's normal
+          top-left-anchored column just keeps its usual position inside that rotated box, the
+          same way any other rotated content does. */}
       {sidebarVisible && (
-        <div className="hidden lg:block">
+        <div className={`relative z-40 hidden lg:block ${kioskRotateClass}`}>
           <Sidebar onLogout={onLogout} onCollapse={toggleSidebar} />
         </div>
       )}

@@ -26,11 +26,13 @@ import {
   Zap,
   Eye,
   EyeOff,
+  Menu,
   RotateCw,
   ChevronUp,
 } from "lucide-react";
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
+import { useSidebarContext } from "@/lib/sidebarContext";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
 import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
@@ -445,12 +447,20 @@ export default function ScanOrderPage() {
   }, [osRotation]);
   const osRotateNext = () =>
     setOsRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
+  const { openMobileMenu, openSidebar, setKioskRotateClass: setSidebarKioskRotateClass } = useSidebarContext();
   const osRotated = osRotation !== 0;
   // A quarter turn swaps the screen's axes — what the CSS calls height then runs along the
   // viewport's width. Anything sized in vh/vw has to know which case it's in; a half turn leaves
   // the axes alone and only flips the content.
   const osQuarterTurn = osRotation === 90 || osRotation === 270;
   const kioskRotateClass = osRotated ? `kiosk-rotate-${osRotation}` : "";
+  // Keeps Layout's sidebar turning in sync with this page's own rotation, so opening it while
+  // rotated doesn't pop it up unrotated on top of everything else. Cleared on unmount — leaving
+  // a stale rotation class behind would wrongly rotate the sidebar on whatever page loads next.
+  useEffect(() => {
+    setSidebarKioskRotateClass(kioskRotateClass);
+    return () => setSidebarKioskRotateClass("");
+  }, [kioskRotateClass, setSidebarKioskRotateClass]);
   const osPortalRotate = portalRotateClass(osRotation);
   // Natural portrait orientation (window taller than wide) — a laptop/tablet held or resized to
   // portrait should get the same single-column, larger-text layout as the manual Rotate mode,
@@ -486,13 +496,28 @@ export default function ScanOrderPage() {
         osRotated ? "" : "hidden min-[480px]:block landscape:block"}`
     : "hidden overflow-x-auto min-[480px]:block landscape:block";
   const RotateToggleButton = () => (
-    <button
-      onClick={() => osRotateNext()}
-      className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-      title={`Rotate the screen (now ${osRotation}°) — steps a quarter turn each press, back to 0° after 270°`}
-    >
-      <RotateCw className="h-5 w-5" />
-    </button>
+    <>
+      {/* Rotated kiosk mode is a fixed, full-viewport overlay, so it sits on top of Layout's
+          own sidebar toggle, making it unreachable by a normal click — this button (fixed
+          INSIDE the rotated container, same trick as the rotate button below) reopens the
+          mobile sidebar drawer instead. Same pattern Loading/Unloading's rotate views use. */}
+      {osRotated && (
+        <button
+          onClick={() => { openMobileMenu(); openSidebar(); }}
+          className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+          title="Open sidebar menu"
+        >
+          <Menu className="h-5 w-5" />
+        </button>
+      )}
+      <button
+        onClick={() => osRotateNext()}
+        className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+        title={`Rotate the screen (now ${osRotation}°) — steps a quarter turn each press, back to 0° after 270°`}
+      >
+        <RotateCw className="h-5 w-5" />
+      </button>
+    </>
   );
 
   // ── Rotated-view scroll fix ──────────────────────────────────────────────

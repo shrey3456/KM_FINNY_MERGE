@@ -462,7 +462,7 @@ export default function LoadOperation() {
   // sidebar toggle — this floating button (same trick as the rotate button itself: fixed inside
   // the rotated container, so it turns with the content) reopens a path back to real
   // navigation. Same pattern Unloading's own rotate view already uses.
-  const { openMobileMenu } = useSidebarContext();
+  const { openMobileMenu, openSidebar, setKioskRotateClass: setSidebarKioskRotateClass } = useSidebarContext();
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
   const quarterTurn = rotation === 90 || rotation === 270;
@@ -1464,6 +1464,15 @@ export default function LoadOperation() {
   const isVehicleClaimed = !!slip?.vehicleAssignedByCode;
   const canEditVehicle = !isVehicleClaimed || admin || slip?.vehicleAssignedByCode === currentUser()?.userCode;
 
+  // Keeps Layout's sidebar turning in sync with this page's own rotation. Both the landing list
+  // and the Stage-B scan view now render the same rotated wrapper when `rotated`, so — unlike
+  // the earlier version of this effect — no per-view gating is needed here: `rotated` alone
+  // correctly reflects whether whatever's currently on screen is actually shown rotated.
+  useEffect(() => {
+    setSidebarKioskRotateClass(rotated ? kioskRotateClass : "");
+    return () => setSidebarKioskRotateClass("");
+  }, [rotated, kioskRotateClass, setSidebarKioskRotateClass]);
+
   // Load Totals — same shape/labels as Order Scan's own Order Totals card (Total/Loaded/
   // Remaining/Extra tiles + a progress bar), built from this order's own items instead of
   // duplicating it as three plain Items/Qty/Volume boxes.
@@ -1837,25 +1846,39 @@ export default function LoadOperation() {
   return (
     <div className="flex-1 overflow-y-auto px-2 py-6">
       <div className="w-full space-y-6">
-        {/* Page header only on the list — nothing there competes with it for room. The
-            create/scan view (an open order, often with many items to scroll through) skips it
-            entirely instead; that view's only collapsible header now is the global "Welcome"
-            bar (Layout.tsx's HEADER_HIDEABLE_PATHS), not this one. */}
-        {view === "list" && (
-          <PageHeader
-            icon={Package}
-            title="Loading"
-            description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
-          />
-        )}
-
         {/* ── Landing view — mirrors Load Operations' layout exactly: full-width search, a
              filter row (date + plant + status counters), status tabs, then a desktop table with
-             a mobile card list below it ───────────────────────────────────────────────────── */}
+             a mobile card list below it. Same kiosk-rotate treatment the scan view has, so a
+             wall-mounted station can rotate the landing list too, not just an open order. ──── */}
         {view === "list" && (
-          <>
+          <div className={`space-y-6 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            {rotated && (
+              <button
+                onClick={() => { openMobileMenu(); openSidebar(); }}
+                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+                title="Open sidebar menu"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+            )}
+            <button
+              onClick={rotateNext}
+              className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+              title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
+            >
+              <RotateCw className="h-5 w-5" />
+            </button>
+            {/* Page header only on the list — nothing there competes with it for room. The
+                create/scan view (an open order, often with many items to scroll through) skips
+                it entirely instead; that view's only collapsible header now is the global
+                "Welcome" bar (Layout.tsx's HEADER_HIDEABLE_PATHS), not this one. */}
+            <PageHeader
+              icon={Package}
+              title="Loading"
+              description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
+            />
             {/* Search bar (desktop) */}
-            <div className="w-full hidden xl:block">
+            <div className={`w-full ${bigView ? "hidden" : "hidden xl:block"}`}>
               <Input
                 placeholder="Search by order number, party name, vehicle or status..."
                 value={listSearch}
@@ -1926,7 +1949,7 @@ export default function LoadOperation() {
                   the sidebar open, which eats ~256px of it). */}
               {canWrite && (
                 <Button
-                  className="ml-auto gap-1 bg-[#001d6e] text-white hover:bg-[#001552] hidden xl:inline-flex"
+                  className={`ml-auto gap-1 bg-[#001d6e] text-white hover:bg-[#001552] ${bigView ? "hidden" : "hidden xl:inline-flex"}`}
                   onClick={startNewLoad}
                 >
                   <Plus className="h-4 w-4" /> Load New Slip
@@ -1935,7 +1958,7 @@ export default function LoadOperation() {
             </div>
 
             {/* Navigation Tabs (hidden on mobile) */}
-            <div className="mb-2 hidden xl:block">
+            <div className={`mb-2 ${bigView ? "hidden" : "hidden xl:block"}`}>
               <Tabs value={activeViewTab} onValueChange={setActiveViewTab} className="w-full">
                 <TabsList className="w-full justify-start">
                   <TabsTrigger value="overall" className="flex-1 max-w-[200px]">All Operations</TabsTrigger>
@@ -1948,7 +1971,7 @@ export default function LoadOperation() {
             {/* Compact search + New Slip, merged onto one row and the button shrunk — the filter
                 row above still covers Date/Plant/Status at every width, but Load New Slip moves
                 here below xl instead of competing with those pills for space. */}
-            <div className="flex gap-2 xl:hidden">
+            <div className={`flex gap-2 ${bigView ? "" : "xl:hidden"}`}>
               <Input
                 placeholder="Search order, party, vehicle..."
                 value={listSearch}
@@ -1993,7 +2016,7 @@ export default function LoadOperation() {
                     table only shows once there's enough SPARE width to survive that; anything
                     narrower gets the card list instead (see the xl:hidden card view further
                     down), which never scrolls horizontally at all. */}
-                <div className="hidden xl:block border rounded-md w-full overflow-x-auto">
+                <div className={`border rounded-md w-full overflow-x-auto ${bigView ? "hidden" : "hidden xl:block"}`}>
                   {/* [&_th]/[&_td]:px-2 shrinks this table's own cell padding from the shared
                       Table component's default px-4 — 11 columns × 16px saved per side adds up
                       to over 150px, which is what was pushing "Actions" past the edge at
@@ -2165,7 +2188,7 @@ export default function LoadOperation() {
                 </div>
 
                 {/* Mobile View - card list */}
-                <div className="space-y-2 xl:hidden">
+                <div className={`space-y-2 ${bigView ? "" : "xl:hidden"}`}>
                   {filteredRecords.map((r) => {
                     const isExpanded = expandedRecordOrder === r.orderNumber;
                     return (
@@ -2335,7 +2358,7 @@ export default function LoadOperation() {
                 </div>
               );
             })()}
-          </>
+          </div>
         )}
 
         {/* A specific order is already being fetched (opened from the landing list, or the
@@ -2663,8 +2686,8 @@ export default function LoadOperation() {
                   sidebar drawer instead. Same pattern Unloading's own rotate view uses. */}
               {rotated && (
                 <button
-                  onClick={openMobileMenu}
-                  className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-white px-4 py-3 text-[#001d6e] shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
+                  onClick={() => { openMobileMenu(); openSidebar(); }}
+                  className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
                   title="Open sidebar menu"
                 >
                   <Menu className="h-5 w-5" />

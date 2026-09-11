@@ -323,7 +323,14 @@ export default function Unloading() {
   // Rotated kiosk mode is a fixed, full-viewport overlay, so it sits on top of Layout's own
   // sidebar toggle — this floating button (same trick as the rotate button itself: fixed inside
   // the rotated container, so it turns with the content) reopens a path back to real navigation.
-  const { openMobileMenu } = useSidebarContext();
+  const { openMobileMenu, openSidebar, setKioskRotateClass: setSidebarKioskRotateClass } = useSidebarContext();
+  // Keeps Layout's sidebar turning in sync with this page's own rotation, so opening it while
+  // rotated doesn't pop it up unrotated on top of everything else. Cleared on unmount — leaving
+  // a stale rotation class behind would wrongly rotate the sidebar on whatever page loads next.
+  useEffect(() => {
+    setSidebarKioskRotateClass(kioskRotateClass);
+    return () => setSidebarKioskRotateClass("");
+  }, [kioskRotateClass, setSidebarKioskRotateClass]);
   const quarterTurn = rotation === 90 || rotation === 270;
   // Natural portrait (window taller than wide) — a tablet or laptop turned upright should get the
   // same single-column layout as manual Rotate, just without the 90° CSS turn, since the screen is
@@ -1132,8 +1139,8 @@ export default function Unloading() {
           <div className={`${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
             {rotated && (
               <button
-                onClick={openMobileMenu}
-                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-white px-4 py-3 text-[#001d6e] shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
+                onClick={() => { openMobileMenu(); openSidebar(); }}
+                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
                 title="Open sidebar menu"
               >
                 <Menu className="h-5 w-5" />
@@ -1341,24 +1348,22 @@ export default function Unloading() {
                 <table className="w-full min-w-full caption-bottom border-collapse text-xs">
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">
-                      {/* Sr. No and Batch dropped in bigView — a rotated kiosk's short side
-                          can't fit all 9 columns without horizontal scroll, and these two are
-                          the least essential (the row order already conveys position; Batch is
-                          almost always "—" for a single-part vehicle). */}
-                      {!bigView && <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>}
+                      {/* Sr. No/Batch/Time Taken used to drop in bigView (a rotated kiosk's
+                          short side couldn't fit all 9 columns without horizontal scroll) — now
+                          always shown, matching the desktop table exactly; kioskTableBoxClass's
+                          own scroll container handles any overflow instead. */}
+                      <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
-                      {!bigView && (
-                        <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">
-                          <span title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">
-                            Batch
-                          </span>
-                        </th>
-                      )}
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">
+                        <span title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">
+                          Batch
+                        </span>
+                      </th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Status</th>
                       <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Progress</th>
-                      {!bigView && <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>}
+                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
                       <th className="whitespace-nowrap px-2 sm:px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
                     </tr>
                   </thead>
@@ -1370,26 +1375,22 @@ export default function Unloading() {
                             onClick={() => openSession(s)}
                             className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${s.scanStatus === "active" ? "bg-emerald-50/60" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                           >
-                            {!bigView && <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-400 tabular-nums">{offset + i + 1}</td>}
+                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-400 tabular-nums">{offset + i + 1}</td>
                             <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
                             <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 text-gray-700">{s.orderDate}</td>
                             <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2"><PlantBadge plant={s.plant} /></td>
-                            {!bigView && (
-                              <td className="border-r border-b border-gray-200 px-3 py-2">
-                                {s.partsCount > 1 ? (
-                                  <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex} of {s.partsCount}</span>
-                                ) : (
-                                  <span className="text-gray-400">—</span>
-                                )}
-                              </td>
-                            )}
+                            <td className="border-r border-b border-gray-200 px-3 py-2">
+                              {s.partsCount > 1 ? (
+                                <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex} of {s.partsCount}</span>
+                              ) : (
+                                <span className="text-gray-400">—</span>
+                              )}
+                            </td>
                             <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2">{statusBadge(s.scanStatus, s.canActivate)}</td>
                             <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 text-gray-700 tabular-nums">{s.scannedQty} / {s.expectedQty}</td>
-                            {!bigView && (
-                              <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">
-                                {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
-                              </td>
-                            )}
+                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">
+                              {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
+                            </td>
                             <td className="border-b border-gray-200 px-2 sm:px-3 py-2 text-right">
                               <div className="flex items-center justify-end gap-1.5">
                                 <Button
@@ -1494,8 +1495,8 @@ export default function Unloading() {
           <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
             {rotated && (
               <button
-                onClick={openMobileMenu}
-                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-white px-4 py-3 text-[#001d6e] shadow-lg ring-1 ring-gray-200 transition-colors hover:bg-gray-50"
+                onClick={() => { openMobileMenu(); openSidebar(); }}
+                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
                 title="Open sidebar menu"
               >
                 <Menu className="h-5 w-5" />
