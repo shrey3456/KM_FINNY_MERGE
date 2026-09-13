@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Filter, Pencil, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/ui/date-input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -24,7 +25,23 @@ function ValueEditor({
 }) {
   if (arity === 0) return null;
 
-  const inputType = column.filterType === "number" ? "number" : column.filterType === "date" ? "date" : "text";
+  // Dates use the popover calendar rather than a native date input — the browser's own picker
+  // can't turn with a kiosk-rotated page (see DateInput).
+  if (column.filterType === "date") {
+    if (arity === 2) {
+      const [a, b] = (value as [string, string]) ?? ["", ""];
+      return (
+        <div className="flex items-center gap-1.5">
+          <DateInput className="h-8 flex-1 text-xs" placeholder="From" value={a} onChange={(v) => onChange([v, b])} />
+          <span className="text-xs text-gray-400">and</span>
+          <DateInput className="h-8 flex-1 text-xs" placeholder="To" value={b} onChange={(v) => onChange([a, v])} />
+        </div>
+      );
+    }
+    return <DateInput className="h-8 w-full text-xs" value={value as string} onChange={onChange} />;
+  }
+
+  const inputType = column.filterType === "number" ? "number" : "text";
 
   if (arity === 2) {
     const [a, b] = (value as [string, string]) ?? ["", ""];

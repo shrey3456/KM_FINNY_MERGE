@@ -697,7 +697,7 @@ const Settings = () => {
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Sales Tracking Start</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
-                        Overall Stock's Sale Qty (when no date is picked there) sums Proforma Slip quantities from this date onward — earlier data isn't reliable enough to include.
+                        Overall Stock's Sale Qty and Expected Qty (when no date is picked there) both sum from this date onward — earlier data isn't reliable enough to include.
                       </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <Input

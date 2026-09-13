@@ -37,6 +37,7 @@ import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { ColumnFilterPopoverContent, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, conditionSummary, isConditionEmpty } from "@/lib/columnFilters";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -319,7 +320,7 @@ const Reports = () => {
   // (server/routes/loading.ts), and Unloading's own scan history (server/routes/unloading.ts).
   // Same table/filters/export/void shell for all four; only the server-side `source` scoping
   // (isDispatch/isUnload) and a couple of labels differ.
-  const [historySource, setHistorySource] = useState<"all" | "receiving" | "dispatch" | "unload">("all");
+  const [historySource, setHistorySource] = usePersistentFilter<"all" | "receiving" | "dispatch" | "unload">("scanHistory:source", "all");
   // Seeded from whatever was left applied last time — see HISTORY_FILTERS_KEY.
   const [historySearch,  setHistorySearch]  = useState(() => readSavedHistoryFilters().search ?? "");
   const [historyPage,    setHistoryPage]    = useState(1);

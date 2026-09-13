@@ -37,6 +37,7 @@ import { useToast } from '@/hooks/use-toast';
 import { apiRequest, queryClient } from '@/lib/queryClient';
 import { DealerPurchaseOrder, DealerPurchaseOrderItem } from '@shared/schema';
 import { cn } from '@/lib/utils';
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 // Purchase Orders Import Component
 function PurchaseOrdersImport({ onImportSuccess }: { onImportSuccess: () => void }) {
@@ -210,7 +211,7 @@ function PurchaseOrdersImport({ onImportSuccess }: { onImportSuccess: () => void
 
 const Purchases = () => {
   const [location] = useLocation();
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = usePersistentFilter('purchases:search', '');
   const [selectedDate, setSelectedDate] = useState<Date | null>(new Date());
   const [showImport, setShowImport] = useState(false);
   const { toast } = useToast();

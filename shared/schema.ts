@@ -389,6 +389,13 @@ export const proformaSlips = pgTable("proforma_slips", {
   // the handoff (loading_handoffs) and moves ownership. Pausing itself is not a handoff by
   // itself — resuming as the same person who paused never creates a handoff row.
   loadingPausedAt: timestamp("loading_paused_at"),
+  // STV (platform) the operator picks in the Create Load Operation dialog. Required there and
+  // write-once: every later endpoint refuses to change it, and the scan view renders it as
+  // locked text instead of a picker, so the platform a load was started on can't drift halfway
+  // through. Also the flag that tells a Notion sync to stop overwriting storeKeeperInfo below —
+  // once this is set, that column is ours (same "a person confirmed this locally" guard
+  // vehicleAssignedByCode already gives vehicleNumber).
+  loadingStv: text("loading_stv"),
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
@@ -401,6 +408,7 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
   loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,
   vehicleInfoId: true, loadingOwnerCode: true, loadingOwnerName: true, loadingPausedAt: true,
+  loadingStv: true,
 });
 
 // One row per actual shift handoff on a Loading order — "who load and what time it['s] given to

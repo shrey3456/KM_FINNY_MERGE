@@ -247,7 +247,13 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
     invoiceNumber: orderData.invoiceNumber || undefined,
     partyState: orderData.partyState || undefined,
     notionStatus: orderData.notionStatus || undefined,
-    storeKeeperInfo: orderData.storeKeeperInfo || undefined,
+    // Skipped entirely once the Loading page has stamped this column itself (loadingStv set on
+    // Create Operation) — same "a person confirmed this locally, don't clobber it" rule the
+    // vehicle fields follow below. Without this guard the next sync would overwrite the
+    // operator + platform we just recorded with Notion's older hand-typed text.
+    storeKeeperInfo: (existingSlip as any)?.loadingStv
+      ? undefined
+      : (orderData.storeKeeperInfo || undefined),
     notionRawData: orderData.notionRawData,
   };
 
@@ -392,7 +398,11 @@ async function diffOrder(orderData: OrderData): Promise<OrderDiff> {
   push('Invoice No.', existingSlip.invoiceNumber, orderData.invoiceNumber || null);
   push('State', existingSlip.partyState, orderData.partyState || null);
   push('Notion Status', existingSlip.notionStatus, orderData.notionStatus || null);
-  push('StoreKeeper Info', existingSlip.storeKeeperInfo, orderData.storeKeeperInfo || null);
+  // Not logged as a change when the Loading page owns this column — the sync isn't writing it
+  // (see the guard where notionFields is built), so reporting a diff would be a phantom entry.
+  if (!(existingSlip as any).loadingStv) {
+    push('StoreKeeper Info', existingSlip.storeKeeperInfo, orderData.storeKeeperInfo || null);
+  }
   const newTotalQty = orderData.authoritativeQty ?? Array.from(orderData.items.values()).reduce((s, i) => s + i.quantity, 0);
   push('Total Quantity', existingSlip.totalQuantity, newTotalQty);
 

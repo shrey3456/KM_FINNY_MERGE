@@ -40,6 +40,7 @@ import { Calendar, Activity, Filter, RefreshCcw, Search, User, CheckCircle2 } fr
 import { Skeleton } from "@/components/ui/skeleton";
 import { format } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 type ActivityData = {
   id: number;
@@ -56,9 +57,9 @@ type ActivityData = {
 export default function Activities() {
   const { toast } = useToast();
   const [currentPage, setCurrentPage] = useState(1);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [actionFilter, setActionFilter] = useState("all-actions");
-  const [pageFilter, setPageFilter] = useState("all-pages");
+  const [searchQuery, setSearchQuery] = usePersistentFilter("activities:search", "");
+  const [actionFilter, setActionFilter] = usePersistentFilter("activities:actionFilter", "all-actions");
+  const [pageFilter, setPageFilter] = usePersistentFilter("activities:pageFilter", "all-pages");
   const [liveUpdate, setLiveUpdate] = useState(true);
   const [activityCount, setActivityCount] = useState(0);
   const [newActivities, setNewActivities] = useState(0);

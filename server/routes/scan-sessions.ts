@@ -1554,6 +1554,16 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       }
     }
 
+    // The configured tracking start date (Settings > Sales Tracking Start, sales_settings —
+    // see server/index.ts's migration and server/routes/settings-admin.ts's GET/PUT
+    // /settings/sales-tracking-start). Read here rather than next to the Sale Qty block below
+    // because BOTH Expected Qty and Sale Qty floor their "all dates" sums at it — data older
+    // than this isn't considered dependable for either.
+    const { rows: salesSettingsRows } = await pool.query(
+      `SELECT sales_tracking_start_date AS "salesTrackingStartDate" FROM sales_settings ORDER BY id LIMIT 1`,
+    );
+    const SALES_TRACKING_START = salesSettingsRows[0]?.salesTrackingStartDate ?? '2026-08-01';
+
     if (singleDate) {
       // Explicit date filter — one shared date.
       const expParams: any[] = [singleDate];
@@ -1570,10 +1580,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       `, expParams);
       await applyExpectedRows(expRows);
     } else if (allDatesMode) {
-      // No date filter — sum every order ever uploaded, across every date (no order_date
-      // restriction at all), instead of scoping to whichever session is currently "active".
-      const expParams: any[] = [];
-      const expConds: string[] = ['ois.is_deleted = false'];
+      // No date filter — sum every order uploaded from the configured tracking start date
+      // onward, across every date, instead of scoping to whichever session is currently
+      // "active". Same floor Sale Qty uses below, so the two tiles always cover the same window.
+      const expParams: any[] = [SALES_TRACKING_START];
+      const expConds: string[] = ['ois.order_date >= $1', 'ois.is_deleted = false'];
       if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
       if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
       const { rows: expRows } = await pool.query(`
@@ -1591,15 +1602,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // same shape as Expected Qty above but sourced from proforma_slip_items/proforma_slips
     // instead of order_import_items/order_import_sessions. Plant/date live on the SLIP (the
     // parent row), not the item, so every item in a slip is grouped under that one slip's plant.
-    // Reliable sales tracking only starts SALES_TRACKING_START — earlier proforma data is not
-    // dependable, so unlike Expected Qty's true all-time sum, the "all dates" default floors
-    // there instead of summing everything that ever existed. Admin-editable on the Settings page
-    // (sales_settings — see server/index.ts's migration / server/routes/settings-admin.ts's
-    // GET/PUT /settings/sales-tracking-start) rather than a hardcoded constant.
-    const { rows: salesSettingsRows } = await pool.query(
-      `SELECT sales_tracking_start_date AS "salesTrackingStartDate" FROM sales_settings ORDER BY id LIMIT 1`,
-    );
-    const SALES_TRACKING_START = salesSettingsRows[0]?.salesTrackingStartDate ?? '2026-08-01';
+    // The "all dates" default floors at SALES_TRACKING_START (read above) — earlier data isn't
+    // dependable — exactly as Expected Qty now does, so both tiles cover the same window.
     const saleByKey = new Map<string, number>();
     let saleTotal = 0;
     const saleOnlyRows: typeof items = [];

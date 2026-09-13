@@ -12,6 +12,7 @@ import logoPath from '@assets/logo_wo_bg_1757152661130.png';
 import { borderBottomLeftRadius } from 'html2canvas/dist/types/css/property-descriptors/border-radius';
 import { text } from 'stream/consumers';
 import { TruckLoadingAnimation } from '@/components/TruckLoadingAnimation';
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 interface TollVoucherData {
   orderNumber: string;
@@ -87,7 +88,7 @@ const getFontSize = (text: string) => {
 };
 
 export default function TollVoucher() {
-  const [selectedPlant, setSelectedPlant] = useState('valsad');
+  const [selectedPlant, setSelectedPlant] = usePersistentFilter('tollVoucher:plant', 'valsad');
   //const [voucherPrefix, setVoucherPrefix] = useState('KM2526-EV-');
   const [voucherNumber, setVoucherNumber] = useState('');
   const [selectedOrder, setSelectedOrder] = useState('');

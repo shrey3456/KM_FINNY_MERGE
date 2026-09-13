@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { CategoryBadge } from "@/components/CategoryBadge";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 // Types for API response
 interface StockSheetItem {
@@ -51,7 +52,7 @@ export default function StockSheets() {
   const { toast } = useToast();
   const [selectedDate, setSelectedDate] = useState<Date | null>(new Date());
   const [category, setCategory] = useState<string>("");
-  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [searchQuery, setSearchQuery] = usePersistentFilter<string>("stockSheets:search", "");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editValue, setEditValue] = useState<string>("");
   const inputRef = useRef<HTMLInputElement>(null);
