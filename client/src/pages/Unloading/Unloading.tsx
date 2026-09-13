@@ -4,7 +4,7 @@ import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Camera, CheckCircle2, ChevronLeft, ChevronRight, FileBarChart, Keyboard, Loader2, Menu, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileBarChart, Keyboard, Loader2, Menu, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import { useSidebarContext } from "@/lib/sidebarContext";
@@ -362,6 +362,27 @@ export default function Unloading() {
     ? `overflow-auto kiosk-scroll ${quarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
     : "";
   const portalRotate = rotated ? portalRotateClass(rotation) : "";
+
+  // ── Rotated-view scroll fix — same as Order Scan's own (client/src/pages/Scanning/Scan.tsx):
+  // a 90°-rotated container's native scroll moves content sideways on screen, not up/down, so a
+  // discrete Up/Down button pair replaces continuous wheel/swipe scrolling for the vehicles table
+  // in rotated mode.
+  const vehiclesTableScrollRef = useRef<HTMLDivElement>(null);
+
+  function ScrollNudgeButtons({ targetRef, amount = 240 }: { targetRef: React.RefObject<HTMLElement>; amount?: number }) {
+    const nudge = (dir: 1 | -1) => targetRef.current?.scrollBy({ top: dir * amount, behavior: "smooth" });
+    const btn = "rounded-2xl bg-black/10 p-3.5 text-current hover:bg-black/20 active:scale-95 transition";
+    return (
+      <div className="flex flex-col items-center gap-2">
+        <button type="button" onClick={() => nudge(-1)} aria-label="Scroll up" title="Scroll up" className={btn}>
+          <ChevronUp className="h-7 w-7" />
+        </button>
+        <button type="button" onClick={() => nudge(1)} aria-label="Scroll down" title="Scroll down" className={btn}>
+          <ChevronDown className="h-7 w-7" />
+        </button>
+      </div>
+    );
+  }
   function handleColumnResizeStart(e: React.MouseEvent) {
     e.preventDefault();
     const startX = e.clientX;
@@ -1138,6 +1159,11 @@ export default function Unloading() {
         {view === "list" && (
           <div className={`${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
             {rotated && (
+              <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
+                <ScrollNudgeButtons targetRef={vehiclesTableScrollRef} amount={360} />
+              </div>
+            )}
+            {rotated && (
               <button
                 onClick={() => { openMobileMenu(); openSidebar(); }}
                 className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -1156,21 +1182,20 @@ export default function Unloading() {
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
             <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
               <div>
+                {/* The real PageHeader, not a hand-rolled stand-in — the earlier tiny eyebrow +
+                    text-lg title read as far less prominent than the unrotated page's actual
+                    icon-badge + text-2xl title, which is exactly what made it hard to spot at a
+                    glance once rotated. Dropping the same component in here instead keeps the
+                    rotated header visually identical to the unrotated one. */}
                 {rotated && (
-                  <div className="flex items-center gap-1.5 text-[#001d6e]">
-                    <PackageOpen className="h-4 w-4" />
-                    <span className="text-xs font-bold uppercase tracking-wide">Unloading</span>
-                  </div>
+                  <PageHeader
+                    icon={PackageOpen}
+                    title="Unloading"
+                    description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
+                  />
                 )}
                 <div className="text-lg font-bold text-[#001d6e]">Vehicles</div>
                 <div className="text-xs text-gray-400">{total} part(s){sessionPlantFilter ? ` · ${sessionPlantFilter}` : ""}</div>
-                {/* The unrotated PageHeader's own description — rotated has no PageHeader to
-                    show it (the fixed overlay covers it), so it's easy to lose here entirely. */}
-                {rotated && (
-                  <p className="mt-1 max-w-xs text-xs text-gray-500">
-                    Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock.
-                  </p>
-                )}
               </div>
               <div className="flex items-center gap-2">
                 {importablePlants.length > 1 && (
@@ -1344,7 +1369,7 @@ export default function Unloading() {
               // inside kioskTableBoxClass (same treatment as the item table's own DataTable) —
               // rather than a different, cut-down card view, so what an operator sees rotated is
               // the same table as everywhere else in the app, only fitted to the rotated screen.
-              <div className={bigView ? kioskTableBoxClass : "overflow-x-auto"}>
+              <div ref={vehiclesTableScrollRef} className={bigView ? kioskTableBoxClass : "overflow-x-auto"}>
                 <table className="w-full min-w-full caption-bottom border-collapse text-xs">
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">

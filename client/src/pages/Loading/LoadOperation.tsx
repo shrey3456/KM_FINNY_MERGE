@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
-  Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
+  Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
@@ -239,11 +239,13 @@ export default function LoadOperation() {
   // is exactly that applied to every event on the order at once.
   const canResetLoad = admin || (hasPageWriteAccess("loading") && hasPageWriteAccess("scan-history"));
 
-  // Landing view is the records table; a persisted mid-flow order (see LAST_ORDER_KEY) resumes
-  // straight into the create flow instead, per "remember where we were" — except for admin, who
-  // always lands on the list first regardless of any remembered order (admin's job here is
-  // mainly to review everyone's slips, not to be dropped back into whatever one they had open).
-  const [view, setView] = useState<"list" | "create">(() => (!admin && localStorage.getItem(LAST_ORDER_KEY) ? "create" : "list"));
+  // "list" is the landing view — records table, filters, AND the Camera/Manual order search box
+  // (no separate "New Load" screen/button anymore; it's always right there). "create" is Stage
+  // B(pre)/Stage B once an order's been found and confirmed. Always starts on "list": a persisted
+  // mid-flow order (see LAST_ORDER_KEY) resumes automatically via the effect below, showing as
+  // the "list" view's own pending-fetch skeleton in place of the table until it resolves, then
+  // flips to "create" (see commitSlip) — no need to pre-guess the view up front anymore.
+  const [view, setView] = useState<"list" | "create">("list");
 
   // Server-paginated (20/page by default, matching Scan History) rather than fetching every
   // slip anyone's ever loaded in one request. Page size is user-selectable (same options/pattern
@@ -584,6 +586,11 @@ export default function LoadOperation() {
     setLoadedVolume(data.loadedVolume);
     setOrderFocused(false);
     setPendingSlip(null);
+    // Always moves to "create" — the Camera/Manual search box now lives on the "list" view
+    // itself (no more separate "New Load" screen/button), so this is what actually switches to
+    // Stage B(pre)/Stage B once an order's been found and confirmed, regardless of whether the
+    // search happened from there or a list row was clicked.
+    setView("create");
     localStorage.setItem(LAST_ORDER_KEY, data.slip.orderNumber);
   }
 
@@ -627,8 +634,7 @@ export default function LoadOperation() {
         silentLookupRef.current = false;
         return;
       }
-      commitSlip(data);
-      if (openedFromListRef.current) setView("create");
+      commitSlip(data); // also sets view to "create"
       openedFromListRef.current = false;
       if (!silentLookupRef.current) toast({ title: "Order found", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
       silentLookupRef.current = false;
@@ -678,7 +684,7 @@ export default function LoadOperation() {
   }
 
   useEffect(() => {
-    if (admin) return; // admin always starts on the list — see the view initializer above
+    if (admin) return; // admin never auto-resumes a remembered order — always starts on the list
     const saved = localStorage.getItem(LAST_ORDER_KEY);
     if (saved) openOrder(saved, { silent: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -695,18 +701,16 @@ export default function LoadOperation() {
     setSelectedVehicle(null);
     setExpandedItemBarcode(null);
     localStorage.removeItem(LAST_ORDER_KEY);
+    // The Camera/Manual search box lives on the "list" view now (no more separate "New Load"
+    // screen) — every caller of this (Stage B(pre)'s Cancel, "Back to List", etc.) means "let me
+    // search for a different order", which is the list view itself.
+    setView("list");
     setTimeout(() => orderInputRef.current?.focus(), 50);
   }
 
   function backToList() {
     resetToSearch();
-    setView("list");
     recordsQuery.refetch();
-  }
-
-  function startNewLoad() {
-    resetToSearch();
-    setView("create");
   }
 
   function openOrderFromList(orderNumber: string) {
@@ -726,7 +730,7 @@ export default function LoadOperation() {
   }
 
   useEffect(() => {
-    if (view !== "create" || scanMode !== "camera" || slip) { stopCamera(); return; }
+    if (view !== "list" || scanMode !== "camera" || slip) { stopCamera(); return; }
     let cancelled = false;
     const scanner = new BarcodeScanner({
       onDetected: (result: Result) => {
@@ -753,7 +757,7 @@ export default function LoadOperation() {
   }, [view, scanMode, slip]);
 
   useEffect(() => {
-    if (view !== "create" || slip) return;
+    if (view !== "list" || slip) return;
     const MAX_GAP_MS = 50;
     const BURST_END_MS = 80;
     let buffer = "";
@@ -779,7 +783,7 @@ export default function LoadOperation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, slip]);
 
-  useEffect(() => { if (view === "create" && !slip && scanMode === "manual") orderInputRef.current?.focus(); }, [view, slip, scanMode]);
+  useEffect(() => { if (view === "list" && !slip && scanMode === "manual") orderInputRef.current?.focus(); }, [view, slip, scanMode]);
 
   // ─── Vehicle search + link ────────────────────────────────────────────────
   const [vehicleSearch, setVehicleSearch] = useState("");
@@ -1877,6 +1881,162 @@ export default function LoadOperation() {
               title="Loading"
               description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
             />
+            {canWrite && (
+              // No overflow-hidden — the order-search suggestions dropdown is absolutely
+              // positioned and needs to render past this card's bottom edge, not get clipped by
+              // it. Lives directly on the list page now — no separate "New Load" screen/button
+              // to click through first; scanning or typing an order number is always right here.
+              <div className="mx-auto max-w-xl w-full rounded-xl border border-gray-200 bg-white shadow-sm">
+                <div className="px-4 sm:px-5 py-4 sm:py-5 space-y-3">
+                  <div className="flex items-center gap-1.5 text-sm font-semibold text-gray-500">
+                    <Search className="h-4 w-4" /> Find or scan an order
+                  </div>
+                  <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
+                    <button
+                      onClick={() => setScanMode("camera")}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-semibold transition-colors ${scanMode === "camera" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                    >
+                      <Camera className="h-4 w-4" /> Camera
+                    </button>
+                    <button
+                      onClick={() => { stopCamera(); setScanMode("manual"); }}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-semibold transition-colors ${scanMode === "manual" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                    >
+                      <Keyboard className="h-4 w-4" /> Manual
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-gray-400">A barcode gun works in Manual mode too — just scan, no need to click the box first.</p>
+
+                  <div className="relative w-full bg-black rounded-2xl overflow-hidden" style={{ display: scanMode === "camera" ? "block" : "none", height: "clamp(220px, 45vw, 340px)" }}>
+                    <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
+                    <div className="pointer-events-none absolute inset-0" style={{ background: "radial-gradient(ellipse 70% 55% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%)" }} />
+                    {scanMode === "camera" && !cameraReady && !cameraError && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white z-10">
+                        <Loader2 className="h-8 w-8 animate-spin opacity-90" />
+                        <p className="text-sm font-medium opacity-80">Starting camera…</p>
+                      </div>
+                    )}
+                    {scanMode === "camera" && cameraReady && (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-10">
+                        {(["tl", "tr", "bl", "br"] as const).map((pos) => (
+                          <div key={pos} className="absolute" style={{
+                            top: pos.startsWith("t") ? "calc(50% - 40px)" : undefined, bottom: pos.startsWith("b") ? "calc(50% - 40px)" : undefined,
+                            left: pos.endsWith("l") ? "calc(50% - 90px)" : undefined, right: pos.endsWith("r") ? "calc(50% - 90px)" : undefined,
+                            width: 22, height: 22, borderColor: "white", borderStyle: "solid",
+                            borderTopWidth: pos.startsWith("t") ? 3 : 0, borderBottomWidth: pos.startsWith("b") ? 3 : 0,
+                            borderLeftWidth: pos.endsWith("l") ? 3 : 0, borderRightWidth: pos.endsWith("r") ? 3 : 0,
+                            borderRadius: pos === "tl" ? "4px 0 0 0" : pos === "tr" ? "0 4px 0 0" : pos === "bl" ? "0 0 0 4px" : "0 0 4px 0",
+                          }} />
+                        ))}
+                      </div>
+                    )}
+                    {scanMode === "camera" && cameraError && (
+                      <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/85 px-3 py-2.5 text-xs text-white z-10">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {cameraError}
+                      </div>
+                    )}
+                  </div>
+
+                  {scanMode === "manual" && (
+                    <div className="relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <Input
+                        ref={orderInputRef}
+                        value={orderSearch}
+                        onChange={(e) => { setOrderSearch(e.target.value); setOrderSuggIdx(-1); }}
+                        onFocus={() => setOrderFocused(true)}
+                        onBlur={() => setTimeout(() => setOrderFocused(false), 150)}
+                        onKeyDown={(e) => {
+                          if (orderFocused && orderSuggestions.length > 0) {
+                            if (e.key === "ArrowDown") { e.preventDefault(); setOrderSuggIdx((i) => Math.min(i + 1, orderSuggestions.length - 1)); return; }
+                            if (e.key === "ArrowUp") { e.preventDefault(); setOrderSuggIdx((i) => Math.max(i - 1, -1)); return; }
+                            if (e.key === "Escape") { setOrderFocused(false); return; }
+                            if (e.key === "Enter" && orderSuggIdx >= 0) { e.preventDefault(); openOrder(orderSuggestions[orderSuggIdx].orderNumber, { confirm: true }); return; }
+                          }
+                          if (e.key === "Enter") openOrder(orderSearch, { confirm: true });
+                        }}
+                        placeholder="Type an order number / party name…"
+                        className="h-11 pl-9 pr-9 text-sm"
+                      />
+                      {orderSearch && (
+                        <button onClick={() => { setOrderSearch(""); orderInputRef.current?.focus(); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                          <X className="h-4 w-4" />
+                        </button>
+                      )}
+                      {orderFocused && debouncedOrderSearch.trim().length >= 2 && (
+                        <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                          {orderSuggestionsQuery.isFetching ? (
+                            <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+                          ) : orderSuggestions.length === 0 ? (
+                            <p className="px-4 py-3 text-xs text-gray-400">No matching orders.</p>
+                          ) : (
+                            orderSuggestions.map((s, i) => (
+                              <button
+                                key={s.id}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => openOrder(s.orderNumber, { confirm: true })}
+                                className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === orderSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-sm font-semibold text-[#001d6e] truncate">#{s.orderNumber}</div>
+                                  <div className="text-xs text-gray-500 truncate">{s.partyName}{s.plant ? ` · ${s.plant}` : ""}</div>
+                                </div>
+                                <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <Button className="w-full h-10 bg-[#001d6e] text-white hover:bg-[#001552]"
+                    disabled={!orderSearch.trim() || fetchSlipMutation.isPending}
+                    onClick={() => openOrder(orderSearch, { confirm: true })}>
+                    {fetchSlipMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
+                    Find Order
+                  </Button>
+                </div>
+              </div>
+            )}
+            {fetchSlipMutation.isPending ? (
+                        <div className="space-y-4 animate-pulse">
+                          <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+                            <div className="flex flex-col gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 sm:flex-row sm:items-center sm:justify-between">
+                              <div className="min-w-0 space-y-2">
+                                <div className="h-4 w-40 rounded bg-gray-200" />
+                                <div className="h-3 w-56 rounded bg-gray-100" />
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="h-8 w-24 rounded-full bg-gray-100" />
+                                <div className="h-8 w-24 rounded-full bg-gray-100" />
+                                <div className="h-9 w-24 rounded-lg bg-gray-100" />
+                              </div>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[38%_0.75rem_1fr]">
+                            <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
+                            <div className="hidden lg:block" />
+                            <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
+                          </div>
+                          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                            <div className="flex items-center gap-2 border-b border-gray-100 px-4 sm:px-5 py-3.5">
+                              <div className="h-4 w-32 rounded bg-gray-200" />
+                            </div>
+                            <div className="divide-y divide-gray-100">
+                              {Array.from({ length: 6 }).map((_, i) => (
+                                <div key={i} className="flex items-center gap-4 px-4 sm:px-5 py-3">
+                                  <div className="h-3.5 flex-1 rounded bg-gray-100" />
+                                  <div className="h-3.5 w-14 rounded bg-gray-100" />
+                                  <div className="h-3.5 w-14 rounded bg-gray-100" />
+                                  <div className="h-3.5 w-14 rounded bg-gray-100" />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+            ) : (
+              <>
             {/* Search bar (desktop) */}
             <div className={`w-full ${bigView ? "hidden" : "hidden xl:block"}`}>
               <Input
@@ -1942,19 +2102,6 @@ export default function LoadOperation() {
                   <span className="text-sm font-semibold">{readyDespCount}</span>
                 </div>
               </Button>
-
-              {/* Desktop only — below xl this button moves next to the search box instead (see
-                  the compact search row further down), so it's not competing with the filter
-                  pills for room on a narrower screen (including a "desktop-width" window with
-                  the sidebar open, which eats ~256px of it). */}
-              {canWrite && (
-                <Button
-                  className={`ml-auto gap-1 bg-[#001d6e] text-white hover:bg-[#001552] ${bigView ? "hidden" : "hidden xl:inline-flex"}`}
-                  onClick={startNewLoad}
-                >
-                  <Plus className="h-4 w-4" /> Load New Slip
-                </Button>
-              )}
             </div>
 
             {/* Navigation Tabs (hidden on mobile) */}
@@ -1968,9 +2115,8 @@ export default function LoadOperation() {
               </Tabs>
             </div>
 
-            {/* Compact search + New Slip, merged onto one row and the button shrunk — the filter
-                row above still covers Date/Plant/Status at every width, but Load New Slip moves
-                here below xl instead of competing with those pills for space. */}
+            {/* Compact search row (below xl) — the filter row above still covers Date/Plant/
+                Status at every width; this is just listSearch's own box at narrower widths. */}
             <div className={`flex gap-2 ${bigView ? "" : "xl:hidden"}`}>
               <Input
                 placeholder="Search order, party, vehicle..."
@@ -1978,15 +2124,6 @@ export default function LoadOperation() {
                 onChange={(e) => setListSearch(e.target.value)}
                 className="flex-1"
               />
-              {canWrite && (
-                <Button
-                  size="sm"
-                  className="shrink-0 gap-1 bg-[#001d6e] text-white hover:bg-[#001552]"
-                  onClick={startNewLoad}
-                >
-                  <Plus className="h-4 w-4" /> New
-                </Button>
-              )}
             </div>
 
             {recordsQuery.isLoading ? (
@@ -2358,177 +2495,11 @@ export default function LoadOperation() {
                 </div>
               );
             })()}
+              </>
+            )}
           </div>
         )}
 
-        {/* A specific order is already being fetched (opened from the landing list, or the
-            silent last-order resume on page load) — a skeleton of Stage B's own shape instead of
-            a bare spinner on blank space, so the page reads as "already here, filling in" rather
-            than blank-then-sudden-layout. Without this at all, clicking a list row flashed the
-            full "search for an order" screen for however long the fetch took, even though the
-            user never wanted to search at all — they'd already picked the exact order. */}
-        {view === "create" && !slip && fetchSlipMutation.isPending && (
-          <div className="space-y-4 animate-pulse">
-            <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-              <div className="flex flex-col gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 sm:flex-row sm:items-center sm:justify-between">
-                <div className="min-w-0 space-y-2">
-                  <div className="h-4 w-40 rounded bg-gray-200" />
-                  <div className="h-3 w-56 rounded bg-gray-100" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-8 w-24 rounded-full bg-gray-100" />
-                  <div className="h-8 w-24 rounded-full bg-gray-100" />
-                  <div className="h-9 w-24 rounded-lg bg-gray-100" />
-                </div>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[38%_0.75rem_1fr]">
-              <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
-              <div className="hidden lg:block" />
-              <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
-            </div>
-            <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-              <div className="flex items-center gap-2 border-b border-gray-100 px-4 sm:px-5 py-3.5">
-                <div className="h-4 w-32 rounded bg-gray-200" />
-              </div>
-              <div className="divide-y divide-gray-100">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="flex items-center gap-4 px-4 sm:px-5 py-3">
-                    <div className="h-3.5 flex-1 rounded bg-gray-100" />
-                    <div className="h-3.5 w-14 rounded bg-gray-100" />
-                    <div className="h-3.5 w-14 rounded bg-gray-100" />
-                    <div className="h-3.5 w-14 rounded bg-gray-100" />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── Stage A: find the order ─────────────────────────────────────── */}
-        {view === "create" && !slip && !fetchSlipMutation.isPending && (
-          // No overflow-hidden — same reason as the vehicle-search card below (Stage B): the
-          // order-search suggestions dropdown is absolutely positioned and needs to render past
-          // this card's bottom edge, not get clipped by it. Safe here with no rounding
-          // compensation needed — everything inside is already inset by padding, nothing
-          // touches the card's own edge directly.
-          <div className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white shadow-sm">
-            <div className="px-4 sm:px-5 py-4 sm:py-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-gray-500">New Load</span>
-                <Button size="sm" variant="ghost" onClick={backToList} className="h-7 text-gray-500 hover:text-gray-700">
-                  <X className="mr-1 h-3.5 w-3.5" /> Cancel
-                </Button>
-              </div>
-              <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
-                <button
-                  onClick={() => setScanMode("camera")}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-semibold transition-colors ${scanMode === "camera" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
-                >
-                  <Camera className="h-4 w-4" /> Camera
-                </button>
-                <button
-                  onClick={() => { stopCamera(); setScanMode("manual"); }}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-semibold transition-colors ${scanMode === "manual" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
-                >
-                  <Keyboard className="h-4 w-4" /> Manual
-                </button>
-              </div>
-              <p className="text-[11px] text-gray-400">A barcode gun works in Manual mode too — just scan, no need to click the box first.</p>
-
-              <div className="relative w-full bg-black rounded-2xl overflow-hidden" style={{ display: scanMode === "camera" ? "block" : "none", height: "clamp(220px, 45vw, 340px)" }}>
-                <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
-                <div className="pointer-events-none absolute inset-0" style={{ background: "radial-gradient(ellipse 70% 55% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%)" }} />
-                {scanMode === "camera" && !cameraReady && !cameraError && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white z-10">
-                    <Loader2 className="h-8 w-8 animate-spin opacity-90" />
-                    <p className="text-sm font-medium opacity-80">Starting camera…</p>
-                  </div>
-                )}
-                {scanMode === "camera" && cameraReady && (
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-10">
-                    {(["tl", "tr", "bl", "br"] as const).map((pos) => (
-                      <div key={pos} className="absolute" style={{
-                        top: pos.startsWith("t") ? "calc(50% - 40px)" : undefined, bottom: pos.startsWith("b") ? "calc(50% - 40px)" : undefined,
-                        left: pos.endsWith("l") ? "calc(50% - 90px)" : undefined, right: pos.endsWith("r") ? "calc(50% - 90px)" : undefined,
-                        width: 22, height: 22, borderColor: "white", borderStyle: "solid",
-                        borderTopWidth: pos.startsWith("t") ? 3 : 0, borderBottomWidth: pos.startsWith("b") ? 3 : 0,
-                        borderLeftWidth: pos.endsWith("l") ? 3 : 0, borderRightWidth: pos.endsWith("r") ? 3 : 0,
-                        borderRadius: pos === "tl" ? "4px 0 0 0" : pos === "tr" ? "0 4px 0 0" : pos === "bl" ? "0 0 0 4px" : "0 0 4px 0",
-                      }} />
-                    ))}
-                  </div>
-                )}
-                {scanMode === "camera" && cameraError && (
-                  <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/85 px-3 py-2.5 text-xs text-white z-10">
-                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {cameraError}
-                  </div>
-                )}
-              </div>
-
-              {scanMode === "manual" && (
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                  <Input
-                    ref={orderInputRef}
-                    autoFocus
-                    value={orderSearch}
-                    onChange={(e) => { setOrderSearch(e.target.value); setOrderSuggIdx(-1); }}
-                    onFocus={() => setOrderFocused(true)}
-                    onBlur={() => setTimeout(() => setOrderFocused(false), 150)}
-                    onKeyDown={(e) => {
-                      if (orderFocused && orderSuggestions.length > 0) {
-                        if (e.key === "ArrowDown") { e.preventDefault(); setOrderSuggIdx((i) => Math.min(i + 1, orderSuggestions.length - 1)); return; }
-                        if (e.key === "ArrowUp") { e.preventDefault(); setOrderSuggIdx((i) => Math.max(i - 1, -1)); return; }
-                        if (e.key === "Escape") { setOrderFocused(false); return; }
-                        if (e.key === "Enter" && orderSuggIdx >= 0) { e.preventDefault(); openOrder(orderSuggestions[orderSuggIdx].orderNumber, { confirm: true }); return; }
-                      }
-                      if (e.key === "Enter") openOrder(orderSearch, { confirm: true });
-                    }}
-                    placeholder="Type an order number / party name…"
-                    className="h-11 pl-9 pr-9 text-sm"
-                  />
-                  {orderSearch && (
-                    <button onClick={() => { setOrderSearch(""); orderInputRef.current?.focus(); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                      <X className="h-4 w-4" />
-                    </button>
-                  )}
-                  {orderFocused && debouncedOrderSearch.trim().length >= 2 && (
-                    <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
-                      {orderSuggestionsQuery.isFetching ? (
-                        <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
-                      ) : orderSuggestions.length === 0 ? (
-                        <p className="px-4 py-3 text-xs text-gray-400">No matching orders.</p>
-                      ) : (
-                        orderSuggestions.map((s, i) => (
-                          <button
-                            key={s.id}
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => openOrder(s.orderNumber, { confirm: true })}
-                            className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === orderSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
-                          >
-                            <div className="min-w-0">
-                              <div className="text-sm font-semibold text-[#001d6e] truncate">#{s.orderNumber}</div>
-                              <div className="text-xs text-gray-500 truncate">{s.partyName}{s.plant ? ` · ${s.plant}` : ""}</div>
-                            </div>
-                            <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <Button className="w-full h-10 bg-[#001d6e] text-white hover:bg-[#001552]"
-                disabled={!orderSearch.trim() || fetchSlipMutation.isPending}
-                onClick={() => openOrder(orderSearch, { confirm: true })}>
-                {fetchSlipMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
-                Find Order
-              </Button>
-            </div>
-          </div>
-        )}
 
         {/* ── Stage B(pre): order found, vehicle not yet CLAIMED — pick one in a dialog, then
             "Create Load Slip" before the actual load page (Stage B below) ever mounts. Gated on
@@ -2543,7 +2514,11 @@ export default function LoadOperation() {
                 <DialogTitle className="text-[#001d6e]">#{slip.orderNumber}</DialogTitle>
                 <DialogDescription>
                   {slip.partyName}{slip.plant ? ` · ${slip.plant}` : ""}
-                  {slip.orderDate ? ` · ${new Date(slip.orderDate).toLocaleDateString("en-IN")}` : ""}
+                  {/* Same local-midnight + explicit Asia/Kolkata pattern used everywhere else
+                      this page renders orderDate — parsing the bare "YYYY-MM-DD" string directly
+                      with new Date() treats it as UTC midnight, then formats in whatever the
+                      browser's own default timezone happens to be instead of always IST. */}
+                  {slip.orderDate ? ` · ${new Date(`${String(slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}` : ""}
                 </DialogDescription>
               </DialogHeader>
 
