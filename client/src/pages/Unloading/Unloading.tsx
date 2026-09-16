@@ -4,7 +4,7 @@ import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileBarChart, Keyboard, Loader2, Menu, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import { useSidebarContext } from "@/lib/sidebarContext";
@@ -421,8 +421,6 @@ export default function Unloading() {
   const kioskTableBoxClass = bigView
     ? `overflow-auto kiosk-scroll ${quarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
     : "";
-  const portalRotate = rotated ? portalRotateClass(rotation) : "";
-
   // ── Rotated-view scroll fix — same as Order Scan's own (client/src/pages/Scanning/Scan.tsx):
   // a 90°-rotated container's native scroll moves content sideways on screen, not up/down, so a
   // discrete Up/Down button pair replaces continuous wheel/swipe scrolling for the vehicles table
@@ -1269,15 +1267,6 @@ export default function Unloading() {
                 <ScrollNudgeButtons targetRef={vehiclesTableScrollRef} amount={360} />
               </div>
             )}
-            {rotated && (
-              <button
-                onClick={() => { openMobileMenu(); openSidebar(); }}
-                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-                title="Open sidebar menu"
-              >
-                <Menu className="h-5 w-5" />
-              </button>
-            )}
             <button
               onClick={rotateNext}
               className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -1296,34 +1285,12 @@ export default function Unloading() {
             )}
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
             <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
+              {/* Header only ABOVE this card (rotated included) — a second copy inside it pushed
+                  the table down and read as a duplicate. Plant is a column filter now, so the
+                  old All Plants dropdown that used to sit here is gone. */}
               <div>
-                {/* The real PageHeader, not a hand-rolled stand-in — the earlier tiny eyebrow +
-                    text-lg title read as far less prominent than the unrotated page's actual
-                    icon-badge + text-2xl title, which is exactly what made it hard to spot at a
-                    glance once rotated. Dropping the same component in here instead keeps the
-                    rotated header visually identical to the unrotated one. */}
-                {rotated && (
-                  <PageHeader
-                    icon={PackageOpen}
-                    title="Unloading"
-                    description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
-                  />
-                )}
                 <div className="text-lg font-bold text-[#001d6e]">Vehicles</div>
-                <div className="text-xs text-gray-400">{total} part(s){sessionPlantFilter ? ` · ${sessionPlantFilter}` : ""}</div>
-              </div>
-              <div className="flex items-center gap-2">
-                {importablePlants.length > 1 && (
-                  <Select value={sessionPlantFilter || "all"} onValueChange={(v) => { setSessionPlantFilter(v === "all" ? "" : v); setOffset(0); }}>
-                    <SelectTrigger className="h-9 w-[160px]"><SelectValue placeholder="All Plants" /></SelectTrigger>
-                    <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
-                      <SelectItem value="all">All Plants</SelectItem>
-                      {importablePlants.map((p: any) => (
-                        <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
+                <div className="text-xs text-gray-400">{total} part(s)</div>
               </div>
             </div>
 

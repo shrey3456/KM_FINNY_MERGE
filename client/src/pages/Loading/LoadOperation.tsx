@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
-  Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
+  Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
@@ -258,6 +258,20 @@ export default function LoadOperation() {
   // the "list" view's own pending-fetch skeleton in place of the table until it resolves, then
   // flips to "create" (see commitSlip) — no need to pre-guess the view up front anymore.
   const [view, setView] = useState<"list" | "create">("list");
+  // The order search sits behind the "Load Operation" button rather than always occupying the top
+  // of the landing page — the records table is what this page is usually opened for.
+  const [searchOpen, setSearchOpen] = useState(false);
+  function openOrderSearch() {
+    setSearchOpen(true);
+    setTimeout(() => orderInputRef.current?.focus(), 50);
+  }
+  function closeOrderSearch() {
+    stopCamera();
+    setScanMode("manual");
+    setSearchOpen(false);
+    setOrderSearch("");
+    setOrderFocused(false);
+  }
 
   // Server-paginated (20/page by default, matching Scan History) rather than fetching every
   // slip anyone's ever loaded in one request. Page size is user-selectable (same options/pattern
@@ -817,6 +831,7 @@ export default function LoadOperation() {
 
   function backToList() {
     resetToSearch();
+    setSearchOpen(false);
     recordsQuery.refetch();
   }
 
@@ -897,7 +912,13 @@ export default function LoadOperation() {
       if (flushTimer) clearTimeout(flushTimer);
       flushTimer = setTimeout(() => {
         if (buffer.length >= 3) {
-          if (view === "create") { setScanMode("manual"); orderInputRef.current?.focus(); setOrderSearch(buffer); }
+          // A gun scan on the landing list opens the order search itself and shows what was
+          // scanned, so the user sees where the lookup came from instead of a dialog appearing
+          // over an apparently untouched page. (This listener only runs on the list — the create
+          // screen has its own item-barcode listener.)
+          setSearchOpen(true);
+          setScanMode("manual");
+          setOrderSearch(buffer);
           openOrder(buffer, { confirm: true });
         }
         buffer = "";
@@ -2037,15 +2058,20 @@ export default function LoadOperation() {
               description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
             />
             {canWrite && (
-              // No overflow-hidden — the order-search suggestions dropdown is absolutely
-              // positioned and needs to render past this card's bottom edge, not get clipped by
-              // it. Lives directly on the list page now — no separate "New Load" screen/button
-              // to click through first; scanning or typing an order number is always right here.
-              <div className="mx-auto max-w-xl w-full rounded-xl border border-gray-200 bg-white shadow-sm">
-                <div className="px-4 sm:px-5 py-4 sm:py-5 space-y-3">
-                  <div className="flex items-center gap-1.5 text-sm font-semibold text-gray-500">
-                    <Search className="h-4 w-4" /> Find or scan an order
-                  </div>
+              // A popup, not an inline card — this page is opened for the records table, and the
+              // order search is something you deliberately start (the toolbar button below, or a
+              // gun scan, which opens this same dialog with what was scanned already filled in).
+              <Dialog open={searchOpen} onOpenChange={(o) => { if (!o) closeOrderSearch(); }}>
+                <DialogContent className="sm:max-w-lg">
+                  <DialogHeader>
+                    <DialogTitle className="flex items-center gap-1.5">
+                      <Search className="h-4 w-4" /> Find or scan an order
+                    </DialogTitle>
+                    <DialogDescription>
+                      Scan with the gun, use the camera, or type an order number / party name.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-3">
                   <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
                     <button
                       onClick={() => setScanMode("camera")}
@@ -2151,8 +2177,9 @@ export default function LoadOperation() {
                     {fetchSlipMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
                     Find Order
                   </Button>
-                </div>
-              </div>
+                  </div>
+                </DialogContent>
+              </Dialog>
             )}
             {fetchSlipMutation.isPending ? (
                         <div className="space-y-4 animate-pulse">
@@ -2283,6 +2310,16 @@ export default function LoadOperation() {
                   <span className="text-sm font-semibold">{readyDespCount}</span>
                 </div>
               </Button>
+
+              {/* ml-auto: sits at the far right of this row, away from the filters/counters. */}
+              {canWrite && (
+                <Button
+                  className="ml-auto h-10 rounded-lg bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b]"
+                  onClick={openOrderSearch}
+                >
+                  <Plus className="mr-1.5 h-4 w-4" /> Load Operation
+                </Button>
+              )}
             </div>
 
             {/* Navigation Tabs (hidden on mobile) */}

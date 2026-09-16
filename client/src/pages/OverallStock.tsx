@@ -2826,6 +2826,7 @@ export default function OverallStock() {
               <span className="mt-1.5 block text-xs text-gray-500">
                 Proforma slips are not changed. If this item is on one, it stays listed here with its Expected Sale.
               </span>
+
             </DialogDescription>
           </DialogHeader>
           {deletePreviewLoading ? (
