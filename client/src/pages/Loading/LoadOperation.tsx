@@ -687,6 +687,7 @@ export default function LoadOperation() {
 
   function commitSlip(data: SlipLookup) {
     if (completeShownForRef.current !== data.slip.orderNumber) completeShownForRef.current = null;
+    if (slip?.orderNumber !== data.slip.orderNumber) itemScanSeqRef.current = { seq: 0, byId: new Map() };
     setSlip(data.slip);
     setItems(data.items);
     setAllComplete(data.allComplete);
@@ -1228,6 +1229,7 @@ export default function LoadOperation() {
       return res.json() as Promise<ScanResponse>;
     },
     onSuccess: (data) => {
+      markItemScanned(adjustTarget?.item.barcode, data.items);
       setSlip(data.slip);
       setItems(data.items);
       setAllComplete(data.allComplete);
@@ -1303,6 +1305,16 @@ export default function LoadOperation() {
   // barcode within the window is discarded (no beep, no dialog, no toast — stays silent, same
   // as Order Scan); a DIFFERENT barcode is never affected.
   const lastScanRef = useRef<{ barcode: string; at: number } | null>(null);
+  // Which item was touched most recently (see filteredItems' sort). Reset when another order is
+  // opened, so one order's scan order never carries into the next.
+  const itemScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
+  function markItemScanned(barcode: string | null | undefined, list: ProformaItem[]) {
+    const hit = list.find((i) => normalize(i.barcode) === normalize(barcode ?? ""));
+    if (!hit) return;
+    const s = itemScanSeqRef.current;
+    s.seq += 1;
+    s.byId.set(hit.id, s.seq);
+  }
   const SAME_BARCODE_COOLDOWN_MS = 5000;
 
   const locked = !!slip?.loadingCompletedAt;
@@ -1350,6 +1362,7 @@ export default function LoadOperation() {
       return res.json() as Promise<ScanResponse>;
     },
     onSuccess: (data) => {
+      markItemScanned(data.event?.barcode, data.items);
       setSlip(data.slip);
       setItems(data.items);
       setAllComplete(data.allComplete);
@@ -1655,6 +1668,10 @@ export default function LoadOperation() {
     const ipp = it.itemsPerPallet ?? 0;
     return ipp > 0 ? it.expected % ipp : it.expected;
   };
+  // Scan order, newest first — same as Unloading's item table (itemScanSeqRef there): each scan
+  // or +/- stamps that row with a rising number, and rows are sorted by it, so whatever was just
+  // handled sits at the top instead of staying wherever its Sr. No. put it. Rows nobody has
+  // touched keep their original order (the sort is stable, and they all score 0).
   const filteredItems = items.filter((it) => {
     if (itemStatusFilter === "done" && !(it.loaded > 0)) return false;
     if (itemStatusFilter === "remaining" && !(it.remaining > 0)) return false;
@@ -1667,7 +1684,7 @@ export default function LoadOperation() {
       if (!hay.includes(q)) return false;
     }
     return true;
-  });
+  }).sort((a, b) => (itemScanSeqRef.current.byId.get(b.id) ?? 0) - (itemScanSeqRef.current.byId.get(a.id) ?? 0));
 
   // Items table — same shared DataTable (navy sticky header, resizable/sortable columns, totals
   // row) Order Scan and Unloading's own items tables use. Item Name and Barcode/SAP are merged
