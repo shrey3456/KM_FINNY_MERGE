@@ -102,8 +102,17 @@ function dateScopeLabel(voucherDate: string | null): string {
 // names than the regular EV database (which the print template / merge read).
 // Map each canonical key (the print reads) to the AEV alias(es) that hold the
 // same value, so both schemas produce identical output.
+//
+// "KM's BKUP" and "CA BKUP" are the AEV database's real, reliably-populated numbers
+// (confirmed live: e.g. KM's BKUP 2150/404/738, CA BKUP 2419/1010/1845 on real Approved
+// vouchers) — "Overall KM's :" and "Conveyance Allowance:" are FORMULA properties on that
+// database that evaluate to 0 on every voucher checked, which is why Route KM's / Conveyance
+// Allowance (and anything derived from them — Average, ECS Payment) came out as 0 even for
+// Approved vouchers. Listed first so they win over the broken formula fields whenever present.
+// Note: "Conveyance Allowance:" itself is handled separately below (CA_BKUP_OVERRIDE), not
+// through this alias list — see that comment for why.
 const FIELD_ALIASES: Record<string, string[]> = {
-  "KM's SUM": ["KM's:", "Overall KM's :"],
+  "KM's SUM": ["KM's BKUP", "KM's:", "Overall KM's :"],
   'Toll Tax :': ['Toll:'],
   'OnRoad Work :': ['On Road Arrangement:'],
   'For Diesel Bill No. :': ['⛽️ Bill No. :'],
@@ -143,9 +152,12 @@ function buildVoucherInfo(properties: Record<string, any>): Record<string, strin
         displayValue = prop.number?.toString() || '';
         break;
       case 'formula':
-        if (prop.formula?.string) {
+        // Truthy checks here would silently drop a genuine 0 result (e.g. a formula whose
+        // number really is 0) — check the formula's own declared type instead, and `!= null`
+        // rather than truthiness, so a real 0 still comes through as "0".
+        if (prop.formula?.type === 'string' && prop.formula.string) {
           displayValue = prop.formula.string;
-        } else if (prop.formula?.number) {
+        } else if (prop.formula?.type === 'number' && prop.formula.number != null) {
           displayValue = prop.formula.number.toString();
         }
         break;
@@ -181,6 +193,16 @@ function buildVoucherInfo(properties: Record<string, any>): Record<string, strin
         break;
       }
     }
+  }
+
+  // CA_BKUP_OVERRIDE: "Conveyance Allowance:" can't use the plain FIELD_ALIASES fallback above,
+  // because its own formula property DOES exist and evaluates to 0 on every AEV voucher checked
+  // — a real, present "0", not a missing value — so the "only fill in when canonical is
+  // absent/empty" rule above would never reach CA BKUP. CA BKUP is confirmed the reliable source
+  // (live: 2419/1010/1845 vs. the formula's 0 on the same Approved vouchers), so it always wins
+  // here whenever it's present, overriding whatever the formula produced.
+  if (info['CA BKUP'] !== undefined && info['CA BKUP'] !== '') {
+    info['Conveyance Allowance:'] = info['CA BKUP'];
   }
 
   return info;
@@ -251,6 +273,18 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
     return isNaN(n) ? 0 : n;
   };
 
+  // Authorisation is "Approved" — the gate for KM's SUM, Conveyance Allowance, and Deduction
+  // (both here and in the multi-voucher merge below). Declared up front so the single-voucher
+  // path can use it too.
+  const isApproved = (info: Record<string, string>) =>
+    (info['Authorisation :'] || '').trim().toLowerCase() === 'approved';
+  const extraKmFromRemark = (info: Record<string, string>): number => {
+    const remark = info['Remark :'] || '';
+    let extra = 0;
+    for (const m of remark.matchAll(/EXTRA\s*KM\.?\s*(\d+(?:\.\d+)?)/gi)) extra += parseNum(m[1]);
+    return extra;
+  };
+
   const merged: Record<string, string> = { ...infos[0] };
 
   // Order Details party name (voucher number prefixed) is only shown when
@@ -262,7 +296,31 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
     delete merged['For Party x Ord Date'];
   }
 
-  if (infos.length === 1) return merged;
+  if (infos.length === 1) {
+    // A single (unmerged) voucher used to pass its KM's SUM / Conveyance Allowance / Deduction /
+    // ECS Payment straight through from Notion, regardless of Authorisation status — so a
+    // not-yet-approved voucher showed its raw figures instead of being zeroed out the way it
+    // would be if merged alongside others. Apply the same approval gate here for consistency.
+    const info = infos[0];
+    const approved = isApproved(info);
+    merged["KM's SUM"] = String((approved ? parseNum(info["KM's SUM"]) : 0) + extraKmFromRemark(info));
+    merged['Conveyance Allowance:'] = String(approved ? parseNum(info['Conveyance Allowance:']) : 0);
+    merged['Deduction :'] = String(approved ? parseNum(info['Deduction :']) : 0);
+    merged['ECS Payment :'] = String(
+      parseNum(merged['Toll Tax :']) +
+        parseNum(merged['OnRoad Work :']) +
+        parseNum(merged['Conveyance Allowance:']) -
+        parseNum(merged['Deduction :'])
+    );
+    // Average = Route KM / Diesel litres — recomputed from the just-corrected KM total rather
+    // than left as whatever raw "Average :" (if any) came through from Notion, so it stays
+    // consistent with an unapproved voucher's KM being zeroed out above.
+    const singleLtr = parseNum(merged["Diesel {Ltr's} :"]);
+    if (singleLtr > 0) {
+      merged['Average :'] = (parseNum(merged["KM's SUM"]) / singleLtr).toFixed(2);
+    }
+    return merged;
+  }
 
   // Sum expense amounts across every voucher
   const SUM_FIELDS = [
@@ -283,10 +341,8 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
   }
 
   // Conveyance Allowance and Deduction are summed ONLY over vouchers whose
-  // Authorisation status is "Approved". Final Payment (ECS Payment) is then
-  // displayed as (approved Conveyance Allowance) - (approved Deduction).
-  const isApproved = (info: Record<string, string>) =>
-    (info['Authorisation :'] || '').trim().toLowerCase() === 'approved';
+  // Authorisation status is "Approved" (isApproved declared above). Final Payment (ECS Payment)
+  // is then displayed as (approved Conveyance Allowance) - (approved Deduction).
   let convTotal = 0;
   let dedTotal = 0;
   for (const info of infos) {
@@ -339,10 +395,7 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
     if (isApproved(info)) {
       kmTotal += parseNum(info["KM's SUM"]);
     }
-    const remark = info['Remark :'] || '';
-    for (const m of remark.matchAll(/EXTRA\s*KM\.?\s*(\d+(?:\.\d+)?)/gi)) {
-      kmTotal += parseNum(m[1]);
-    }
+    kmTotal += extraKmFromRemark(info);
   }
   merged["KM's SUM"] = String(kmTotal);
   // Average = Route KM / Diesel litres

@@ -334,7 +334,15 @@ router.get('/loading/proforma/search', requirePageAccess('loading'), async (req:
       plantCondition = `AND LOWER(plant) = ANY($${params.length})`;
     }
     const { rows } = await pool.query(
-      `SELECT id, order_number AS "orderNumber", party_name AS "partyName", plant, order_date AS "orderDate",
+      // order_date::text — this is a raw pool.query (not Drizzle), so node-postgres's default
+      // DATE type parser would otherwise hand back a JS Date object built at LOCAL midnight,
+      // which res.json() then serializes as a UTC timestamp with the date shifted by the
+      // server's own UTC offset (e.g. "2026-08-26" becomes "2026-08-25T18:30:00.000Z" on an
+      // IST server) — exactly the kind of value the client's date-only rendering logic isn't
+      // expecting, and slicing just the date portion of THAT then picks the wrong day. Casting
+      // to text in SQL returns the plain "YYYY-MM-DD" Postgres already has, matching what
+      // Drizzle's own (string-mode) date columns return elsewhere in this app.
+      `SELECT id, order_number AS "orderNumber", party_name AS "partyName", plant, order_date::text AS "orderDate",
               vehicle_number AS "vehicleNumber"
        FROM proforma_slips
        WHERE (order_number ILIKE $1 OR party_name ILIKE $1) ${plantCondition}
@@ -627,7 +635,9 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 lr.party_name AS "partyName", lr.plant, lr.vehicle_number AS "vehicleNumber",
                 lr.rto_number AS "rtoNumber", lr.volume, lr.created_by_code AS "createdByCode",
                 lr.created_by_name AS "createdByName", lr.created_at AS "createdAt",
-                ps.order_date AS "orderDate",
+                -- ::text — see the identical cast + comment on the /proforma/search query above;
+                -- same raw pool.query date-shift bug, same fix.
+                ps.order_date::text AS "orderDate",
                 ps.loading_completed_at AS "loadingCompletedAt",
                 ps.loading_owner_code AS "loadingOwnerCode", ps.loading_owner_name AS "loadingOwnerName",
                 ps.loading_paused_at AS "loadingPausedAt",
