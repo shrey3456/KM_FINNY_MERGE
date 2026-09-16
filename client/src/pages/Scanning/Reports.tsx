@@ -37,6 +37,38 @@ import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { ColumnFilterPopoverContent, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, conditionSummary, isConditionEmpty } from "@/lib/columnFilters";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+
+// The Type column, in one place — the table cell, its badge and the CSV export all read it, so a
+// row can never be labelled one way in the table and another in the export.
+//
+// A label is "<where it came from> <what kind>": Scan / Unload / Load / Stock, then Adjust (a qty
+// edit or a +/- correction) > Empty Box > Extra > Regular. Adjust wins over Extra, so a correction
+// that also goes past the expected qty reads "Load Adjust", not "Load Extra".
+type ScanTypeLabel = { source: string; kind: string; label: string; className: string };
+
+function scanTypeLabel(row: {
+  isExtra?: boolean; isEmptyBox?: boolean; isExchange?: boolean;
+  isDispatch?: boolean; isUnload?: boolean; isAdjust?: boolean;
+  sourceKind?: string;
+}): ScanTypeLabel {
+  // sourceKind comes from the server; the flags are the fallback for an older one that doesn't
+  // send it yet.
+  const source = row.sourceKind
+    ?? (row.isDispatch ? "loading" : row.isUnload ? "unloading" : row.isExchange || row.isAdjust ? "stock" : "scan");
+  const word = source === "loading" ? "Load" : source === "unloading" ? "Unload" : source === "stock" ? "Stock" : "Scan";
+  const kind = row.isExchange ? "Exchange"
+    : row.isAdjust ? "Adjust"
+    : row.isEmptyBox ? "Empty Box"
+    : row.isExtra ? "Extra"
+    : "Regular";
+  // Colour says the source at a glance; the words carry the detail.
+  const className = source === "loading" ? "bg-blue-100 text-blue-800 hover:bg-blue-100"
+    : source === "unloading" ? "bg-teal-100 text-teal-800 hover:bg-teal-100"
+    : source === "stock" ? "bg-slate-200 text-slate-800 hover:bg-slate-200"
+    : "bg-green-100 text-green-800 hover:bg-green-100";
+  return { source: word, kind, label: word + " " + kind, className };
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -51,12 +83,20 @@ type ScanHistoryItem = {
   isExtra: boolean;
   isEmptyBox?: boolean;
   isExchange?: boolean;
+  // An adjustment, signed totalQty. On its own: a person's manual stock adjustment from Overall
+  // Stock's Adjust dialog (+added / −removed), never voidable or editable here. With isDispatch:
+  // "Loading Adjust" — the Loading Items table's +/- (+ loaded more / − loaded less), voidable
+  // like any loading entry.
+  isAdjust?: boolean;
   // Loading page's item-scanning history (server/routes/loading.ts) — a real stock removal onto
   // a vehicle for a proforma order, distinct from a receiving scan (isExchange stays false here).
   isDispatch?: boolean;
   // Unloading page's own scan history (server/routes/unloading.ts) — a real stock addition for a
   // vehicle+date batch, distinct from both receiving and Loading dispatch.
   isUnload?: boolean;
+  // Which page wrote this row, straight from the server. The flags above say what kind of entry it
+  // is; this says where it came from, and scanTypeLabel joins the two ("Scan Extra", "Load Adjust").
+  sourceKind?: "scan" | "loading" | "unloading" | "stock";
   emptyBoxNote?: string | null;
   stv: string | null;
   scannedByCode: string | null;
@@ -319,7 +359,7 @@ const Reports = () => {
   // (server/routes/loading.ts), and Unloading's own scan history (server/routes/unloading.ts).
   // Same table/filters/export/void shell for all four; only the server-side `source` scoping
   // (isDispatch/isUnload) and a couple of labels differ.
-  const [historySource, setHistorySource] = useState<"all" | "receiving" | "dispatch" | "unload">("all");
+  const [historySource, setHistorySource] = usePersistentFilter<"all" | "receiving" | "dispatch" | "unload">("scanHistory:source", "all");
   // Seeded from whatever was left applied last time — see HISTORY_FILTERS_KEY.
   const [historySearch,  setHistorySearch]  = useState(() => readSavedHistoryFilters().search ?? "");
   const [historyPage,    setHistoryPage]    = useState(1);
@@ -353,19 +393,22 @@ const Reports = () => {
   // filter only offers what can actually occur there (matched what was expected, or went over).
   const TYPE_OPTIONS = historySource === "dispatch"
     ? [
-        { value: "regular", label: "Loaded only" },
-        { value: "extra", label: "Loaded Extra only" },
+        { value: "regular", label: "Load Regular only" },
+        { value: "extra", label: "Load Extra only" },
+        { value: "adjust", label: "Load Adjust only" },
       ]
     : historySource === "unload"
     ? [
-        { value: "regular", label: "Unloaded only" },
-        { value: "extra", label: "Unloaded Extra only" },
+        { value: "regular", label: "Unload Regular only" },
+        { value: "extra", label: "Unload Extra only" },
+        { value: "adjust", label: "Unload Adjust only" },
       ]
     : [
-        { value: "regular", label: "Regular only" },
-        { value: "extra", label: "Extra only" },
-        { value: "empty", label: "Empty Box only" },
-        { value: "exchange", label: "Exchange only" },
+        { value: "regular", label: "Scan Regular only" },
+        { value: "extra", label: "Scan Extra only" },
+        { value: "empty", label: "Scan Empty Box only" },
+        { value: "exchange", label: "Stock Exchange only" },
+        { value: "adjust", label: "Adjust only (Scan + Stock)" },
       ];
 
   // Date filter — same control/encoding as Overall Stock: the stored value is either a single
@@ -826,7 +869,7 @@ const Reports = () => {
       h.totalQty,
       h.pallets != null ? parseFloat(String(h.pallets)).toFixed(2) : "",
       h.stv ?? "",
-      h.isExchange ? "Exchange" : h.isDispatch ? (h.isExtra ? "Loaded Extra" : "Loaded") : h.isUnload ? (h.isExtra ? "Unloaded Extra" : "Unloaded") : h.isEmptyBox ? "Empty Box" : h.isExtra ? "Extra" : "Regular",
+      scanTypeLabel(h).label,
       h.scannedAt ? format(new Date(h.scannedAt), "yyyy-MM-dd HH:mm") : "",
     ]),
   ];
@@ -951,7 +994,7 @@ const Reports = () => {
         ).toLocaleString(),
       cellClassName: "font-bold",
       render: (row) =>
-        row.isExchange ? (
+        row.isExchange || row.isAdjust ? (
           <span className={row.totalQty < 0 ? "text-red-500" : "text-emerald-600"}>
             {row.totalQty < 0 ? row.totalQty.toLocaleString() : `+${row.totalQty.toLocaleString()}`}
           </span>
@@ -997,27 +1040,11 @@ const Reports = () => {
         </span>
       ),
       width: 100,
-      accessor: (row) => (row.isExchange ? "Exchange" : row.isDispatch ? (row.isExtra ? "Loaded Extra" : "Loaded") : row.isUnload ? (row.isExtra ? "Unloaded Extra" : "Unloaded") : row.isEmptyBox ? "Empty Box" : row.isExtra ? "Extra" : "Regular"),
-      render: (row) =>
-        row.isExchange ? (
-          <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-100 text-[11px] px-1.5 border-0">Exchange</Badge>
-        ) : row.isDispatch ? (
-          <span className="inline-flex items-center gap-1">
-            <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100 text-[11px] px-1.5 border-0">Loaded</Badge>
-            {row.isExtra && <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>}
-          </span>
-        ) : row.isUnload ? (
-          <span className="inline-flex items-center gap-1">
-            <Badge className="bg-teal-100 text-teal-800 hover:bg-teal-100 text-[11px] px-1.5 border-0">Unloaded</Badge>
-            {row.isExtra && <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>}
-          </span>
-        ) : row.isEmptyBox ? (
-          <Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 text-[11px] px-1.5 border-0">Empty Box</Badge>
-        ) : row.isExtra ? (
-          <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 text-[11px] px-1.5 border-0">Extra</Badge>
-        ) : (
-          <Badge className="bg-green-100 text-green-800 hover:bg-green-100 text-[11px] px-1.5 border-0">Regular</Badge>
-        ),
+      accessor: (row) => scanTypeLabel(row).label,
+      render: (row) => {
+        const t = scanTypeLabel(row);
+        return <Badge className={`${t.className} whitespace-nowrap text-[11px] px-1.5 border-0`}>{t.label}</Badge>;
+      },
     },
     {
       id: "time",
@@ -1036,8 +1063,10 @@ const Reports = () => {
             width: 48,
             align: "center" as const,
             render: (row: ScanHistoryItem) =>
-              // Same permission-pair-per-source and exchange-row exclusion as Void below.
-              !row.voided && !row.isExchange && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
+              // Same permission-pair-per-source and stock-row exclusion as Void below. A Load
+              // Adjust is a +/- correction with no qty to re-edit — void it and press +/- again.
+              !row.voided && scanTypeLabel(row).source !== "Stock" && !(row.isAdjust && row.isDispatch)
+              && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
                   onClick={() => { setEditTarget(row); setEditQty(String(row.totalQty ?? 0)); setEditStv(row.stv ?? ""); }}
                   title="Edit this scan">
@@ -1055,8 +1084,9 @@ const Reports = () => {
               // Exchange rows aren't backed by a voidable event at all. Receiving/dispatch/unload
               // each check their own permission and hit their own endpoint (see voidMutation) — a
               // user with only one of the write-access pairs would otherwise see a Void button
-              // that 403s on the row it doesn't cover.
-              !row.voided && !row.isExchange && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
+              // that 403s on the row it doesn't cover. Every real scan row can be voided, including
+              // the corrections; only the stock-ledger rows (manual adjust, exchange) can't.
+              !row.voided && scanTypeLabel(row).source !== "Stock" && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
                   onClick={() => setVoidTarget(row)} title="Void this scan">
                   <Trash2 className="h-3.5 w-3.5" />
@@ -1484,6 +1514,7 @@ const Reports = () => {
               // Stripe by the row's stable id (not its position), so a new scan landing at the
               // top doesn't flip every row's color/number on each poll.
               const stripeEven = row.id % 2 === 0;
+              if (row.isAdjust) return stripeEven ? "bg-slate-50" : "bg-slate-100/70";
               if (row.isExchange) return stripeEven ? "bg-purple-50/50" : "bg-purple-50/80";
               if (row.isEmptyBox) return stripeEven ? "bg-orange-50/50" : "bg-orange-50/80";
               if (row.voided) return "bg-gray-50 opacity-60";
@@ -1543,7 +1574,8 @@ const Reports = () => {
                 <div
                   key={row.id}
                   className={`border-b border-gray-100 px-4 py-3 ${
-                    row.isExchange ? "bg-purple-50/60"
+                    row.isAdjust ? "bg-slate-100/60"
+                    : row.isExchange ? "bg-purple-50/60"
                     : row.isEmptyBox ? "bg-orange-50/60"
                     : row.voided ? "bg-gray-50 opacity-60"
                     : row.isExtra ? "bg-amber-50/60" : ""}`}

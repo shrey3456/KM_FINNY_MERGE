@@ -45,6 +45,7 @@ import { useSingleDateFilter } from "@/hooks/useSingleDateFilter";
 import { TruckLoadingAnimation } from "@/components/TruckLoadingAnimation";
 import * as QRCode from "qrcode";
 import logoPath from "@assets/logo_wo_bg_1757152661130.png";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 interface ExpenseVoucherItem {
   productCode: string;
@@ -169,12 +170,12 @@ const getPartyTextFromVoucherInfo = (info?: Record<string, string>) => {
 };
 
 export default function ExpenseVoucher() {
-  const [selectedPlant, setSelectedPlant] = useState("valsad");
+  const [selectedPlant, setSelectedPlant] = usePersistentFilter("expenseVoucher:plant", "valsad");
   // const [voucherPrefix, setVoucherPrefix] = useState("KM2526-EV-");
   const [voucherNumber, setVoucherNumber] = useState("");
   const [selectedOrder, setSelectedOrder] = useState("");
   // Whether the current search term is a voucher number or a driver name
-  const [searchMode, setSearchMode] = useState<"voucher" | "driver">("voucher");
+  const [searchMode, setSearchMode] = usePersistentFilter<"voucher" | "driver">("expenseVoucher:searchMode", "voucher");
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchStage, setSearchStage] = useState("");
   // null = not chosen yet; when a search returns multiple vehicles, the

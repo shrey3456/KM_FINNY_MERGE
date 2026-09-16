@@ -68,6 +68,12 @@ function requireUnloadingDeleteAccess(req: Request, res: Response, next: any) {
 
 // Attaches live progress to a session's expected items (expected/scanned/remaining/pallet size),
 // the same shape both GET (open) and POST /scan responses return.
+//
+// Also returns offBatchExtraQty/offBatchExtraPallets: scans of products that are NOT on this batch's
+// file at all (logged as Extra). They have no item row, but they are real boxes received on this
+// vehicle — the landing list's "scannedQty" has always counted them, so the opened batch's
+// Received/Extra totals add them too; otherwise the same batch showed one quantity in the list and
+// a smaller one once opened.
 async function withProgress(session: any) {
   const state = await getPlantStateCode(pool, session.plant ?? '');
   const { rows: items } = await pool.query(
@@ -80,12 +86,34 @@ async function withProgress(session: any) {
      FROM unload_scan_events WHERE session_id = $1 AND voided IS NOT TRUE GROUP BY barcode`,
     [session.id],
   );
-  const scannedByBarcode = new Map<string, number>(scannedRows.map((r: any) => [normalize(r.barcode), r.scannedQty]));
+  // Summed, not set: two raw barcodes that differ only in case/spaces are the same product.
+  const scannedByBarcode = new Map<string, number>();
+  const rawBarcodeByKey = new Map<string, string>();
+  for (const r of scannedRows as any[]) {
+    const key = normalize(r.barcode);
+    scannedByBarcode.set(key, (scannedByBarcode.get(key) ?? 0) + Number(r.scannedQty ?? 0));
+    if (!rawBarcodeByKey.has(key)) rawBarcodeByKey.set(key, r.barcode);
+  }
 
-  const progressItems = await Promise.all(items.map(async (item: any) => {
+  // A barcode can be listed on more than one line of the same file. Its scans are shared out
+  // across those lines in order (each line filled up to its own qty, the last line takes any
+  // over-scan) instead of every line claiming the full scanned amount — which counted the same
+  // boxes twice in the opened batch's totals.
+  const lastLineByBarcode = new Map<string, number>();
+  items.forEach((item: any, index: number) => lastLineByBarcode.set(normalize(item.barcode), index));
+  const leftToShare = new Map(scannedByBarcode);
+  const scannedPerLine = items.map((item: any, index: number) => {
+    const key = normalize(item.barcode);
+    const left = leftToShare.get(key) ?? 0;
+    const share = index === lastLineByBarcode.get(key) ? left : Math.min(left, item.quantity ?? 0);
+    leftToShare.set(key, left - share);
+    return share;
+  });
+
+  const progressItems = await Promise.all(items.map(async (item: any, index: number) => {
     const product = item.barcode ? await storage.getProductByBarcode(item.barcode, session.plant) : undefined;
     const expected = item.quantity ?? 0;
-    const scanned = scannedByBarcode.get(normalize(item.barcode)) ?? 0;
+    const scanned = scannedPerLine[index];
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     return {
       ...item, expected, scanned, remaining: Math.max(0, expected - scanned),
@@ -93,9 +121,33 @@ async function withProgress(session: any) {
     };
   }));
 
+  let offBatchExtraQty = 0;
+  let offBatchExtraPallets = 0;
+  for (const [key, qty] of Array.from(scannedByBarcode.entries())) {
+    if (lastLineByBarcode.has(key) || qty <= 0) continue;
+    const product = await storage.getProductByBarcode(rawBarcodeByKey.get(key) ?? key, session.plant);
+    const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, qty);
+    offBatchExtraQty += qty;
+    if (itemsPerPallet > 0) offBatchExtraPallets += qty / itemsPerPallet;
+  }
+
   const allComplete = progressItems.length > 0 && progressItems.every((i) => i.isComplete);
-  return { items: progressItems, allComplete };
+  return {
+    items: progressItems, allComplete,
+    offBatchExtraQty, offBatchExtraPallets: Number(offBatchExtraPallets.toFixed(2)),
+  };
 }
+
+// Per batch, how much of what its file lists has arrived — each barcode capped at its own listed
+// qty, so over-scans and products not on the file don't count here. scannedQty (every box
+// scanned) minus this is the batch's Extra, the same split the opened batch shows.
+const RECEIVED_QTY_SQL = `COALESCE((
+  SELECT SUM(LEAST(sc.qty, ex.qty))
+  FROM (SELECT LOWER(TRIM(barcode)) AS bc, SUM(quantity) AS qty FROM unload_import_items WHERE session_id = s.id GROUP BY 1) ex
+  JOIN (SELECT LOWER(TRIM(barcode)) AS bc, SUM(total_qty) AS qty FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE GROUP BY 1) sc
+    ON sc.bc = ex.bc
+), 0)::int`;
+const withExtraQty = (row: any) => ({ ...row, extraQty: Math.max(0, (row.scannedQty ?? 0) - (row.receivedQty ?? 0)) });
 
 // A batch only becomes "active" when a user actually opens it to scan (POST .../activate below)
 // — never automatically on import or when an earlier batch completes, mirroring Order Import's
@@ -367,6 +419,7 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
                 (SELECT COUNT(*) FROM unload_import_sessions g WHERE g.group_id = s.group_id AND g.is_deleted = false) AS "partsCount",
                 COALESCE((SELECT SUM(quantity) FROM unload_import_items WHERE session_id = s.id), 0)::int AS "expectedQty",
                 COALESCE((SELECT SUM(total_qty) FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE), 0)::int AS "scannedQty",
+                ${RECEIVED_QTY_SQL} AS "receivedQty",
                 ((SELECT g.id FROM unload_import_sessions g
                   WHERE g.group_id = s.group_id AND g.is_deleted = false AND g.scan_status <> 'completed'
                   ORDER BY g.part_index ASC, g.id ASC LIMIT 1) = s.id) AS "canActivate"
@@ -379,7 +432,7 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
       pool.query(`SELECT COUNT(*) AS total FROM unload_import_sessions s ${where}`, params),
     ]);
 
-    res.json({ sessions: dataRes.rows, total: parseInt(countRes.rows[0]?.total ?? '0', 10), limit, offset });
+    res.json({ sessions: dataRes.rows.map(withExtraQty), total: parseInt(countRes.rows[0]?.total ?? '0', 10), limit, offset });
   } catch (error) {
     console.error('Error listing unloading sessions:', error);
     res.status(500).json({ message: 'Failed to fetch unloading sessions' });
@@ -532,14 +585,15 @@ router.get('/unloading/sessions/recent-complete', requirePageAccess('unloading')
          s.scan_completed_at AS "scanCompletedAt",
          (SELECT COUNT(*) FROM unload_import_sessions g WHERE g.group_id = s.group_id AND g.is_deleted = false) AS "partsCount",
          COALESCE((SELECT SUM(quantity) FROM unload_import_items WHERE session_id = s.id), 0)::int AS "expectedQty",
-         COALESCE((SELECT SUM(total_qty) FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE), 0)::int AS "scannedQty"
+         COALESCE((SELECT SUM(total_qty) FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE), 0)::int AS "scannedQty",
+         ${RECEIVED_QTY_SQL} AS "receivedQty"
        FROM unload_import_sessions s
        ${where}
        ORDER BY s.plant, s.scan_completed_at DESC`,
       params,
     );
 
-    res.json({ sessions: rows, total: rows.length });
+    res.json({ sessions: rows.map(withExtraQty), total: rows.length });
   } catch (error) {
     console.error('Error fetching unloading recent-complete list:', error);
     res.status(500).json({ message: 'Failed to fetch recent-complete list' });
@@ -694,14 +748,14 @@ router.get('/unloading/sessions/:id', requirePageAccess('unloading'), async (req
     if (!session || session.is_deleted) return res.status(404).json({ message: 'Unloading session not found' });
     if (!canAccessPlant(req, session.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
 
-    const { items, allComplete } = await withProgress({ id: session.id, plant: session.plant });
+    const { items, allComplete, offBatchExtraQty, offBatchExtraPallets } = await withProgress({ id: session.id, plant: session.plant });
     res.json({
       session: {
         id: session.id, plant: session.plant, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
         csvFileName: session.csv_file_name, groupId: session.group_id, partIndex: session.part_index,
         scanStatus: session.scan_status, scanCompletedAt: session.scan_completed_at,
       },
-      items, allComplete,
+      items, allComplete, offBatchExtraQty, offBatchExtraPallets,
     });
   } catch (error) {
     console.error('Error fetching unloading session:', error);
@@ -887,8 +941,8 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
         [barcode, product?.id ?? null, session.plant, qty],
       );
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
-         VALUES ($1,$2,$3,$4,$5,'receive',$6,$7,$8)`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
+         VALUES ($1,$2,$3,$4,$5,'receive',$6,$7,$8,'unloading')`,
         [barcode, product?.id ?? null, session.plant, qty, extraQty, `Unloaded vehicle ${session.vehicle_number} (${session.order_date})`, id, userCode ?? null],
       );
       await client.query('COMMIT');
@@ -897,7 +951,7 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
       throw err;
     }
 
-    const { items: progressItems, allComplete } = await withProgress({ id: session.id, plant: session.plant });
+    const { items: progressItems, allComplete, offBatchExtraQty, offBatchExtraPallets } = await withProgress({ id: session.id, plant: session.plant });
 
     let finalStatus = session.scan_status;
     if (allComplete && session.scan_status !== 'completed') {
@@ -935,7 +989,7 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
         id: session.id, plant: session.plant, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
         scanStatus: finalStatus, groupId: session.group_id, partIndex: session.part_index,
       },
-      items: progressItems, allComplete,
+      items: progressItems, allComplete, offBatchExtraQty, offBatchExtraPallets,
       event: {
         barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
         sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
@@ -995,8 +1049,8 @@ router.post('/unloading/sessions/:id/complete', requirePageWrite('unloading'), a
       });
     }
 
-    const { items, allComplete } = await withProgress({ id, plant: session.plant });
-    res.json({ items, allComplete });
+    const { items, allComplete, offBatchExtraQty, offBatchExtraPallets } = await withProgress({ id, plant: session.plant });
+    res.json({ items, allComplete, offBatchExtraQty, offBatchExtraPallets });
   } catch (error) {
     console.error('Error completing unloading session:', error);
     res.status(500).json({ message: 'Failed to complete' });
@@ -1037,8 +1091,8 @@ router.post('/unloading/sessions/:id/reopen', requireUnloadingVoidAccess, async 
       });
     }
 
-    const { items, allComplete } = await withProgress({ id, plant: session.plant });
-    res.json({ items, allComplete });
+    const { items, allComplete, offBatchExtraQty, offBatchExtraPallets } = await withProgress({ id, plant: session.plant });
+    res.json({ items, allComplete, offBatchExtraQty, offBatchExtraPallets });
   } catch (error) {
     console.error('Error reopening unloading session:', error);
     res.status(500).json({ message: 'Failed to reopen' });
@@ -1120,8 +1174,8 @@ router.delete('/unloading/sessions/:id', requireUnloadingDeleteAccess, async (re
           [actualQty, r.barcode, session.plant],
         );
         await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
-           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7)`,
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
+           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading')`,
           [r.barcode, productId, session.plant, -actualQty, 'Unloading CSV deleted — rollback', id, userCode ?? null],
         );
         stockReversed.push({ barcode: r.barcode, qty: actualQty });
@@ -1184,8 +1238,8 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
         [qty, event.barcode, event.plant],
       );
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7)`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading')`,
         [event.barcode, product?.id ?? null, event.plant, -qty, reason ?? 'Unloading scan voided', event.session_id, userCode ?? null],
       );
     }
@@ -1265,8 +1319,8 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
       [oldQty, event.barcode, event.plant],
     );
     await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
-       VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7)`,
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
+       VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading')`,
       [event.barcode, product?.id ?? null, event.plant, -oldQty, `Qty correction — old scan reversed (edited by ${editorLabel})`, event.session_id, userCode ?? null],
     );
 
@@ -1294,9 +1348,10 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
     const state = await getPlantStateCode(client, event.plant ?? '');
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
+      // is_adjust: this is a qty correction, not a fresh scan — shown as "Unload Adjust".
       `INSERT INTO unload_scan_events
-         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, stv, plant, vehicle_number, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,$13)`,
       [
         event.session_id, event.barcode, event.item_name, event.sap_code,
         itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
@@ -1316,8 +1371,8 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
       [event.barcode, product?.id ?? null, event.plant, newQty],
     );
     await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code)
-       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,$8)`,
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
+       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,$8,'unloading')`,
       [event.barcode, product?.id ?? null, event.plant, newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, event.session_id, userCode ?? null],
     );
 

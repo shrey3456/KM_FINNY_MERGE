@@ -20,6 +20,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import type { VehicleInfo } from "@shared/schema";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 // ─── Types (mirror server/services/notionVehicleSync.ts + vehicle-info route responses) ───
 type EnrichedVehicle = VehicleInfo & { lastEditedByName: string | null; createdByName: string | null };
@@ -113,7 +114,7 @@ export default function VehicleMaster() {
   const canWrite = hasPageWriteAccess("vehicle-master");
   const admin = isAdminOrSuper();
 
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = usePersistentFilter("vehicleMaster:search", "");
   const [visibleColumnKeys, setVisibleColumnKeys] = useState<Set<string>>(new Set(ALL_KEYS));
   const [showPending, setShowPending] = useState(false);
   const [editing, setEditing] = useState<EnrichedVehicle | null>(null);

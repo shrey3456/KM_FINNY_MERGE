@@ -1,4 +1,5 @@
 import { createContext, useContext } from "react";
+import type { PortalRotation } from "@/lib/portalRotation";
 
 // Lets a page reach the app's own sidebar without any prop drilling — needed by kiosk-rotate
 // views (Loading/Unloading/Scan's scan pages), whose rotated content is a fixed, full-viewport
@@ -19,16 +20,20 @@ import { createContext, useContext } from "react";
 // their own rotated content works here too: it's just a fixed, full-viewport, rotated box, and
 // the sidebar's own fixed-width column simply keeps its normal top-left position inside that
 // box, same as any other rotated content.
+// setPortalRotation lets the active page tell Layout its rotation (0 when not rotated) so popups
+// it portals out — dialogs, dropdowns, popovers, calendars — turn to match; see lib/portalRotation.
 // Provided by Layout.tsx; defaults to no-ops so a page rendered outside Layout (tests, storybook)
 // doesn't crash calling it.
 export const SidebarContext = createContext<{
   openMobileMenu: () => void;
   openSidebar: () => void;
   setKioskRotateClass: (cls: string) => void;
+  setPortalRotation: (rotation: PortalRotation) => void;
 }>({
   openMobileMenu: () => {},
   openSidebar: () => {},
   setKioskRotateClass: () => {},
+  setPortalRotation: () => {},
 });
 
 export function useSidebarContext() {

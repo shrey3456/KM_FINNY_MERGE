@@ -7,6 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { AlertCircle, CheckCircle, RefreshCw, Shield, Search, XCircle } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useUser } from "@/hooks/use-user";
+import { format } from "date-fns";
 
 interface FieldChange {
   field: string;
@@ -38,9 +39,11 @@ export function ProformaSlipNotionSync({ onApplySuccess }: ProformaSlipNotionSyn
   const { user } = useUser();
   const canSync = user?.role === 'admin' || user?.role === 'super-admin';
 
+  // Today's LOCAL date. toISOString() is UTC, which in India (UTC+5:30) is still yesterday until
+  // 5:30 am — a sync opened early in the morning defaulted to the previous day's orders.
   const [dateRange, setDateRange] = useState({
-    startDate: new Date().toISOString().split('T')[0],
-    endDate: new Date().toISOString().split('T')[0],
+    startDate: format(new Date(), 'yyyy-MM-dd'),
+    endDate: format(new Date(), 'yyyy-MM-dd'),
   });
   const [checking, setChecking] = useState(false);
   const [applying, setApplying] = useState(false);

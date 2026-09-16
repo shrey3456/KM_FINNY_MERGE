@@ -58,6 +58,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 import { hasPageViewAccess, hasPageWriteAccess } from "@/lib/permissions";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 // Solid navy fill, matching the Product Master action buttons.
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
@@ -201,7 +202,8 @@ function MultiSelectField({
       <PopoverContent className="w-72 p-0" style={{ maxHeight: "none" }}>
         <div
           className="overflow-y-auto overscroll-contain"
-          style={{ maxHeight: "260px" }}
+          // Capped to the room Radix measures on the side it opens, so the list never runs off screen.
+          style={{ maxHeight: "min(260px, calc(var(--radix-popover-content-available-height, 260px) - 8px))" }}
           onWheel={(e) => e.stopPropagation()}
           onTouchMove={(e) => e.stopPropagation()}
         >
@@ -227,7 +229,7 @@ function MultiSelectField({
 }
 
 const Users = () => {
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = usePersistentFilter('users:search', '');
   const [pageIndex, setPageIndex] = useState(0);
   // Searching re-cuts the list, so start it from the top rather than leaving you on a page number
   // that means something different (or nothing at all) against the new set.

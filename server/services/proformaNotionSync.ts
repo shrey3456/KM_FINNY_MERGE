@@ -39,8 +39,8 @@ function getDatabaseId(): string {
   return match[1];
 }
 
-// Normalizes a date string of unknown origin (Notion ISO rollup, Notion "DD/MM/YY" formula
-// text, or the request's own "YYYY-MM-DD" startDate) into "YYYY-MM-DD" for the Postgres `date`
+// Normalizes a Notion date (the ISO "Ord Date :" rollup, or the "DD/MM/YY" "For Ord Date :"
+// formula text) into "YYYY-MM-DD" for the Postgres `date`
 // column. Deliberately does NOT use `new Date(dateString)` on slash-separated input — that
 // parses as MM/DD/YY, which either silently gives the wrong date or throws when the "day"
 // isn't a valid month (e.g. "26/08/2026" -> month 26).
@@ -165,8 +165,16 @@ export async function fetchProformaOrdersFromNotion(
         const orderNo = row['Order No. :'] || row['For Order No. :'] || row['For Ord No. :'] || row['Order No.'] || '';
         if (!orderNo) continue;
 
-        const rawOrderDate = row['Ord Date :'] || row['For Ord Date :'] || startDate;
-        const ordDate = normalizeToISODate(rawOrderDate, startDate);
+        // Always the order's OWN date from Notion — never the sync run's date range. This used to
+        // fall back to the range's start date when Notion's date was missing or unreadable, which
+        // silently stored the order under whichever day the sync happened to be run for. Such an
+        // order is now skipped (and logged) instead of being saved under the wrong day.
+        const ordDate =
+          normalizeToISODate(row['Ord Date :'] || '', '') || normalizeToISODate(row['For Ord Date :'] || '', '');
+        if (!ordDate) {
+          console.warn(`Proforma sync: skipped order ${orderNo} — no readable order date in Notion`);
+          continue;
+        }
         const partyName = row['For Party Name '] || row['For Party Name'] || row['For Party Name :'] || 'Unknown Party';
         const orderInfo = orderInfoMap.get(orderNo);
         const plant = orderInfo?.plant || row['Plant :'] || row['Plant'] || 'VALSAD';
@@ -247,7 +255,13 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
     invoiceNumber: orderData.invoiceNumber || undefined,
     partyState: orderData.partyState || undefined,
     notionStatus: orderData.notionStatus || undefined,
-    storeKeeperInfo: orderData.storeKeeperInfo || undefined,
+    // Skipped entirely once the Loading page has stamped this column itself (loadingStv set on
+    // Create Operation) — same "a person confirmed this locally, don't clobber it" rule the
+    // vehicle fields follow below. Without this guard the next sync would overwrite the
+    // operator + platform we just recorded with Notion's older hand-typed text.
+    storeKeeperInfo: (existingSlip as any)?.loadingStv
+      ? undefined
+      : (orderData.storeKeeperInfo || undefined),
     notionRawData: orderData.notionRawData,
   };
 
@@ -392,7 +406,11 @@ async function diffOrder(orderData: OrderData): Promise<OrderDiff> {
   push('Invoice No.', existingSlip.invoiceNumber, orderData.invoiceNumber || null);
   push('State', existingSlip.partyState, orderData.partyState || null);
   push('Notion Status', existingSlip.notionStatus, orderData.notionStatus || null);
-  push('StoreKeeper Info', existingSlip.storeKeeperInfo, orderData.storeKeeperInfo || null);
+  // Not logged as a change when the Loading page owns this column — the sync isn't writing it
+  // (see the guard where notionFields is built), so reporting a diff would be a phantom entry.
+  if (!(existingSlip as any).loadingStv) {
+    push('StoreKeeper Info', existingSlip.storeKeeperInfo, orderData.storeKeeperInfo || null);
+  }
   const newTotalQty = orderData.authoritativeQty ?? Array.from(orderData.items.values()).reduce((s, i) => s + i.quantity, 0);
   push('Total Quantity', existingSlip.totalQuantity, newTotalQty);
 

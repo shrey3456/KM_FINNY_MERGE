@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { pool } from "./db";
+import { tagStockMovementSources } from './lib/stockRecalc';
 
 
 const app = express();
@@ -333,6 +334,37 @@ app.use((req, res, next) => {
     // is a no-op once everything's clean) — every write from here on is already trimmed at the
     // source, so this can't reaccumulate.
     await pool.query(`UPDATE products SET barcode = TRIM(barcode) WHERE barcode <> TRIM(barcode)`);
+    // stock_movements.source — marks a person's manual Overall Stock adjustment ('manual'), the
+    // only 'adjust' rows Scan History lists. Earlier manual edits that kept the default reason
+    // are backfilled; ones given a custom reason can't be told apart and stay untagged.
+    await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS source TEXT`);
+    await pool.query(`UPDATE stock_movements SET source = 'manual' WHERE type = 'adjust' AND source IS NULL AND reason = 'Manual adjustment (Overall Stock)'`);
+    // Tag older Loading / Unloading ledger rows (see server/lib/stockRecalc.ts) — the same
+    // function Settings > Recalculate Stock runs.
+    await tagStockMovementSources(pool);
+    // loading_scan_events.is_adjust — marks the Loading Items table's +/- corrections ("Loading
+    // Adjust"). Older ones are found through the stock ledger row the same request wrote (same
+    // order, barcode, plant, opposite qty, within a few seconds); a negative qty is always one.
+    await pool.query(`ALTER TABLE loading_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
+    // Same marker on the two scanning tables, set by their qty-edit endpoints ("Scan Adjust" /
+    // "Unload Adjust"). No backfill: an edit leaves nothing behind that identifies it afterwards,
+    // so only edits made from now on are marked.
+    await pool.query(`ALTER TABLE order_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
+    await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
+    await pool.query(`
+      UPDATE loading_scan_events lse SET is_adjust = true
+      WHERE lse.is_adjust IS NOT TRUE AND (
+        lse.total_qty < 0
+        OR EXISTS (
+          SELECT 1 FROM stock_movements sm
+          WHERE sm.type = 'adjust' AND sm.reason LIKE 'Loaded quantity manually %'
+            AND sm.reason LIKE '% for order ' || lse.order_number
+            AND LOWER(TRIM(sm.barcode)) = LOWER(TRIM(lse.barcode))
+            AND LOWER(TRIM(sm.plant)) = LOWER(TRIM(lse.plant))
+            AND sm.qty = -lse.total_qty
+            AND ABS(EXTRACT(EPOCH FROM (sm.created_at - lse.scanned_at))) < 10
+        )
+      )`);
     await pool.query(`UPDATE stock_movements SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE order_import_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE order_scan_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);

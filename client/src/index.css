@@ -49,6 +49,27 @@ input[type="number"] {
    containing block for any `position: fixed` descendant (e.g. the rotate toggle
    button), so controls placed inside rotate along with the content and stay put in
    a natural on-screen corner from the viewer's (rotated) perspective. */
+/* Portaled popups (dropdowns, selects, popovers, calendars) on a kiosk-rotated page. Radix places
+   these against the trigger's on-screen rectangle; rotating the popup to match then swings that
+   box away from where it was placed, so it lands partly clipped. Instead, while a page is rotated
+   (Layout sets data-portal-rotation on <body>) every portaled popup is centred on screen and
+   turned as a whole — the same treatment dialogs get. Scoped to wrappers OUTSIDE #root: tooltips
+   and dropdown sub-menus render in place inside the already-rotated page and must not turn twice.
+   !important is needed to beat the inline position/transform Radix writes on the wrapper. */
+body[data-portal-rotation] [data-radix-popper-content-wrapper]:not(#root [data-radix-popper-content-wrapper]) {
+  top: 50% !important;
+  left: 50% !important;
+}
+body[data-portal-rotation="90"] [data-radix-popper-content-wrapper]:not(#root [data-radix-popper-content-wrapper]) {
+  transform: translate(-50%, -50%) rotate(90deg) !important;
+}
+body[data-portal-rotation="180"] [data-radix-popper-content-wrapper]:not(#root [data-radix-popper-content-wrapper]) {
+  transform: translate(-50%, -50%) rotate(180deg) !important;
+}
+body[data-portal-rotation="270"] [data-radix-popper-content-wrapper]:not(#root [data-radix-popper-content-wrapper]) {
+  transform: translate(-50%, -50%) rotate(270deg) !important;
+}
+
 .kiosk-rotate-90,
 .kiosk-rotate-180,
 .kiosk-rotate-270 {

@@ -9,8 +9,13 @@ import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import { useSidebarContext } from "@/lib/sidebarContext";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
+import { type FilterableColumn, type FilterCondition, type FilterOption, matchAllConditions } from "@/lib/columnFilters";
+import { format as formatDay } from "date-fns";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
+import { CircularProgress } from "@/components/ui/circular-progress";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { buildPageList } from "@/components/ui/data-table/data-table-pagination";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
@@ -49,11 +54,9 @@ const LOADING_ROTATIONS = [0, 90, 180, 270] as const;
 type LoadingRotation = (typeof LOADING_ROTATIONS)[number];
 const LOADING_ROTATION_STORAGE_KEY = "loadingRotation";
 
-// STV (sub-transfer voucher) — same per-plant picker Order Scan and Unloading have, reusing
-// their existing GET /api/order-scan/stvs endpoint (a generic plant-scoped lookup, not
-// Order-Scan-specific). Remembered per browser since this page unmounts on navigation, which
-// would otherwise clear the pick and re-trigger "Select an STV".
-const LOADING_STV_STORAGE_KEY = "km-finny.loading.selectedStv";
+// STV (sub-transfer voucher) — picked once in the Create Operation dialog from the plant's own
+// list (GET /api/order-scan/stvs, a generic plant-scoped lookup, not Order-Scan-specific), then
+// frozen. Radix Select has no value for "nothing selected", hence this sentinel.
 const NO_STV = "__none__";
 
 // ─── Types (mirror server/routes/loading.ts responses) ───────────────────────
@@ -94,6 +97,10 @@ type ProformaSlip = {
   // feature existed, treated as unowned/open). loadingPausedAt set = blocked for everyone,
   // including the owner, until someone runs Claim.
   loadingOwnerCode: string | null; loadingOwnerName: string | null; loadingPausedAt: string | null;
+  // Chosen once in the Create Operation dialog and frozen from then on — the scan view shows it
+  // as locked text and the server stamps every scan event with it, ignoring anything the client
+  // sends. Null only on slips started before this was required.
+  loadingStv: string | null;
 };
 type VehicleSuggestion = {
   id: number; vehicleNumber: string; rtoNumber: string | null; driver: string | null;
@@ -109,6 +116,9 @@ type LoadingRecord = {
   createdAt: string; orderDate: string | null;
   loadingCompletedAt: string | null;
   loadingOwnerCode: string | null; loadingOwnerName: string | null; loadingPausedAt: string | null;
+  // The STV this load was started on (see the Create Operation dialog) — shown in the list and
+  // filterable there.
+  loadingStv: string | null;
 };
 type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number; event: { barcode: string; itemName: string; sapCode: string | null; totalQty: number; isExtra: boolean; remaining: number; productId: number | null } };
 // One row of that order's own load-event history (the landing table's expand panel) — fetched
@@ -118,6 +128,8 @@ type LoadHistoryEvent = {
   id: number; barcode: string | null; itemName: string | null; totalQty: number;
   isExtra: boolean; voided: boolean | null; scannedByName: string | null; scannedAt: string;
   stv: string | null;
+  // Written by the Items table's +/- buttons, not a scan — shown as "Loading Adjust".
+  isAdjust?: boolean;
 };
 // One period of ownership in the full "who held this load, and how much they loaded" chain —
 // see buildOwnerTimeline in server/routes/loading.ts. Display/reporting only, never used for
@@ -239,11 +251,27 @@ export default function LoadOperation() {
   // is exactly that applied to every event on the order at once.
   const canResetLoad = admin || (hasPageWriteAccess("loading") && hasPageWriteAccess("scan-history"));
 
-  // Landing view is the records table; a persisted mid-flow order (see LAST_ORDER_KEY) resumes
-  // straight into the create flow instead, per "remember where we were" — except for admin, who
-  // always lands on the list first regardless of any remembered order (admin's job here is
-  // mainly to review everyone's slips, not to be dropped back into whatever one they had open).
-  const [view, setView] = useState<"list" | "create">(() => (!admin && localStorage.getItem(LAST_ORDER_KEY) ? "create" : "list"));
+  // "list" is the landing view — records table, filters, AND the Camera/Manual order search box
+  // (no separate "New Load" screen/button anymore; it's always right there). "create" is Stage
+  // B(pre)/Stage B once an order's been found and confirmed. Always starts on "list": a persisted
+  // mid-flow order (see LAST_ORDER_KEY) resumes automatically via the effect below, showing as
+  // the "list" view's own pending-fetch skeleton in place of the table until it resolves, then
+  // flips to "create" (see commitSlip) — no need to pre-guess the view up front anymore.
+  const [view, setView] = useState<"list" | "create">("list");
+  // The order search sits behind the "Load Operation" button rather than always occupying the top
+  // of the landing page — the records table is what this page is usually opened for.
+  const [searchOpen, setSearchOpen] = useState(false);
+  function openOrderSearch() {
+    setSearchOpen(true);
+    setTimeout(() => orderInputRef.current?.focus(), 50);
+  }
+  function closeOrderSearch() {
+    stopCamera();
+    setScanMode("manual");
+    setSearchOpen(false);
+    setOrderSearch("");
+    setOrderFocused(false);
+  }
 
   // Server-paginated (20/page by default, matching Scan History) rather than fetching every
   // slip anyone's ever loaded in one request. Page size is user-selectable (same options/pattern
@@ -251,7 +279,7 @@ export default function LoadOperation() {
   // number wouldn't line up against a different page size.
   const RECORDS_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
   const [recordsPage, setRecordsPage] = useState(1);
-  const [recordsPageSize, setRecordsPageSize] = useState(20);
+  const [recordsPageSize, setRecordsPageSize] = usePersistentFilter("loading:listPageSize", 20);
   const recordsOffset = (recordsPage - 1) * recordsPageSize;
   const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number }>({
     queryKey: ["/api/loading/records", recordsPage, recordsPageSize],
@@ -265,12 +293,20 @@ export default function LoadOperation() {
   // ─── Landing-view filters — same controls/layout Load Operations uses (search box, date +
   // plant filters, status count buttons, status tabs). All applied client-side over the current
   // page of records, exactly like Load Operations filters its own already-fetched list.
-  const [listSearch, setListSearch] = useState("");
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
-  const [selectedPlants, setSelectedPlants] = useState<string[]>([]);
-  const [activeViewTab, setActiveViewTab] = useState("overall");
-  const [sortBy, setSortBy] = useState<"orderNumber" | "creationDate">("creationDate");
-  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  // All persisted for the sitting (sessionStorage) — these narrow which loads you're looking at,
+  // and rebuilding them after every hop to another page is pure friction.
+  const [listSearch, setListSearch] = usePersistentFilter("loading:listSearch", "");
+  // Stored as an ISO string, not a Date: JSON round-tripping a Date yields a string back, so
+  // persisting the Date itself would silently hand the rest of this page a non-Date.
+  const [selectedDateIso, setSelectedDateIso] = usePersistentFilter<string | null>("loading:listDate", null);
+  const selectedDate = selectedDateIso ? new Date(selectedDateIso) : null;
+  const setSelectedDate = (d: Date | null) => setSelectedDateIso(d ? d.toISOString() : null);
+  const [selectedPlants, setSelectedPlants] = usePersistentFilter<string[]>("loading:listPlants", []);
+  const [activeViewTab, setActiveViewTab] = usePersistentFilter("loading:listTab", "overall");
+  const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate">("loading:listSortBy", "creationDate");
+  const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "desc");
+  // Excel-style column filters for the landing list (see recordFilterColumns below).
+  const [recordColumnConditions, setRecordColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("loading:columnFilters", {});
 
   // Plant options for PlantFilter, straight from Plant Management (same source PlantBadge reads),
   // so the filter's colors match the badges rendered in the rows.
@@ -299,11 +335,54 @@ export default function LoadOperation() {
   const recordAccentBorderClass = (r: LoadingRecord) =>
     r.loadingCompletedAt ? "border-l-4 border-l-emerald-400" : r.loadingPausedAt ? "border-l-4 border-l-amber-400" : "border-l-4 border-l-blue-400";
 
+  // Same filter engine and UI as Overall Stock / Scan History / Scan Viewer: a "+ Filter" button,
+  // a filter icon on each column header, and removable chips. Options come from the records on
+  // this page, so a checklist never offers a value that would filter everything away.
+  const recordDistinct = (values: (string | null | undefined)[]): FilterOption[] =>
+    Array.from(new Set(values.map((v) => (v ?? "").trim()).filter(Boolean))).sort().map((v) => ({ value: v, label: v }));
+  // Bucketed to a day exactly as the matcher buckets the cell (lib/columnFilters dayBucket).
+  const recordDayOptions = (values: (string | null | undefined)[]) =>
+    recordDistinct(values.map((v) => (v ? formatDay(new Date(v), "yyyy-MM-dd") : null)));
+  const recordOwner = (r: LoadingRecord) => r.loadingOwnerName ?? r.loadingOwnerCode ?? "";
+  const recordFilterColumns: FilterableColumn<LoadingRecord>[] = [
+    { id: "orderNumber", label: "Order No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.orderNumber)), accessor: (r) => r.orderNumber },
+    { id: "orderDate", label: "Order Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.orderDate)), accessor: (r) => r.orderDate },
+    { id: "loadDate", label: "Load Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.createdAt)), accessor: (r) => r.createdAt },
+    { id: "party", label: "Party Name", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.partyName)), accessor: (r) => r.partyName },
+    { id: "plant", label: "Plant", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => r.plant)), accessor: (r) => r.plant },
+    { id: "vehicle", label: "Vehicle No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.vehicleNumber)), accessor: (r) => r.vehicleNumber },
+    { id: "stv", label: "STV", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => r.loadingStv)), accessor: (r) => r.loadingStv },
+    { id: "status", label: "Status", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => recordStatus(r))), accessor: (r) => recordStatus(r) },
+    { id: "owner", label: "Owner", filterType: "text", options: recordDistinct(recordsItems.map(recordOwner)), accessor: recordOwner },
+    { id: "creator", label: "Creator", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.createdByName)), accessor: (r) => r.createdByName },
+  ];
+  const recordConditionList = Object.values(recordColumnConditions);
+  const setRecordCondition = (id: string, condition: FilterCondition) =>
+    setRecordColumnConditions((prev) => ({ ...prev, [id]: condition }));
+  const clearRecordCondition = (id: string) =>
+    setRecordColumnConditions((prev) => { const next = { ...prev }; delete next[id]; return next; });
+  const recordColumnHeader = (id: string, label: string) => {
+    const column = recordFilterColumns.find((c) => c.id === id);
+    if (!column) return label;
+    return (
+      <span className="inline-flex items-center gap-1">
+        {label}
+        <ColumnHeaderFilterButton
+          column={column}
+          condition={recordColumnConditions[id]}
+          onChange={(c) => setRecordCondition(id, c)}
+          onRemove={() => clearRecordCondition(id)}
+        />
+      </span>
+    );
+  };
+
   const filteredRecords = recordsItems
     .filter((r) => {
       if (activeViewTab === "loading" && r.loadingCompletedAt) return false;
       if (activeViewTab === "ready-desp" && !r.loadingCompletedAt) return false;
       if (selectedPlants.length > 0 && !selectedPlants.includes(r.plant ?? "")) return false;
+      if (!matchAllConditions(r, recordConditionList, recordFilterColumns)) return false;
       if (selectedDate) {
         const d = new Date(r.createdAt);
         if (
@@ -314,7 +393,7 @@ export default function LoadOperation() {
       }
       const q = listSearch.trim().toLowerCase();
       if (q) {
-        const hay = [r.orderNumber, r.partyName, r.plant, r.vehicleNumber, r.rtoNumber, recordStatus(r)];
+        const hay = [r.orderNumber, r.partyName, r.plant, r.vehicleNumber, r.rtoNumber, recordStatus(r), r.loadingStv, r.loadingOwnerName];
         if (!hay.some((v) => (v ?? "").toLowerCase().includes(q))) return false;
       }
       return true;
@@ -431,6 +510,27 @@ export default function LoadOperation() {
   const [slip, setSlip] = useState<ProformaSlip | null>(null);
   const [items, setItems] = useState<ProformaItem[]>([]);
   const [allComplete, setAllComplete] = useState(false);
+  // Completing a load is confirmed first and announced afterwards, the same way Unloading does it.
+  // A toast was too easy to miss on a busy scanning screen, and the +/- path showed nothing at all.
+  const [confirmCompleteOpen, setConfirmCompleteOpen] = useState(false);
+  const [completedInfo, setCompletedInfo] = useState<
+    { orderNumber: string; partyName: string; vehicleNumber: string | null; loadedQty: number; expectedQty: number; auto: boolean } | null
+  >(null);
+  // Which order the popup has already been shown for — the "everything is loaded" state stays true
+  // for every later scan/refresh on the same order, so without this it would reopen each time.
+  const completeShownForRef = useRef<string | null>(null);
+  function announceLoadComplete(nextSlip: ProformaSlip, nextItems: ProformaItem[], auto: boolean) {
+    if (completeShownForRef.current === nextSlip.orderNumber) return;
+    completeShownForRef.current = nextSlip.orderNumber;
+    setCompletedInfo({
+      orderNumber: nextSlip.orderNumber,
+      partyName: nextSlip.partyName,
+      vehicleNumber: nextSlip.vehicleNumber ?? null,
+      loadedQty: nextItems.reduce((sum, i) => sum + (i.loaded ?? 0), 0),
+      expectedQty: nextItems.reduce((sum, i) => sum + (i.expected ?? 0), 0),
+      auto,
+    });
+  }
   // Volume actually scanned onto the vehicle so far (server-computed in withProgress(), server/
   // routes/loading.ts) — distinct from slip.totalVolume (the order's full planned volume) and
   // slip.vehicleVolume (the vehicle's capacity).
@@ -462,7 +562,7 @@ export default function LoadOperation() {
   // sidebar toggle — this floating button (same trick as the rotate button itself: fixed inside
   // the rotated container, so it turns with the content) reopens a path back to real
   // navigation. Same pattern Unloading's own rotate view already uses.
-  const { openMobileMenu, openSidebar, setKioskRotateClass: setSidebarKioskRotateClass } = useSidebarContext();
+  const { setKioskRotateClass: setSidebarKioskRotateClass, setPortalRotation } = useSidebarContext();
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
   const quarterTurn = rotation === 90 || rotation === 270;
@@ -485,9 +585,13 @@ export default function LoadOperation() {
   // flips units on a quarter turn, since that turns the subtree 90° (content-space height then
   // runs along the viewport's WIDTH, not its height).
   const kioskTableMaxHeight = bigView ? (quarterTurn ? "62vw" : "62vh") : "65vh";
-  // Radix renders dialogs into document.body, outside the rotated container, so each needs the
-  // matching turn applied by hand or it opens upright while everything behind it is rotated.
-  const portalRotate = rotated ? (rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : "-rotate-90") : "";
+  // Reports this page's rotation to Layout so every popup it opens — dialogs, dropdowns, filter
+  // popovers, calendars — turns to match (see lib/portalRotation). Reset on unmount so the next
+  // page doesn't inherit a stale turn.
+  useEffect(() => {
+    setPortalRotation(rotated ? rotation : 0);
+    return () => setPortalRotation(0);
+  }, [rotated, rotation, setPortalRotation]);
   // The vehicle search/assign UI is collapsed behind a button now instead of always sitting
   // open under the header — the current vehicle is already shown right there in the header's
   // own slip-details line, so it doesn't need its own separate always-visible banner + search
@@ -576,14 +680,25 @@ export default function LoadOperation() {
   type SlipLookup = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number };
   const confirmRef = useRef(false);
   const [pendingSlip, setPendingSlip] = useState<SlipLookup | null>(null);
+  // The STV chosen in the Create Operation dialog. Deliberately NOT pre-filled from the
+  // remembered localStorage pick — this is a write-once decision stamped into an audit field, so
+  // it has to be an explicit choice each time rather than something inherited from a prior load.
+  const [pendingStv, setPendingStv] = useState<string>("");
 
   function commitSlip(data: SlipLookup) {
+    if (completeShownForRef.current !== data.slip.orderNumber) completeShownForRef.current = null;
+    if (slip?.orderNumber !== data.slip.orderNumber) itemScanSeqRef.current = { seq: 0, byId: new Map() };
     setSlip(data.slip);
     setItems(data.items);
     setAllComplete(data.allComplete);
     setLoadedVolume(data.loadedVolume);
     setOrderFocused(false);
     setPendingSlip(null);
+    // Always moves to "create" — the Camera/Manual search box now lives on the "list" view
+    // itself (no more separate "New Load" screen/button), so this is what actually switches to
+    // Stage B(pre)/Stage B once an order's been found and confirmed, regardless of whether the
+    // search happened from there or a list row was clicked.
+    setView("create");
     localStorage.setItem(LAST_ORDER_KEY, data.slip.orderNumber);
   }
 
@@ -627,8 +742,7 @@ export default function LoadOperation() {
         silentLookupRef.current = false;
         return;
       }
-      commitSlip(data);
-      if (openedFromListRef.current) setView("create");
+      commitSlip(data); // also sets view to "create"
       openedFromListRef.current = false;
       if (!silentLookupRef.current) toast({ title: "Order found", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
       silentLookupRef.current = false;
@@ -657,13 +771,17 @@ export default function LoadOperation() {
   // slip to LOADING (locally and in Notion). Looking a slip up, previewing it, or cancelling out
   // of the dialog all leave its status untouched.
   const startLoadMutation = useMutation({
-    mutationFn: async (orderNumber: string) => {
-      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(orderNumber)}/start`, {});
+    mutationFn: async ({ orderNumber, stv }: { orderNumber: string; stv: string }) => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(orderNumber)}/start`, { stv });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to start load");
       return res.json() as Promise<SlipLookup>;
     },
     onSuccess: (data) => {
       commitSlip(data);
+      setPendingStv("");
+      // Straight into the new load's own view — Back still returns to the landing list. Without
+      // this, starting a load from the list left the user sitting on the list they started from.
+      setView("create");
       toast({ title: "Load operation created", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
@@ -678,7 +796,7 @@ export default function LoadOperation() {
   }
 
   useEffect(() => {
-    if (admin) return; // admin always starts on the list — see the view initializer above
+    if (admin) return; // admin never auto-resumes a remembered order — always starts on the list
     const saved = localStorage.getItem(LAST_ORDER_KEY);
     if (saved) openOrder(saved, { silent: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -695,18 +813,27 @@ export default function LoadOperation() {
     setSelectedVehicle(null);
     setExpandedItemBarcode(null);
     localStorage.removeItem(LAST_ORDER_KEY);
+    // The Camera/Manual search box lives on the "list" view now (no more separate "New Load"
+    // screen) — every caller of this (Stage B(pre)'s Cancel, "Back to List", etc.) means "let me
+    // search for a different order", which is the list view itself.
+    setView("list");
     setTimeout(() => orderInputRef.current?.focus(), 50);
   }
 
+  // Loaded / expected / still-short for this order, used by the confirm + complete dialogs.
+  const completeTotals = items.reduce(
+    (acc, i) => ({
+      expected: acc.expected + (i.expected ?? 0),
+      loaded: acc.loaded + (i.loaded ?? 0),
+      remaining: acc.remaining + (i.remaining ?? 0),
+    }),
+    { expected: 0, loaded: 0, remaining: 0 },
+  );
+
   function backToList() {
     resetToSearch();
-    setView("list");
+    setSearchOpen(false);
     recordsQuery.refetch();
-  }
-
-  function startNewLoad() {
-    resetToSearch();
-    setView("create");
   }
 
   function openOrderFromList(orderNumber: string) {
@@ -726,7 +853,7 @@ export default function LoadOperation() {
   }
 
   useEffect(() => {
-    if (view !== "create" || scanMode !== "camera" || slip) { stopCamera(); return; }
+    if (view !== "list" || scanMode !== "camera" || slip) { stopCamera(); return; }
     let cancelled = false;
     const scanner = new BarcodeScanner({
       onDetected: (result: Result) => {
@@ -752,8 +879,23 @@ export default function LoadOperation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, scanMode, slip]);
 
+  // Barcode gun for finding an order — now active on the landing list too, not just once you've
+  // already clicked into the "create"/search screen. A gun scan is just a burst of very fast
+  // keystrokes (rapid enough that a human typing normally can't produce the same gaps), so this
+  // only has to tell that burst apart from someone deliberately typing into a real field — it
+  // never needs to know or care which screen happens to be showing:
+  //   - Landing on the list (view === "list", no order open yet)? Straight to this listener.
+  //   - Already have an order open (`slip` set)? This steps aside — the item-barcode listener
+  //     below takes over instead, so a scan there adds/removes stock, not a second order lookup.
+  //   - Focus is inside any real input/textarea (including the landing list's own search box,
+  //     or the create screen's order box) — this listener explicitly skips those keystrokes, so
+  //     manually typing/searching there behaves exactly as before: it just filters/searches,
+  //     and picking an order is still a deliberate click or Enter press, never auto-triggered.
+  // The dialog this opens (pendingSlip's confirm modal) is a plain state-driven Dialog, not tied
+  // to `view` at all, so it pops up correctly over the list exactly like it already does over
+  // the create screen's own search UI.
   useEffect(() => {
-    if (view !== "create" || slip) return;
+    if (view !== "list" || slip) return;
     const MAX_GAP_MS = 50;
     const BURST_END_MS = 80;
     let buffer = "";
@@ -770,7 +912,16 @@ export default function LoadOperation() {
       buffer += e.key;
       if (flushTimer) clearTimeout(flushTimer);
       flushTimer = setTimeout(() => {
-        if (buffer.length >= 3) { setScanMode("manual"); orderInputRef.current?.focus(); setOrderSearch(buffer); openOrder(buffer, { confirm: true }); }
+        if (buffer.length >= 3) {
+          // A gun scan on the landing list opens the order search itself and shows what was
+          // scanned, so the user sees where the lookup came from instead of a dialog appearing
+          // over an apparently untouched page. (This listener only runs on the list — the create
+          // screen has its own item-barcode listener.)
+          setSearchOpen(true);
+          setScanMode("manual");
+          setOrderSearch(buffer);
+          openOrder(buffer, { confirm: true });
+        }
         buffer = "";
       }, BURST_END_MS);
     };
@@ -779,7 +930,7 @@ export default function LoadOperation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, slip]);
 
-  useEffect(() => { if (view === "create" && !slip && scanMode === "manual") orderInputRef.current?.focus(); }, [view, slip, scanMode]);
+  useEffect(() => { if (view === "list" && !slip && scanMode === "manual") orderInputRef.current?.focus(); }, [view, slip, scanMode]);
 
   // ─── Vehicle search + link ────────────────────────────────────────────────
   const [vehicleSearch, setVehicleSearch] = useState("");
@@ -951,30 +1102,20 @@ export default function LoadOperation() {
     return matches[0];
   }
 
-  // STV — same per-plant picker Order Scan/Unloading have. Persisted per browser; dropped and
-  // re-defaulted whenever it doesn't belong to the current plant's list (e.g. restored from a
-  // different plant's session).
-  const [selectedStv, setSelectedStv] = useState<string>(() => {
-    try { return localStorage.getItem(LOADING_STV_STORAGE_KEY) ?? ""; } catch { return ""; }
-  });
-  useEffect(() => {
-    try {
-      if (selectedStv) localStorage.setItem(LOADING_STV_STORAGE_KEY, selectedStv);
-      else localStorage.removeItem(LOADING_STV_STORAGE_KEY);
-    } catch { /* private mode */ }
-  }, [selectedStv]);
+  // The plant's STV list, needed only by the Create Operation dialog — the one place an STV is
+  // ever chosen. The scan view has no picker at all: it just displays whatever the slip was
+  // started with, and only an admin can change that afterwards (Proforma Slips page).
+  const stvPlant = pendingSlip?.slip?.plant ?? "";
   const stvsQuery = useQuery<string[]>({
-    queryKey: ["/api/order-scan/stvs", slip?.plant],
-    queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(slip!.plant ?? "")}`).then((r) => r.json()),
-    enabled: !!slip?.plant,
+    queryKey: ["/api/order-scan/stvs", stvPlant],
+    queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(stvPlant)}`).then((r) => r.json()),
+    enabled: !!stvPlant,
   });
   const stvs = stvsQuery.data ?? [];
-  useEffect(() => {
-    if (stvs.length === 0) return;
-    if (selectedStv && !stvs.includes(selectedStv)) { setSelectedStv(""); return; }
-    if (!selectedStv) setSelectedStv(stvs[0]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stvsQuery.data, selectedStv]);
+  // Frozen server-side once the load has started. Empty only on legacy slips started before the
+  // STV became mandatory — those scan with no STV rather than being blocked, since there's no
+  // longer any in-page control for someone to set one with.
+  const lockedStv = slip?.loadingStv ?? "";
 
   const [itemScanMode, setItemScanMode] = useState<"camera" | "manual">("manual");
   const [itemBarcode, setItemBarcode] = useState("");
@@ -1052,7 +1193,7 @@ export default function LoadOperation() {
     mutationFn: async () => {
       if (!extraTarget) throw new Error("Pick an item first");
       const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, {
-        barcode: extraTarget.barcode, qty: extraQty, extra: true, stv: selectedStv || null,
+        barcode: extraTarget.barcode, qty: extraQty, extra: true,
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to add extra");
       return res.json() as Promise<ScanResponse>;
@@ -1088,11 +1229,17 @@ export default function LoadOperation() {
       return res.json() as Promise<ScanResponse>;
     },
     onSuccess: (data) => {
+      markItemScanned(adjustTarget?.item.barcode, data.items);
       setSlip(data.slip);
       setItems(data.items);
       setAllComplete(data.allComplete);
       setLoadedVolume(data.loadedVolume);
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", data.slip.orderNumber] });
+      // A +/- correction can finish the load just as a scan can — same popup, same refresh.
+      if (data.allComplete && !slip?.loadingCompletedAt) {
+        announceLoadComplete(data.slip, data.items, true);
+        queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+      }
       toast({
         title: adjustTarget?.direction === "add" ? "Quantity added" : "Quantity removed",
         description: `${adjustTarget?.item.itemName ?? adjustTarget?.item.barcode} · ${adjustTarget?.direction === "add" ? "+" : "−"}${adjustQty}`,
@@ -1158,6 +1305,16 @@ export default function LoadOperation() {
   // barcode within the window is discarded (no beep, no dialog, no toast — stays silent, same
   // as Order Scan); a DIFFERENT barcode is never affected.
   const lastScanRef = useRef<{ barcode: string; at: number } | null>(null);
+  // Which item was touched most recently (see filteredItems' sort). Reset when another order is
+  // opened, so one order's scan order never carries into the next.
+  const itemScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
+  function markItemScanned(barcode: string | null | undefined, list: ProformaItem[]) {
+    const hit = list.find((i) => normalize(i.barcode) === normalize(barcode ?? ""));
+    if (!hit) return;
+    const s = itemScanSeqRef.current;
+    s.seq += 1;
+    s.byId.set(hit.id, s.seq);
+  }
   const SAME_BARCODE_COOLDOWN_MS = 5000;
 
   const locked = !!slip?.loadingCompletedAt;
@@ -1200,17 +1357,18 @@ export default function LoadOperation() {
 
   const scanItemMutation = useMutation({
     mutationFn: async ({ barcode, qty, extra }: { barcode: string; qty: number; extra?: boolean }) => {
-      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, { barcode, qty, extra: !!extra, stv: selectedStv || null });
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, { barcode, qty, extra: !!extra });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Scan failed");
       return res.json() as Promise<ScanResponse>;
     },
     onSuccess: (data) => {
+      markItemScanned(data.event?.barcode, data.items);
       setSlip(data.slip);
       setItems(data.items);
       setAllComplete(data.allComplete);
       setLoadedVolume(data.loadedVolume);
       if (data.allComplete && !slip?.loadingCompletedAt) {
-        toast({ title: "Load complete", description: "Every item has been fully loaded — marked complete automatically." });
+        announceLoadComplete(data.slip, data.items, true);
         // The server auto-set loadingCompletedAt as a side effect of this scan — the landing
         // list's badge reads that column, so it needs a refresh too, not just this order's own
         // view, or it keeps showing "In Progress" until the user happens to navigate back to it.
@@ -1243,7 +1401,8 @@ export default function LoadOperation() {
       setItems(data.items);
       setAllComplete(data.allComplete);
       setLoadedVolume(data.loadedVolume);
-      toast({ title: "Load marked complete" });
+      setConfirmCompleteOpen(false);
+      announceLoadComplete(data.slip, data.items, false);
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
     onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
@@ -1333,10 +1492,6 @@ export default function LoadOperation() {
     // section unmounted.
     if (!slip.vehicleNumber) return;
 
-    if (stvs.length > 0 && !selectedStv) {
-      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
-      return;
-    }
 
     // Same-barcode cooldown — a repeat of the exact barcode just accepted, within the window,
     // is discarded before anything else (no beep, no dialog): see SAME_BARCODE_COOLDOWN_MS above.
@@ -1513,6 +1668,10 @@ export default function LoadOperation() {
     const ipp = it.itemsPerPallet ?? 0;
     return ipp > 0 ? it.expected % ipp : it.expected;
   };
+  // Scan order, newest first — same as Unloading's item table (itemScanSeqRef there): each scan
+  // or +/- stamps that row with a rising number, and rows are sorted by it, so whatever was just
+  // handled sits at the top instead of staying wherever its Sr. No. put it. Rows nobody has
+  // touched keep their original order (the sort is stable, and they all score 0).
   const filteredItems = items.filter((it) => {
     if (itemStatusFilter === "done" && !(it.loaded > 0)) return false;
     if (itemStatusFilter === "remaining" && !(it.remaining > 0)) return false;
@@ -1525,7 +1684,7 @@ export default function LoadOperation() {
       if (!hay.includes(q)) return false;
     }
     return true;
-  });
+  }).sort((a, b) => (itemScanSeqRef.current.byId.get(b.id) ?? 0) - (itemScanSeqRef.current.byId.get(a.id) ?? 0));
 
   // Items table — same shared DataTable (navy sticky header, resizable/sortable columns, totals
   // row) Order Scan and Unloading's own items tables use. Item Name and Barcode/SAP are merged
@@ -1545,8 +1704,52 @@ export default function LoadOperation() {
       </>
     );
   };
+  // Totals-row counterpart to renderPalletLoose: the column's qty summed, then whole pallets and
+  // loose boxes each added up row by row at that row's OWN pallet size (never one blended size),
+  // honoring the same All/Pallet/Loose tab as the cells above it.
+  const renderPalletLooseTotal = (rows: ProformaItem[], pick: (row: ProformaItem) => number) => {
+    let qty = 0;
+    let pallets = 0;
+    let loose = 0;
+    for (const row of rows) {
+      const q = pick(row);
+      qty += q;
+      const ipp = row.itemsPerPallet ?? 0;
+      if (ipp <= 0) continue;
+      pallets += Math.floor(q / ipp);
+      loose += q % ipp;
+    }
+    return (
+      <>
+        <span className="block">{qty}</span>
+        {itemUnitTab !== "loose" && pallets > 0 && <span className="block text-sm font-semibold text-gray-500">{pallets} plt</span>}
+        {itemUnitTab !== "pallet" && loose > 0 && <span className="block text-sm font-semibold text-gray-500">{loose} loose</span>}
+      </>
+    );
+  };
 
   const loadingItemColumns: DataTableColumn<ProformaItem>[] = [
+    {
+      // Same ring pattern as Scan Order/Master View's own state column: one aggregate "% loaded"
+      // ring in the header, each row gets its own ring showing that item's own % loaded.
+      id: "pct",
+      header: (
+        <CircularProgress
+          percent={itemTotals.expected > 0 ? Math.min(100, Math.round((itemTotals.loaded / itemTotals.expected) * 100)) : 0}
+          size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff"
+        />
+      ),
+      // align-top: the Item column next to this one stacks 2-3 lines (name/barcode-SAP/pack
+      // size), which sets this row's height — align-middle's default then centered the ring in
+      // all that leftover space, reading as "way too much empty space around a tiny ring." Top-
+      // aligning it (matching where the Item column's own text starts) puts all the slack below
+      // the ring instead of split evenly around it.
+      width: 28, minWidth: 28, align: "center", cellClassName: "align-top", sortable: false, totalable: false,
+      render: (row) => {
+        const pct = row.expected > 0 ? Math.min(100, Math.round((row.loaded / row.expected) * 100)) : (row.loaded > 0 ? 100 : 0);
+        return <CircularProgress percent={pct} size={20} strokeWidth={2} />;
+      },
+    },
     {
       // minWidth kept low (not the ~180 a stacked name+barcode+pallet cell would suggest) so the
       // resize grip can actually shrink this column — DataTable floors a drag at minWidth, and a
@@ -1557,27 +1760,24 @@ export default function LoadOperation() {
       // only on this column, not the numeric ones.
       id: "item", header: "Item Name", align: "center", width: 150, minWidth: 90, sortable: true,
       accessor: (row) => `${row.itemName ?? ""} ${row.barcode ?? ""} ${row.sapCode ?? ""}`,
-      // text-sm sm:text-sm overrides DataTable's own default cell size (text-[11px] sm:text-xs)
-      // for this table specifically — that default reads fine on a dense, full-width monitor but
-      // was too small once this table also has to work down to ~700-1024px (sidebar-open
-      // tablet-ish widths), which is most of what this table now actually renders at.
-      cellClassName: "whitespace-normal break-words text-left text-gray-700 text-sm sm:text-sm",
+      cellClassName: "whitespace-normal break-words text-left text-gray-700 text-xs sm:text-xs leading-tight",
       totalable: false,
       render: (row) => (
         <>
           <span className="font-medium text-gray-900">{row.itemName ?? "—"}</span>
-          {(row.stockAvailable ?? 0) <= 0 && <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 text-[9px] font-bold text-red-700">NO STOCK</span>}
-          {row.isComplete && <CheckCircle2 className="ml-1.5 inline h-3.5 w-3.5 text-emerald-600" />}
-          <p className="mt-0.5 font-mono text-xs text-gray-400">
+          {(row.stockAvailable ?? 0) <= 0 && <span className="ml-1.5 rounded-full bg-red-100 px-1 py-px text-[8px] font-bold text-red-700">NO STOCK</span>}
+          {row.isComplete && <CheckCircle2 className="ml-1.5 inline h-3 w-3 text-emerald-600" />}
+          <p className="font-mono text-[10px] leading-tight text-gray-400">
             {row.barcode || "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
           </p>
-          {(row.itemsPerPallet ?? 0) > 0 && <p className="mt-0.5 text-xs font-semibold text-gray-500">{row.itemsPerPallet} per pallet</p>}
+          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-[10px] font-semibold leading-tight text-gray-500">{row.itemsPerPallet} per pallet</p>}
         </>
       ),
     },
     {
       id: "expected", header: "Expected", align: "center", width: 58, minWidth: 55, sortable: true,
       accessor: (row) => row.expected,
+      total: (rows) => renderPalletLooseTotal(rows, (r) => r.expected),
       cellClassName: "text-gray-700 text-sm sm:text-sm",
       render: (row) => (
         <>
@@ -1592,6 +1792,7 @@ export default function LoadOperation() {
       // Loaded rather than a column that's blank for almost every row.
       id: "loaded", header: "Loaded", align: "center", width: 104, minWidth: 96, sortable: true,
       accessor: (row) => row.loaded,
+      total: (rows) => renderPalletLooseTotal(rows, (r) => r.loaded),
       cellClassName: "font-medium text-gray-900 text-sm sm:text-sm",
       render: (row) => {
         const extra = Math.max(0, row.loaded - row.expected);
@@ -1630,6 +1831,7 @@ export default function LoadOperation() {
     {
       id: "remaining", header: "Remaining", align: "center", width: 62, minWidth: 55, sortable: true,
       accessor: (row) => row.remaining,
+      total: (rows) => renderPalletLooseTotal(rows, (r) => r.remaining),
       cellClassName: "text-gray-700 text-sm sm:text-sm",
       render: (row) => (
         <>
@@ -1687,7 +1889,7 @@ export default function LoadOperation() {
       accessor: (ev) => ev.totalQty,
       render: (ev) => (
         <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
-          {ev.isExtra ? "+" : ""}{ev.totalQty}
+          {(ev.isExtra || ev.isAdjust) && ev.totalQty > 0 ? "+" : ""}{ev.totalQty}
         </span>
       ),
     },
@@ -1698,10 +1900,12 @@ export default function LoadOperation() {
     },
     {
       id: "status", header: "Status", width: 90, minWidth: 60, totalable: false,
-      accessor: (ev) => (ev.voided ? "Voided" : ev.isExtra ? "Extra" : ""),
+      accessor: (ev) => (ev.voided ? "Voided" : ev.isAdjust ? "Loading Adjust" : ev.isExtra ? "Extra" : ""),
       render: (ev) =>
         ev.voided ? (
           <span className="text-[11px] font-medium text-red-500">Voided</span>
+        ) : ev.isAdjust ? (
+          <span className="whitespace-nowrap text-[11px] font-semibold uppercase text-blue-700">Loading Adjust</span>
         ) : ev.isExtra ? (
           <span className="text-[11px] font-semibold uppercase text-amber-700">Extra</span>
         ) : (
@@ -1804,12 +2008,14 @@ export default function LoadOperation() {
                   <TableCell className="text-muted-foreground">{ev.scannedByName ?? "-"}</TableCell>
                   <TableCell className="text-right">
                     <Badge className={ev.isExtra ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-purple-100 text-purple-800 hover:bg-purple-200"}>
-                      {ev.isExtra ? "+" : ""}{ev.totalQty}
+                      {(ev.isExtra || ev.isAdjust) && ev.totalQty > 0 ? "+" : ""}{ev.totalQty}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-xs">
                     {ev.voided ? (
                       <span className="font-medium text-red-500">Voided</span>
+                    ) : ev.isAdjust ? (
+                      <span className="whitespace-nowrap font-semibold uppercase text-blue-700">Loading Adjust</span>
                     ) : ev.isExtra ? (
                       <span className="font-semibold uppercase text-amber-700">Extra</span>
                     ) : (
@@ -1844,7 +2050,7 @@ export default function LoadOperation() {
   // own wrapper is a container-fluid, which is a no-op here) — kept inside this page's scroll
   // container so the app shell still scrolls it the same way.
   return (
-    <div className="flex-1 overflow-y-auto px-2 py-6">
+    <div className="flex-1 overflow-y-auto px-2 pt-1 pb-4">
       <div className="w-full space-y-6">
         {/* ── Landing view — mirrors Load Operations' layout exactly: full-width search, a
              filter row (date + plant + status counters), status tabs, then a desktop table with
@@ -1852,15 +2058,6 @@ export default function LoadOperation() {
              wall-mounted station can rotate the landing list too, not just an open order. ──── */}
         {view === "list" && (
           <div className={`space-y-6 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
-            {rotated && (
-              <button
-                onClick={() => { openMobileMenu(); openSidebar(); }}
-                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-                title="Open sidebar menu"
-              >
-                <Menu className="h-5 w-5" />
-              </button>
-            )}
             <button
               onClick={rotateNext}
               className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -1877,6 +2074,168 @@ export default function LoadOperation() {
               title="Loading"
               description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
             />
+            {canWrite && (
+              // A popup, not an inline card — this page is opened for the records table, and the
+              // order search is something you deliberately start (the toolbar button below, or a
+              // gun scan, which opens this same dialog with what was scanned already filled in).
+              <Dialog open={searchOpen} onOpenChange={(o) => { if (!o) closeOrderSearch(); }}>
+                <DialogContent className="sm:max-w-lg">
+                  <DialogHeader>
+                    <DialogTitle className="flex items-center gap-1.5">
+                      <Search className="h-4 w-4" /> Find or scan an order
+                    </DialogTitle>
+                    <DialogDescription>
+                      Scan with the gun, use the camera, or type an order number / party name.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-3">
+                  <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
+                    <button
+                      onClick={() => setScanMode("camera")}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-semibold transition-colors ${scanMode === "camera" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                    >
+                      <Camera className="h-4 w-4" /> Camera
+                    </button>
+                    <button
+                      onClick={() => { stopCamera(); setScanMode("manual"); }}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-semibold transition-colors ${scanMode === "manual" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
+                    >
+                      <Keyboard className="h-4 w-4" /> Manual
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-gray-400">A barcode gun works in Manual mode too — just scan, no need to click the box first.</p>
+
+                  <div className="relative w-full bg-black rounded-2xl overflow-hidden" style={{ display: scanMode === "camera" ? "block" : "none", height: "clamp(220px, 45vw, 340px)" }}>
+                    <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
+                    <div className="pointer-events-none absolute inset-0" style={{ background: "radial-gradient(ellipse 70% 55% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%)" }} />
+                    {scanMode === "camera" && !cameraReady && !cameraError && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white z-10">
+                        <Loader2 className="h-8 w-8 animate-spin opacity-90" />
+                        <p className="text-sm font-medium opacity-80">Starting camera…</p>
+                      </div>
+                    )}
+                    {scanMode === "camera" && cameraReady && (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-10">
+                        {(["tl", "tr", "bl", "br"] as const).map((pos) => (
+                          <div key={pos} className="absolute" style={{
+                            top: pos.startsWith("t") ? "calc(50% - 40px)" : undefined, bottom: pos.startsWith("b") ? "calc(50% - 40px)" : undefined,
+                            left: pos.endsWith("l") ? "calc(50% - 90px)" : undefined, right: pos.endsWith("r") ? "calc(50% - 90px)" : undefined,
+                            width: 22, height: 22, borderColor: "white", borderStyle: "solid",
+                            borderTopWidth: pos.startsWith("t") ? 3 : 0, borderBottomWidth: pos.startsWith("b") ? 3 : 0,
+                            borderLeftWidth: pos.endsWith("l") ? 3 : 0, borderRightWidth: pos.endsWith("r") ? 3 : 0,
+                            borderRadius: pos === "tl" ? "4px 0 0 0" : pos === "tr" ? "0 4px 0 0" : pos === "bl" ? "0 0 0 4px" : "0 0 4px 0",
+                          }} />
+                        ))}
+                      </div>
+                    )}
+                    {scanMode === "camera" && cameraError && (
+                      <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/85 px-3 py-2.5 text-xs text-white z-10">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {cameraError}
+                      </div>
+                    )}
+                  </div>
+
+                  {scanMode === "manual" && (
+                    <div className="relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <Input
+                        ref={orderInputRef}
+                        value={orderSearch}
+                        onChange={(e) => { setOrderSearch(e.target.value); setOrderSuggIdx(-1); }}
+                        onFocus={() => setOrderFocused(true)}
+                        onBlur={() => setTimeout(() => setOrderFocused(false), 150)}
+                        onKeyDown={(e) => {
+                          if (orderFocused && orderSuggestions.length > 0) {
+                            if (e.key === "ArrowDown") { e.preventDefault(); setOrderSuggIdx((i) => Math.min(i + 1, orderSuggestions.length - 1)); return; }
+                            if (e.key === "ArrowUp") { e.preventDefault(); setOrderSuggIdx((i) => Math.max(i - 1, -1)); return; }
+                            if (e.key === "Escape") { setOrderFocused(false); return; }
+                            if (e.key === "Enter" && orderSuggIdx >= 0) { e.preventDefault(); openOrder(orderSuggestions[orderSuggIdx].orderNumber, { confirm: true }); return; }
+                          }
+                          if (e.key === "Enter") openOrder(orderSearch, { confirm: true });
+                        }}
+                        placeholder="Type an order number / party name…"
+                        className="h-11 pl-9 pr-9 text-sm"
+                      />
+                      {orderSearch && (
+                        <button onClick={() => { setOrderSearch(""); orderInputRef.current?.focus(); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                          <X className="h-4 w-4" />
+                        </button>
+                      )}
+                      {orderFocused && debouncedOrderSearch.trim().length >= 2 && (
+                        <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+                          {orderSuggestionsQuery.isFetching ? (
+                            <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+                          ) : orderSuggestions.length === 0 ? (
+                            <p className="px-4 py-3 text-xs text-gray-400">No matching orders.</p>
+                          ) : (
+                            orderSuggestions.map((s, i) => (
+                              <button
+                                key={s.id}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => openOrder(s.orderNumber, { confirm: true })}
+                                className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === orderSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-sm font-semibold text-[#001d6e] truncate">#{s.orderNumber}</div>
+                                  <div className="text-xs text-gray-500 truncate">{s.partyName}{s.plant ? ` · ${s.plant}` : ""}</div>
+                                </div>
+                                <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <Button className="w-full h-10 bg-[#001d6e] text-white hover:bg-[#001552]"
+                    disabled={!orderSearch.trim() || fetchSlipMutation.isPending}
+                    onClick={() => openOrder(orderSearch, { confirm: true })}>
+                    {fetchSlipMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
+                    Find Order
+                  </Button>
+                  </div>
+                </DialogContent>
+              </Dialog>
+            )}
+            {fetchSlipMutation.isPending ? (
+                        <div className="space-y-4 animate-pulse">
+                          <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+                            <div className="flex flex-col gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 sm:flex-row sm:items-center sm:justify-between">
+                              <div className="min-w-0 space-y-2">
+                                <div className="h-4 w-40 rounded bg-gray-200" />
+                                <div className="h-3 w-56 rounded bg-gray-100" />
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="h-8 w-24 rounded-full bg-gray-100" />
+                                <div className="h-8 w-24 rounded-full bg-gray-100" />
+                                <div className="h-9 w-24 rounded-lg bg-gray-100" />
+                              </div>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[38%_0.75rem_1fr]">
+                            <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
+                            <div className="hidden lg:block" />
+                            <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
+                          </div>
+                          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                            <div className="flex items-center gap-2 border-b border-gray-100 px-4 sm:px-5 py-3.5">
+                              <div className="h-4 w-32 rounded bg-gray-200" />
+                            </div>
+                            <div className="divide-y divide-gray-100">
+                              {Array.from({ length: 6 }).map((_, i) => (
+                                <div key={i} className="flex items-center gap-4 px-4 sm:px-5 py-3">
+                                  <div className="h-3.5 flex-1 rounded bg-gray-100" />
+                                  <div className="h-3.5 w-14 rounded bg-gray-100" />
+                                  <div className="h-3.5 w-14 rounded bg-gray-100" />
+                                  <div className="h-3.5 w-14 rounded bg-gray-100" />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+            ) : (
+              <>
             {/* Search bar (desktop) */}
             <div className={`w-full ${bigView ? "hidden" : "hidden xl:block"}`}>
               <Input
@@ -1904,6 +2263,32 @@ export default function LoadOperation() {
                 onPlantChange={setSelectedPlants}
                 plantOptions={plantOptions}
               />
+
+              <AddColumnFilterButton
+                columns={recordFilterColumns}
+                conditions={recordColumnConditions}
+                onApply={setRecordCondition}
+                onClear={clearRecordCondition}
+                className="h-9 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+              />
+              {Object.entries(recordColumnConditions).map(([id, condition]) => (
+                <ColumnFilterChipView
+                  key={id}
+                  columnId={id}
+                  condition={condition}
+                  columns={recordFilterColumns}
+                  onEdit={(c) => setRecordCondition(id, c)}
+                  onRemove={() => clearRecordCondition(id)}
+                />
+              ))}
+              {Object.keys(recordColumnConditions).length > 1 && (
+                <Button
+                  size="sm" variant="ghost" className="h-9 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                  onClick={() => setRecordColumnConditions({})}
+                >
+                  Clear all
+                </Button>
+              )}
 
               {/* Status Buttons */}
               <Button
@@ -1943,16 +2328,13 @@ export default function LoadOperation() {
                 </div>
               </Button>
 
-              {/* Desktop only — below xl this button moves next to the search box instead (see
-                  the compact search row further down), so it's not competing with the filter
-                  pills for room on a narrower screen (including a "desktop-width" window with
-                  the sidebar open, which eats ~256px of it). */}
+              {/* ml-auto: sits at the far right of this row, away from the filters/counters. */}
               {canWrite && (
                 <Button
-                  className={`ml-auto gap-1 bg-[#001d6e] text-white hover:bg-[#001552] ${bigView ? "hidden" : "hidden xl:inline-flex"}`}
-                  onClick={startNewLoad}
+                  className="ml-auto h-10 rounded-lg bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b]"
+                  onClick={openOrderSearch}
                 >
-                  <Plus className="h-4 w-4" /> Load New Slip
+                  <Plus className="mr-1.5 h-4 w-4" /> Load Operation
                 </Button>
               )}
             </div>
@@ -1968,9 +2350,8 @@ export default function LoadOperation() {
               </Tabs>
             </div>
 
-            {/* Compact search + New Slip, merged onto one row and the button shrunk — the filter
-                row above still covers Date/Plant/Status at every width, but Load New Slip moves
-                here below xl instead of competing with those pills for space. */}
+            {/* Compact search row (below xl) — the filter row above still covers Date/Plant/
+                Status at every width; this is just listSearch's own box at narrower widths. */}
             <div className={`flex gap-2 ${bigView ? "" : "xl:hidden"}`}>
               <Input
                 placeholder="Search order, party, vehicle..."
@@ -1978,15 +2359,6 @@ export default function LoadOperation() {
                 onChange={(e) => setListSearch(e.target.value)}
                 className="flex-1"
               />
-              {canWrite && (
-                <Button
-                  size="sm"
-                  className="shrink-0 gap-1 bg-[#001d6e] text-white hover:bg-[#001552]"
-                  onClick={startNewLoad}
-                >
-                  <Plus className="h-4 w-4" /> New
-                </Button>
-              )}
             </div>
 
             {recordsQuery.isLoading ? (
@@ -2031,24 +2403,25 @@ export default function LoadOperation() {
                           the header read as a header rather than blending into the rows. */}
                       <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
                         <TableHead className="w-12 text-[11px] font-semibold uppercase tracking-wide text-white"></TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Order date (top) — the proforma slip's own date; Load date (below) — when this load operation was started">Order / Load Date</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Order date (top) — the proforma slip's own date; Load date (below) — when this load operation was started">{recordColumnHeader("orderDate", "Order / Load Date")}</TableHead>
                         <TableHead
                           className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
                           onClick={() => { setSortBy("orderNumber"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
                         >
-                          Order Number {sortBy === "orderNumber" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
+                          {recordColumnHeader("orderNumber", "Order Number")} {sortBy === "orderNumber" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
                         </TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Party Name</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Plant</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">Vehicle No.</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">Status</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">Owner</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("party", "Party Name")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("plant", "Plant")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">{recordColumnHeader("vehicle", "Vehicle No.")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The STV/platform this load was started on — set once at Create Operation">{recordColumnHeader("stv", "STV")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Owner")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
                         <TableHead
                           className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
                           onClick={() => { setSortBy("creationDate"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
                         >
-                          Creator {sortBy === "creationDate" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
+                          {recordColumnHeader("creator", "Creator")} {sortBy === "creationDate" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
                         </TableHead>
                         <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-white">Actions</TableHead>
                       </TableRow>
@@ -2093,6 +2466,11 @@ export default function LoadOperation() {
                                   <span>{r.vehicleNumber || "-"}</span>
                                   {r.rtoNumber && <span className="text-xs text-muted-foreground">RTO: {r.rtoNumber}</span>}
                                 </div>
+                              </TableCell>
+                              <TableCell>
+                                {r.loadingStv
+                                  ? <span className="inline-flex items-center rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
+                                  : <span className="text-muted-foreground">-</span>}
                               </TableCell>
                               <TableCell>
                                 <Badge className={recordStatusBadgeClass(r)}>
@@ -2344,191 +2722,25 @@ export default function LoadOperation() {
                   </nav>
                   <div className="flex items-center justify-end gap-1">
                     <span className="text-xs whitespace-nowrap text-muted-foreground">Show:</span>
-                    <select
-                      className="h-7 rounded border bg-background px-1 text-xs"
-                      value={recordsPageSize}
-                      onChange={(e) => { setRecordsPageSize(Number(e.target.value)); setRecordsPage(1); }}
-                      aria-label="Rows per page"
-                    >
-                      {RECORDS_PAGE_SIZE_OPTIONS.map((size) => (
-                        <option key={size} value={size}>{size}</option>
-                      ))}
-                    </select>
+                    {/* The shared Select, not a native <select>: a native list is drawn by the
+                        browser and stays upright on a rotated kiosk screen. */}
+                    <Select value={String(recordsPageSize)} onValueChange={(v) => { setRecordsPageSize(Number(v)); setRecordsPage(1); }}>
+                      <SelectTrigger className="h-7 w-[64px] px-2 text-xs" aria-label="Rows per page"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {RECORDS_PAGE_SIZE_OPTIONS.map((size) => (
+                          <SelectItem key={size} value={String(size)}>{size}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
               );
             })()}
+              </>
+            )}
           </div>
         )}
 
-        {/* A specific order is already being fetched (opened from the landing list, or the
-            silent last-order resume on page load) — a skeleton of Stage B's own shape instead of
-            a bare spinner on blank space, so the page reads as "already here, filling in" rather
-            than blank-then-sudden-layout. Without this at all, clicking a list row flashed the
-            full "search for an order" screen for however long the fetch took, even though the
-            user never wanted to search at all — they'd already picked the exact order. */}
-        {view === "create" && !slip && fetchSlipMutation.isPending && (
-          <div className="space-y-4 animate-pulse">
-            <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-              <div className="flex flex-col gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 sm:flex-row sm:items-center sm:justify-between">
-                <div className="min-w-0 space-y-2">
-                  <div className="h-4 w-40 rounded bg-gray-200" />
-                  <div className="h-3 w-56 rounded bg-gray-100" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-8 w-24 rounded-full bg-gray-100" />
-                  <div className="h-8 w-24 rounded-full bg-gray-100" />
-                  <div className="h-9 w-24 rounded-lg bg-gray-100" />
-                </div>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[38%_0.75rem_1fr]">
-              <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
-              <div className="hidden lg:block" />
-              <div className="h-40 rounded-xl border border-gray-200 bg-white shadow-sm" />
-            </div>
-            <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-              <div className="flex items-center gap-2 border-b border-gray-100 px-4 sm:px-5 py-3.5">
-                <div className="h-4 w-32 rounded bg-gray-200" />
-              </div>
-              <div className="divide-y divide-gray-100">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="flex items-center gap-4 px-4 sm:px-5 py-3">
-                    <div className="h-3.5 flex-1 rounded bg-gray-100" />
-                    <div className="h-3.5 w-14 rounded bg-gray-100" />
-                    <div className="h-3.5 w-14 rounded bg-gray-100" />
-                    <div className="h-3.5 w-14 rounded bg-gray-100" />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── Stage A: find the order ─────────────────────────────────────── */}
-        {view === "create" && !slip && !fetchSlipMutation.isPending && (
-          // No overflow-hidden — same reason as the vehicle-search card below (Stage B): the
-          // order-search suggestions dropdown is absolutely positioned and needs to render past
-          // this card's bottom edge, not get clipped by it. Safe here with no rounding
-          // compensation needed — everything inside is already inset by padding, nothing
-          // touches the card's own edge directly.
-          <div className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white shadow-sm">
-            <div className="px-4 sm:px-5 py-4 sm:py-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-gray-500">New Load</span>
-                <Button size="sm" variant="ghost" onClick={backToList} className="h-7 text-gray-500 hover:text-gray-700">
-                  <X className="mr-1 h-3.5 w-3.5" /> Cancel
-                </Button>
-              </div>
-              <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
-                <button
-                  onClick={() => setScanMode("camera")}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-semibold transition-colors ${scanMode === "camera" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
-                >
-                  <Camera className="h-4 w-4" /> Camera
-                </button>
-                <button
-                  onClick={() => { stopCamera(); setScanMode("manual"); }}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-semibold transition-colors ${scanMode === "manual" ? "bg-[#001d6e] text-white" : "text-gray-500 hover:bg-gray-50"}`}
-                >
-                  <Keyboard className="h-4 w-4" /> Manual
-                </button>
-              </div>
-              <p className="text-[11px] text-gray-400">A barcode gun works in Manual mode too — just scan, no need to click the box first.</p>
-
-              <div className="relative w-full bg-black rounded-2xl overflow-hidden" style={{ display: scanMode === "camera" ? "block" : "none", height: "clamp(220px, 45vw, 340px)" }}>
-                <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
-                <div className="pointer-events-none absolute inset-0" style={{ background: "radial-gradient(ellipse 70% 55% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%)" }} />
-                {scanMode === "camera" && !cameraReady && !cameraError && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white z-10">
-                    <Loader2 className="h-8 w-8 animate-spin opacity-90" />
-                    <p className="text-sm font-medium opacity-80">Starting camera…</p>
-                  </div>
-                )}
-                {scanMode === "camera" && cameraReady && (
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-10">
-                    {(["tl", "tr", "bl", "br"] as const).map((pos) => (
-                      <div key={pos} className="absolute" style={{
-                        top: pos.startsWith("t") ? "calc(50% - 40px)" : undefined, bottom: pos.startsWith("b") ? "calc(50% - 40px)" : undefined,
-                        left: pos.endsWith("l") ? "calc(50% - 90px)" : undefined, right: pos.endsWith("r") ? "calc(50% - 90px)" : undefined,
-                        width: 22, height: 22, borderColor: "white", borderStyle: "solid",
-                        borderTopWidth: pos.startsWith("t") ? 3 : 0, borderBottomWidth: pos.startsWith("b") ? 3 : 0,
-                        borderLeftWidth: pos.endsWith("l") ? 3 : 0, borderRightWidth: pos.endsWith("r") ? 3 : 0,
-                        borderRadius: pos === "tl" ? "4px 0 0 0" : pos === "tr" ? "0 4px 0 0" : pos === "bl" ? "0 0 0 4px" : "0 0 4px 0",
-                      }} />
-                    ))}
-                  </div>
-                )}
-                {scanMode === "camera" && cameraError && (
-                  <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 bg-red-900/85 px-3 py-2.5 text-xs text-white z-10">
-                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {cameraError}
-                  </div>
-                )}
-              </div>
-
-              {scanMode === "manual" && (
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                  <Input
-                    ref={orderInputRef}
-                    autoFocus
-                    value={orderSearch}
-                    onChange={(e) => { setOrderSearch(e.target.value); setOrderSuggIdx(-1); }}
-                    onFocus={() => setOrderFocused(true)}
-                    onBlur={() => setTimeout(() => setOrderFocused(false), 150)}
-                    onKeyDown={(e) => {
-                      if (orderFocused && orderSuggestions.length > 0) {
-                        if (e.key === "ArrowDown") { e.preventDefault(); setOrderSuggIdx((i) => Math.min(i + 1, orderSuggestions.length - 1)); return; }
-                        if (e.key === "ArrowUp") { e.preventDefault(); setOrderSuggIdx((i) => Math.max(i - 1, -1)); return; }
-                        if (e.key === "Escape") { setOrderFocused(false); return; }
-                        if (e.key === "Enter" && orderSuggIdx >= 0) { e.preventDefault(); openOrder(orderSuggestions[orderSuggIdx].orderNumber, { confirm: true }); return; }
-                      }
-                      if (e.key === "Enter") openOrder(orderSearch, { confirm: true });
-                    }}
-                    placeholder="Type an order number / party name…"
-                    className="h-11 pl-9 pr-9 text-sm"
-                  />
-                  {orderSearch && (
-                    <button onClick={() => { setOrderSearch(""); orderInputRef.current?.focus(); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                      <X className="h-4 w-4" />
-                    </button>
-                  )}
-                  {orderFocused && debouncedOrderSearch.trim().length >= 2 && (
-                    <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
-                      {orderSuggestionsQuery.isFetching ? (
-                        <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
-                      ) : orderSuggestions.length === 0 ? (
-                        <p className="px-4 py-3 text-xs text-gray-400">No matching orders.</p>
-                      ) : (
-                        orderSuggestions.map((s, i) => (
-                          <button
-                            key={s.id}
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => openOrder(s.orderNumber, { confirm: true })}
-                            className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === orderSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
-                          >
-                            <div className="min-w-0">
-                              <div className="text-sm font-semibold text-[#001d6e] truncate">#{s.orderNumber}</div>
-                              <div className="text-xs text-gray-500 truncate">{s.partyName}{s.plant ? ` · ${s.plant}` : ""}</div>
-                            </div>
-                            <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <Button className="w-full h-10 bg-[#001d6e] text-white hover:bg-[#001552]"
-                disabled={!orderSearch.trim() || fetchSlipMutation.isPending}
-                onClick={() => openOrder(orderSearch, { confirm: true })}>
-                {fetchSlipMutation.isPending ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
-                Find Order
-              </Button>
-            </div>
-          </div>
-        )}
 
         {/* ── Stage B(pre): order found, vehicle not yet CLAIMED — pick one in a dialog, then
             "Create Load Slip" before the actual load page (Stage B below) ever mounts. Gated on
@@ -2543,7 +2755,11 @@ export default function LoadOperation() {
                 <DialogTitle className="text-[#001d6e]">#{slip.orderNumber}</DialogTitle>
                 <DialogDescription>
                   {slip.partyName}{slip.plant ? ` · ${slip.plant}` : ""}
-                  {slip.orderDate ? ` · ${new Date(slip.orderDate).toLocaleDateString("en-IN")}` : ""}
+                  {/* Same local-midnight + explicit Asia/Kolkata pattern used everywhere else
+                      this page renders orderDate — parsing the bare "YYYY-MM-DD" string directly
+                      with new Date() treats it as UTC midnight, then formats in whatever the
+                      browser's own default timezone happens to be instead of always IST. */}
+                  {slip.orderDate ? ` · ${new Date(`${String(slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}` : ""}
                 </DialogDescription>
               </DialogHeader>
 
@@ -2679,20 +2895,6 @@ export default function LoadOperation() {
             mount until then. ──────────────────────────────────────────────────────────────── */}
         {view === "create" && slip && isVehicleClaimed && (
           <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
-              {/* Rotated kiosk mode's fixed overlay sits on top of Layout's own sidebar toggle,
-                  making it unreachable by a normal click — this button (fixed INSIDE the
-                  rotated container, so it turns with the content and stays reachable/correctly
-                  oriented, same trick as the rotate button right below it) reopens the mobile
-                  sidebar drawer instead. Same pattern Unloading's own rotate view uses. */}
-              {rotated && (
-                <button
-                  onClick={() => { openMobileMenu(); openSidebar(); }}
-                  className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-                  title="Open sidebar menu"
-                >
-                  <Menu className="h-5 w-5" />
-                </button>
-              )}
               {/* Kiosk rotate — same floating button Order Scan/Unloading use, for a screen
                   physically mounted at an angle next to the loading bay. Fixed positioning
                   inside the (transform:rotate) wrapper above keeps it pinned to a natural
@@ -2772,7 +2974,7 @@ export default function LoadOperation() {
                           }`}
                           title="Vehicle capacity"
                         >
-                          Cap {slip.vehicleVolume}
+                          Vech vol: {slip.vehicleVolume}
                         </span>
                       )}
                       {slip.vehicleNumber && (
@@ -2806,33 +3008,15 @@ export default function LoadOperation() {
                       visibly bigger, outlined treatment rather than reading as just another
                       small pill alongside Change Vehicle/Complete. */}
                   <div className="flex flex-wrap items-center gap-1 shrink-0">
-                    {/* STV — same per-plant picker Order Scan/Unloading have. Amber when nothing
-                        is picked (scanning is blocked until it is — see handleItemBarcode's
-                        "Select an STV before scanning" toast) so it reads as needing attention. */}
-                    {canWrite && !locked && (
+                    {/* STV is read-only here by design. It's picked once in the Create Operation
+                        dialog and, after that, only an admin can change it — from the Proforma
+                        Slips page, not from the scanning screen. */}
+                    {lockedStv && (
                       <div className="flex items-center gap-1">
                         <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
-                        {stvs.length > 0 ? (
-                          <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
-                            <SelectTrigger className={`h-6 w-32 justify-center rounded-full text-center text-xs font-semibold ${
-                              selectedStv
-                                ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
-                                : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
-                            }`}>
-                              <SelectValue placeholder="Select STV…" />
-                            </SelectTrigger>
-                            <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
-                              <SelectItem value={NO_STV}>— Select STV —</SelectItem>
-                              {stvs.map((st) => (
-                                <SelectItem key={st} value={st}>{st}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        ) : !stvsQuery.isLoading && (
-                          <span className="rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
-                            No STV — create one in Plant Settings
-                          </span>
-                        )}
+                        <span className="inline-flex h-6 items-center gap-1 rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-3 text-xs font-semibold text-[#001d6e]">
+                          <Lock className="h-3 w-3" />{lockedStv}
+                        </span>
                       </div>
                     )}
                     {canWrite && !locked && canEditVehicle && (
@@ -2850,7 +3034,7 @@ export default function LoadOperation() {
                         size="sm"
                         className="h-7 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
                         disabled={completeMutation.isPending}
-                        onClick={() => completeMutation.mutate()}
+                        onClick={() => setConfirmCompleteOpen(true)}
                       >
                         {completeMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                         Complete
@@ -3340,7 +3524,7 @@ export default function LoadOperation() {
       {/* "Create Load Operation from Proforma" — the same confirmation step Load Operations shows
           between finding a slip and starting work on it: full slip details, every item on it, and
           an explicit Create Operation before the scanning view opens. */}
-      <Dialog open={!!pendingSlip} onOpenChange={(open) => { if (!open) setPendingSlip(null); }}>
+      <Dialog open={!!pendingSlip} onOpenChange={(open) => { if (!open) { setPendingSlip(null); setPendingStv(""); } }}>
         <DialogContent className="sm:max-w-[700px] w-full overflow-y-auto max-h-[90vh]">
           <DialogHeader>
             <DialogTitle>Create Load Operation from Proforma</DialogTitle>
@@ -3420,6 +3604,40 @@ export default function LoadOperation() {
                   </div>
                 )}
               </div>
+
+              {/* STV (platform) — required, and the only place it can ever be set: once Create
+                  Operation succeeds the server freezes it on the slip and records it, with the
+                  creator's first name, into the slip's StoreKeeper Info. Hence the explicit
+                  "cannot be changed later" warning rather than a silently-defaulted picker. */}
+              {canWrite && (
+                <div className="border rounded-md">
+                  <h4 className="text-sm font-medium p-3 border-b bg-muted/30">
+                    STV / Platform <span className="text-red-600">*</span>
+                  </h4>
+                  <div className="p-3 space-y-2">
+                    {stvs.length > 0 ? (
+                      <Select value={pendingStv || NO_STV} onValueChange={(v) => setPendingStv(v === NO_STV ? "" : v)}>
+                        <SelectTrigger className={pendingStv ? "" : "border-amber-400 bg-amber-50"}>
+                          <SelectValue placeholder="Select STV…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                          {stvs.map((st) => (
+                            <SelectItem key={st} value={st}>{st}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : !stvsQuery.isLoading && (
+                      <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                        No STV configured for {pendingSlip?.slip?.plant || "this plant"} — add one in Plant Settings before creating this operation.
+                      </div>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      Recorded against this load and cannot be changed later.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Link / change the vehicle without leaving the dialog — same Vehicle Master
                   search the scanning view uses, acting on this not-yet-started slip. */}
@@ -3527,14 +3745,14 @@ export default function LoadOperation() {
               </div>
 
               <div className="flex flex-col space-y-4 pt-2">
-                <Button variant="outline" className="w-full" onClick={() => { setPendingSlip(null); setOrderSearch(""); }}>
+                <Button variant="outline" className="w-full" onClick={() => { setPendingSlip(null); setPendingStv(""); setOrderSearch(""); }}>
                   Cancel
                 </Button>
                 <Button
                   variant="default"
                   className="w-full bg-[#001d6e] hover:bg-[#001d6e]/90"
-                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading}
-                  onClick={() => { if (pendingSlip) startLoadMutation.mutate(pendingSlip.slip.orderNumber); }}
+                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading || !pendingStv}
+                  onClick={() => { if (pendingSlip && pendingStv) startLoadMutation.mutate({ orderNumber: pendingSlip.slip.orderNumber, stv: pendingStv }); }}
                 >
                   {startLoadMutation.isPending ? (
                     <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</>
@@ -3542,7 +3760,7 @@ export default function LoadOperation() {
                     <>Create Operation</>
                   )}
                 </Button>
-                <Button type="button" variant="ghost" className="w-full" onClick={() => { setPendingSlip(null); setOrderSearch(""); setTimeout(() => orderInputRef.current?.focus(), 50); }}>
+                <Button type="button" variant="ghost" className="w-full" onClick={() => { setPendingSlip(null); setPendingStv(""); setOrderSearch(""); setTimeout(() => orderInputRef.current?.focus(), 50); }}>
                   <ChevronLeft className="h-4 w-4 mr-1" />
                   Back to Search
                 </Button>
@@ -3553,11 +3771,9 @@ export default function LoadOperation() {
       </Dialog>
 
       {/* Confirm dialog — loose/partial regular scans. Extras never reach this — they go through
-          their own dedicated Add Extra popup below. portalRotate: Radix renders this into
-          document.body, outside the rotated kiosk container, so it needs the same turn applied
-          by hand or it opens upright while everything behind it is rotated. */}
+          their own dedicated Add Extra popup below. */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
-        <DialogContent className={`max-w-sm ${portalRotate}`}>
+        <DialogContent className={`max-w-sm`}>
           <DialogHeader>
             <DialogTitle>{pending?.item?.itemName ?? pending?.barcode ?? "Confirm scan"}</DialogTitle>
             <DialogDescription>
@@ -3646,7 +3862,7 @@ export default function LoadOperation() {
             is constrained computes x to auto per spec, which is exactly what put a horizontal
             scrollbar under the search view (same fix as the page-level scroll container's own
             comment about this elsewhere in this file). */}
-        <DialogContent className={`overflow-x-hidden overflow-y-auto p-0 ${extraTarget ? "sm:max-w-3xl" : "max-w-xl"} ${portalRotate}`}>
+        <DialogContent className={`overflow-x-hidden overflow-y-auto p-0 ${extraTarget ? "sm:max-w-3xl" : "max-w-xl"}`}>
           <div className={extraTarget ? "flex flex-col sm:flex-row" : ""}>
             {extraTarget && (
               <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-56 sm:border-b-0 sm:border-r">
@@ -3897,8 +4113,89 @@ export default function LoadOperation() {
 
       {/* Void confirmation — a single scan event, same rule/effect as Scan History's own Void:
           stock reversed, kept in history marked Voided (never deleted). */}
+      {/* Confirm before completing — the same "say what is still short, then let them decide"
+          dialog Unloading uses, instead of completing straight from the button click. */}
+      <Dialog open={confirmCompleteOpen} onOpenChange={(o) => { if (!o) setConfirmCompleteOpen(false); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Mark this load complete?</DialogTitle>
+            <DialogDescription>
+              Once complete, scanning is locked for this order until it's reopened.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 text-sm text-gray-600">
+            <p>
+              <span className="font-semibold text-gray-900">#{slip?.orderNumber}</span>
+              {slip?.partyName ? ` — ${slip.partyName}` : ""}
+              {slip?.vehicleNumber ? ` · ${slip.vehicleNumber}` : ""}
+            </p>
+            <p>
+              <span className="font-bold tabular-nums text-gray-900">{completeTotals.loaded.toLocaleString()}</span>
+              {" of "}
+              <span className="font-bold tabular-nums text-gray-900">{completeTotals.expected.toLocaleString()}</span>
+              {" loaded."}
+            </p>
+            {completeTotals.remaining > 0 && (
+              <p className="rounded-md bg-amber-50 px-3 py-2 text-amber-800">
+                <AlertTriangle className="mr-1.5 inline h-4 w-4" />
+                {completeTotals.remaining.toLocaleString()} unit(s) are still not loaded. Completing now leaves them short.
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmCompleteOpen(false)} disabled={completeMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-emerald-600 text-white hover:bg-emerald-700"
+              disabled={completeMutation.isPending}
+              onClick={() => completeMutation.mutate()}
+            >
+              {completeMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Complete Load
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Shown once per order, whether the load finished by itself (last scan / +/-) or was
+          completed by hand. */}
+      <Dialog open={!!completedInfo} onOpenChange={(o) => { if (!o) setCompletedInfo(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-emerald-700">
+              <CheckCircle2 className="h-5 w-5" /> Load complete
+            </DialogTitle>
+            <DialogDescription>
+              {completedInfo?.auto
+                ? "Every item has been fully loaded — this order was marked complete automatically."
+                : "This order has been marked complete."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1 text-sm text-gray-600">
+            <p>
+              <span className="font-semibold text-gray-900">#{completedInfo?.orderNumber}</span>
+              {completedInfo?.partyName ? ` — ${completedInfo.partyName}` : ""}
+            </p>
+            {completedInfo?.vehicleNumber && <p>Vehicle {completedInfo.vehicleNumber}</p>}
+            <p>
+              <span className="font-bold tabular-nums text-gray-900">{(completedInfo?.loadedQty ?? 0).toLocaleString()}</span>
+              {" of "}
+              <span className="font-bold tabular-nums text-gray-900">{(completedInfo?.expectedQty ?? 0).toLocaleString()}</span>
+              {" units loaded."}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCompletedInfo(null)}>Stay on this order</Button>
+            <Button className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90" onClick={() => { setCompletedInfo(null); backToList(); }}>
+              Back to list
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
-        <DialogContent className={`max-w-sm ${portalRotate}`}>
+        <DialogContent className={`max-w-sm`}>
           <DialogHeader>
             <DialogTitle>Void this scan?</DialogTitle>
           </DialogHeader>
@@ -3934,7 +4231,7 @@ export default function LoadOperation() {
       {/* Items table's own +/- confirm — a manual correction to loaded qty, always confirmed
           first (never fires straight off the click) with an editable quantity, defaulting to 1. */}
       <Dialog open={!!adjustTarget} onOpenChange={(o) => { if (!o) setAdjustTarget(null); }}>
-        <DialogContent className={`max-w-sm ${portalRotate}`}>
+        <DialogContent className={`max-w-sm`}>
           <DialogHeader>
             <DialogTitle className={adjustTarget?.direction === "add" ? "text-emerald-700" : "text-red-700"}>
               {adjustTarget?.direction === "add" ? "Add to loaded quantity?" : "Remove from loaded quantity?"}

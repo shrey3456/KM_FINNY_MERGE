@@ -30,6 +30,7 @@ import EditCsvDialog from "@/components/modals/EditCsvDialog";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import { PlantBadge } from "@/components/PlantBadge";
 import { useAuth } from "@/hooks/use-auth";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { Button } from "@/components/ui/button";
 import { buildPageList } from "@/components/ui/data-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -339,7 +340,7 @@ export default function OrderImport() {
   // separate from the Order Import state above, since a user could conceivably have either
   // dialog open in principle (they can't in practice — switching modes doesn't close an open
   // dialog — but keeping them independent avoids one flow's state leaking into the other's UI). ──
-  const [pageMode, setPageMode] = useState<"order-import" | "unloading">("order-import");
+  const [pageMode, setPageMode] = usePersistentFilter<"order-import" | "unloading">("orderImport:pageMode", "order-import");
   const [unloadImportPlant, setUnloadImportPlant] = useState("");
   const [unloadImportDate, setUnloadImportDate] = useState("");
   const [unloadImportFile, setUnloadImportFile] = useState<File | null>(null);
@@ -391,23 +392,26 @@ export default function OrderImport() {
   // — matches the server's own allowance in POST /order-import/sessions. Used as both the date
   // picker's min= and the threshold below for when the past-date existing-order check kicks in.
   const earliestOrderDateStr = getLocalISODate(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
-  const [pageSize, setPageSize] = useState(10);
+  // Browse/lookup filters below are persisted for the sitting. The CSV UPLOAD form's own plant
+  // and Order Date (above) deliberately are NOT — pre-filling the destination of an import from
+  // a previous sitting invites importing a file against the wrong plant/date.
+  const [pageSize, setPageSize] = usePersistentFilter("orderImport:pageSize", 10);
   const [currentPage, setCurrentPage] = useState(1);
-  const [filterDate, setFilterDate] = useState("");
-  const [filterPlant, setFilterPlant] = useState("");
+  const [filterDate, setFilterDate] = usePersistentFilter("orderImport:filterDate", "");
+  const [filterPlant, setFilterPlant] = usePersistentFilter("orderImport:filterPlant", "");
   // Plant tab row under the status tabs. "" = All. Tabs are derived from the sessions actually
   // present in the current status tab, so they appear and disappear with the data.
-  const [plantTab, setPlantTab] = useState("");
+  const [plantTab, setPlantTab] = usePersistentFilter("orderImport:plantTab", "");
 
   // Load CSV for Scan — plant and date filters (default empty = server last-48h window)
-  const [scanPlant, setScanPlant] = useState("");
-  const [scanDate, setScanDate] = useState(todayStr);
+  const [scanPlant, setScanPlant] = usePersistentFilter("orderImport:scanPlant", "");
+  const [scanDate, setScanDate] = usePersistentFilter("orderImport:scanDate", todayStr);
   const [scanExpandedId, setScanExpandedId] = useState<number | null>(null);
-  const [scanItemSearch, setScanItemSearch] = useState("");
+  const [scanItemSearch, setScanItemSearch] = usePersistentFilter("orderImport:scanItemSearch", "");
 
   // Currently Active card — own plant/date filters
-  const [activePlant, setActivePlant] = useState("");
-  const [activeDate, setActiveDate] = useState("");
+  const [activePlant, setActivePlant] = usePersistentFilter("orderImport:activePlant", "");
+  const [activeDate, setActiveDate] = usePersistentFilter("orderImport:activeDate", "");
 
   // Completed Sessions card — collapsed by default. No plant filter: the Completed tab now always
   // shows every plant's latest completion at once (see completedScanSessions below).
@@ -1184,8 +1188,8 @@ export default function OrderImport() {
     vehicleNumbers: string[]; sessionIds: number[]; vehicles: { vehicleNumber: string; sessionId: number }[];
   };
   const [unloadHistoryOffset, setUnloadHistoryOffset] = useState(0);
-  const [unloadHistoryPlantFilter, setUnloadHistoryPlantFilter] = useState("");
-  const [unloadHistoryDateFilter, setUnloadHistoryDateFilter] = useState("");
+  const [unloadHistoryPlantFilter, setUnloadHistoryPlantFilter] = usePersistentFilter("orderImport:unloadHistoryPlant", "");
+  const [unloadHistoryDateFilter, setUnloadHistoryDateFilter] = usePersistentFilter("orderImport:unloadHistoryDate", "");
   const UNLOAD_HISTORY_LIMIT = 20;
   const unloadCsvHistoryQuery = useQuery<{ uploads: UnloadCsvHistoryUpload[]; total: number }>({
     queryKey: ["/api/unloading/csv-history", unloadHistoryOffset, unloadHistoryPlantFilter, unloadHistoryDateFilter],
@@ -1384,7 +1388,7 @@ export default function OrderImport() {
 
   const activeId = activeSessionQuery.data?.id ?? null;
 
-  const [activeTab, setActiveTab] = useState<"available" | "active" | "completed" | "history">("available");
+  const [activeTab, setActiveTab] = usePersistentFilter<"available" | "active" | "completed" | "history">("orderImport:statusTab", "available");
 
   // Plant tabs come from the sessions in the current status tab (ignoring the plant selection
   // itself, so picking a plant never empties the row). History pages server-side, so it falls back

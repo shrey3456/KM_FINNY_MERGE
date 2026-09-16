@@ -158,6 +158,32 @@ function isAlreadyLoading(notionStatus?: string | null): boolean {
   return String(notionStatus ?? '').trim().toUpperCase() === NOTION_LOADING_STATUS;
 }
 
+// The STV picked on Create Operation must actually be one of that plant's configured STVs —
+// checked server-side, not just constrained by the dialog's <Select>, since the code is written
+// into an audit field (storeKeeperInfo) that Notion users read.
+async function plantStvList(plant: string | null | undefined): Promise<string[]> {
+  const name = String(plant ?? '').trim();
+  if (!name) return [];
+  const { rows } = await pool.query(
+    `SELECT s.stv FROM plant_stvs s JOIN plants p ON p.id = s.plant_id WHERE LOWER(p.name) = LOWER($1)`,
+    [name],
+  );
+  return rows.map((r: any) => String(r.stv));
+}
+
+// Renders "who started this load, on which platform" the way the existing Notion-authored values
+// in this column already read — "SHEKHAR KUMAR, pt: 5" — so hand-written and app-written rows
+// stay one consistent format. First name only (per request) and upper-cased to match them, and
+// the STV's platform number is unwrapped from its "PLT-04"/"STV-04" code since those rows write
+// the bare number. A code that isn't in that shape (e.g. "STV-01&02") is kept verbatim rather
+// than mangled.
+function formatStoreKeeperInfo(userName: string | null | undefined, stv: string): string {
+  const firstName = String(userName ?? '').trim().split(/\s+/)[0]?.toUpperCase() ?? '';
+  const numeric = /^(?:PLT|STV)-0*(\d+)$/i.exec(stv.trim());
+  const platform = numeric ? numeric[1] : stv.trim();
+  return firstName ? `${firstName}, pt: ${platform}` : `pt: ${platform}`;
+}
+
 // Mirrors Order Scan's canCompletePart exactly (server/routes/order-scan.ts) — anyone can
 // complete a load EXCEPT designations "Loader"/"Helper"/"Driver"/"Scanner"; admin/super-admin
 // always allowed. This is the "force complete even if not everything is loaded" button.
@@ -308,7 +334,15 @@ router.get('/loading/proforma/search', requirePageAccess('loading'), async (req:
       plantCondition = `AND LOWER(plant) = ANY($${params.length})`;
     }
     const { rows } = await pool.query(
-      `SELECT id, order_number AS "orderNumber", party_name AS "partyName", plant, order_date AS "orderDate",
+      // order_date::text — this is a raw pool.query (not Drizzle), so node-postgres's default
+      // DATE type parser would otherwise hand back a JS Date object built at LOCAL midnight,
+      // which res.json() then serializes as a UTC timestamp with the date shifted by the
+      // server's own UTC offset (e.g. "2026-08-26" becomes "2026-08-25T18:30:00.000Z" on an
+      // IST server) — exactly the kind of value the client's date-only rendering logic isn't
+      // expecting, and slicing just the date portion of THAT then picks the wrong day. Casting
+      // to text in SQL returns the plain "YYYY-MM-DD" Postgres already has, matching what
+      // Drizzle's own (string-mode) date columns return elsewhere in this app.
+      `SELECT id, order_number AS "orderNumber", party_name AS "partyName", plant, order_date::text AS "orderDate",
               vehicle_number AS "vehicleNumber"
        FROM proforma_slips
        WHERE (order_number ILIKE $1 OR party_name ILIKE $1) ${plantCondition}
@@ -362,6 +396,23 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
       return res.status(409).json({ message: 'Status is already Loading — not able to load.' });
     }
 
+    // STV is mandatory here and ONLY here: this is the one moment it can be set, and every other
+    // endpoint treats it as frozen afterwards. Refusing the start outright (rather than
+    // defaulting to the plant's first STV) is deliberate — a wrong platform silently recorded in
+    // storeKeeperInfo is worse than a blocked Create Operation.
+    const requestedStv = String(req.body?.stv ?? '').trim();
+    if (!requestedStv) {
+      return res.status(400).json({ message: 'Select an STV before creating this load operation.' });
+    }
+    const allowedStvs = await plantStvList(slip.plant);
+    if (allowedStvs.length === 0) {
+      return res.status(400).json({ message: `No STV is configured for plant ${slip.plant ?? '—'} — add one in Plant Settings first.` });
+    }
+    const matchedStv = allowedStvs.find((s) => normalize(s) === normalize(requestedStv));
+    if (!matchedStv) {
+      return res.status(400).json({ message: `"${requestedStv}" is not an STV configured for plant ${slip.plant ?? '—'}.` });
+    }
+
     if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS) {
       const updated = await storage.updateProformaSlip(slip.id, { notionStatus: NOTION_LOADING_STATUS } as any);
       if (updated) slip = updated;
@@ -372,11 +423,22 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
     // scan it, same as the old implicit "creator" idea, just tracked explicitly now so it can be
     // paused/handed off. Never overwrites an existing owner (this endpoint is only reachable
     // before loading starts anyway, per the isAlreadyLoading guard above).
-    if (!slip.loadingOwnerCode) {
+    // First-time owner + STV assignment. storeKeeperInfo is stamped from the pair here and only
+    // here: it names the person who STARTED the load, so a later pause/handoff (which moves
+    // loadingOwnerCode) deliberately leaves it alone — the owner timeline already records who
+    // took over. Guarded on loadingStv so re-entry can never restamp it either.
+    if (!slip.loadingOwnerCode || !slip.loadingStv) {
       const { userCode, userName } = actor(req);
-      const updated = await storage.updateProformaSlip(slip.id, {
-        loadingOwnerCode: userCode ?? null, loadingOwnerName: userName ?? null,
-      } as any);
+      const patch: Record<string, unknown> = {};
+      if (!slip.loadingOwnerCode) {
+        patch.loadingOwnerCode = userCode ?? null;
+        patch.loadingOwnerName = userName ?? null;
+      }
+      if (!slip.loadingStv) {
+        patch.loadingStv = matchedStv;
+        patch.storeKeeperInfo = formatStoreKeeperInfo(userName, matchedStv);
+      }
+      const updated = await storage.updateProformaSlip(slip.id, patch as any);
       if (updated) slip = updated;
     }
 
@@ -386,6 +448,44 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
   } catch (error) {
     console.error('Error starting load:', error);
     res.status(500).json({ message: 'Failed to start load' });
+  }
+});
+
+// PATCH /api/loading/proforma/:orderNumber/stv — the ONE way an STV changes after Create
+// Operation, and admin-only. The Loading page has no STV control at all any more: operators pick
+// it once when starting the load, and correcting a mistake afterwards is an admin action taken
+// from the Proforma Slips page. Rewrites storeKeeperInfo to match, keeping whatever name is
+// already recorded there (the person who started the load) rather than re-stamping it with the
+// admin doing the correction.
+router.patch('/loading/proforma/:orderNumber/stv', requirePageWrite('loading'), async (req: Request, res: Response) => {
+  try {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ message: 'Only an admin can change a load\'s STV.' });
+    }
+    const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+
+    const requestedStv = String(req.body?.stv ?? '').trim();
+    if (!requestedStv) return res.status(400).json({ message: 'stv is required' });
+    const allowedStvs = await plantStvList(slip.plant);
+    const matchedStv = allowedStvs.find((s) => normalize(s) === normalize(requestedStv));
+    if (!matchedStv) {
+      return res.status(400).json({ message: `"${requestedStv}" is not an STV configured for plant ${slip.plant ?? '—'}.` });
+    }
+
+    // Reuse the name already in storeKeeperInfo ("NAME, pt: 4" → "NAME") so a correction only
+    // changes the platform. Falls back to the recorded owner for a slip whose storeKeeperInfo
+    // came from Notion in some other shape, or is empty.
+    const existingName = /^\s*([^,]+?)\s*,\s*pt\s*:/i.exec(String(slip.storeKeeperInfo ?? ''))?.[1];
+    const updated = await storage.updateProformaSlip(slip.id, {
+      loadingStv: matchedStv,
+      storeKeeperInfo: formatStoreKeeperInfo(existingName ?? slip.loadingOwnerName, matchedStv),
+    } as any);
+    if (!updated) return res.status(500).json({ message: 'Failed to update STV' });
+    res.json({ slip: updated });
+  } catch (error) {
+    console.error('Error updating load STV:', error);
+    res.status(500).json({ message: 'Failed to update STV' });
   }
 });
 
@@ -535,10 +635,13 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 lr.party_name AS "partyName", lr.plant, lr.vehicle_number AS "vehicleNumber",
                 lr.rto_number AS "rtoNumber", lr.volume, lr.created_by_code AS "createdByCode",
                 lr.created_by_name AS "createdByName", lr.created_at AS "createdAt",
-                ps.order_date AS "orderDate",
+                -- ::text — see the identical cast + comment on the /proforma/search query above;
+                -- same raw pool.query date-shift bug, same fix.
+                ps.order_date::text AS "orderDate",
                 ps.loading_completed_at AS "loadingCompletedAt",
                 ps.loading_owner_code AS "loadingOwnerCode", ps.loading_owner_name AS "loadingOwnerName",
-                ps.loading_paused_at AS "loadingPausedAt"
+                ps.loading_paused_at AS "loadingPausedAt",
+                ps.loading_stv AS "loadingStv"
          FROM loading_records lr
          LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
          ${plantWhere}
@@ -657,7 +760,6 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     const barcode = String(req.body?.barcode ?? '').trim();
     const qty = Math.round(Number(req.body?.qty));
     const isExtraScan = req.body?.extra === true;
-    const stv = req.body?.stv != null ? String(req.body.stv).trim() || null : null;
     if (!barcode) return res.status(400).json({ message: 'barcode is required' });
     if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be a positive number' });
 
@@ -669,6 +771,11 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     }
     const ownershipError = checkLoadOwnership(slip, req, await resolveLoadOwner(slip));
     if (ownershipError) return res.status(403).json({ message: ownershipError });
+    // The slip's own locked STV wins over whatever the client sent — the pick belongs to the load
+    // (chosen once at Create Operation), not to the scanning session, so a stale client or an
+    // older slip's remembered localStorage value can't tag events with a different platform.
+    const stv = (slip as any).loadingStv
+      ?? (req.body?.stv != null ? String(req.body.stv).trim() || null : null);
     // Vehicle must be linked before any item can be scanned onto it — enforced here too, not
     // just hidden client-side, so a stale/bypassed client can't scan against an unassigned slip.
     if (!slip.vehicleNumber) {
@@ -802,8 +909,8 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
         [qty, barcode, slip.plant],
       );
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-         VALUES ($1,$2,$3,$4,$5,'dispatch',$6,$7)`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+         VALUES ($1,$2,$3,$4,$5,'dispatch',$6,$7,'loading')`,
         [barcode, product?.id ?? null, slip.plant, -qty, extraQty, `Loaded onto vehicle for order ${slip.orderNumber}`, userCode ?? null],
       );
       await client.query('COMMIT');
@@ -922,8 +1029,8 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('load
 
       await client.query(
         `INSERT INTO loading_scan_events
-           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, plant, stv, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13)`,
         [
           slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
           delta > 0 ? pallets : -pallets, delta > 0 ? looseQty : -looseQty, delta, isExtra, slip.plant, null, userCode ?? null, userName ?? null,
@@ -936,8 +1043,8 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('load
         [delta, barcode, slip.plant],
       );
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6)`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
         [
           barcode, product?.id ?? null, slip.plant, -delta,
           `Loaded quantity manually ${delta > 0 ? 'increased' : 'decreased'} by ${Math.abs(delta)} for order ${slip.orderNumber}`,
@@ -1090,8 +1197,8 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
           [qty, event.barcode, event.plant],
         );
         await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6)`,
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
           [event.barcode, product?.id ?? null, event.plant, qty, `Loading slip ${slip.orderNumber} reset — deleted from landing table`, userCode ?? null],
         );
       }
@@ -1177,8 +1284,8 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
         [qty, event.barcode, event.plant],
       );
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6)`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
         [event.barcode, product?.id ?? null, event.plant, qty, `Voided load scan for order ${event.order_number}`, userCode ?? null],
       );
     }
@@ -1314,8 +1421,8 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
       [newQty, event.barcode, event.plant],
     );
     await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'loading')`,
       [event.barcode, product?.id ?? null, event.plant, -newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, userCode ?? null],
     );
 

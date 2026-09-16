@@ -389,6 +389,13 @@ export const proformaSlips = pgTable("proforma_slips", {
   // the handoff (loading_handoffs) and moves ownership. Pausing itself is not a handoff by
   // itself — resuming as the same person who paused never creates a handoff row.
   loadingPausedAt: timestamp("loading_paused_at"),
+  // STV (platform) the operator picks in the Create Load Operation dialog. Required there and
+  // write-once: every later endpoint refuses to change it, and the scan view renders it as
+  // locked text instead of a picker, so the platform a load was started on can't drift halfway
+  // through. Also the flag that tells a Notion sync to stop overwriting storeKeeperInfo below —
+  // once this is set, that column is ours (same "a person confirmed this locally" guard
+  // vehicleAssignedByCode already gives vehicleNumber).
+  loadingStv: text("loading_stv"),
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
@@ -401,6 +408,7 @@ export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
   printedByCode: true, printedByName: true, printedAt: true, printCount: true,
   loadingCompletedAt: true, loadingCompletedByCode: true, vehicleAssignedByCode: true,
   vehicleInfoId: true, loadingOwnerCode: true, loadingOwnerName: true, loadingPausedAt: true,
+  loadingStv: true,
 });
 
 // One row per actual shift handoff on a Loading order — "who load and what time it['s] given to
@@ -509,6 +517,9 @@ export const loadingScanEvents = pgTable("loading_scan_events", {
   looseQty: integer("loose_qty").default(0),
   totalQty: integer("total_qty").default(0),
   isExtra: boolean("is_extra").default(false), // scanned beyond this item's proforma quantity
+  // Written by the Items table's +/- buttons (POST /loading/proforma/:orderNumber/adjust-load), not
+  // a barcode scan — shown as "Loading Adjust" everywhere this history is listed.
+  isAdjust: boolean("is_adjust").default(false),
   plant: text("plant"),
   // Sub-transfer voucher code (see plantStvs below) — same per-plant STV concept Order Scan and
   // Unloading already record per event; picked once for the vehicle before scanning (see the
@@ -1065,6 +1076,9 @@ export const orderScanEvents = pgTable("order_scan_events", {
   totalQty: integer("total_qty").default(0),
   itemsPerPallet: integer("items_per_pallet").default(0),
   isExtra: boolean("is_extra").default(false),
+  // Written by a qty edit (PUT /order-scan/events/:id), not a fresh barcode scan — the old event
+  // is voided and the corrected one written with this set, shown as "Scan Adjust".
+  isAdjust: boolean("is_adjust").default(false),
   stv: text("stv"),
   scannedByCode: text("scanned_by_code").references(() => users.userCode),
   scannedByName: text("scanned_by_name"),
@@ -1200,6 +1214,9 @@ export const unloadScanEvents = pgTable("unload_scan_events", {
   looseQty: integer("loose_qty").default(0),
   totalQty: integer("total_qty").default(0),
   isExtra: boolean("is_extra").default(false), // scanned beyond this item's expected quantity
+  // Written by a qty edit (PUT /unloading/events/:id), not a fresh barcode scan — shown as
+  // "Unload Adjust", same idea as order_scan_events.isAdjust.
+  isAdjust: boolean("is_adjust").default(false),
   // Sub-transfer voucher code (see plantStvs above) — same per-plant STV concept Order Scan
   // already records per event; picked once for the vehicle before scanning (see the STV
   // selector in client/src/pages/Unloading/Unloading.tsx), stored on every event.
@@ -1475,6 +1492,11 @@ export const stockMovements = pgTable("stock_movements", {
   extraQty: integer("extra_qty").default(0),     // portion of qty that was extra (over-order)
   type: text("type").notNull(),                  // 'receive' | 'dispatch' | 'adjust' | 'exchange'
   reason: text("reason"),
+  // Who/what wrote an 'adjust' row. 'manual' = a person's Add/Remove/Set on Overall Stock's
+  // Adjust dialog (server/routes/plant-stock-admin.ts) — the only adjustments Scan History lists.
+  // Null for system-written rows (void rollbacks, Clear Stock, CSV edits…), which already appear
+  // as their own events elsewhere; the free-text reason can't tell the two apart.
+  source: text("source"),
   sessionId: integer("session_id"),              // order_import_sessions.id when from a scan completion
   createdByCode: text("created_by_code"),
   createdAt: timestamp("created_at").defaultNow(),

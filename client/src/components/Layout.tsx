@@ -8,6 +8,7 @@ import finnyLogo from '@assets/finny-logo.png';
 import { Home, Menu, ChevronUp, ChevronDown } from 'lucide-react';
 import { formatUsername } from '@/lib/format-username';
 import { SidebarContext } from '@/lib/sidebarContext';
+import { PortalRotationProvider, type PortalRotation } from '@/lib/portalRotation';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -34,6 +35,19 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   // useSidebarContext().setKioskRotateClass, so the sidebar rotates WITH the page's own
   // rotated content instead of popping up unrotated on top of it. Empty when not rotated.
   const [kioskRotateClass, setKioskRotateClass] = useState("");
+  // Also pushed up by the active rotated page — provided to the page tree so its portaled popups
+  // turn with it (lib/portalRotation). 0 when not rotated.
+  const [portalRotation, setPortalRotation] = useState<PortalRotation>(0);
+  // Popups attached to a trigger (dropdowns, popovers) are rotated by a body-level CSS rule rather
+  // than per component — see the data-portal-rotation block in index.css for why.
+  useEffect(() => {
+    if (portalRotation === 0) {
+      delete document.body.dataset.portalRotation;
+      return;
+    }
+    document.body.dataset.portalRotation = String(portalRotation);
+    return () => { delete document.body.dataset.portalRotation; };
+  }, [portalRotation]);
   // Scanning pages: let the operator collapse the "Welcome" header to reclaim vertical space for
   // the items table. Remembered across reloads since a scanning station keeps the same preference
   // — one shared key rather than one per page, because it's the same physical station either way.
@@ -80,7 +94,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   };
 
   return (
-    <SidebarContext.Provider value={{ openMobileMenu: () => setMobileMenuOpen(true), openSidebar, setKioskRotateClass }}>
+    <SidebarContext.Provider value={{ openMobileMenu: () => setMobileMenuOpen(true), openSidebar, setKioskRotateClass, setPortalRotation }}>
     <div className="flex h-screen overflow-hidden bg-white">
       {/* Sidebar for desktop - conditionally shown based on sidebarVisible state.
           relative z-40: Loading/Unloading/Scan's kiosk-rotate wrapper (index.css) is a fixed,
@@ -249,7 +263,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
             Tables scroll horizontally inside their own containers, so nothing is lost here. */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden bg-white">
           <div className="min-w-0 px-4 sm:px-6">
-            {children}
+            <PortalRotationProvider rotation={portalRotation}>{children}</PortalRotationProvider>
           </div>
         </main>
         

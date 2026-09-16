@@ -1,4 +1,5 @@
-import { Fragment, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useLocation } from "wouter";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -12,6 +13,39 @@ import type {
   DataTableSortDirection,
   DataTableSortState,
 } from "./types";
+
+// ── Remembered column widths ─────────────────────────────────────────────────────────────────
+// A width the user drags is a lasting preference, so it lives in localStorage rather than in
+// component state that a navigation throws away. Reads and writes are wrapped: storage can be
+// unavailable (private windows, blocked site data) and must never take the table down with it.
+const COLUMN_WIDTH_STORAGE_PREFIX = "dt-widths:";
+
+function readStoredColumnWidths(key: string): Record<string, number> {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    // Only finite positive numbers — a hand-edited or half-written entry must not push a column
+    // to NaN/0 width, which would collapse the table.
+    const widths: Record<string, number> = {};
+    for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) widths[id] = value;
+    }
+    return widths;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredColumnWidths(key: string, widths: Record<string, number>) {
+  try {
+    if (Object.keys(widths).length === 0) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, JSON.stringify(widths));
+  } catch {
+    /* storage unavailable — widths simply won't be remembered */
+  }
+}
 
 /**
  * The one totals-row look, exported so hand-built tables elsewhere (the Scan page's rotated-kiosk
@@ -157,6 +191,12 @@ interface DataTableProps<TData> {
   renderFooter?: (ctx: DataTableFooterContext) => ReactNode;
 
   enableColumnResizing?: boolean;
+  /**
+   * Where this table's dragged column widths are remembered. Defaults to the page's path plus this
+   * table's own column ids, which is unique enough for every table in the app — pass one only to
+   * tell two identical tables on the same page apart, or to share widths deliberately.
+   */
+  columnWidthStorageKey?: string;
   isStickyHeader?: boolean;
   stickyColumnId?: string;
   maxHeight?: string;
@@ -230,6 +270,7 @@ export function DataTable<TData>({
   expandedRowId = null,
   renderFooter,
   enableColumnResizing = false,
+  columnWidthStorageKey,
   isStickyHeader = false,
   stickyColumnId,
   maxHeight,
@@ -251,7 +292,22 @@ export function DataTable<TData>({
   const [internalVisibleIds, setInternalVisibleIds] = useState<Set<string>>(
     () => new Set(columns.filter((c) => !c.isHiddenByDefault).map((c) => c.id)),
   );
-  const [colWidths, setColWidths] = useState<Record<string, number>>({});
+  // Dragged widths survive leaving the page and coming back. They used to live in state alone, so
+  // every navigation threw them away and the table snapped back to its defaults. The key is the
+  // page path + this table's column ids: no call site has to pass anything, and a table whose
+  // columns change (a column added later) starts fresh rather than restoring widths onto columns
+  // that no longer line up.
+  const [pathname] = useLocation();
+  const widthsKey = columnWidthStorageKey ?? `${COLUMN_WIDTH_STORAGE_PREFIX}${pathname}:${columns.map((c) => c.id).join("|")}`;
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => readStoredColumnWidths(widthsKey));
+  // The same component instance now showing a different table (or the same table on another page)
+  // — load that one's saved widths instead of carrying the previous table's over.
+  const loadedWidthsKeyRef = useRef(widthsKey);
+  useEffect(() => {
+    if (loadedWidthsKeyRef.current === widthsKey) return;
+    loadedWidthsKeyRef.current = widthsKey;
+    setColWidths(readStoredColumnWidths(widthsKey));
+  }, [widthsKey]);
   // Set while a resize drag is in flight — see startResize and the header's onDragStart.
   const resizingRef = useRef(false);
 
@@ -461,6 +517,12 @@ export function DataTable<TData>({
       resizingRef.current = false;
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      // Saved once the drag ends, not on every mousemove. The updater is only a way to read the
+      // final widths without a stale closure — it returns exactly what it was given.
+      setColWidths((current) => {
+        writeStoredColumnWidths(widthsKey, current);
+        return current;
+      });
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);

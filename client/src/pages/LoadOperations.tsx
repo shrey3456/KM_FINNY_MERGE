@@ -1147,24 +1147,15 @@ export default function LoadOperations() {
     }
   }, [isInitialized, savedDate]);
   
-  // When the page is unmounted or date filter changes, save the current filter
+  // Save on every change INCLUDING a clear — saveDateFilter(null) removes the key. Guarding
+  // this on `selectedDate` (as it used to) meant clearing the filter left the old date in
+  // storage, and the restore effect above then re-applied it on the next visit: the filter
+  // could be turned on but never off.
   useEffect(() => {
-    if (isInitialized && selectedDate) {
-      // Save the current filter to ensure it persists when navigating pages
-      console.log("Saving load operations date filter:", selectedDate);
+    if (isInitialized) {
       SingleDateFilterStorage.saveDateFilter('load-operations-page', selectedDate);
     }
   }, [isInitialized, selectedDate]);
-  
-  // Cleanup effect to save current filter on page unmount
-  useEffect(() => {
-    return () => {
-      if (selectedDate) {
-        console.log("Saving load operations date filter on unmount:", selectedDate);
-        SingleDateFilterStorage.saveDateFilter('load-operations-page', selectedDate);
-      }
-    };
-  }, [selectedDate]);
 
   // Setup user interaction tracking for the auto-refresh feature
   useEffect(() => {
@@ -1373,7 +1364,7 @@ export default function LoadOperations() {
               
               // Invalidate related queries to ensure data consistency across devices
               queryClient.invalidateQueries({ 
-                queryKey: [`/api/proforma-slips/order/${referenceNumber}`],
+                queryKey: [`/api/proforma-slips/order/${encodeURIComponent(referenceNumber)}`],
                 refetchType: 'active'
               });
             }
@@ -1480,7 +1471,7 @@ export default function LoadOperations() {
               
               // Invalidate related queries to ensure data consistency across devices
               queryClient.invalidateQueries({ 
-                queryKey: [`/api/proforma-slips/order/${referenceNumber}`],
+                queryKey: [`/api/proforma-slips/order/${encodeURIComponent(referenceNumber)}`],
                 refetchType: 'active'
               });
             }
@@ -6078,7 +6069,7 @@ export default function LoadOperations() {
                     setIsDateFilterActive(!!date);
                     // Update the saved date filter
                     if (date) {
-                      SingleDateFilterStorage.saveDateFilter('load-operations', date);
+                      SingleDateFilterStorage.saveDateFilter('load-operations-page', date);
                     }
                   }}
                 >
@@ -6800,7 +6791,7 @@ export default function LoadOperations() {
                   setIsDateFilterActive(!!date);
                   // Update the saved date filter
                   if (date) {
-                    SingleDateFilterStorage.saveDateFilter('load-operations', date);
+                    SingleDateFilterStorage.saveDateFilter('load-operations-page', date);
                   }
                 }}
               />

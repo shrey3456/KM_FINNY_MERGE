@@ -136,7 +136,7 @@ const proformaSlipItemFormSchema = z.object({
 });
 
 async function unlockSlip(orderNumber: string) {
-  const res = await apiRequest('POST', `/api/proforma-slips/order/${orderNumber}/unlock`);
+  const res = await apiRequest('POST', `/api/proforma-slips/order/${encodeURIComponent(orderNumber)}/unlock`);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || 'Failed to unlock');
@@ -144,7 +144,7 @@ async function unlockSlip(orderNumber: string) {
 }
 
 async function lockSlip(orderNumber: string, printedByCode?: string) {
-  const res = await apiRequest('POST', `/api/proforma-slips/order/${orderNumber}/lock`, {
+  const res = await apiRequest('POST', `/api/proforma-slips/order/${encodeURIComponent(orderNumber)}/lock`, {
     printedByCode
   });
   if (!res.ok) {
@@ -336,6 +336,29 @@ export default function ProformaSlips() {
   
   const currentUserRole = String(currentUserInfo?.role || '').toLowerCase();
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
+
+  // Admin-only STV correction. The slip being edited, plus the pending pick — see the Edit STV
+  // action in the row menu and the dialog at the end of this file.
+  const [stvEditSlip, setStvEditSlip] = useState<LockedProformaSlip | null>(null);
+  const [stvEditValue, setStvEditValue] = useState('');
+  const stvEditOptionsQuery = useQuery<string[]>({
+    queryKey: ['/api/order-scan/stvs', stvEditSlip?.plant],
+    queryFn: () => apiRequest('GET', `/api/order-scan/stvs?plant=${encodeURIComponent(stvEditSlip?.plant ?? '')}`).then((r) => r.json()),
+    enabled: !!stvEditSlip?.plant,
+  });
+  const saveStvMutation = useMutation({
+    mutationFn: async ({ orderNumber, stv }: { orderNumber: string; stv: string }) => {
+      const res = await apiRequest('PATCH', `/api/loading/proforma/${encodeURIComponent(orderNumber)}/stv`, { stv });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || 'Failed to update STV');
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
+      toast({ title: 'STV updated', description: 'StoreKeeper Info has been updated to match.' });
+      setStvEditSlip(null);
+    },
+    onError: (err: any) => toast({ title: 'Could not update STV', description: err?.message ?? 'Failed', variant: 'destructive' }),
+  });
   const userDept = String(currentUserInfo?.department || '').toLowerCase().trim();
   const userDesig = String(currentUserInfo?.designation || '').toLowerCase().trim();
 
@@ -1481,6 +1504,12 @@ export default function ProformaSlips() {
       render: (slip) => slip.storeKeeperInfo || ' ',
     },
     {
+      id: 'loadingStv',
+      header: columnHeader('loadingStv', 'STV'),
+      width: 90,
+      render: (slip) => slip.loadingStv || ' ',
+    },
+    {
       id: 'actions',
       header: '',
       width: 60,
@@ -1497,6 +1526,15 @@ export default function ProformaSlips() {
           <DropdownMenuContent align="end">
             <DropdownMenuLabel>Actions</DropdownMenuLabel>
             <DropdownMenuSeparator />
+
+            {/* The only place a started load's STV can be corrected — the Loading page has no
+                STV control at all, by design. Admin-only, and only once a load exists to
+                correct (loadingStv is stamped by Create Operation). */}
+            {isAdminOrSuper && slip.loadingStv && (
+              <DropdownMenuItem onClick={() => { setStvEditSlip(slip); setStvEditValue(slip.loadingStv ?? ''); }}>
+                <Pencil className="mr-2 h-4 w-4" /> Edit STV ({slip.loadingStv})
+              </DropdownMenuItem>
+            )}
 
             {!slip.isPrintLocked && canLockSlips && (
               <DropdownMenuItem
@@ -2942,6 +2980,46 @@ export default function ProformaSlips() {
               disabled={deleteMultipleProformaSlipsMutation.isPending}
             >
               {deleteMultipleProformaSlipsMutation.isPending ? "Deleting..." : "Delete All Selected"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Admin-only STV correction — the single place a started load's STV can be changed. */}
+      <Dialog open={!!stvEditSlip} onOpenChange={(open) => { if (!open) setStvEditSlip(null); }}>
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>Edit STV</DialogTitle>
+            <DialogDescription>
+              Order #{stvEditSlip?.orderNumber} · {stvEditSlip?.plant}. Changing this also updates the slip's StoreKeeper Info.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <Select value={stvEditValue} onValueChange={setStvEditValue}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select STV…" />
+              </SelectTrigger>
+              <SelectContent>
+                {(stvEditOptionsQuery.data ?? []).map((st) => (
+                  <SelectItem key={st} value={st}>{st}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {!stvEditOptionsQuery.isLoading && (stvEditOptionsQuery.data ?? []).length === 0 && (
+              <p className="text-sm text-red-600">No STV configured for this plant — add one in Plant Settings.</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStvEditSlip(null)}>Cancel</Button>
+            <Button
+              disabled={!stvEditValue || stvEditValue === stvEditSlip?.loadingStv || saveStvMutation.isPending}
+              onClick={() => {
+                if (stvEditSlip && stvEditValue) {
+                  saveStvMutation.mutate({ orderNumber: stvEditSlip.orderNumber, stv: stvEditValue });
+                }
+              }}
+            >
+              {saveStvMutation.isPending ? 'Saving...' : 'Save'}
             </Button>
           </DialogFooter>
         </DialogContent>
