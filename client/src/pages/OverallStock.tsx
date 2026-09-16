@@ -60,15 +60,15 @@ type PlantStockRow = {
   // entries; the stock/extra/pallet cells render as dashes so it's never read as inventory.
   isEmptyBox?: boolean;
   emptyBoxCount?: number;
-  // Sum of every CSV's ordered quantity ever uploaded for this barcode+plant — scoped down to
-  // one date's orders only when a date filter is picked (see expectedDate below); otherwise an
-  // all-time sum across every order date. null when Expected Qty isn't populated at all.
+  // Sum of every CSV's ordered quantity for this barcode+plant — scoped down to one date's
+  // orders when a date filter is picked (see expectedDate below); otherwise summed from the
+  // configured Sales Tracking Start date onward (see salesTrackingStart below, Settings > Data
+  // Management), the same floor Sale Qty uses. null when Expected Qty isn't populated at all.
   expectedQty?: number | null;
   expectedPallets?: number | null;
   // Sum of Proforma Slip quantities for this barcode+plant — same date scoping as expectedQty,
-  // except the "all dates" default floors at the configured Sales Tracking Start date (see
-  // salesTrackingStart below, Settings > Data Management) instead of truly summing every slip
-  // ever raised. null when Sale Qty isn't populated at all.
+  // including the same Sales Tracking Start floor in "all dates" mode. null when Sale Qty isn't
+  // populated at all.
   saleQty?: number | null;
   salePallets?: number | null;
   // Only populated when a single explicit date is selected — the running physical balance as
@@ -103,15 +103,15 @@ type PlantStockResponse = {
   from?: string | null;
   to?: string | null;
   // Set only when an explicit date filter is applied. Null in the default "all dates" mode,
-  // where expectedTotal is a sum across every order ever uploaded instead of one date's orders.
+  // where expectedTotal is summed from salesTrackingStart onward instead of one date's orders.
   expectedDate?: string | null;
   expectedTotal?: number | null;
   // Same shape as expectedDate/expectedTotal, for Sale Qty (sourced from Proforma Slips).
   saleDate?: string | null;
   saleTotal?: number | null;
-  // The "all dates" floor Sale Qty sums from — admin-editable on Settings (Sales Tracking Start),
-  // sent along so the "since ..." label below always shows the real configured date instead of a
-  // hardcoded one.
+  // The "all dates" floor BOTH Expected Qty and Sale Qty sum from — admin-editable on Settings
+  // (Sales Tracking Start), sent along so the "since ..." labels below always show the real
+  // configured date instead of a hardcoded one.
   salesTrackingStart?: string | null;
 };
 
@@ -668,14 +668,13 @@ export default function OverallStock() {
   // window" rather than "total on hand", so the UI labels them differently.
   const dateMode = stockData?.dateMode ?? false;
   // Expected Qty (sum of every CSV's ordered quantity across all parts) — an explicit date
-  // filter scopes this to that one date's orders; with no filter it's an all-time sum across
-  // every order ever uploaded (expectedDate is then null).
+  // filter scopes this to that one date's orders; with no filter it sums from the configured
+  // Sales Tracking Start date onward (expectedDate is then null).
   const expectedDate = stockData?.expectedDate ?? null;
   const expectedTotal = stockData?.expectedTotal ?? 0;
   const hasExpected = stockData?.expectedTotal != null;
-  // Sale Qty (sum of Proforma Slip quantities) — same date scoping as Expected Qty, except the
-  // "all dates" default only counts sales from the configured Sales Tracking Start date onward
-  // (Settings > Data Management), not truly every slip ever raised.
+  // Sale Qty (sum of Proforma Slip quantities) — same date scoping as Expected Qty, including
+  // the same Sales Tracking Start floor (Settings > Data Management) in "all dates" mode.
   const saleDate = stockData?.saleDate ?? null;
   const saleTotal = stockData?.saleTotal ?? 0;
   const hasSale = stockData?.saleTotal != null;
@@ -1391,7 +1390,7 @@ export default function OverallStock() {
       cellClassName: cellBorder,
       render: (row) =>
         row.isEmptyBox || row.expectedQty == null ? dash : (
-          <span title={expectedDate ? `Sum of ordered quantity across every CSV/part uploaded for ${expectedDate}` : "Sum of ordered quantity across every CSV/part ever uploaded (all dates)"}>
+          <span title={expectedDate ? `Sum of ordered quantity across every CSV/part uploaded for ${expectedDate}` : `Sum of ordered quantity across every CSV/part uploaded since ${salesTrackingStartLabel ?? "the configured start date"}`}>
             {stackedCell(row.expectedQty, row.expectedPallets, "text-purple-700")}
           </span>
         ),
@@ -1931,10 +1930,11 @@ export default function OverallStock() {
               tone: "navy" as const,
               value: expectedTotal.toLocaleString(),
               // An explicit date filter scopes this to that one date's orders; with no filter
-              // it's every order ever uploaded, summed across every date.
+              // it's every order since the configured Sales Tracking Start date, the same floor
+              // the Sale tile uses.
               label: expectedDate
                 ? `Expected (${expectedDate}) · ${expectedPalletsTotal.toFixed(2)} plt`
-                : `Expected (All Dates) · ${expectedPalletsTotal.toFixed(2)} plt`,
+                : `Expected (Since ${salesTrackingStartLabel ?? "start"}) · ${expectedPalletsTotal.toFixed(2)} plt`,
             }] : []),
             // Opening Stock — date-filter view only, physical balance carried in from before
             // the selected date.

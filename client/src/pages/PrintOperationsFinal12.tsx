@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Card, CardContent } from '../components/ui/card';
 import { CardHeader } from '../components/ui/card';
 import { Input } from '../components/ui/input';
@@ -9,8 +9,20 @@ import { Search, PrinterCheck, FileDown, Factory } from 'lucide-react';
 import axios from 'axios';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
+import JsBarcode from 'jsbarcode';
 import { useLocation } from 'wouter';
 import { hasPageWriteAccess } from '../lib/permissions';
+
+// Renders a Code128 barcode (readable by virtually every 1D scanner gun, unlike a QR code which
+// needs a 2D imager) for the given text into an offscreen canvas and returns it as a PNG data
+// URL — a plain string that works both as a live <img> in the on-screen preview and, embedded
+// directly into the print template's HTML string, in the printed slip itself. Neither consumer
+// needs to load jsbarcode itself; they just display an already-rendered image.
+function generateBarcodeDataUrl(text: string): string {
+  const canvas = document.createElement('canvas');
+  JsBarcode(canvas, text, { format: 'CODE128', displayValue: false, margin: 4, height: 40 });
+  return canvas.toDataURL('image/png');
+}
 
 // Product/order interfaces
 interface ProformaSlipItem {
@@ -136,6 +148,14 @@ const PrintOperations: React.FC = () => {
     },
     enabled: false, // Don't run the query automatically
   });
+
+  // Computed once per order number, then reused as-is by both the on-screen preview (as an
+  // <img>) and handlePrint's own HTML-string template (embedded the same way) — so scanning
+  // either the preview or the printed slip with a gun reads the exact same order number back.
+  const barcodeDataUrl = useMemo(
+    () => (proformaData?.slip?.orderNumber ? generateBarcodeDataUrl(proformaData.slip.orderNumber) : ''),
+    [proformaData?.slip?.orderNumber],
+  );
   
   // Reset local print tracker when data changes
   useEffect(() => {
@@ -312,7 +332,11 @@ const PrintOperations: React.FC = () => {
             </div>
           </div>
           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1mm;">
-            <div style="font-size: 14pt; font-weight: bold; text-align: right; color: #a10808;">#${proformaData.slip.orderNumber}</div>
+            <!-- Slip number with its scannable barcode directly beneath it, then the date. -->
+            <div style="display: flex; flex-direction: column; align-items: flex-end;">
+              <div style="font-size: 14pt; font-weight: bold; text-align: right; color: #a10808; line-height: 1.1;">#${proformaData.slip.orderNumber}</div>
+              ${barcodeDataUrl ? `<img src="${barcodeDataUrl}" style="height: 7mm; width: auto; display: block; margin-top: 0.5mm;" alt="Order barcode" />` : ''}
+            </div>
             <div style="font-size: 10pt; font-weight: bold; line-height: 1.2; text-align: right;">${formatDate(proformaData.slip.orderDate)}</div>
           </div>
         </div>
@@ -1032,7 +1056,13 @@ const PrintOperations: React.FC = () => {
                           </div>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1mm' }}>
-                          <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808' }}>#{proformaData.slip.orderNumber}</div>
+                          {/* Slip number with its scannable barcode directly beneath it, then the date — same as the printed slip. */}
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                            <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808', lineHeight: '1.1' }}>#{proformaData.slip.orderNumber}</div>
+                            {barcodeDataUrl && (
+                              <img src={barcodeDataUrl} alt="Order barcode" style={{ height: '7mm', width: 'auto', display: 'block', marginTop: '0.5mm' }} />
+                            )}
+                          </div>
                           <div style={{ fontSize: '10pt', fontWeight: 'bold', lineHeight: '1.2', textAlign: 'right' }}>{formatDate(proformaData.slip.orderDate)}</div>
                         </div>
                       </div>

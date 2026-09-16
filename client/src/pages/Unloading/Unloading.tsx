@@ -8,13 +8,19 @@ import {
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import { useSidebarContext } from "@/lib/sidebarContext";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
+import { type FilterableColumn, type FilterCondition, type FilterOption, matchAllConditions } from "@/lib/columnFilters";
+import { format as formatDay } from "date-fns";
 import PageHeader from "@/components/PageHeader";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, matchBarcodeNotInSystemError, parseApiErrorMessage } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
+import { CircularProgress } from "@/components/ui/circular-progress";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/ui/date-input";
 import { Label } from "@/components/ui/label";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -59,6 +65,24 @@ const normalize = (v?: string | number | null) => String(v ?? "").trim().toLower
 const palletsOf = (qty: number, itemsPerPallet: number | null | undefined) =>
   (qty > 0 && (itemsPerPallet ?? 0) > 0 ? (qty / (itemsPerPallet as number)).toFixed(2) : "0.00");
 
+// Totals-row counterpart to palletsOf, for columns that stack qty over its pallets in one cell:
+// the column's qty summed, with the pallet figure underneath — each row's qty ÷ ITS OWN pallet
+// size, added up unrounded, never one blended pallet size applied to the combined quantity.
+function qtyPalletTotal<T extends { itemsPerPallet?: number | null }>(rows: T[], pick: (row: T) => number, signed = false) {
+  const qty = rows.reduce((sum, row) => sum + pick(row), 0);
+  const plt = rows.reduce((sum, row) => {
+    const q = pick(row);
+    const ipp = row.itemsPerPallet ?? 0;
+    return q > 0 && ipp > 0 ? sum + q / ipp : sum;
+  }, 0);
+  return (
+    <>
+      <span className="block">{signed && qty > 0 ? `+${qty}` : qty}</span>
+      <span className="block text-xs font-semibold text-gray-500">{plt.toFixed(2)} plt</span>
+    </>
+  );
+}
+
 // "Time taken" — wall-clock time from when a batch was first opened for scanning (activated) to
 // when it was marked complete. Same measure used on Order Management and Loading's own landing
 // tables, so all three read the same way.
@@ -82,22 +106,6 @@ function isAdminOrSuper(): boolean {
   const role = (currentUser().role ?? "").toLowerCase().trim();
   return role === "admin" || role === "super-admin";
 }
-// Mirrors getUserPlants in server/routes/order-scan.ts: null = admin, sees every plant;
-// otherwise exactly the plants assigned on the Users page, lowercased. Used to filter the
-// Import dialog's Plant picker down to what this user could actually import for — the server
-// enforces the same restriction independently (canAccessPlant in server/routes/unloading.ts),
-// this is just so a restricted user isn't shown plants that would 403 if picked.
-function getUserPlantsClient(): string[] | null {
-  const u = currentUser();
-  const role = (u.role ?? "").toLowerCase().trim();
-  if (role === "admin" || role === "super-admin") return null;
-  try {
-    const parsed = typeof u.plants === "string" ? JSON.parse(u.plants) : u.plants;
-    if (Array.isArray(parsed)) return parsed.map((p: string) => String(p).toLowerCase().trim()).filter(Boolean);
-  } catch { /* default [] */ }
-  return [];
-}
-
 // Remembers which batch is currently open, per browser, so navigating away to another page and
 // coming back to /unloading resumes exactly where you left off instead of dropping back to the
 // list. Cleared once that batch is marked complete (or on an explicit "Back to list"), same
@@ -127,14 +135,6 @@ const ROTATIONS = [0, 90, 180, 270] as const;
 type Rotation = (typeof ROTATIONS)[number];
 const SESSIONS_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const ROTATION_STORAGE_KEY = "unloadingRotation";
-
-// Radix renders dialogs into document.body, outside the rotated container, so each needs the
-// matching turn applied by hand (same fix as portalRotateClass in Scan.tsx) or it opens upright
-// while everything behind it is rotated — the opposite of what "rotated to match the physically
-// turned screen" should look like.
-function portalRotateClass(rotation: Rotation): string {
-  return rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : rotation === 270 ? "-rotate-90" : "";
-}
 
 function getLocalISODate(date = new Date()): string {
   const year = date.getFullYear();
@@ -186,13 +186,17 @@ export default function Unloading() {
   const [offset, setOffset] = useState(0);
   const [limit, setLimit] = useState(20);
 
-  const [sessionPlantFilter, setSessionPlantFilter] = useState("");
+  // Persisted (sessionStorage) — narrowing the batch list by date/vehicle is working context for
+  // the current sitting. Plant has no dedicated picker here any more; it's filtered through the
+  // Plant column filter instead (sessionFilterColumns below).
   // Vehicle number search (debounced) and Order Date filter — same idea as Order Management's
   // History tab (date + Today/clear) and Loading's own debounced vehicle search. Both are
   // supported server-side already (vehicleNumber was, orderDate is new); this just exposes them.
-  const [sessionVehicleFilter, setSessionVehicleFilter] = useState("");
+  const [sessionVehicleFilter, setSessionVehicleFilter] = usePersistentFilter("unloading:vehicleFilter", "");
   const debouncedVehicleFilter = useDebounced(sessionVehicleFilter, 300);
-  const [sessionDateFilter, setSessionDateFilter] = useState("");
+  const [sessionDateFilter, setSessionDateFilter] = usePersistentFilter("unloading:dateFilter", "");
+  // Excel-style column filters for the landing list (see sessionFilterColumns below).
+  const [sessionColumnConditions, setSessionColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("unloading:columnFilters", {});
   // Three tabs — Available (which also holds in-progress "active" batches, marked green),
   // History (shows every status), and Recent Complete (one row per PLANT — whichever batch
   // finished there most recently; see /unloading/sessions/recent-complete's own comment for why
@@ -202,24 +206,69 @@ export default function Unloading() {
   // stay valid values for the underlying query param but no longer have their own tab button.
   // "Time Taken" only ever shows a value on the History tab, matching Order Management's own
   // restriction.
-  const [statusTab, setStatusTab] = useState<"available" | "active" | "completed" | "history" | "recent-complete">("available");
+  const [statusTab, setStatusTab] = usePersistentFilter<"available" | "active" | "completed" | "history" | "recent-complete">("unloading:statusTab", "available");
   const sessionFilterParams =
-    (sessionPlantFilter ? `&plant=${encodeURIComponent(sessionPlantFilter)}` : "")
-    + (debouncedVehicleFilter.trim() ? `&vehicleNumber=${encodeURIComponent(debouncedVehicleFilter.trim())}` : "")
+    (debouncedVehicleFilter.trim() ? `&vehicleNumber=${encodeURIComponent(debouncedVehicleFilter.trim())}` : "")
     + (sessionDateFilter ? `&orderDate=${encodeURIComponent(sessionDateFilter)}` : "");
   const sessionsQuery = useQuery<{ sessions: SessionListItem[]; total: number }>({
-    queryKey: ["/api/unloading/sessions", offset, limit, sessionPlantFilter, debouncedVehicleFilter, sessionDateFilter, statusTab],
+    queryKey: ["/api/unloading/sessions", offset, limit, debouncedVehicleFilter, sessionDateFilter, statusTab],
     queryFn: () => apiRequest(
       "GET",
       `/api/unloading/sessions?limit=${limit}&offset=${offset}${sessionFilterParams}&status=${statusTab}`,
     ).then((r) => r.json()),
     enabled: statusTab !== "recent-complete",
   });
-  const sessions = sessionsQuery.data?.sessions ?? [];
+  const allSessions = sessionsQuery.data?.sessions ?? [];
   const total = sessionsQuery.data?.total ?? 0;
 
+  // Same filter engine and UI as Overall Stock / Scan History / Scan Viewer: a "+ Filter" button,
+  // a filter icon on each column header, and removable chips. Applied client-side over the page
+  // already fetched — plant/vehicle/date/status tab still go to the server as before.
+  // "Ready" vs "Locked (queued)" splits available batches the same way the row's own button does:
+  // Locked ones sit behind an earlier batch in their vehicle + date group.
+  const sessionStatusLabel = (s: SessionListItem) =>
+    s.scanStatus === "completed" ? "Completed" : s.scanStatus === "active" ? "Active" : s.canActivate ? "Ready" : "Locked (queued)";
+  const sessionProgressLabel = (s: SessionListItem) =>
+    s.scannedQty <= 0 ? "Not started" : s.scannedQty >= s.expectedQty ? "Complete" : "Partial";
+  const sessionBatchLabel = (s: SessionListItem) => (s.partsCount > 1 ? `Batch ${s.partIndex} of ${s.partsCount}` : "Single");
+  const distinctOptions = (values: (string | null | undefined)[]): FilterOption[] =>
+    Array.from(new Set(values.map((v) => (v ?? "").trim()).filter(Boolean))).sort().map((v) => ({ value: v, label: v }));
+  const sessionFilterColumns: FilterableColumn<SessionListItem>[] = [
+    { id: "vehicle", label: "Vehicle", filterType: "text", options: distinctOptions(allSessions.map((s) => s.vehicleNumber)), accessor: (s) => s.vehicleNumber },
+    // Options bucketed to a day exactly as the matcher buckets the cell (lib/columnFilters dayBucket).
+    { id: "orderDate", label: "Order Date", filterType: "date", options: distinctOptions(allSessions.map((s) => (s.orderDate ? formatDay(new Date(s.orderDate), "yyyy-MM-dd") : null))), accessor: (s) => s.orderDate },
+    { id: "plant", label: "Plant", filterType: "text", disableConditions: true, options: distinctOptions(allSessions.map((s) => s.plant)), accessor: (s) => s.plant },
+    { id: "batch", label: "Batch", filterType: "text", disableConditions: true, options: distinctOptions(allSessions.map(sessionBatchLabel)), accessor: sessionBatchLabel },
+    { id: "status", label: "Status", filterType: "text", disableConditions: true, options: distinctOptions(allSessions.map(sessionStatusLabel)), accessor: sessionStatusLabel },
+    { id: "progress", label: "Progress", filterType: "text", disableConditions: true, options: distinctOptions(allSessions.map(sessionProgressLabel)), accessor: sessionProgressLabel },
+    { id: "csvFile", label: "CSV File", filterType: "text", options: distinctOptions(allSessions.map((s) => s.csvFileName)), accessor: (s) => s.csvFileName },
+    { id: "expectedQty", label: "Expected Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.expectedQty },
+    { id: "scannedQty", label: "Scanned Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.scannedQty },
+  ];
+  const sessionConditionList = Object.values(sessionColumnConditions);
+  const sessions = allSessions.filter((s) => matchAllConditions(s, sessionConditionList, sessionFilterColumns));
+  const setSessionCondition = (id: string, condition: FilterCondition) =>
+    setSessionColumnConditions((prev) => ({ ...prev, [id]: condition }));
+  const clearSessionCondition = (id: string) =>
+    setSessionColumnConditions((prev) => { const next = { ...prev }; delete next[id]; return next; });
+  const sessionColumnHeader = (id: string, label: string) => {
+    const column = sessionFilterColumns.find((c) => c.id === id);
+    if (!column) return label;
+    return (
+      <span className="inline-flex items-center gap-1">
+        {label}
+        <ColumnHeaderFilterButton
+          column={column}
+          condition={sessionColumnConditions[id]}
+          onChange={(c) => setSessionCondition(id, c)}
+          onRemove={() => clearSessionCondition(id)}
+        />
+      </span>
+    );
+  };
+
   const statusCountsQuery = useQuery<{ available: number; active: number; completed: number; total: number }>({
-    queryKey: ["/api/unloading/sessions/status-counts", sessionPlantFilter, debouncedVehicleFilter, sessionDateFilter],
+    queryKey: ["/api/unloading/sessions/status-counts", debouncedVehicleFilter, sessionDateFilter],
     queryFn: () => apiRequest(
       "GET",
       `/api/unloading/sessions/status-counts${sessionFilterParams ? `?${sessionFilterParams.slice(1)}` : ""}`,
@@ -258,12 +307,6 @@ export default function Unloading() {
     queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
     staleTime: 60000,
   });
-  // /api/plants itself returns every plant unfiltered — restrict what a non-admin is even
-  // offered to import for, matching the server's own canAccessPlant check.
-  const userPlants = getUserPlantsClient();
-  const importablePlants = (allPlants ?? []).filter(
-    (p: any) => userPlants === null || userPlants.includes(String(p.name ?? "").toLowerCase()),
-  );
 
   // ─── Scan view ──────────────────────────────────────────────────────────────
   const [activeSessionId, setActiveSessionId] = useState<number | null>(() => {
@@ -323,7 +366,7 @@ export default function Unloading() {
   // Rotated kiosk mode is a fixed, full-viewport overlay, so it sits on top of Layout's own
   // sidebar toggle — this floating button (same trick as the rotate button itself: fixed inside
   // the rotated container, so it turns with the content) reopens a path back to real navigation.
-  const { openMobileMenu, openSidebar, setKioskRotateClass: setSidebarKioskRotateClass } = useSidebarContext();
+  const { setKioskRotateClass: setSidebarKioskRotateClass, setPortalRotation } = useSidebarContext();
   // Keeps Layout's sidebar turning in sync with this page's own rotation, so opening it while
   // rotated doesn't pop it up unrotated on top of everything else. Cleared on unmount — leaving
   // a stale rotation class behind would wrongly rotate the sidebar on whatever page loads next.
@@ -350,6 +393,19 @@ export default function Unloading() {
   // kiosk kept getting the desktop grid crammed into a narrow band. Same reason Order Scan forces
   // its own single-column layout on for bigView instead of relying on breakpoints.
   const bigView = rotated || isPortrait;
+  // The vehicle list's compact mode (short action labels) also has to kick in on a plain narrow
+  // window, which is neither rotated nor portrait — breakpoint classes can't be used for this
+  // because a rotated kiosk's REAL window is wide even though its content area is narrow.
+  const [isNarrowViewport, setIsNarrowViewport] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1023px)");
+    const onChange = () => setIsNarrowViewport(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const compactVehicleTable = bigView || isNarrowViewport;
   // Bounded, self-scrolling frame for tables in rotated mode — mirrors Order Scan's own
   // kioskTableBoxClass exactly (client/src/pages/Scanning/Scan.tsx). Without this, a table left
   // to flow naturally inside the rotated box has no cap of its own and no scrollbar to fall back
@@ -888,7 +944,33 @@ export default function Unloading() {
   // an earlier bump (text-base/text-lg felt oversized outside the kiosk/rotated view) — the
   // existing global .kiosk-rotate-* CSS (index.css) still bumps these up automatically while
   // rotated, independent of this baseline.
+  // Same ring pattern as Scan Order/Master View's and Loading's own items tables: one aggregate
+  // "% received" ring in the header (built from every item on this batch, not just whatever's
+  // currently filtered/searched, so the aggregate never shifts just because of a search), each
+  // row gets its own ring showing that item's own % received. Capped at 100/at each item's own
+  // expected qty so an over-received (Extra) item can't push either number past 100.
+  const unloadPctItems = detail?.items ?? [];
+  const unloadQtyExpected = unloadPctItems.reduce((sum, i) => sum + (i.expected ?? 0), 0);
+  const unloadQtyReceived = unloadPctItems.reduce((sum, i) => sum + Math.min(i.scanned ?? 0, i.expected ?? 0), 0);
+  const unloadPct = unloadQtyExpected ? Math.min(100, Math.round((unloadQtyReceived / unloadQtyExpected) * 100)) : 0;
+
   const itemColumns: DataTableColumn<SessionItem>[] = [
+    {
+      id: "pct",
+      header: <CircularProgress percent={unloadPct} size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff" />,
+      // align-top: the Item column next to this one stacks 2-3 lines, which sets this row's
+      // height — align-middle's default then centered the ring in all that leftover space,
+      // reading as too much empty space around a tiny ring. Top-aligning it (matching where the
+      // Item column's own text starts) puts the slack below the ring instead of around it.
+      // px-0.5 on both header and cell: the ring is only 20px wide, so DataTable's default
+      // horizontal cell padding was costing more width than the ring itself.
+      width: 24, minWidth: 24, align: "center",
+      headerClassName: "px-0.5", cellClassName: "align-top px-0.5", sortable: false, totalable: false,
+      render: (row) => {
+        const pct = row.expected > 0 ? Math.min(100, Math.round((row.scanned / row.expected) * 100)) : (row.scanned > 0 ? 100 : 0);
+        return <CircularProgress percent={pct} size={20} strokeWidth={2} />;
+      },
+    },
     {
       id: "item",
       header: "Item",
@@ -897,17 +979,18 @@ export default function Unloading() {
       minWidth: 140,
       render: (row) => (
         <div>
-          <p className="font-medium text-gray-900 whitespace-normal break-words leading-snug text-sm">{row.itemName ?? "—"}</p>
-          <p className="text-gray-400 font-mono whitespace-normal break-words text-xs">
+          <p className="font-medium text-gray-900 whitespace-normal break-words leading-tight text-xs">{row.itemName ?? "—"}</p>
+          <p className="text-gray-400 font-mono whitespace-normal break-words leading-tight text-[10px]">
             {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
           </p>
-          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold mt-0.5 text-xs">{row.itemsPerPallet} per pallet</p>}
+          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold leading-tight text-[10px]">{row.itemsPerPallet} per pallet</p>}
         </div>
       ),
     },
     {
       id: "exp", header: "Exp", align: "right", width: 80, minWidth: 60, sortable: true,
       accessor: (row) => row.expected,
+      total: (rows) => qtyPalletTotal(rows, (r) => r.expected),
       render: (row) => (
         <>
           <span className="block text-base font-semibold">{row.expected || "—"}</span>
@@ -918,6 +1001,7 @@ export default function Unloading() {
     {
       id: "received", header: "Received", align: "right", width: 90, minWidth: 60, sortable: true,
       accessor: (row) => row.scanned,
+      total: (rows) => qtyPalletTotal(rows, (r) => r.scanned),
       cellClassName: "font-semibold text-gray-900",
       render: (row) => (
         <>
@@ -929,6 +1013,7 @@ export default function Unloading() {
     {
       id: "left", header: "Remain", align: "right", width: 80, minWidth: 60, sortable: true,
       accessor: (row) => row.remaining,
+      total: (rows) => qtyPalletTotal(rows, (r) => r.remaining),
       render: (row) => (
         <>
           <span className={`block text-base font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
@@ -939,6 +1024,7 @@ export default function Unloading() {
     {
       id: "extra", header: "Extra", align: "right", width: 80, minWidth: 60,
       accessor: (row) => Math.max(0, row.scanned - row.expected),
+      total: (rows) => qtyPalletTotal(rows, (r) => Math.max(0, r.scanned - r.expected), true),
       render: (row) => {
         const extra = Math.max(0, row.scanned - row.expected);
         return (
@@ -1058,29 +1144,10 @@ export default function Unloading() {
     <div className="flex items-center gap-2">
       <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
       {stvs.length > 0 ? (
-        rotated ? (
-          // Rotated: a plain native <select> instead of the Radix popover below — rotating a
-          // portalled popover to match the kiosk transform is unreliable (Radix positions it
-          // against the ALREADY-rotated trigger's real on-screen rect, then this codebase's own
-          // extra CSS rotation on the popover panel swings that correctly-placed box out to a
-          // different spot, which is what left part of it inside the rotated container's bounds
-          // and part of it clipped). A native select renders as an OS-level overlay entirely
-          // outside the page's own rotated DOM, so it's immune to this whole class of bug.
-          <select
-            value={selectedStv || NO_STV}
-            onChange={(e) => setSelectedStv(e.target.value === NO_STV ? "" : e.target.value)}
-            className={`h-7 w-36 rounded-full border px-2 text-center text-xs font-semibold ${
-              selectedStv
-                ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
-                : "border-amber-400 bg-amber-50 text-amber-800"
-            }`}
-          >
-            <option value={NO_STV}>— Select STV —</option>
-            {stvs.map((st) => (
-              <option key={st} value={st}>{st}</option>
-            ))}
-          </select>
-        ) : (
+          // Same dropdown rotated or not. It used to swap to a native <select> when rotated, because
+          // rotating the popup in place mis-positioned it — but a native select's list is drawn by
+          // the browser and can't be rotated at all, so it opened upright. Rotated popups are now
+          // centred and turned by the data-portal-rotation rule in index.css instead.
           <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
             {/* Amber when nothing is picked — scanning is blocked until it is (see
                 handleItemBarcode's "Select an STV before scanning" toast), so the control has to
@@ -1099,7 +1166,6 @@ export default function Unloading() {
               ))}
             </SelectContent>
           </Select>
-        )
       ) : !stvsQuery.isLoading && (
         <span className="rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
           No STV — create one in Plant Settings
@@ -1133,9 +1199,8 @@ export default function Unloading() {
     <div className="flex-1 overflow-y-auto p-4 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
         {/* The kiosk-rotate wrapper below is position:fixed over the whole viewport, so it visually
-            covers this header once rotated — hide it then and fold the page's identity into the
-            rotated box's own header (the "Unloading" eyebrow above "Vehicles") instead, so the
-            title stays visible rather than sitting hidden behind the fixed overlay. */}
+            covers this header once rotated — hidden then, and the rotated box renders the same
+            PageHeader itself, above (outside) the Vehicles card. */}
         {!rotated && view === "list" && (
           <PageHeader
             icon={PackageOpen}
@@ -1179,6 +1244,15 @@ export default function Unloading() {
             >
               <RotateCw className="h-5 w-5" />
             </button>
+            {rotated && (
+              <div className="mb-3">
+                <PageHeader
+                  icon={PackageOpen}
+                  title="Unloading"
+                  description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
+                />
+              </div>
+            )}
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
             <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
               <div>
@@ -1212,8 +1286,8 @@ export default function Unloading() {
               </div>
             </div>
 
-            {/* Filters — vehicle number search (debounced) + Order Date, alongside the plant
-                picker above. Both are supported server-side (see /unloading/sessions). */}
+            {/* Filters — vehicle number search (debounced) + Order Date, both supported
+                server-side (see /unloading/sessions), plus the shared column filters. */}
             <div className="flex flex-wrap items-center gap-2 px-4 sm:px-5 py-3 border-b border-gray-100">
               <div className="relative w-full sm:w-56">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
@@ -1233,11 +1307,11 @@ export default function Unloading() {
                   </button>
                 )}
               </div>
-              <Input
-                type="date"
+              <DateInput
                 value={sessionDateFilter}
-                onChange={(e) => { setSessionDateFilter(e.target.value); setOffset(0); }}
-                className="h-9 w-auto text-sm"
+                onChange={(v) => { setSessionDateFilter(v); setOffset(0); }}
+                clearable={false}
+                className="h-9 text-sm"
               />
               {sessionDateFilter !== getLocalISODate() && (
                 <Button
@@ -1253,6 +1327,32 @@ export default function Unloading() {
                   onClick={() => { setSessionDateFilter(""); setOffset(0); }}
                 >
                   <X className="h-3.5 w-3.5" />
+                </Button>
+              )}
+
+              <AddColumnFilterButton
+                columns={sessionFilterColumns}
+                conditions={sessionColumnConditions}
+                onApply={setSessionCondition}
+                onClear={clearSessionCondition}
+                className="h-9 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+              />
+              {Object.entries(sessionColumnConditions).map(([id, condition]) => (
+                <ColumnFilterChipView
+                  key={id}
+                  columnId={id}
+                  condition={condition}
+                  columns={sessionFilterColumns}
+                  onEdit={(c) => setSessionCondition(id, c)}
+                  onRemove={() => clearSessionCondition(id)}
+                />
+              ))}
+              {Object.keys(sessionColumnConditions).length > 1 && (
+                <Button
+                  size="sm" variant="ghost" className="h-9 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                  onClick={() => setSessionColumnConditions({})}
+                >
+                  Clear all
                 </Button>
               )}
             </div>
@@ -1358,7 +1458,7 @@ export default function Unloading() {
                   <Truck className="h-7 w-7 text-[#001d6e]/40" />
                 </div>
                 <div className="mb-1 text-sm font-semibold text-[#001d6e]">
-                  {statusTab === "history" ? "No vehicles imported yet" : `No ${statusTab} batches`}
+                  {allSessions.length > 0 ? "No batches match these filters" : statusTab === "history" ? "No vehicles imported yet" : `No ${statusTab} batches`}
                 </div>
                 <p className="mb-4 max-w-xs text-xs text-muted-foreground">
                   {statusTab !== "history" ? "Check the History tab to see everything." : canWrite ? "Import a CSV to get started." : "Nothing has been imported yet."}
@@ -1373,23 +1473,21 @@ export default function Unloading() {
                 <table className="w-full min-w-full caption-bottom border-collapse text-xs">
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">
-                      {/* Sr. No/Batch/Time Taken used to drop in bigView (a rotated kiosk's
-                          short side couldn't fit all 9 columns without horizontal scroll) — now
-                          always shown, matching the desktop table exactly; kioskTableBoxClass's
-                          own scroll container handles any overflow instead. */}
-                      <th className="w-12 whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicle</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">
+                      {/* All 9 columns at every size — the fixed layout wraps them to fit
+                          rather than dropping any. */}
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("vehicle", "Vehicle")}</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("orderDate", "Order Date")}</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("plant", "Plant")}</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">
                         <span title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">
-                          Batch
+                          {sessionColumnHeader("batch", "Batch")}
                         </span>
                       </th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Status</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-2 sm:px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Progress</th>
-                      <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
-                      <th className="whitespace-nowrap px-2 sm:px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("status", "Status")}</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("progress", "Progress")}</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
+                      <th className="px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1400,30 +1498,37 @@ export default function Unloading() {
                             onClick={() => openSession(s)}
                             className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${s.scanStatus === "active" ? "bg-emerald-50/60" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                           >
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-400 tabular-nums">{offset + i + 1}</td>
-                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
-                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 text-gray-700">{s.orderDate}</td>
-                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2"><PlantBadge plant={s.plant} /></td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2">
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-400 tabular-nums">{offset + i + 1}</td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">{s.orderDate}</td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words"><PlantBadge plant={s.plant} /></td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">
                               {s.partsCount > 1 ? (
                                 <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex} of {s.partsCount}</span>
                               ) : (
                                 <span className="text-gray-400">—</span>
                               )}
                             </td>
-                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2">{statusBadge(s.scanStatus, s.canActivate)}</td>
-                            <td className="border-r border-b border-gray-200 px-2 sm:px-3 py-2 text-gray-700 tabular-nums">{s.scannedQty} / {s.expectedQty}</td>
-                            <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">{statusBadge(s.scanStatus, s.canActivate)}</td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">{s.scannedQty} / {s.expectedQty}</td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
                               {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
                             </td>
-                            <td className="border-b border-gray-200 px-2 sm:px-3 py-2 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
+                            <td className="border-b border-gray-200 px-1.5 py-2 break-words text-right">
+                              <div className="flex flex-wrap items-center justify-end gap-1">
                                 <Button
-                                  size="sm" variant="outline" className="h-7 text-xs"
+                                  size="sm" variant="outline" className="h-7 px-2 text-xs"
                                   disabled={s.scanStatus === "available" && !s.canActivate}
+                                  title={s.scanStatus === "completed" ? "View" : s.scanStatus === "active" ? "Continue Scan" : s.canActivate ? "Start Scan" : "Locked"}
                                   onClick={(e) => { e.stopPropagation(); openSession(s); }}
                                 >
-                                  {s.scanStatus === "completed" ? "View" : s.scanStatus === "active" ? "Continue Scan" : s.canActivate ? "Start Scan" : "Locked"}
+                                  {s.scanStatus === "completed"
+                                    ? "View"
+                                    : s.scanStatus === "active"
+                                      ? (compactVehicleTable ? "Continue" : "Continue Scan")
+                                      : s.canActivate
+                                        ? (compactVehicleTable ? "Start" : "Start Scan")
+                                        : "Locked"}
                                 </Button>
                                 <button
                                   className="rounded p-1 text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
@@ -1498,16 +1603,16 @@ export default function Unloading() {
 
                   <div className="flex items-center gap-1">
                     <span className="text-xs whitespace-nowrap text-muted-foreground">Show:</span>
-                    <select
-                      className="h-7 rounded border bg-background px-1 text-xs"
-                      value={limit}
-                      onChange={(e) => { setLimit(Number(e.target.value)); setOffset(0); }}
-                      aria-label="Rows per page"
-                    >
-                      {SESSIONS_PAGE_SIZE_OPTIONS.map((size) => (
-                        <option key={size} value={size}>{size}</option>
-                      ))}
-                    </select>
+                    {/* The shared Select, not a native <select>: a native list is drawn by the
+                        browser and stays upright on a rotated kiosk screen. */}
+                    <Select value={String(limit)} onValueChange={(v) => { setLimit(Number(v)); setOffset(0); }}>
+                      <SelectTrigger className="h-7 w-[64px] px-2 text-xs" aria-label="Rows per page"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {SESSIONS_PAGE_SIZE_OPTIONS.map((size) => (
+                          <SelectItem key={size} value={String(size)}>{size}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
               );
@@ -1518,15 +1623,6 @@ export default function Unloading() {
 
         {view === "scan" && (
           <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
-            {rotated && (
-              <button
-                onClick={() => { openMobileMenu(); openSidebar(); }}
-                className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-                title="Open sidebar menu"
-              >
-                <Menu className="h-5 w-5" />
-              </button>
-            )}
             <button
               onClick={rotateNext}
               className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -1824,14 +1920,10 @@ export default function Unloading() {
         )}
       </div>
 
-      {/* Confirm dialog — anything not a clean full-pallet auto-scan. Radix portals DialogContent
-          to document.body, escaping the rotated wrapper no matter where this is declared in JSX,
-          so it needs the compensating turn applied by hand via portalRotate (same fix as
-          portalRotateClass in Scan.tsx) — otherwise it opens upright while the page behind it is
-          rotated. */}
+      {/* Confirm dialog — anything not a clean full-pallet auto-scan. */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
         <DialogContent
-          className={`overflow-y-auto rounded-2xl p-0 ${portalRotate} ${
+          className={`overflow-y-auto rounded-2xl p-0 ${
             quarterTurn
               ? "w-[92vh] max-w-[92vh] max-h-[92vw]"
               : "w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl max-h-[90vh]"}`}
@@ -1922,7 +2014,7 @@ export default function Unloading() {
                   <SelectTrigger className={`w-full rounded-xl ${!selectedStv ? "border-dashed text-gray-400" : ""}`}>
                     <SelectValue placeholder="Select STV…" />
                   </SelectTrigger>
-                  <SelectContent className={rotated ? `origin-top-left ${portalRotate}` : undefined}>
+                  <SelectContent>
                     <SelectItem value={NO_STV}>— Select STV —</SelectItem>
                     {stvs.map((s) => (
                       <SelectItem key={s} value={s}>{s}</SelectItem>
@@ -2074,7 +2166,7 @@ export default function Unloading() {
           against a later part via reconcileUnloadCredits), same "Complete this part?" pattern and
           copy as Order Scan's own showForceComplete dialog. */}
       <Dialog open={showCompleteConfirm} onOpenChange={(open) => { if (!open) setShowCompleteConfirm(false); }}>
-        <DialogContent className={`max-w-sm ${portalRotate}`}>
+        <DialogContent className={`max-w-sm`}>
           <DialogHeader>
             <DialogTitle>Complete this batch?</DialogTitle>
             <DialogDescription className="space-y-1 pt-1">
@@ -2114,7 +2206,7 @@ export default function Unloading() {
       {/* ── Delete confirmation — replace (soft, carries forward on re-upload) vs discard
           (reverses stock, voids history, self-resolves) ─────────────────────────────────── */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <DialogContent className={`max-w-md ${portalRotate}`}>
+        <DialogContent className={`max-w-md`}>
           <DialogHeader>
             <DialogTitle>Delete {deleteTarget?.vehicleNumber} ({deleteTarget?.orderDate})?</DialogTitle>
             <DialogDescription>

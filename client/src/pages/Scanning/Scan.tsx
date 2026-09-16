@@ -26,7 +26,6 @@ import {
   Zap,
   Eye,
   EyeOff,
-  Menu,
   RotateCw,
   ChevronUp,
 } from "lucide-react";
@@ -34,6 +33,7 @@ import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import { useSidebarContext } from "@/lib/sidebarContext";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
+import { CircularProgress } from "@/components/ui/circular-progress";
 import { PlantBadge } from "@/components/PlantBadge";
 import { apiRequest } from "@/lib/queryClient";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
@@ -55,7 +55,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/ui/date-input";
 import { Label } from "@/components/ui/label";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import {
   Select,
   SelectContent,
@@ -173,6 +175,7 @@ function scanFmtUploadDate(dt: string | null | undefined): string {
 const normalize = (value?: string | number | null) =>
   String(value ?? "").trim().toLowerCase();
 
+
 // Display-only: strips a trailing ".csv" from a file name so it reads cleanly in the UI.
 const stripCsvExt = (name?: string | null) => (name ?? "").replace(/\.csv$/i, "");
 
@@ -208,12 +211,6 @@ function useColumnOrder(storageKey: string) {
 // walks these in order and wraps back to 0.
 const ROTATIONS = [0, 90, 180, 270] as const;
 type Rotation = (typeof ROTATIONS)[number];
-
-// Radix renders dialogs/dropdowns into document.body, outside the rotated container, so each needs
-// the matching turn applied by hand or it opens upright while everything behind it is rotated.
-function portalRotateClass(rotation: Rotation): string {
-  return rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : rotation === 270 ? "-rotate-90" : "";
-}
 
 // Totals-row counterpart to pltCell: each row contributes qty ÷ ITS OWN pallet size, then those
 // are added up — never one blended pallet size applied to a combined quantity, which would be
@@ -371,7 +368,7 @@ export default function ScanOrderPage() {
   const queryClient = useQueryClient();
 
   // ── Master View / Separate CSVs tab state ────────────────────────────────
-  const [osTab, setOsTab] = useState<"scan" | "master-view" | "separate-csvs">("master-view");
+  const [osTab, setOsTab] = usePersistentFilter<"scan" | "master-view" | "separate-csvs">("scanOrder:tab", "master-view");
   const [mvSearch,    setMvSearch]    = useState("");
   // Desktop Master View search — collapsed by default (just an icon button); clicking it
   // reveals the field inline in the plant-name row.
@@ -379,7 +376,7 @@ export default function ScanOrderPage() {
   const [mvShowFiles, setMvShowFiles] = useState(false); // toggle: show/hide source-file names in Master View
   // Clicking a totals box narrows the items table to just those rows. "" = show everything;
   // clicking the active box again clears it.
-  const [osStatFilter, setOsStatFilter] = useState<"" | "done" | "remaining" | "extra">("");
+  const [osStatFilter, setOsStatFilter] = usePersistentFilter<"" | "done" | "remaining" | "extra">("scanOrder:statFilter", "");
   // Draggable split between the totals card and the scanner column. Stored as a percent of the
   // row's width so it survives a reload and adapts to any window size.
   const totalsRowRef = useRef<HTMLDivElement | null>(null);
@@ -425,7 +422,7 @@ export default function ScanOrderPage() {
   // behavior). Setting it lets the operator browse a different day's uploaded CSVs (still
   // scoped to the active order's plant) without leaving Scan Order or disturbing the active
   // scanning session.
-  const [csvDate, setCsvDate] = useState("");
+  const [csvDate, setCsvDate] = usePersistentFilter("scanOrder:csvDate", "");
   const resetCsvBrowse = () => { setCsvDate(""); setCsvExpId(null); setCsvSearch(""); };
 
   const [showAllHistory, setShowAllHistory] = useState(false);
@@ -447,7 +444,7 @@ export default function ScanOrderPage() {
   }, [osRotation]);
   const osRotateNext = () =>
     setOsRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
-  const { openMobileMenu, openSidebar, setKioskRotateClass: setSidebarKioskRotateClass } = useSidebarContext();
+  const { setKioskRotateClass: setSidebarKioskRotateClass, setPortalRotation } = useSidebarContext();
   const osRotated = osRotation !== 0;
   // A quarter turn swaps the screen's axes — what the CSS calls height then runs along the
   // viewport's width. Anything sized in vh/vw has to know which case it's in; a half turn leaves
@@ -461,7 +458,13 @@ export default function ScanOrderPage() {
     setSidebarKioskRotateClass(kioskRotateClass);
     return () => setSidebarKioskRotateClass("");
   }, [kioskRotateClass, setSidebarKioskRotateClass]);
-  const osPortalRotate = portalRotateClass(osRotation);
+  // Reports this page's rotation to Layout so every popup it opens — dialogs, dropdowns, filter
+  // popovers, calendars — turns to match (see lib/portalRotation). Reset on unmount so the next
+  // page doesn't inherit a stale turn.
+  useEffect(() => {
+    setPortalRotation(osRotated ? osRotation : 0);
+    return () => setPortalRotation(0);
+  }, [osRotated, osRotation, setPortalRotation]);
   // Natural portrait orientation (window taller than wide) — a laptop/tablet held or resized to
   // portrait should get the same single-column, larger-text layout as the manual Rotate mode,
   // just WITHOUT the 90° kiosk rotation (the screen is already upright).
@@ -497,19 +500,6 @@ export default function ScanOrderPage() {
     : "hidden overflow-x-auto min-[480px]:block landscape:block";
   const RotateToggleButton = () => (
     <>
-      {/* Rotated kiosk mode is a fixed, full-viewport overlay, so it sits on top of Layout's
-          own sidebar toggle, making it unreachable by a normal click — this button (fixed
-          INSIDE the rotated container, same trick as the rotate button below) reopens the
-          mobile sidebar drawer instead. Same pattern Loading/Unloading's rotate views use. */}
-      {osRotated && (
-        <button
-          onClick={() => { openMobileMenu(); openSidebar(); }}
-          className="fixed bottom-20 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-          title="Open sidebar menu"
-        >
-          <Menu className="h-5 w-5" />
-        </button>
-      )}
       <button
         onClick={() => osRotateNext()}
         className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -2158,6 +2148,17 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // AND partially-received rows (any nonzero qty) plus extra-only rows — an item with SOME qty
   // in belongs in the "received" tally even while its own row still shows "Partial".
   const mvDoneCount = allMvItems.filter((i) => !i._isEmptyBox && (mvRowState(i).isReceived || mvRowState(i).isExtraOnly)).length;
+  // Same qty-ratio formula as osPct (Scan tab) — the state column's header ring. This used to be
+  // an item-count ("any progress counts as received" vs osPct's stricter "fully done" count),
+  // which is exactly why the same single CSV could show two different percentages depending on
+  // which tab you were looking at. Received is capped at each item's own expected qty.
+  const mvNonEmptyItems = allMvItems.filter((i) => !i._isEmptyBox);
+  const mvQtyExpected = mvNonEmptyItems.reduce((sum, i) => sum + (mvRowState(i).exp), 0);
+  const mvQtyReceived = mvNonEmptyItems.reduce((sum, i) => {
+    const { exp, done } = mvRowState(i);
+    return sum + Math.min(done, exp);
+  }, 0);
+  const mvPct = mvQtyExpected ? Math.min(100, Math.round((mvQtyReceived / mvQtyExpected) * 100)) : 0;
 
   // Same totals-box filter the Scan tab uses, so clicking Done/Remaining/Extra narrows Master View
   // to those rows too. Declared after mvRowState because it calls it.
@@ -2192,17 +2193,20 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   const mvColumns: DataTableColumn<MvMergedItem>[] = [
     {
       id: "state",
-      header: "",
-      width: 40,
+      // Same treatment as the Scan tab's own state column: one aggregate ring in the header,
+      // each row gets its own % received ring — except the two special cases (an empty synthetic
+      // box row, or an extra-only row with no expected qty to measure a percentage against),
+      // which keep their original icon since "% received" isn't a meaningful number for them.
+      header: <CircularProgress percent={mvPct} size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff" />,
+      width: 28,
       align: "center",
       hideable: false,
       render: (item) => {
         if (item._isEmptyBox) return <Package className="mx-auto h-4 w-4 text-orange-500" />;
-        const { isExtraOnly, isDone, isPartial } = mvRowState(item);
-        return isExtraOnly ? <AlertTriangle className="mx-auto h-4 w-4 text-orange-500" />
-          : isDone ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
-          : isPartial ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
-          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+        const { isExtraOnly, exp, done } = mvRowState(item);
+        if (isExtraOnly) return <AlertTriangle className="mx-auto h-4 w-4 text-orange-500" />;
+        const rowPct = exp > 0 ? Math.min(100, Math.round((done / exp) * 100)) : (done > 0 ? 100 : 0);
+        return <CircularProgress percent={rowPct} size={20} strokeWidth={2} />;
       },
     },
     {
@@ -2661,7 +2665,20 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const osCsvOnlyItems = osItems.filter((i) => (i.expectedQty ?? 0) > 0);
     const osDoneCount = osCsvOnlyItems.filter(osIsItemFullyDone).length;
     const osTotalCount = osCsvOnlyItems.length;
-    const osPct = osTotalCount ? Math.round((osDoneCount / osTotalCount) * 100) : 0;
+    // The header ring is "% of PRODUCT received" — a quantity ratio, not a count of fully-done
+    // items (osDoneCount/osTotalCount above is a different, stricter number: what fraction of
+    // line ITEMS are 100% complete, still used elsewhere). Using item-counts here is exactly
+    // what made this disagree with Master View's own ring on the very same CSV — that one was
+    // built from an "any progress counts" item-count instead. Both now use the same qty-ratio
+    // formula, so one CSV always shows the same % on both tabs. Received is capped at that
+    // item's own expected qty (extras don't count toward "received progress").
+    const osQtyExpected = osCsvOnlyItems.reduce((sum, i) => sum + (i.expectedQty ?? 0), 0);
+    const osQtyReceived = osCsvOnlyItems.reduce((sum, i) => {
+      const exp = i.expectedQty ?? 0;
+      const creditQty = osCreditByBarcode.get(normalize(i.barcode))?.creditedQty ?? 0;
+      return sum + Math.min((i.totalScannedQty ?? 0) + creditQty, exp);
+    }, 0);
+    const osPct = osQtyExpected ? Math.min(100, Math.round((osQtyReceived / osQtyExpected) * 100)) : 0;
     // Map of barcode → total extra qty across the WHOLE order group (every part of this day's
     // CSV, not just the part currently open) — used both for the per-row Extra column in the
     // CSV Items table and the Extra-pallets total below. extraPartIndexesByBarcode carries which
@@ -2749,15 +2766,17 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const osColumns: DataTableColumn<OsScanItem>[] = [
       {
         id: "state",
-        header: "",
-        width: 40,
+        // Header ring = one aggregate "how much received" number for the whole table; each row
+        // now gets its OWN ring too (this item's own % received), replacing the old plain
+        // done/partial/pending icon with an actual per-product fill level.
+        header: <CircularProgress percent={osPct} size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff" />,
+        width: 28,
         align: "center",
         hideable: false,
         render: (item) => {
-          const { done, partial } = osRowState(item);
-          return done ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
-            : partial ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
-            : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+          const { exp, doneQty } = osRowState(item);
+          const rowPct = exp > 0 ? Math.min(100, Math.round((doneQty / exp) * 100)) : (doneQty > 0 ? 100 : 0);
+          return <CircularProgress percent={rowPct} size={20} strokeWidth={2} />;
         },
       },
       {
@@ -3285,14 +3304,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     } ${bigView ? "h-11 w-56 text-base" : "h-8 w-44 text-sm"}`}>
                       <SelectValue placeholder="Select STV…" />
                     </SelectTrigger>
-                    {/* Radix portals this dropdown to document.body, outside the .kiosk-rotate-90
-                        subtree, so it doesn't inherit the page rotation on its own — it renders
-                        upright while everything else is rotated. Radix positions it via an inline
-                        transform:translate(...) on its OWN wrapper (a different element from this
-                        one), so adding our rotation directly here composes cleanly with no
-                        conflict. origin-top-left matches Radix's actual side="bottom" align="start"
-                        anchor for this trigger, keeping the dropdown attached to the same corner. */}
-                    <SelectContent className={osRotated ? `origin-top-left ${osPortalRotate}` : undefined}>
+                    <SelectContent>
                       <SelectItem value={NO_STV}>— Select STV —</SelectItem>
                       {stvs.map((s) => (
                         <SelectItem key={s} value={s}>{s}</SelectItem>
@@ -4197,10 +4209,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    type="date"
+                  <DateInput
                     value={csvEffDate}
-                    onChange={(e) => { setCsvDate(e.target.value); setCsvExpId(null); setCsvSearch(""); }}
+                    onChange={(v) => { setCsvDate(v); setCsvExpId(null); setCsvSearch(""); }}
+                    clearable={false}
                     className="h-8 w-[136px] text-xs"
                   />
                   {!csvEffPlant && (
@@ -4992,10 +5004,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {osTab === "separate-csvs" && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <Input
-                    type="date"
+                  <DateInput
                     value={csvEffDate}
-                    onChange={(e) => { setCsvDate(e.target.value); setCsvExpId(null); setCsvSearch(""); }}
+                    onChange={(v) => { setCsvDate(v); setCsvExpId(null); setCsvSearch(""); }}
+                    clearable={false}
                     className="h-8 w-[140px] text-xs"
                   />
                   {!csvEffPlant && (
@@ -5115,15 +5127,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </div>
         </div>
 
-        {/* Empty Box dialog — manual entry (quantity + optional note), plus undo of prior entries.
-            Radix portals this to document.body, outside the .kiosk-rotate-90 subtree (same as the
-            STV SelectContent above), so it doesn't inherit the page rotation on its own — it opens
-            upright and off-axis while everything else is rotated. It's centered (left/top 50% +
-            translate -50%/-50%), not corner-anchored like the Select dropdown, so a plain rotate-90
-            around its own (default, center) transform-origin lines it back up with the rotated
-            page — no origin utility needed here. */}
+        {/* Empty Box dialog — manual entry (quantity + optional note), plus undo of prior entries. */}
         <Dialog open={showEmptyBox} onOpenChange={(o) => { if (!o) setShowEmptyBox(false); }}>
-          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osPortalRotate}`}>
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm`}>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-amber-700">
                 <Package className="h-5 w-5" /> Log Empty Box
@@ -5235,11 +5241,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </DialogContent>
         </Dialog>
 
-        {/* Multi-match selection dialog — Radix portals this to document.body, outside the
-            .kiosk-rotate-90 subtree, so (like the Empty Box dialog) it needs the rotate class
-            applied manually or it opens upright while the rest of the kiosk screen is rotated. */}
+        {/* Multi-match selection dialog. */}
         <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) { setOsMultiMatch(null); resetOsConfirmation(); } }}>
-          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${osPortalRotate}`}>
+          <DialogContent className={`w-[calc(100%-2rem)] max-w-sm`}>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
                 <AlertTriangle className="h-5 w-5 text-amber-500" />
@@ -5308,7 +5312,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             sizing and just flips it. Either way it scrolls so it always fits. */}
         <Dialog open={!!osPending} onOpenChange={(o) => { if (!o) { setOsPending(null); osPendingRef.current = null; resetOsConfirmation(); } }}>
           <DialogContent
-            className={`overflow-y-auto rounded-2xl p-0 ${osPortalRotate} ${
+            className={`overflow-y-auto rounded-2xl p-0 ${
               osQuarterTurn
                 ? "w-[92vh] max-w-[92vh] max-h-[92vw]"
                 : "w-[calc(100%-2rem)] max-w-2xl sm:max-w-4xl max-h-[90vh]"}`}

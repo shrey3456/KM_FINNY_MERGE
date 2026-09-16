@@ -1,19 +1,23 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, FileText, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, Search, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, FileText, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, Search, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
+import { useSidebarContext } from "@/lib/sidebarContext";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import { apiRequest } from "@/lib/queryClient";
 import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
+import { CircularProgress } from "@/components/ui/circular-progress";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
-import { ColumnHeaderFilterButton, ColumnFilterPopoverContent } from "@/components/filters/ColumnFilterChip";
+import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton, ColumnFilterPopoverContent } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, conditionSummary, matchAllConditions } from "@/lib/columnFilters";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/ui/date-input";
 import { Label } from "@/components/ui/label";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -129,6 +133,24 @@ function fmtIST(value: string | Date | null | undefined): string {
 const palletsOf = (qty: number, itemsPerPallet: number | null | undefined) =>
   (qty > 0 && (itemsPerPallet ?? 0) > 0 ? (qty / (itemsPerPallet as number)).toFixed(2) : "0.00");
 
+// Totals-row counterpart to palletsOf, for columns that stack qty over its pallets in one cell:
+// the column's qty summed, with the pallet figure underneath — each row's qty ÷ ITS OWN pallet
+// size, added up unrounded, never one blended pallet size applied to the combined quantity.
+function qtyPalletTotal<T extends { itemsPerPallet?: number | null }>(rows: T[], pick: (row: T) => number, signed = false) {
+  const qty = rows.reduce((sum, row) => sum + pick(row), 0);
+  const plt = rows.reduce((sum, row) => {
+    const q = pick(row);
+    const ipp = row.itemsPerPallet ?? 0;
+    return q > 0 && ipp > 0 ? sum + q / ipp : sum;
+  }, 0);
+  return (
+    <>
+      <span className="block">{signed && qty > 0 ? `+${qty}` : qty}</span>
+      <span className="block text-xs font-semibold text-gray-500">{plt.toFixed(2)} plt</span>
+    </>
+  );
+}
+
 // Same colors/shape as statusBadge in Unloading.tsx (minus the canActivate "Locked" case, which
 // doesn't apply here — this section can open any batch, not just the next-in-line one), so
 // "which vehicle is actually active right now" is as obvious in this dropdown as it is on the
@@ -162,7 +184,36 @@ const VIEWER_FILTERS_KEY = "scanViewer:filters";
 type SavedViewerFilters = {
   search?: string;
   conditions?: Record<string, FilterCondition>;
+  // Plant/date/part and the two tab selections. These pick WHICH order you're looking at, and
+  // used to be deliberately excluded here on the reasoning that the page should always open on
+  // your plant's live order — but that meant deliberately looking up a different plant or an
+  // older date was thrown away the moment you visited another page, which is the opposite of
+  // what someone doing that lookup wants. They're restored now; the auto-default effects that
+  // pick a plant/date/part only run when there's nothing saved to restore.
+  plant?: string;
+  date?: string;
+  sessionId?: number | null;
+  viewerTab?: string;
+  viewerSource?: string;
 };
+
+// The Unloading sub-view keeps its own plant/date/vehicle pickers in its own component, so it
+// gets its own key rather than reaching into the bundle above.
+const UNLOADING_VIEWER_FILTERS_KEY = "scanViewer:unloadingFilters";
+
+type SavedUnloadingViewerFilters = {
+  plant?: string;
+  date?: string;
+  sessionId?: number | null;
+};
+
+function readSavedUnloadingViewerFilters(): SavedUnloadingViewerFilters {
+  try {
+    return JSON.parse(sessionStorage.getItem(UNLOADING_VIEWER_FILTERS_KEY) ?? "{}") as SavedUnloadingViewerFilters;
+  } catch {
+    return {};
+  }
+}
 
 function readSavedViewerFilters(): SavedViewerFilters {
   try {
@@ -208,12 +259,14 @@ export default function ScanViewer() {
     } catch { return []; }
   })();
 
-  const [plant, setPlant] = useState("");
+  // Restored from the last sitting when there is one; otherwise blank, which is what lets the
+  // "default to your first plant + its live order date" effect below take over.
+  const [plant, setPlant] = useState(() => readSavedViewerFilters().plant ?? "");
   // Defaults to today — "the live order date" — rather than blank, so the page shows
   // something immediately instead of starting on an empty screen. Still fully backend-driven:
   // this is just the initial value handed to the same filter, not a client-side default view.
-  const [date, setDate] = useState(() => getLocalISODate());
-  const [sessionId, setSessionId] = useState<number | null>(null);
+  const [date, setDate] = useState(() => readSavedViewerFilters().date ?? getLocalISODate());
+  const [sessionId, setSessionId] = useState<number | null>(() => readSavedViewerFilters().sessionId ?? null);
   // Seeded from whatever was left applied last time — see VIEWER_FILTERS_KEY.
   const [search, setSearch] = useState(() => readSavedViewerFilters().search ?? "");
 
@@ -242,9 +295,14 @@ export default function ScanViewer() {
   }, []);
   const bigView = isRotated || isPortrait;
   const rotateClass = isRotated ? `kiosk-rotate-${rotation}` : "";
-  // Radix portals dialogs to <body>, outside the rotated container, so they need the matching turn
-  // applied by hand or they open upright while everything behind them is rotated.
-  const portalRotate = rotation === 90 ? "rotate-90" : rotation === 180 ? "rotate-180" : rotation === 270 ? "-rotate-90" : "";
+  const { setPortalRotation } = useSidebarContext();
+  // Reports this page's rotation to Layout so every popup it opens — dialogs, dropdowns, filter
+  // popovers, calendars — turns to match (see lib/portalRotation). Reset on unmount so the next
+  // page doesn't inherit a stale turn.
+  useEffect(() => {
+    setPortalRotation(isRotated ? rotation : 0);
+    return () => setPortalRotation(0);
+  }, [isRotated, rotation, setPortalRotation]);
   // Rotated, the page's own scroll moves content sideways on the physical screen, so it gets the
   // same Up/Down nudge buttons the Scan Order page uses rather than relying on wheel/swipe.
   const pageScrollRef = useRef<HTMLDivElement>(null);
@@ -298,11 +356,15 @@ export default function ScanViewer() {
   // Part Order was removed as a separate tab — switching which CSV/part you're looking at now
   // happens via the "Select part…" picker in the tab row (always visible, next to the date
   // picker), which drives this same "scan" tab directly instead of needing its own tab.
-  const [viewerTab, setViewerTab] = useState<"master-view" | "scan" | "part-order">("master-view");
+  const [viewerTab, setViewerTab] = useState<"master-view" | "scan" | "part-order">(
+    () => (readSavedViewerFilters().viewerTab as "master-view" | "scan" | "part-order") ?? "master-view",
+  );
   // Order Scan (this page's original scope) vs Unloading — a second, entirely independent
   // picker/table/history flow (see UnloadingViewerSection below), not another mode threaded
   // through the Order Scan state above.
-  const [viewerSource, setViewerSource] = useState<"order-scan" | "unloading">("order-scan");
+  const [viewerSource, setViewerSource] = useState<"order-scan" | "unloading">(
+    () => (readSavedViewerFilters().viewerSource as "order-scan" | "unloading") ?? "order-scan",
+  );
   // Part Order lists each CSV part of this order on its own, expandable to its rows — the
   // read-only counterpart of the Scan Order page's own Part Order tab.
   const [partExpId, setPartExpId] = useState<number | null>(null);
@@ -357,10 +419,13 @@ export default function ScanViewer() {
   // defaulting to whichever plant it resolves for you rather than leaving it unset. Waits for
   // active-sessions to have loaded (or failed) too, so this default also gets the right date
   // in one step instead of picking a plant now and correcting the date a moment later.
+  // A restored plant short-circuits this — but only if it's still one this user may see, since
+  // a saved pick outlives the permission that allowed it (plants can be reassigned between
+  // sittings). An unauthorized leftover is treated as "nothing saved" and re-defaulted.
   useEffect(() => {
-    if (!plant && plantOptions.length > 0 && !activeSessionsQuery.isLoading) {
-      selectPlant(plantOptions[0]);
-    }
+    if (plantOptions.length === 0 || activeSessionsQuery.isLoading) return;
+    if (plant && plantOptions.some((p) => normalize(p) === normalize(plant))) return;
+    selectPlant(plantOptions[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plantOptions.join(","), activeSessionsQuery.isLoading]);
 
@@ -471,7 +536,7 @@ export default function ScanViewer() {
     return allMvItems.filter((i) => [i.itemName, i.barcode, i.sapCode].some((v) => v?.toLowerCase().includes(q)));
   }, [allMvItems, search]);
   const [mvStatFilter, setMvStatFilter] = useState<"" | "done" | "remaining" | "extra">("");
-  const mvFiltered = !mvStatFilter
+  const mvStatFiltered = !mvStatFilter
     ? mvSearched
     : mvSearched.filter((i) => {
         const { received, left, extra } = mvRowState(i);
@@ -494,16 +559,6 @@ export default function ScanViewer() {
     }
     return acc;
   }, { expected: 0, done: 0, remaining: 0, extra: 0, palletsExpected: 0, palletsDone: 0, palletsRemaining: 0, palletsExtra: 0 });
-  // Totals for the Master View kiosk table / card list closing row — over whatever's on screen
-  // (search + stat filter), same rule the Part View table's own totals row follows.
-  const mvCardTotals = mvFiltered.reduce((acc, i) => {
-    const { exp, received, left, extra } = mvRowState(i);
-    const ipp = i.itemsPerPallet ?? 0;
-    acc.exp += exp; acc.received += received; acc.left += left; acc.extra += extra;
-    acc.expPlt += mvPltQty(exp, ipp); acc.receivedPlt += mvPltQty(received, ipp);
-    acc.leftPlt += mvPltQty(left, ipp); acc.extraPlt += mvPltQty(extra, ipp);
-    return acc;
-  }, { exp: 0, received: 0, left: 0, extra: 0, expPlt: 0, receivedPlt: 0, leftPlt: 0, extraPlt: 0 });
 
   // ── STV filter (page level) ──────────────────────────────────────────────
   // Every other filter on this page reads a field that's already on the loaded item rows. STV
@@ -543,6 +598,76 @@ export default function ScanViewer() {
     () => Array.from(new Set(Array.from(stvsByBarcode.values()).flat())).sort((a, b) => a.localeCompare(b)),
     [stvsByBarcode],
   );
+
+  // ── Master View column filters ─────────────────────────────────────────────
+  // Same engine and UI as the Scan tab's own filters (a filter icon on each header, "+ Filter",
+  // removable chips), over every Master View column except Order Date — every row on this page
+  // shares one order date, so filtering on it can only ever keep all rows or none. Declared here,
+  // below stvsByBarcode/stvOptions, because the STV column's options and accessor read them.
+  const [mvColumnConditions, setMvColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("scanViewer:mvColumnFilters", {});
+  const mvStatusLabel = (i: MvMergedItem) => {
+    const { received, exp } = mvRowState(i);
+    return i.isExtraOnly ? "Extra" : received >= exp && exp > 0 ? "Received" : received > 0 ? "Partial" : "Pending";
+  };
+  const mvTextOptions = (pick: (i: MvMergedItem) => string | null | undefined) =>
+    Array.from(new Set(allMvItems.map(pick).filter((v): v is string => !!v)))
+      .sort((a, b) => a.localeCompare(b))
+      .map((v) => ({ value: v, label: v }));
+  const mvNumberOptions = (pick: (i: MvMergedItem) => number, decimals = 0) =>
+    Array.from(new Set(allMvItems.map(pick)))
+      .sort((a, b) => a - b)
+      .map((v) => ({ value: String(v), label: decimals ? v.toFixed(decimals) : v.toLocaleString() }));
+  const mvFilterColumns: FilterableColumn<MvMergedItem>[] = [
+    { id: "item", label: "Item", filterType: "text", options: mvTextOptions((i) => i.itemName), accessor: (i) => i.itemName },
+    { id: "barcode", label: "Barcode / SAP", filterType: "text", options: mvTextOptions((i) => i.barcode), accessor: (i) => i.barcode },
+    { id: "exp", label: "Exp Qty", filterType: "number", options: mvNumberOptions((i) => mvRowState(i).exp), accessor: (i) => mvRowState(i).exp },
+    { id: "left", label: "Remain Qty", filterType: "number", options: mvNumberOptions((i) => mvRowState(i).left), accessor: (i) => mvRowState(i).left },
+    { id: "received", label: "Received Qty", filterType: "number", options: mvNumberOptions((i) => mvRowState(i).received), accessor: (i) => mvRowState(i).received },
+    { id: "extra", label: "Extra Qty", filterType: "number", options: mvNumberOptions((i) => mvRowState(i).extra), accessor: (i) => mvRowState(i).extra },
+    { id: "expPlt", label: "Exp Plt", filterType: "number", options: mvNumberOptions((i) => mvPltQty(mvRowState(i).exp, i.itemsPerPallet), 2), accessor: (i) => mvPltQty(mvRowState(i).exp, i.itemsPerPallet) },
+    { id: "leftPlt", label: "Remain Plt", filterType: "number", options: mvNumberOptions((i) => mvPltQty(mvRowState(i).left, i.itemsPerPallet), 2), accessor: (i) => mvPltQty(mvRowState(i).left, i.itemsPerPallet) },
+    { id: "receivedPlt", label: "Received Plt", filterType: "number", options: mvNumberOptions((i) => mvPltQty(mvRowState(i).received, i.itemsPerPallet), 2), accessor: (i) => mvPltQty(mvRowState(i).received, i.itemsPerPallet) },
+    { id: "extraPlt", label: "Extra Plt", filterType: "number", options: mvNumberOptions((i) => mvPltQty(mvRowState(i).extra, i.itemsPerPallet), 2), accessor: (i) => mvPltQty(mvRowState(i).extra, i.itemsPerPallet) },
+    { id: "status", label: "Status", filterType: "text", disableConditions: true, options: mvTextOptions(mvStatusLabel), accessor: mvStatusLabel },
+    {
+      id: "stv", label: "STV", filterType: "enum", disableConditions: true,
+      options: stvOptions.map((st) => ({ value: st, label: st })),
+      accessor: (i) => stvsByBarcode.get(normalize(i.barcode ?? "")) ?? [],
+    },
+  ];
+  const mvConditionList = Object.values(mvColumnConditions);
+  // search → stat tile → column filters: every Master View layout (desktop table, kiosk table,
+  // card list) and its closing totals read from this one list.
+  const mvFiltered = mvStatFiltered.filter((i) => matchAllConditions(i, mvConditionList, mvFilterColumns));
+  const setMvCondition = (id: string, condition: FilterCondition) =>
+    setMvColumnConditions((prev) => ({ ...prev, [id]: condition }));
+  const clearMvCondition = (id: string) =>
+    setMvColumnConditions((prev) => { const next = { ...prev }; delete next[id]; return next; });
+  const mvColumnHeader = (id: string, label: string) => {
+    const column = mvFilterColumns.find((c) => c.id === id);
+    if (!column) return label;
+    return (
+      <span className="inline-flex items-center gap-1">
+        {label}
+        <ColumnHeaderFilterButton
+          column={column}
+          condition={mvColumnConditions[id]}
+          onChange={(c) => setMvCondition(id, c)}
+          onRemove={() => clearMvCondition(id)}
+        />
+      </span>
+    );
+  };
+  // Totals for the Master View kiosk table / card list closing row — over whatever's on screen
+  // (search + stat filter), same rule the Part View table's own totals row follows.
+  const mvCardTotals = mvFiltered.reduce((acc, i) => {
+    const { exp, received, left, extra } = mvRowState(i);
+    const ipp = i.itemsPerPallet ?? 0;
+    acc.exp += exp; acc.received += received; acc.left += left; acc.extra += extra;
+    acc.expPlt += mvPltQty(exp, ipp); acc.receivedPlt += mvPltQty(received, ipp);
+    acc.leftPlt += mvPltQty(left, ipp); acc.extraPlt += mvPltQty(extra, ipp);
+    return acc;
+  }, { exp: 0, received: 0, left: 0, extra: 0, expPlt: 0, receivedPlt: 0, leftPlt: 0, extraPlt: 0 });
 
   const partItemsQuery = useQuery<OsScanItem[]>({
     queryKey: ["/api/order-scan/sessions", partExpId, "items", "scan-viewer-part"],
@@ -770,19 +895,21 @@ export default function ScanViewer() {
   }, [items, extrasQuery.data, stvOptions, stvsByBarcode]);
   const columnConditionList = useMemo(() => Object.values(columnConditions), [columnConditions]);
 
-  // Keep the saved copy in step with what's applied, so coming back to this page restores it.
-  // Plant/date aren't saved: they choose WHICH order you're looking at rather than filtering it,
-  // and the page deliberately opens on the live order for your plant.
+  // Keep the saved copy in step with what's applied, so coming back to this page restores it —
+  // including which order you were looking at (plant/date/part) and which tab you were on.
   useEffect(() => {
     try {
       sessionStorage.setItem(
         VIEWER_FILTERS_KEY,
-        JSON.stringify({ search, conditions: columnConditions } satisfies SavedViewerFilters),
+        JSON.stringify({
+          search, conditions: columnConditions,
+          plant, date, sessionId, viewerTab, viewerSource,
+        } satisfies SavedViewerFilters),
       );
     } catch {
       // Storage unavailable (private mode / quota) — filters just won't outlive the page.
     }
-  }, [search, columnConditions]);
+  }, [search, columnConditions, plant, date, sessionId, viewerTab, viewerSource]);
 
   // The single "+ Filter" entry point — every generic column in one searchable list, same
   // pattern as Overall Stock/Scan History (no special-cased dims here: Plant/Order Date are
@@ -989,21 +1116,31 @@ export default function ScanViewer() {
   const headerBorder = "border-r border-white/10";
   const cellBorder = "border-r border-gray-200";
 
+  // % received — the same ring the Scan Order, Loading and Unloading tables carry: one aggregate
+  // in the header, one per row. Both are Σ min(received, expected) / Σ expected, so an
+  // over-scanned (Extra) item can't push either past 100 or inflate the total.
+  const itemPct = totals.expected > 0 ? Math.min(100, Math.round((totals.done / totals.expected) * 100)) : 0;
+
   const itemColumns: DataTableColumn<OsScanItem>[] = [
-    // Leading status icon, then Item and Barcode / SAP as their own columns — the same column
-    // set the Scan Order page's items table uses, so the two read identically.
+    // Leading % ring, then Item and Barcode / SAP as their own columns — the same column set the
+    // Scan Order page's items table uses, so the two read identically.
     {
       id: "state",
-      header: "",
-      width: 40,
+      header: <CircularProgress percent={itemPct} size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff" />,
+      width: 28,
+      minWidth: 28,
       align: "center",
       hideable: false,
       totalable: false,
+      // px-0.5: the ring is only 20px, so default cell padding would cost more width than it.
+      headerClassName: "px-0.5",
+      cellClassName: "align-top px-0.5",
       render: (row) => {
-        const status = row.status ?? "pending";
-        return status === "complete" ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
-          : status === "partial" ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
-          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+        const { exp, isExtraOnly } = rowState(row);
+        // An extra-only row has nothing expected to measure a percentage against.
+        if (isExtraOnly) return <AlertTriangle className="mx-auto h-4 w-4 text-orange-500" />;
+        const scanned = row.totalScannedQty ?? 0;
+        return <CircularProgress percent={exp > 0 ? Math.min(100, Math.round((Math.min(scanned, exp) / exp) * 100)) : 0} size={20} strokeWidth={2} />;
       },
     },
     {
@@ -1224,27 +1361,33 @@ export default function ScanViewer() {
   // is the same for all of them — carried as a column so it travels with an export.
   const viewerOrderDate = selectedSession?.orderDate ?? date;
 
+  // Same Σ min(received, expected) / Σ expected as the Scan tab's ring (mvTotals.done is already
+  // capped per item), so one order reads the same % on both tabs.
+  const mvPct = mvTotals.expected > 0 ? Math.min(100, Math.round((mvTotals.done / mvTotals.expected) * 100)) : 0;
+
   const mvColumns: DataTableColumn<MvMergedItem>[] = [
-    // Same leading status icon and separate Barcode / SAP column as the Scan tab and the Scan
-    // Order page, so all three tables carry an identical column set.
+    // Same leading % ring and separate Barcode / SAP column as the Scan tab and the Scan Order
+    // page, so all three tables carry an identical column set.
     {
       id: "state",
-      header: "",
-      width: 40,
+      header: <CircularProgress percent={mvPct} size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff" />,
+      width: 28,
+      minWidth: 28,
       align: "center",
       hideable: false,
       totalable: false,
+      // px-0.5: the ring is only 20px, so default cell padding would cost more width than it.
+      headerClassName: "px-0.5",
+      cellClassName: "align-top px-0.5",
       render: (row) => {
-        const done = row.quantity > 0 && row.scannedQty >= row.quantity;
-        const partial = !done && row.scannedQty > 0;
-        return done ? <CheckCircle2 className="mx-auto h-4 w-4 text-emerald-500" />
-          : partial ? <ScanLine className="mx-auto h-4 w-4 text-amber-500" />
-          : <span className="inline-block h-4 w-4 rounded-full border-2 border-gray-300" />;
+        if (row.isExtraOnly) return <AlertTriangle className="mx-auto h-4 w-4 text-orange-500" />;
+        const { exp, received } = mvRowState(row);
+        return <CircularProgress percent={exp > 0 ? Math.min(100, Math.round((Math.min(received, exp) / exp) * 100)) : 0} size={20} strokeWidth={2} />;
       },
     },
     {
       id: "item",
-      header: "Item",
+      header: mvColumnHeader("item", "Item"),
       hideable: false,
       width: 260,
       sortable: true,
@@ -1272,7 +1415,7 @@ export default function ScanViewer() {
     },
     {
       id: "barcode",
-      header: "Barcode / SAP",
+      header: mvColumnHeader("barcode", "Barcode / SAP"),
       width: 140,
       sortable: true,
       accessor: (row) => row.barcode,
@@ -1288,13 +1431,13 @@ export default function ScanViewer() {
       ),
     },
     {
-      id: "exp", header: "Exp Qty", width: 80, align: "right", sortable: true,
+      id: "exp", header: mvColumnHeader("exp", "Exp Qty"), width: 80, align: "right", sortable: true,
       accessor: (row) => mvRowState(row).exp,
       cellClassName: `tabular-nums text-gray-600 ${cellBorder}`,
       render: (row) => mvRowState(row).exp || "—",
     },
     {
-      id: "left", header: "Remain Qty", width: 90, align: "right", sortable: true,
+      id: "left", header: mvColumnHeader("left", "Remain Qty"), width: 90, align: "right", sortable: true,
       accessor: (row) => mvRowState(row).left,
       cellClassName: cellBorder,
       render: (row) => {
@@ -1303,13 +1446,13 @@ export default function ScanViewer() {
       },
     },
     {
-      id: "received", header: "Received Qty", width: 90, align: "right", sortable: true,
+      id: "received", header: mvColumnHeader("received", "Received Qty"), width: 90, align: "right", sortable: true,
       accessor: (row) => mvRowState(row).received,
       cellClassName: `tabular-nums font-semibold text-gray-900 ${cellBorder}`,
       render: (row) => mvRowState(row).received,
     },
     {
-      id: "extra", header: "Extra Qty", width: 80, align: "right", sortable: true,
+      id: "extra", header: mvColumnHeader("extra", "Extra Qty"), width: 80, align: "right", sortable: true,
       accessor: (row) => mvRowState(row).extra,
       cellClassName: cellBorder,
       render: (row) => {
@@ -1318,35 +1461,35 @@ export default function ScanViewer() {
       },
     },
     {
-      id: "expPlt", header: "Exp Plt", width: 80, align: "right", sortable: true,
+      id: "expPlt", header: mvColumnHeader("expPlt", "Exp Plt"), width: 80, align: "right", sortable: true,
       accessor: (row) => mvPltQty(mvRowState(row).exp, row.itemsPerPallet),
       total: (rows) => rows.reduce((s, r) => s + mvPltQty(mvRowState(r).exp, r.itemsPerPallet), 0).toFixed(2),
       cellClassName: `tabular-nums text-gray-500 ${cellBorder}`,
       render: (row) => mvPltQty(mvRowState(row).exp, row.itemsPerPallet).toFixed(2),
     },
     {
-      id: "leftPlt", header: "Remain Plt", width: 90, align: "right", sortable: true,
+      id: "leftPlt", header: mvColumnHeader("leftPlt", "Remain Plt"), width: 90, align: "right", sortable: true,
       accessor: (row) => mvPltQty(mvRowState(row).left, row.itemsPerPallet),
       total: (rows) => rows.reduce((s, r) => s + mvPltQty(mvRowState(r).left, r.itemsPerPallet), 0).toFixed(2),
       cellClassName: `tabular-nums font-semibold text-purple-600 ${cellBorder}`,
       render: (row) => mvPltQty(mvRowState(row).left, row.itemsPerPallet).toFixed(2),
     },
     {
-      id: "receivedPlt", header: "Received Plt", width: 90, align: "right", sortable: true,
+      id: "receivedPlt", header: mvColumnHeader("receivedPlt", "Received Plt"), width: 90, align: "right", sortable: true,
       accessor: (row) => mvPltQty(mvRowState(row).received, row.itemsPerPallet),
       total: (rows) => rows.reduce((s, r) => s + mvPltQty(mvRowState(r).received, r.itemsPerPallet), 0).toFixed(2),
       cellClassName: `tabular-nums font-semibold text-[#001d6e] ${cellBorder}`,
       render: (row) => mvPltQty(mvRowState(row).received, row.itemsPerPallet).toFixed(2),
     },
     {
-      id: "extraPlt", header: "Extra Plt", width: 80, align: "right", sortable: true,
+      id: "extraPlt", header: mvColumnHeader("extraPlt", "Extra Plt"), width: 80, align: "right", sortable: true,
       accessor: (row) => mvPltQty(mvRowState(row).extra, row.itemsPerPallet),
       total: (rows) => rows.reduce((s, r) => s + mvPltQty(mvRowState(r).extra, r.itemsPerPallet), 0).toFixed(2),
       cellClassName: `tabular-nums font-semibold text-amber-600 ${cellBorder}`,
       render: (row) => mvPltQty(mvRowState(row).extra, row.itemsPerPallet).toFixed(2),
     },
     {
-      id: "status", header: "Status", width: 100, align: "center", sortable: true,
+      id: "status", header: mvColumnHeader("status", "Status"), width: 100, align: "center", sortable: true,
       totalable: false,
       accessor: (row) => (row.isExtraOnly ? "extra" : mvRowState(row).received >= mvRowState(row).exp && mvRowState(row).exp > 0 ? "complete" : mvRowState(row).received > 0 ? "partial" : "pending"),
       render: (row) => {
@@ -1365,7 +1508,7 @@ export default function ScanViewer() {
     },
     {
       id: "stv",
-      header: "STV",
+      header: mvColumnHeader("stv", "STV"),
       width: 110,
       sortable: true,
       accessor: (row) => stvsByBarcode.get(normalize(row.barcode ?? "")) ?? [],
@@ -1483,11 +1626,11 @@ export default function ScanViewer() {
               {/* Date/part pickers — right after the plant switcher, same row, so every control
                   needed to pick which order is being viewed sits together instead of being split
                   across a separate row below. */}
-              <Input
-                type="date"
-                className="h-7 w-auto rounded-full text-xs"
+              <DateInput
+                className="h-7 rounded-full text-xs"
                 value={date}
-                onChange={(e) => { setDate(e.target.value); setSessionId(null); }}
+                onChange={(v) => { setDate(v); setSessionId(null); }}
+                clearable={false}
               />
               {sessionOptions.length > 1 && (
                 <Select value={sessionId ? String(sessionId) : ""} onValueChange={(v) => setSessionId(Number(v))}>
@@ -2237,7 +2380,30 @@ export default function ScanViewer() {
             title={`${mvFiltered.length} of ${allMvItems.length} items`}
             className="rounded-xl shadow-sm border-gray-200"
             headerActions={
-              <CollapsibleSearch value={search} onChange={setSearch} placeholder="Search by name or barcode…" />
+              <>
+                <AddColumnFilterButton
+                  columns={mvFilterColumns}
+                  conditions={mvColumnConditions}
+                  onApply={setMvCondition}
+                  onClear={clearMvCondition}
+                />
+                {Object.entries(mvColumnConditions).map(([id, condition]) => (
+                  <ColumnFilterChipView
+                    key={id}
+                    columnId={id}
+                    condition={condition}
+                    columns={mvFilterColumns}
+                    onEdit={(c) => setMvCondition(id, c)}
+                    onRemove={() => clearMvCondition(id)}
+                  />
+                ))}
+                {Object.keys(mvColumnConditions).length > 1 && (
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900" onClick={() => setMvColumnConditions({})}>
+                    Clear all
+                  </Button>
+                )}
+                <CollapsibleSearch value={search} onChange={setSearch} placeholder="Search by name or barcode…" />
+              </>
             }
           >
             {mvQuery.isLoading ? (
@@ -2450,9 +2616,7 @@ export default function ScanViewer() {
 
       {/* Void confirmation — same rule as Scan/Scan History's own void dialog. */}
       <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
-        {/* Radix portals this to <body>, outside the rotated container, so on a turned screen it
-            would otherwise open upright while everything behind it is rotated. */}
-        <DialogContent className={`w-[calc(100%-2rem)] max-w-sm ${portalRotate}`}>
+        <DialogContent className={`w-[calc(100%-2rem)] max-w-sm`}>
           <DialogHeader>
             <DialogTitle className="text-red-600">Void this scan?</DialogTitle>
             <DialogDescription>
@@ -2522,13 +2686,15 @@ function UnloadingViewerSection({
   plantOptions: string[];
   getPlantColorCfg: (plantName: string | null | undefined) => Plant | null;
 }) {
-  const [uPlant, setUPlant] = useState("");
-  const [uDate, setUDate] = useState(() => getLocalISODate());
+  const [uPlant, setUPlant] = useState(() => readSavedUnloadingViewerFilters().plant ?? "");
+  // ?? not ||: a saved "" is a real choice here ("All dates"), not an absent value.
+  const [uDate, setUDate] = useState(() => readSavedUnloadingViewerFilters().date ?? getLocalISODate());
   // Set the moment the user picks a date themselves (including clearing it to "All") — once
   // true, the today-has-nothing auto-resolve effect below never overrides their own choice
-  // again. Re-armed on a plant change (see the plant Select's onValueChange).
-  const uDateTouchedRef = useRef(false);
-  const [uSessionId, setUSessionId] = useState<number | null>(null);
+  // again. Re-armed on a plant change (see the plant Select's onValueChange). Starts true when
+  // a date was restored from the last sitting, for the same reason: that was a deliberate pick.
+  const uDateTouchedRef = useRef(readSavedUnloadingViewerFilters().date !== undefined);
+  const [uSessionId, setUSessionId] = useState<number | null>(() => readSavedUnloadingViewerFilters().sessionId ?? null);
   // uExpandedItemId is the DataTable row identity (matches getRowId below); uHistoryBarcode/
   // uHistoryItemName are set alongside it purely to drive the history query/panel heading —
   // barcode alone can't be the row identity since that's what getRowId/expandedRowId compare.
@@ -2540,9 +2706,24 @@ function UnloadingViewerSection({
   const [uItemSearchOpen, setUItemSearchOpen] = useState(false);
   const [uItemSearchText, setUItemSearchText] = useState("");
 
+  // Same restore-then-validate rule as the Order Scan side: a restored plant wins, unless this
+  // user may no longer see it, in which case fall back to the first one they can.
   useEffect(() => {
-    if (!uPlant && plantOptions.length > 0) setUPlant(plantOptions[0]);
+    if (plantOptions.length === 0) return;
+    if (uPlant && plantOptions.some((p) => p.toLowerCase() === uPlant.toLowerCase())) return;
+    setUPlant(plantOptions[0]);
   }, [plantOptions.join(","), uPlant]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        UNLOADING_VIEWER_FILTERS_KEY,
+        JSON.stringify({ plant: uPlant, date: uDate, sessionId: uSessionId } satisfies SavedUnloadingViewerFilters),
+      );
+    } catch {
+      // Storage unavailable — the pickers just won't outlive the page.
+    }
+  }, [uPlant, uDate, uSessionId]);
 
   // A blank date means "every date" — the sessions query below simply omits orderDate, and the
   // underlying /unloading/sessions endpoint already returns everything for the plant when it's
@@ -2629,7 +2810,10 @@ function UnloadingViewerSection({
     }
     return acc;
   }, [uItems]);
-  const uItemPct = uItemTotals.expected > 0 ? Math.min(100, Math.round((uItemTotals.received / uItemTotals.expected) * 100)) : 0;
+  // Capped per item — Σ min(scanned, expected) / Σ expected — so an over-scanned (Extra) item can't
+  // push the batch's % up. Previously this summed raw scanned qty, which let extras inflate it.
+  const uItemReceivedCapped = uItems.reduce((sum, i) => sum + Math.min(i.scanned, i.expected), 0);
+  const uItemPct = uItemTotals.expected > 0 ? Math.min(100, Math.round((uItemReceivedCapped / uItemTotals.expected) * 100)) : 0;
   const [uItemStatusFilter, setUItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
 
   const uHistoryQuery = useQuery<{ items: UnloadingHistoryEvent[] }>({
@@ -2644,8 +2828,50 @@ function UnloadingViewerSection({
   const uTotalReal = uItems.filter((i) => i.expected > 0).length;
   const uPct = uTotalReal > 0 ? Math.round((uFullyDone / uTotalReal) * 100) : 0;
 
+  // Column filters for the batch's items table — same engine and UI as the Scan and Master View
+  // tabs (header icons, "+ Filter", chips). Remembered separately from those, since this is a
+  // different table.
+  const [uColumnConditions, setUColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("scanViewer:unloadingColumnFilters", {});
+  const uStatusLabel = (i: UnloadingProgressItem) => (i.isComplete ? "Received" : i.scanned > 0 ? "Partial" : "Pending");
+  const uTextOptions = (pick: (i: UnloadingProgressItem) => string | null | undefined) =>
+    Array.from(new Set(uItems.map(pick).filter((v): v is string => !!v)))
+      .sort((a, b) => a.localeCompare(b))
+      .map((v) => ({ value: v, label: v }));
+  const uNumberOptions = (pick: (i: UnloadingProgressItem) => number) =>
+    Array.from(new Set(uItems.map(pick)))
+      .sort((a, b) => a - b)
+      .map((v) => ({ value: String(v), label: v.toLocaleString() }));
+  const uFilterColumns: FilterableColumn<UnloadingProgressItem>[] = [
+    { id: "item", label: "Item", filterType: "text", options: uTextOptions((i) => i.itemName), accessor: (i) => i.itemName },
+    { id: "barcode", label: "Barcode", filterType: "text", options: uTextOptions((i) => i.barcode), accessor: (i) => i.barcode },
+    { id: "exp", label: "Exp", filterType: "number", options: uNumberOptions((i) => i.expected), accessor: (i) => i.expected },
+    { id: "received", label: "Received", filterType: "number", options: uNumberOptions((i) => i.scanned), accessor: (i) => i.scanned },
+    { id: "left", label: "Remain", filterType: "number", options: uNumberOptions((i) => i.remaining), accessor: (i) => i.remaining },
+    { id: "extra", label: "Extra", filterType: "number", options: uNumberOptions((i) => Math.max(0, i.scanned - i.expected)), accessor: (i) => Math.max(0, i.scanned - i.expected) },
+    { id: "status", label: "Status", filterType: "text", disableConditions: true, options: uTextOptions(uStatusLabel), accessor: uStatusLabel },
+  ];
+  const setUCondition = (id: string, condition: FilterCondition) =>
+    setUColumnConditions((prev) => ({ ...prev, [id]: condition }));
+  const clearUCondition = (id: string) =>
+    setUColumnConditions((prev) => { const next = { ...prev }; delete next[id]; return next; });
+  const uColumnHeader = (id: string, label: string) => {
+    const column = uFilterColumns.find((c) => c.id === id);
+    if (!column) return label;
+    return (
+      <span className="inline-flex items-center gap-1">
+        {label}
+        <ColumnHeaderFilterButton
+          column={column}
+          condition={uColumnConditions[id]}
+          onChange={(c) => setUCondition(id, c)}
+          onRemove={() => clearUCondition(id)}
+        />
+      </span>
+    );
+  };
+
   const uFilteredItems = useMemo(() => {
-    let list = uItems;
+    let list = uItems.filter((i) => matchAllConditions(i, Object.values(uColumnConditions), uFilterColumns));
     if (uItemStatusFilter === "done") list = list.filter((i) => i.expected > 0 && i.scanned >= i.expected);
     else if (uItemStatusFilter === "remaining") list = list.filter((i) => i.remaining > 0);
     else if (uItemStatusFilter === "extra") list = list.filter((i) => i.scanned > i.expected);
@@ -2657,15 +2883,29 @@ function UnloadingViewerSection({
         || (i.sapCode ?? "").toLowerCase().includes(q));
     }
     return list;
-  }, [uItems, uItemSearchText, uItemStatusFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uItems, uItemSearchText, uItemStatusFilter, uColumnConditions]);
 
   // Same Item/Exp/Received/Remain/Extra/Status column set, same widths, same pallet sub-values
   // and Partial/Pending status badges as the real Unloading page's own items table (itemColumns
   // in Unloading.tsx) — this is meant to look and read identically, not just show the same data.
   const uItemColumns: DataTableColumn<UnloadingProgressItem>[] = [
+    // % received ring — header is the batch aggregate (uItemPct), each row its own item's.
+    {
+      id: "pct",
+      header: <CircularProgress percent={uItemPct} size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff" />,
+      width: 28, minWidth: 28, align: "center", sortable: false, totalable: false,
+      headerClassName: "px-0.5", cellClassName: "align-top px-0.5",
+      render: (row) => (
+        <CircularProgress
+          percent={row.expected > 0 ? Math.min(100, Math.round((Math.min(row.scanned, row.expected) / row.expected) * 100)) : (row.scanned > 0 ? 100 : 0)}
+          size={20} strokeWidth={2}
+        />
+      ),
+    },
     {
       id: "item",
-      header: "Item",
+      header: uColumnHeader("item", "Item"),
       accessor: (row) => row.itemName ?? row.barcode ?? "",
       width: 240,
       minWidth: 140,
@@ -2680,8 +2920,9 @@ function UnloadingViewerSection({
       ),
     },
     {
-      id: "exp", header: "Exp", align: "right", width: 80, minWidth: 60, sortable: true,
+      id: "exp", header: uColumnHeader("exp", "Exp"), align: "right", width: 80, minWidth: 60, sortable: true,
       accessor: (row) => row.expected,
+      total: (rows) => qtyPalletTotal(rows, (r) => r.expected),
       render: (row) => (
         <>
           <span className="block text-base font-semibold">{row.expected || "—"}</span>
@@ -2690,8 +2931,9 @@ function UnloadingViewerSection({
       ),
     },
     {
-      id: "received", header: "Received", align: "right", width: 90, minWidth: 60, sortable: true,
+      id: "received", header: uColumnHeader("received", "Received"), align: "right", width: 90, minWidth: 60, sortable: true,
       accessor: (row) => row.scanned,
+      total: (rows) => qtyPalletTotal(rows, (r) => r.scanned),
       cellClassName: "font-semibold text-gray-900",
       render: (row) => (
         <>
@@ -2701,8 +2943,9 @@ function UnloadingViewerSection({
       ),
     },
     {
-      id: "left", header: "Remain", align: "right", width: 80, minWidth: 60, sortable: true,
+      id: "left", header: uColumnHeader("left", "Remain"), align: "right", width: 80, minWidth: 60, sortable: true,
       accessor: (row) => row.remaining,
+      total: (rows) => qtyPalletTotal(rows, (r) => r.remaining),
       render: (row) => (
         <>
           <span className={`block text-base font-semibold ${row.remaining > 0 ? "text-[#001d6e]" : "text-gray-300"}`}>{row.remaining || "—"}</span>
@@ -2711,8 +2954,9 @@ function UnloadingViewerSection({
       ),
     },
     {
-      id: "extra", header: "Extra", align: "right", width: 80, minWidth: 60,
+      id: "extra", header: uColumnHeader("extra", "Extra"), align: "right", width: 80, minWidth: 60,
       accessor: (row) => Math.max(0, row.scanned - row.expected),
+      total: (rows) => qtyPalletTotal(rows, (r) => Math.max(0, r.scanned - r.expected), true),
       render: (row) => {
         const extra = Math.max(0, row.scanned - row.expected);
         return (
@@ -2724,7 +2968,7 @@ function UnloadingViewerSection({
       },
     },
     {
-      id: "status", header: "Status", align: "center", width: 90, minWidth: 70, hideable: false, totalable: false,
+      id: "status", header: uColumnHeader("status", "Status"), align: "center", width: 90, minWidth: 70, hideable: false, totalable: false,
       accessor: (row) => (row.isComplete ? "Received" : row.scanned > 0 ? "Partial" : "Pending"),
       render: (row) => {
         const status = row.isComplete ? "complete" : row.scanned > 0 ? "partial" : "pending";
@@ -2835,11 +3079,11 @@ function UnloadingViewerSection({
                 ))}
               </SelectContent>
             </Select>
-            <Input
-              type="date"
-              className="h-7 w-auto rounded-full text-xs"
+            <DateInput
+              className="h-7 rounded-full text-xs"
               value={uDate}
-              onChange={(e) => { uDateTouchedRef.current = true; setUDate(e.target.value); setUSessionId(null); }}
+              onChange={(v) => { uDateTouchedRef.current = true; setUDate(v); setUSessionId(null); }}
+              clearable={false}
             />
             {uDate && (
               <button
@@ -2949,6 +3193,27 @@ function UnloadingViewerSection({
         <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
           <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5 bg-white">
             <span className="text-xs font-medium text-gray-500">{uFilteredItems.length} item{uFilteredItems.length === 1 ? "" : "s"}</span>
+            <AddColumnFilterButton
+              columns={uFilterColumns}
+              conditions={uColumnConditions}
+              onApply={setUCondition}
+              onClear={clearUCondition}
+            />
+            {Object.entries(uColumnConditions).map(([id, condition]) => (
+              <ColumnFilterChipView
+                key={id}
+                columnId={id}
+                condition={condition}
+                columns={uFilterColumns}
+                onEdit={(c) => setUCondition(id, c)}
+                onRemove={() => clearUCondition(id)}
+              />
+            ))}
+            {Object.keys(uColumnConditions).length > 1 && (
+              <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900" onClick={() => setUColumnConditions({})}>
+                Clear all
+              </Button>
+            )}
             <button
               onClick={() => setUItemSearchOpen((v) => !v)}
               title="Search items"

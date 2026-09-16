@@ -58,6 +58,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 import { hasPageViewAccess, hasPageWriteAccess } from "@/lib/permissions";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 // Solid navy fill, matching the Product Master action buttons.
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
@@ -227,7 +228,7 @@ function MultiSelectField({
 }
 
 const Users = () => {
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = usePersistentFilter('users:search', '');
   const [pageIndex, setPageIndex] = useState(0);
   // Searching re-cuts the list, so start it from the top rather than leaving you on a page number
   // that means something different (or nothing at all) against the new set.

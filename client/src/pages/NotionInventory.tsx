@@ -64,6 +64,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Product } from "@shared/schema";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 type SyncStatus = {
   isSyncing: boolean;
@@ -190,7 +191,7 @@ const BTN_OUTLINE = "h-8 border border-[#001d6e] text-[#001d6e] bg-white hover:b
 
 export default function NotionInventory() {
   const { toast } = useToast();
-  const [searchTerm, setSearchTerm] = useState("");
+  const [searchTerm, setSearchTerm] = usePersistentFilter("notionInventory:search", "");
   const [showFullSyncConfirm, setShowFullSyncConfirm] = useState(false);
   const [lastApplyReport, setLastApplyReport] = useState<SyncReport | null>(null);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
