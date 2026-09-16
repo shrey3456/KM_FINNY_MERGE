@@ -29,7 +29,7 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from 'react-hook-form';
 import { useEffect, useState } from 'react';
-import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, CalendarDays } from 'lucide-react';
+import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, CalendarDays, RefreshCw } from 'lucide-react';
 import Papa from 'papaparse';
 import { apiRequest } from '@/lib/queryClient';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -142,6 +142,50 @@ const Settings = () => {
   // and only orders/vehicles/deliveries dated on or before it clear (Order Import, Unloading, and
   // Loading via its proforma slip's own order date).
   const [csOrderDateUpTo, setCsOrderDateUpTo] = useState('');
+
+  // Recalculate Stock — Check (read-only) shows every stored stock total that doesn't match the
+  // history; Apply corrects them. See server/lib/stockRecalc.ts.
+  type RecalcPlantRow = {
+    barcode: string; plant: string; itemName: string | null;
+    storedStock: number; storedExtra: number; correctStock: number; correctExtra: number; storedRows: number;
+  };
+  type RecalcProductRow = { productId: number; barcode: string; itemName: string | null; storedTotal: number; correctTotal: number };
+  type RecalcPreview = { plantCount: number; productCount: number; plantRows: RecalcPlantRow[]; productRows: RecalcProductRow[] };
+  const [recalcOpen, setRecalcOpen] = useState(false);
+  const [recalcPreview, setRecalcPreview] = useState<RecalcPreview | null>(null);
+  const [recalcChecking, setRecalcChecking] = useState(false);
+  const [recalcApplying, setRecalcApplying] = useState(false);
+  const [recalcConfirm, setRecalcConfirm] = useState('');
+  const runStockCheck = async () => {
+    setRecalcChecking(true);
+    try {
+      const data = await apiRequest('GET', '/api/settings/recalculate-stock/preview', undefined, false, true);
+      setRecalcPreview(data as RecalcPreview);
+      setRecalcConfirm('');
+      setRecalcOpen(true);
+    } catch (error: any) {
+      toast({ title: 'Check failed', description: error?.message || 'Could not check stock', variant: 'destructive' });
+    } finally {
+      setRecalcChecking(false);
+    }
+  };
+  const applyStockRecalc = async () => {
+    setRecalcApplying(true);
+    try {
+      const result: any = await apiRequest('POST', '/api/settings/recalculate-stock', {}, false, true);
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
+      toast({
+        title: 'Stock recalculated',
+        description: `${result.plantRowsFixed} item total(s) and ${result.productTotalsFixed} product total(s) corrected.`,
+      });
+      setRecalcOpen(false);
+      setRecalcPreview(null);
+    } catch (error: any) {
+      toast({ title: 'Recalculate failed', description: error?.message || 'Could not recalculate stock', variant: 'destructive' });
+    } finally {
+      setRecalcApplying(false);
+    }
+  };
 
   const { data: allPlants } = useQuery<any[]>({
     queryKey: ['/api/plants'],
@@ -695,9 +739,9 @@ const Settings = () => {
                     </div>
 
                     <div className="p-4 border rounded-lg bg-gray-50">
-                      <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Sales Tracking Start</h4>
+                      <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Stock Tracking Start</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
-                        Overall Stock's Sale Qty and Expected Qty (when no date is picked there) both sum from this date onward — earlier data isn't reliable enough to include.
+                        When no date is picked on Overall Stock, its Purchase, Expected, Expected Sale and Sale columns count from this date onward. Everything before it is still included, as the Opening stock.
                       </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <Input
@@ -715,6 +759,22 @@ const Settings = () => {
                           {isSavingSalesTrackingStart ? 'Saving...' : 'Save'}
                         </Button>
                       </div>
+                    </div>
+
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Recalculate Stock</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Adds up every item's stock again from its full history (every scan, unloading, loading and adjustment)
+                        and fixes any stock total that doesn't match. Check first to see what would change — nothing is changed until you apply.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={runStockCheck}
+                        disabled={!isAdminUser || recalcChecking}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        {recalcChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check stock'}
+                      </Button>
                     </div>
 
                     <div className="p-4 border border-red-200 rounded-lg bg-red-50">
@@ -763,6 +823,108 @@ const Settings = () => {
           </Tabs>
         </div>
       </div>
+
+      {/* Recalculate Stock — the Check result, and Apply. */}
+      <AlertDialog open={recalcOpen} onOpenChange={(open) => { if (!recalcApplying) setRecalcOpen(open); }}>
+        <AlertDialogContent className="max-w-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Recalculate Stock</AlertDialogTitle>
+            <AlertDialogDescription>
+              {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount === 0
+                ? 'Every stock total matches its history. Nothing to fix.'
+                : `${recalcPreview?.plantCount ?? 0} item total(s) and ${recalcPreview?.productCount ?? 0} product total(s) don't match their history. Apply sets them to the correct numbers below. History, scans, CSVs and proforma slips are not changed.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount > 0 && (
+            <div className="max-h-[55vh] space-y-4 overflow-y-auto">
+              {recalcPreview.plantRows.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Stock at a plant</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Item</th>
+                          <th className="px-2 py-1.5">Plant</th>
+                          <th className="px-2 py-1.5 text-right">Now</th>
+                          <th className="px-2 py-1.5 text-right">Correct</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recalcPreview.plantRows.map((r) => (
+                          <tr key={`${r.barcode}::${r.plant}`} className="border-t">
+                            <td className="px-2 py-1.5">
+                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
+                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}{r.storedRows > 1 ? ` · saved ${r.storedRows} times` : ''}</div>
+                            </td>
+                            <td className="px-2 py-1.5">{r.plant}</td>
+                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedStock}{r.storedExtra > 0 ? ` (extra ${r.storedExtra})` : ''}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctStock}{r.correctExtra > 0 ? ` (extra ${r.correctExtra})` : ''}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {recalcPreview.plantCount > recalcPreview.plantRows.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {recalcPreview.plantRows.length} of {recalcPreview.plantCount} — Apply fixes all of them.</p>
+                  )}
+                </div>
+              )}
+
+              {recalcPreview.productRows.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Total of all plants</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Item</th>
+                          <th className="px-2 py-1.5 text-right">Now</th>
+                          <th className="px-2 py-1.5 text-right">Correct</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recalcPreview.productRows.map((r) => (
+                          <tr key={r.productId} className="border-t">
+                            <td className="px-2 py-1.5">
+                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
+                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}</div>
+                            </td>
+                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedTotal}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctTotal}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {recalcPreview.productCount > recalcPreview.productRows.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {recalcPreview.productRows.length} of {recalcPreview.productCount} — Apply fixes all of them.</p>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <Label htmlFor="recalcConfirm">Type FIX to apply</Label>
+                <Input id="recalcConfirm" value={recalcConfirm} onChange={(e) => setRecalcConfirm(e.target.value)} placeholder="FIX" />
+              </div>
+            </div>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={recalcApplying}>Close</AlertDialogCancel>
+            {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount > 0 && (
+              <Button
+                onClick={applyStockRecalc}
+                disabled={recalcApplying || recalcConfirm.trim().toUpperCase() !== 'FIX'}
+                className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90"
+              >
+                {recalcApplying ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Applying…</> : 'Apply'}
+              </Button>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={showClearDialog} onOpenChange={handleClearDialogOpenChange}>
         <AlertDialogContent>

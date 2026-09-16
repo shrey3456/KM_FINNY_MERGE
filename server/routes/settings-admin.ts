@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
+import { checkStock, recalculateStock, StockBusyError } from '../lib/stockRecalc';
 
 // Settings > Data Management > "Clear Stock" — an admin-only action that resets stock numbers
 // for a chosen plant (or every plant), optionally scoped further to only orders/slips dated on
@@ -315,6 +316,53 @@ router.put('/settings/sales-tracking-start', requireAdminRole, async (req: Reque
   } catch (error) {
     console.error('Error updating sales tracking start date:', error);
     res.status(500).json({ message: 'Failed to update sales tracking start date' });
+  }
+});
+
+// Settings > Data Management > Recalculate Stock — see server/lib/stockRecalc.ts.
+// GET  .../preview : read-only; lists every stored total that doesn't match the history (capped
+//                    for display, with the full counts alongside).
+// POST             : corrects those stored totals. History, scans, CSVs and proforma slips are
+//                    never changed.
+const RECALC_PREVIEW_LIMIT = 500;
+
+router.get('/settings/recalculate-stock/preview', requireAdminRole, async (_req: Request, res: Response) => {
+  try {
+    const { plantRows, productRows } = await checkStock(pool);
+    res.json({
+      plantCount: plantRows.length,
+      productCount: productRows.length,
+      plantRows: plantRows.slice(0, RECALC_PREVIEW_LIMIT),
+      productRows: productRows.slice(0, RECALC_PREVIEW_LIMIT),
+    });
+  } catch (error) {
+    console.error('Error checking stock:', error);
+    res.status(500).json({ message: 'Failed to check stock' });
+  }
+});
+
+router.post('/settings/recalculate-stock', requireAdminRole, async (req: Request, res: Response) => {
+  const { userCode, userName } = actor(req);
+  try {
+    const result = await recalculateStock(pool);
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Settings',
+        action: 'update',
+        entityType: 'plant_stock',
+        entityId: 'recalculate-stock',
+        details: `Recalculated stock from history by ${userName ?? userCode}: ${result.plantRowsFixed} plant row(s) corrected`
+          + `${result.duplicateRowsCleared ? `, ${result.duplicateRowsCleared} duplicate row(s) set to 0` : ''}`
+          + `, ${result.productTotalsFixed} product total(s) corrected.`,
+        userCode,
+        userName,
+      });
+    }
+    res.json({ success: true, ...result });
+  } catch (error) {
+    if (error instanceof StockBusyError) return res.status(409).json({ message: error.message });
+    console.error('Error recalculating stock:', error);
+    res.status(500).json({ message: 'Failed to recalculate stock' });
   }
 });
 

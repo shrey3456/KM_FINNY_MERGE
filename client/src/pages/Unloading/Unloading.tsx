@@ -39,7 +39,10 @@ type SessionListItem = {
   id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
   rowCount: number; groupId: number; partIndex: number; scanStatus: "available" | "active" | "completed";
   createdAt: string; scanActivatedAt: string | null; scanCompletedAt: string | null;
-  partsCount: number; expectedQty: number; scannedQty: number;
+  // scannedQty = every box scanned on this batch; receivedQty = the part of it that fills what the
+  // file lists (each barcode capped at its own qty); extraQty = the rest (over-scans + products
+  // not on the file). The opened batch's Received/Extra tiles use this same split.
+  partsCount: number; expectedQty: number; scannedQty: number; receivedQty: number; extraQty: number;
   // Only the earliest not-yet-completed batch in a vehicle+date's FIFO group is eligible to be
   // clicked into (see isEligibleToActivate in server/routes/unloading.ts) — an 'available' row
   // with canActivate=false is queued behind an earlier batch that must complete first.
@@ -229,7 +232,7 @@ export default function Unloading() {
   const sessionStatusLabel = (s: SessionListItem) =>
     s.scanStatus === "completed" ? "Completed" : s.scanStatus === "active" ? "Active" : s.canActivate ? "Ready" : "Locked (queued)";
   const sessionProgressLabel = (s: SessionListItem) =>
-    s.scannedQty <= 0 ? "Not started" : s.scannedQty >= s.expectedQty ? "Complete" : "Partial";
+    s.scannedQty <= 0 ? "Not started" : s.receivedQty >= s.expectedQty ? "Complete" : "Partial";
   const sessionBatchLabel = (s: SessionListItem) => (s.partsCount > 1 ? `Batch ${s.partIndex} of ${s.partsCount}` : "Single");
   const distinctOptions = (values: (string | null | undefined)[]): FilterOption[] =>
     Array.from(new Set(values.map((v) => (v ?? "").trim()).filter(Boolean))).sort().map((v) => ({ value: v, label: v }));
@@ -243,7 +246,8 @@ export default function Unloading() {
     { id: "progress", label: "Progress", filterType: "text", disableConditions: true, options: distinctOptions(allSessions.map(sessionProgressLabel)), accessor: sessionProgressLabel },
     { id: "csvFile", label: "CSV File", filterType: "text", options: distinctOptions(allSessions.map((s) => s.csvFileName)), accessor: (s) => s.csvFileName },
     { id: "expectedQty", label: "Expected Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.expectedQty },
-    { id: "scannedQty", label: "Scanned Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.scannedQty },
+    { id: "scannedQty", label: "Received Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.scannedQty },
+    { id: "extraQty", label: "Extra Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.extraQty },
   ];
   const sessionConditionList = Object.values(sessionColumnConditions);
   const sessions = allSessions.filter((s) => matchAllConditions(s, sessionConditionList, sessionFilterColumns));
@@ -317,7 +321,7 @@ export default function Unloading() {
   });
   const barcodeRef = useRef<HTMLInputElement>(null);
 
-  const activeSessionQuery = useQuery<{ session: SessionDetail; items: SessionItem[]; allComplete: boolean }>({
+  const activeSessionQuery = useQuery<{ session: SessionDetail; items: SessionItem[]; allComplete: boolean; offBatchExtraQty?: number; offBatchExtraPallets?: number }>({
     queryKey: ["/api/unloading/sessions", activeSessionId],
     queryFn: () => apiRequest("GET", `/api/unloading/sessions/${activeSessionId}`).then((r) => r.json()),
     enabled: activeSessionId != null,
@@ -478,6 +482,15 @@ export default function Unloading() {
         acc.pltExtra += extra / ipp;
       }
     }
+    // Products scanned on this vehicle that aren't on the batch file have no item row, but they
+    // are boxes received — counted in Received and Extra, so these totals equal the list's
+    // "Received" figure for the same batch.
+    const offBatchQty = detail?.offBatchExtraQty ?? 0;
+    const offBatchPlt = detail?.offBatchExtraPallets ?? 0;
+    acc.received += offBatchQty;
+    acc.extra += offBatchQty;
+    acc.pltReceived += offBatchPlt;
+    acc.pltExtra += offBatchPlt;
     return acc;
   })();
   const itemPct = itemTotals.expected > 0 ? Math.min(100, Math.round((itemTotals.received / itemTotals.expected) * 100)) : 0;
@@ -624,7 +637,10 @@ export default function Unloading() {
       }
     },
     onSuccess: (data) => {
-      queryClient.setQueryData(["/api/unloading/sessions", activeSessionId], { session: data.session, items: data.items, allComplete: data.allComplete });
+      queryClient.setQueryData(["/api/unloading/sessions", activeSessionId], {
+        session: data.session, items: data.items, allComplete: data.allComplete,
+        offBatchExtraQty: data.offBatchExtraQty, offBatchExtraPallets: data.offBatchExtraPallets,
+      });
       // setQueryData above only updates the item table's own progress numbers (an instant,
       // no-refetch cache write) — it does NOT touch the separate per-item history query
       // (["/api/unloading/sessions", activeSessionId, "events"], powering each item row's
@@ -777,7 +793,18 @@ export default function Unloading() {
     // fallback for an unmatched scan — instead of a bare barcode defaulting to 1.
     let resolvedProduct: Product | null = null;
     if (!item) {
-      const { known, product } = await resolveProduct(barcode);
+      // If this lookup throws (a network blip), the lock set above must still be released —
+      // otherwise every later scan is silently ignored until the page is reloaded.
+      let resolved: Awaited<ReturnType<typeof resolveProduct>>;
+      try {
+        resolved = await resolveProduct(barcode);
+      } catch {
+        scanLockRef.current = false;
+        lastScanRef.current = null;
+        toast({ title: "Scan failed", description: "Couldn't look up that barcode — please scan it again.", variant: "destructive" });
+        return;
+      }
+      const { known, product } = resolved;
       if (!known) {
         scanLockRef.current = false;
         setItemBarcode("");
@@ -802,16 +829,27 @@ export default function Unloading() {
     setItemBarcode("");
   }
 
+  // The gun and camera listeners are long-lived, so they call the scan handler through this ref —
+  // always the latest one. Calling handleItemBarcode directly froze it at the render the listener
+  // was attached in: the batch's items still loading, an STV picked afterwards, updated remaining
+  // quantities — none of it was ever seen, which is how scanning could "stop" until the page was
+  // reopened. Same pattern as Scan Order's handleOsBarcodeRef.
+  const handleItemBarcodeRef = useRef(handleItemBarcode);
+  useEffect(() => { handleItemBarcodeRef.current = handleItemBarcode; });
+  const detailReady = !!detail;
+
+  // Also re-run when the confirm pop-up closes (pending -> null): the pop-up takes focus while open,
+  // and without this the next gun scan had no focused box to land in.
   useEffect(() => {
-    if (view === "scan") setTimeout(() => barcodeRef.current?.focus(), 50);
-  }, [view, activeSessionId]);
+    if (view === "scan" && !pending) setTimeout(() => barcodeRef.current?.focus(), 50);
+  }, [view, activeSessionId, pending]);
 
   // Camera scanner — active only while the Camera tab is selected.
   useEffect(() => {
-    if (view !== "scan" || itemScanMode !== "camera" || !detail || locked) { stopItemCamera(); return; }
+    if (view !== "scan" || itemScanMode !== "camera" || !detailReady || locked) { stopItemCamera(); return; }
     let cancelled = false;
     const scanner = new BarcodeScanner({
-      onDetected: (result: Result) => { const code = result.getText(); if (code && !cancelled) handleItemBarcode(code); },
+      onDetected: (result: Result) => { const code = result.getText(); if (code && !cancelled) handleItemBarcodeRef.current(code); },
       onError: (err: Error) => { if (!cancelled) { setItemCameraError(err.message); setItemScanMode("manual"); } },
     });
     itemScannerRef.current = scanner;
@@ -829,12 +867,16 @@ export default function Unloading() {
     })();
     return () => { cancelled = true; scanner.stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, itemScanMode, activeSessionId, locked]);
+  }, [view, itemScanMode, activeSessionId, locked, detailReady]);
 
   // Barcode gun — a fast burst of keystrokes ending in a pause is treated as a scan, same
-  // MAX_GAP_MS/BURST_END_MS heuristic as Order Scan/Loading.
+  // MAX_GAP_MS/BURST_END_MS heuristic as Order Scan/Loading. Attached for the whole time the scan
+  // screen is open: it used to attach only if the batch had already loaded at that moment, and
+  // never re-attached once it had, so a freshly opened batch could miss the gun entirely whenever
+  // focus wasn't on the barcode box. Whether a scan can go through right now (batch loaded, not
+  // locked, no pop-up open) is checked by the handler itself, with current values.
   useEffect(() => {
-    if (view !== "scan" || !detail || locked) return;
+    if (view !== "scan") return;
     const MAX_GAP_MS = 50;
     const BURST_END_MS = 80;
     let buffer = "";
@@ -851,14 +893,13 @@ export default function Unloading() {
       buffer += e.key;
       if (flushTimer) clearTimeout(flushTimer);
       flushTimer = setTimeout(() => {
-        if (buffer.length >= 3) { setItemScanMode("manual"); barcodeRef.current?.focus(); handleItemBarcode(buffer); }
+        if (buffer.length >= 3) { setItemScanMode("manual"); barcodeRef.current?.focus(); handleItemBarcodeRef.current(buffer); }
         buffer = "";
       }, BURST_END_MS);
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => { window.removeEventListener("keydown", handleKeyDown, true); if (flushTimer) clearTimeout(flushTimer); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, activeSessionId, locked]);
+  }, [view]);
 
   const voidMutation = useMutation({
     mutationFn: (eventId: number) => apiRequest("POST", `/api/unloading/events/${eventId}/void`, { reason: "Voided from Unloading" }),
@@ -1421,7 +1462,7 @@ export default function Unloading() {
                       {s.partsCount > 1 && (
                         <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex}/{s.partsCount}</span>
                       )}
-                      <span className="text-xs text-gray-600"><span className="text-gray-400">Received </span><span className="font-bold tabular-nums">{s.scannedQty}/{s.expectedQty}</span></span>
+                      <span className="text-xs text-gray-600"><span className="text-gray-400">Received </span><span className="font-bold tabular-nums">{s.scannedQty}/{s.expectedQty}</span>{s.extraQty > 0 && <span className="text-amber-600"> (incl. {s.extraQty} extra)</span>}</span>
                       {s.scanCompletedAt && (
                         <span className="text-xs text-gray-400">Completed {new Date(s.scanCompletedAt).toLocaleString()}</span>
                       )}
@@ -1510,7 +1551,10 @@ export default function Unloading() {
                               )}
                             </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">{statusBadge(s.scanStatus, s.canActivate)}</td>
-                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">{s.scannedQty} / {s.expectedQty}</td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
+                              {s.scannedQty} / {s.expectedQty}
+                              {s.extraQty > 0 && <span className="block text-[11px] text-amber-600">incl. {s.extraQty} extra</span>}
+                            </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
                               {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
                             </td>
@@ -1725,9 +1769,9 @@ export default function Unloading() {
                     </div>
 
                     <div className="space-y-1">
-                      {/* itemPct, not received/expected raw: received here already includes extras
-                          (it sums item.scanned, which can exceed expected), so an over-received
-                          batch would otherwise push the bar past its own track. */}
+                      {/* itemPct, not received/expected raw: received here includes extras (over-scans
+                          and products not on the file), so an over-received batch would otherwise
+                          push the bar past its own track. */}
                       <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
                         <div
                           className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"

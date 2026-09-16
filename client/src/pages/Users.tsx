@@ -202,7 +202,8 @@ function MultiSelectField({
       <PopoverContent className="w-72 p-0" style={{ maxHeight: "none" }}>
         <div
           className="overflow-y-auto overscroll-contain"
-          style={{ maxHeight: "260px" }}
+          // Capped to the room Radix measures on the side it opens, so the list never runs off screen.
+          style={{ maxHeight: "min(260px, calc(var(--radix-popover-content-available-height, 260px) - 8px))" }}
           onWheel={(e) => e.stopPropagation()}
           onTouchMove={(e) => e.stopPropagation()}
         >

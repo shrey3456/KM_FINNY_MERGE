@@ -909,8 +909,8 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
         [qty, barcode, slip.plant],
       );
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-         VALUES ($1,$2,$3,$4,$5,'dispatch',$6,$7)`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+         VALUES ($1,$2,$3,$4,$5,'dispatch',$6,$7,'loading')`,
         [barcode, product?.id ?? null, slip.plant, -qty, extraQty, `Loaded onto vehicle for order ${slip.orderNumber}`, userCode ?? null],
       );
       await client.query('COMMIT');
@@ -1029,8 +1029,8 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('load
 
       await client.query(
         `INSERT INTO loading_scan_events
-           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, plant, stv, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13)`,
         [
           slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
           delta > 0 ? pallets : -pallets, delta > 0 ? looseQty : -looseQty, delta, isExtra, slip.plant, null, userCode ?? null, userName ?? null,
@@ -1043,8 +1043,8 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('load
         [delta, barcode, slip.plant],
       );
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6)`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
         [
           barcode, product?.id ?? null, slip.plant, -delta,
           `Loaded quantity manually ${delta > 0 ? 'increased' : 'decreased'} by ${Math.abs(delta)} for order ${slip.orderNumber}`,
@@ -1197,8 +1197,8 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
           [qty, event.barcode, event.plant],
         );
         await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6)`,
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
           [event.barcode, product?.id ?? null, event.plant, qty, `Loading slip ${slip.orderNumber} reset — deleted from landing table`, userCode ?? null],
         );
       }
@@ -1284,8 +1284,8 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
         [qty, event.barcode, event.plant],
       );
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6)`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
         [event.barcode, product?.id ?? null, event.plant, qty, `Voided load scan for order ${event.order_number}`, userCode ?? null],
       );
     }
@@ -1421,8 +1421,8 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
       [newQty, event.barcode, event.plant],
     );
     await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'loading')`,
       [event.barcode, product?.id ?? null, event.plant, -newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, userCode ?? null],
     );
 

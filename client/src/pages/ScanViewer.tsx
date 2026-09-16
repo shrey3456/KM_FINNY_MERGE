@@ -2779,7 +2779,7 @@ function UnloadingViewerSection({
     if (active?.orderDate && active.orderDate !== uDate) setUDate(active.orderDate);
   }, [uActiveQuery.data]);
 
-  const uSessionDetailQuery = useQuery<{ session: any; items: UnloadingProgressItem[]; allComplete: boolean }>({
+  const uSessionDetailQuery = useQuery<{ session: any; items: UnloadingProgressItem[]; allComplete: boolean; offBatchExtraQty?: number; offBatchExtraPallets?: number }>({
     queryKey: ["/api/unloading/sessions", "scan-viewer-detail", uSessionId],
     queryFn: () => apiRequest("GET", `/api/unloading/sessions/${uSessionId}`).then((r) => r.json()),
     enabled: uSessionId != null,
@@ -2808,8 +2808,15 @@ function UnloadingViewerSection({
         acc.pltExtra += extra / ipp;
       }
     }
+    // Products scanned on this vehicle that aren't on the batch file — same as Unloading's own totals.
+    const offBatchQty = uSessionDetailQuery.data?.offBatchExtraQty ?? 0;
+    const offBatchPlt = uSessionDetailQuery.data?.offBatchExtraPallets ?? 0;
+    acc.received += offBatchQty;
+    acc.extra += offBatchQty;
+    acc.pltReceived += offBatchPlt;
+    acc.pltExtra += offBatchPlt;
     return acc;
-  }, [uItems]);
+  }, [uItems, uSessionDetailQuery.data]);
   // Capped per item — Σ min(scanned, expected) / Σ expected — so an over-scanned (Extra) item can't
   // push the batch's % up. Previously this summed raw scanned qty, which let extras inflate it.
   const uItemReceivedCapped = uItems.reduce((sum, i) => sum + Math.min(i.scanned, i.expected), 0);

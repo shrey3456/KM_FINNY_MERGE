@@ -1420,9 +1420,12 @@ async function writeScanEvents(
     userCode: string | null;
     userName: string | null;
     forceAllExtra: boolean;
+    // A qty edit rather than a fresh scan — marks the corrected event(s) as "Scan Adjust".
+    isAdjust?: boolean;
   },
 ): Promise<{ events: any[]; updatedItem: any; orderQty: number; extraQty: number }> {
   const { sessionId, scanItem, totalQty, itemsPerPallet, barcode, resolvedItemName, stv, userCode, userName, forceAllExtra } = params;
+  const isAdjust = params.isAdjust === true;
   const splitPallets = (q: number) => ({
     pallets: itemsPerPallet > 0 ? Math.floor(q / itemsPerPallet) : q,
     looseQty: itemsPerPallet > 0 ? q % itemsPerPallet : 0,
@@ -1442,11 +1445,11 @@ async function writeScanEvents(
     const orderEventResult = await client.query(
       `INSERT INTO order_scan_events
          (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-          items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING *`,
       [sessionId, scanItem.id, barcode, resolvedItemName,
-       part.pallets, part.looseQty, orderQty, itemsPerPallet, false,
+       part.pallets, part.looseQty, orderQty, itemsPerPallet, false, isAdjust,
        stv ?? null, userCode, userName],
     );
     events.push(orderEventResult.rows[0]);
@@ -1476,11 +1479,11 @@ async function writeScanEvents(
     const extraEventResult = await client.query(
       `INSERT INTO order_scan_events
          (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-          items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING *`,
       [sessionId, scanItem?.id ?? null, barcode, resolvedItemName,
-       part.pallets, part.looseQty, extraQty, itemsPerPallet, true,
+       part.pallets, part.looseQty, extraQty, itemsPerPallet, true, isAdjust,
        stv ?? null, userCode, userName],
     );
     events.push(extraEventResult.rows[0]);
@@ -2264,6 +2267,7 @@ router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res
       userCode: event.scanned_by_code,
       userName: event.scanned_by_name,
       forceAllExtra: false,
+      isAdjust: true,
     });
 
     if (plant) {

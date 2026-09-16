@@ -128,6 +128,8 @@ type LoadHistoryEvent = {
   id: number; barcode: string | null; itemName: string | null; totalQty: number;
   isExtra: boolean; voided: boolean | null; scannedByName: string | null; scannedAt: string;
   stv: string | null;
+  // Written by the Items table's +/- buttons, not a scan — shown as "Loading Adjust".
+  isAdjust?: boolean;
 };
 // One period of ownership in the full "who held this load, and how much they loaded" chain —
 // see buildOwnerTimeline in server/routes/loading.ts. Display/reporting only, never used for
@@ -494,6 +496,27 @@ export default function LoadOperation() {
   const [slip, setSlip] = useState<ProformaSlip | null>(null);
   const [items, setItems] = useState<ProformaItem[]>([]);
   const [allComplete, setAllComplete] = useState(false);
+  // Completing a load is confirmed first and announced afterwards, the same way Unloading does it.
+  // A toast was too easy to miss on a busy scanning screen, and the +/- path showed nothing at all.
+  const [confirmCompleteOpen, setConfirmCompleteOpen] = useState(false);
+  const [completedInfo, setCompletedInfo] = useState<
+    { orderNumber: string; partyName: string; vehicleNumber: string | null; loadedQty: number; expectedQty: number; auto: boolean } | null
+  >(null);
+  // Which order the popup has already been shown for — the "everything is loaded" state stays true
+  // for every later scan/refresh on the same order, so without this it would reopen each time.
+  const completeShownForRef = useRef<string | null>(null);
+  function announceLoadComplete(nextSlip: ProformaSlip, nextItems: ProformaItem[], auto: boolean) {
+    if (completeShownForRef.current === nextSlip.orderNumber) return;
+    completeShownForRef.current = nextSlip.orderNumber;
+    setCompletedInfo({
+      orderNumber: nextSlip.orderNumber,
+      partyName: nextSlip.partyName,
+      vehicleNumber: nextSlip.vehicleNumber ?? null,
+      loadedQty: nextItems.reduce((sum, i) => sum + (i.loaded ?? 0), 0),
+      expectedQty: nextItems.reduce((sum, i) => sum + (i.expected ?? 0), 0),
+      auto,
+    });
+  }
   // Volume actually scanned onto the vehicle so far (server-computed in withProgress(), server/
   // routes/loading.ts) — distinct from slip.totalVolume (the order's full planned volume) and
   // slip.vehicleVolume (the vehicle's capacity).
@@ -649,6 +672,7 @@ export default function LoadOperation() {
   const [pendingStv, setPendingStv] = useState<string>("");
 
   function commitSlip(data: SlipLookup) {
+    if (completeShownForRef.current !== data.slip.orderNumber) completeShownForRef.current = null;
     setSlip(data.slip);
     setItems(data.items);
     setAllComplete(data.allComplete);
@@ -740,6 +764,9 @@ export default function LoadOperation() {
     onSuccess: (data) => {
       commitSlip(data);
       setPendingStv("");
+      // Straight into the new load's own view — Back still returns to the landing list. Without
+      // this, starting a load from the list left the user sitting on the list they started from.
+      setView("create");
       toast({ title: "Load operation created", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
@@ -777,6 +804,16 @@ export default function LoadOperation() {
     setView("list");
     setTimeout(() => orderInputRef.current?.focus(), 50);
   }
+
+  // Loaded / expected / still-short for this order, used by the confirm + complete dialogs.
+  const completeTotals = items.reduce(
+    (acc, i) => ({
+      expected: acc.expected + (i.expected ?? 0),
+      loaded: acc.loaded + (i.loaded ?? 0),
+      remaining: acc.remaining + (i.remaining ?? 0),
+    }),
+    { expected: 0, loaded: 0, remaining: 0 },
+  );
 
   function backToList() {
     resetToSearch();
@@ -1175,6 +1212,11 @@ export default function LoadOperation() {
       setAllComplete(data.allComplete);
       setLoadedVolume(data.loadedVolume);
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", data.slip.orderNumber] });
+      // A +/- correction can finish the load just as a scan can — same popup, same refresh.
+      if (data.allComplete && !slip?.loadingCompletedAt) {
+        announceLoadComplete(data.slip, data.items, true);
+        queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+      }
       toast({
         title: adjustTarget?.direction === "add" ? "Quantity added" : "Quantity removed",
         description: `${adjustTarget?.item.itemName ?? adjustTarget?.item.barcode} · ${adjustTarget?.direction === "add" ? "+" : "−"}${adjustQty}`,
@@ -1292,7 +1334,7 @@ export default function LoadOperation() {
       setAllComplete(data.allComplete);
       setLoadedVolume(data.loadedVolume);
       if (data.allComplete && !slip?.loadingCompletedAt) {
-        toast({ title: "Load complete", description: "Every item has been fully loaded — marked complete automatically." });
+        announceLoadComplete(data.slip, data.items, true);
         // The server auto-set loadingCompletedAt as a side effect of this scan — the landing
         // list's badge reads that column, so it needs a refresh too, not just this order's own
         // view, or it keeps showing "In Progress" until the user happens to navigate back to it.
@@ -1325,7 +1367,8 @@ export default function LoadOperation() {
       setItems(data.items);
       setAllComplete(data.allComplete);
       setLoadedVolume(data.loadedVolume);
-      toast({ title: "Load marked complete" });
+      setConfirmCompleteOpen(false);
+      announceLoadComplete(data.slip, data.items, false);
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
     onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
@@ -1808,7 +1851,7 @@ export default function LoadOperation() {
       accessor: (ev) => ev.totalQty,
       render: (ev) => (
         <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
-          {ev.isExtra ? "+" : ""}{ev.totalQty}
+          {(ev.isExtra || ev.isAdjust) && ev.totalQty > 0 ? "+" : ""}{ev.totalQty}
         </span>
       ),
     },
@@ -1819,10 +1862,12 @@ export default function LoadOperation() {
     },
     {
       id: "status", header: "Status", width: 90, minWidth: 60, totalable: false,
-      accessor: (ev) => (ev.voided ? "Voided" : ev.isExtra ? "Extra" : ""),
+      accessor: (ev) => (ev.voided ? "Voided" : ev.isAdjust ? "Loading Adjust" : ev.isExtra ? "Extra" : ""),
       render: (ev) =>
         ev.voided ? (
           <span className="text-[11px] font-medium text-red-500">Voided</span>
+        ) : ev.isAdjust ? (
+          <span className="whitespace-nowrap text-[11px] font-semibold uppercase text-blue-700">Loading Adjust</span>
         ) : ev.isExtra ? (
           <span className="text-[11px] font-semibold uppercase text-amber-700">Extra</span>
         ) : (
@@ -1925,12 +1970,14 @@ export default function LoadOperation() {
                   <TableCell className="text-muted-foreground">{ev.scannedByName ?? "-"}</TableCell>
                   <TableCell className="text-right">
                     <Badge className={ev.isExtra ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-purple-100 text-purple-800 hover:bg-purple-200"}>
-                      {ev.isExtra ? "+" : ""}{ev.totalQty}
+                      {(ev.isExtra || ev.isAdjust) && ev.totalQty > 0 ? "+" : ""}{ev.totalQty}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-xs">
                     {ev.voided ? (
                       <span className="font-medium text-red-500">Voided</span>
+                    ) : ev.isAdjust ? (
+                      <span className="whitespace-nowrap font-semibold uppercase text-blue-700">Loading Adjust</span>
                     ) : ev.isExtra ? (
                       <span className="font-semibold uppercase text-amber-700">Extra</span>
                     ) : (
@@ -2933,7 +2980,7 @@ export default function LoadOperation() {
                         size="sm"
                         className="h-7 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
                         disabled={completeMutation.isPending}
-                        onClick={() => completeMutation.mutate()}
+                        onClick={() => setConfirmCompleteOpen(true)}
                       >
                         {completeMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                         Complete
@@ -4012,6 +4059,87 @@ export default function LoadOperation() {
 
       {/* Void confirmation — a single scan event, same rule/effect as Scan History's own Void:
           stock reversed, kept in history marked Voided (never deleted). */}
+      {/* Confirm before completing — the same "say what is still short, then let them decide"
+          dialog Unloading uses, instead of completing straight from the button click. */}
+      <Dialog open={confirmCompleteOpen} onOpenChange={(o) => { if (!o) setConfirmCompleteOpen(false); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Mark this load complete?</DialogTitle>
+            <DialogDescription>
+              Once complete, scanning is locked for this order until it's reopened.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 text-sm text-gray-600">
+            <p>
+              <span className="font-semibold text-gray-900">#{slip?.orderNumber}</span>
+              {slip?.partyName ? ` — ${slip.partyName}` : ""}
+              {slip?.vehicleNumber ? ` · ${slip.vehicleNumber}` : ""}
+            </p>
+            <p>
+              <span className="font-bold tabular-nums text-gray-900">{completeTotals.loaded.toLocaleString()}</span>
+              {" of "}
+              <span className="font-bold tabular-nums text-gray-900">{completeTotals.expected.toLocaleString()}</span>
+              {" loaded."}
+            </p>
+            {completeTotals.remaining > 0 && (
+              <p className="rounded-md bg-amber-50 px-3 py-2 text-amber-800">
+                <AlertTriangle className="mr-1.5 inline h-4 w-4" />
+                {completeTotals.remaining.toLocaleString()} unit(s) are still not loaded. Completing now leaves them short.
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmCompleteOpen(false)} disabled={completeMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-emerald-600 text-white hover:bg-emerald-700"
+              disabled={completeMutation.isPending}
+              onClick={() => completeMutation.mutate()}
+            >
+              {completeMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Complete Load
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Shown once per order, whether the load finished by itself (last scan / +/-) or was
+          completed by hand. */}
+      <Dialog open={!!completedInfo} onOpenChange={(o) => { if (!o) setCompletedInfo(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-emerald-700">
+              <CheckCircle2 className="h-5 w-5" /> Load complete
+            </DialogTitle>
+            <DialogDescription>
+              {completedInfo?.auto
+                ? "Every item has been fully loaded — this order was marked complete automatically."
+                : "This order has been marked complete."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1 text-sm text-gray-600">
+            <p>
+              <span className="font-semibold text-gray-900">#{completedInfo?.orderNumber}</span>
+              {completedInfo?.partyName ? ` — ${completedInfo.partyName}` : ""}
+            </p>
+            {completedInfo?.vehicleNumber && <p>Vehicle {completedInfo.vehicleNumber}</p>}
+            <p>
+              <span className="font-bold tabular-nums text-gray-900">{(completedInfo?.loadedQty ?? 0).toLocaleString()}</span>
+              {" of "}
+              <span className="font-bold tabular-nums text-gray-900">{(completedInfo?.expectedQty ?? 0).toLocaleString()}</span>
+              {" units loaded."}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCompletedInfo(null)}>Stay on this order</Button>
+            <Button className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90" onClick={() => { setCompletedInfo(null); backToList(); }}>
+              Back to list
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
         <DialogContent className={`max-w-sm`}>
           <DialogHeader>

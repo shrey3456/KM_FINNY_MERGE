@@ -6,6 +6,7 @@ import { AlertCircle, Download, CheckCircle, XCircle, RefreshCw, Shield } from "
 import { apiRequest } from "@/lib/queryClient";
 import { Progress } from "@/components/ui/progress";
 import { useUser } from "@/hooks/use-user";
+import { format } from "date-fns";
 import { getPermissionsForRole } from "@/lib/permissions";
 
 interface ProformaSlipAPIImportProps {
@@ -20,9 +21,10 @@ export function ProformaSlipAPIImport({ onImportSuccess }: ProformaSlipAPIImport
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [importCount, setImportCount] = useState<number>(0);
   const [progress, setProgress] = useState<number>(0);
+  // Today's LOCAL date — toISOString() is UTC, which in India is still yesterday until 5:30 am.
   const [dateRange, setDateRange] = useState({
-    startDate: new Date().toISOString().split('T')[0],
-    endDate: new Date().toISOString().split('T')[0]
+    startDate: format(new Date(), 'yyyy-MM-dd'),
+    endDate: format(new Date(), 'yyyy-MM-dd')
   });
 
   // Check if user has admin or super-admin role
@@ -67,7 +69,7 @@ export function ProformaSlipAPIImport({ onImportSuccess }: ProformaSlipAPIImport
   };
 
   const handleRefreshToday = async () => {
-    const today = new Date().toISOString().split('T')[0];
+    const today = format(new Date(), 'yyyy-MM-dd');
     setDateRange({ startDate: today, endDate: today });
     
     // Auto-trigger import for today's data

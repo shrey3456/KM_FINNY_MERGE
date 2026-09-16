@@ -6,10 +6,10 @@ import { requireAdminRole } from '../lib/pageAccess';
 // Overall Stock > per-row Edit/Delete — admin-only actions scoped to ONE (barcode, plant), the
 // surgical counterpart to Settings > Clear Stock (which acts on a whole plant at once). Two
 // actions:
-//   - POST /plant-stock/adjust — sets this item's stock to an admin-typed total. Logs exactly
-//     one stock_movements 'adjust' row for the delta (positive if raised, negative if lowered),
-//     same ledger entry type Opening Stock/Clear Stock's own zero-out already use, so it shows up
-//     as "Adjusted" in Overall Stock's existing arrival-history drill-down with no new UI needed.
+//   - GET /plant-stock/current + POST /plant-stock/adjust — the Adjust dialog. The admin picks a
+//     plant, sees that plant's LIVE stock, and adds / removes / sets it. Logs one stock_movements
+//     'adjust' row tagged source = 'manual', which shows as "Adjusted" in Overall Stock's
+//     arrival-history drill-down and as an "Adjust" entry in Scan History.
 //   - DELETE /plant-stock — permanently removes this barcode+plant's stock AND every trace of it
 //     from receiving (Order Import/Scan Order), Loading dispatch, and Unloading scan history —
 //     mirrors Clear Stock's 'remove' mode, just filtered down to one barcode instead of every
@@ -56,7 +56,8 @@ router.get('/plant-stock/delete-preview', requireAdminRole, async (req: Request,
 
     const stockRow = stockRes.rows[0];
     res.json({
-      currentStock: stockRow ? Number(stockRow.in_stock ?? 0) + Number(stockRow.extra_qty ?? 0) : 0,
+      // in_stock is the physical total — extras are already counted inside it.
+      currentStock: stockRow ? Number(stockRow.in_stock ?? 0) : 0,
       receivingScanEvents: receivingRes.rows[0]?.n ?? 0,
       loadingScanEvents: loadingRes.rows[0]?.n ?? 0,
       unloadingScanEvents: unloadRes.rows[0]?.n ?? 0,
@@ -70,45 +71,110 @@ router.get('/plant-stock/delete-preview', requireAdminRole, async (req: Request,
   }
 });
 
-// POST /api/plant-stock/adjust — body: { barcode, plant, newQty, reason? }
+// GET /api/plant-stock/current?barcode=&plant= — this item's LIVE stock at one plant, straight from
+// product_plant_stock. The Adjust dialog previews against this rather than the Overall Stock row it
+// was opened from: with a date filter on, that row's numbers mean "received in the window", not what
+// is on hand, and on the All/State tabs a row is several plants summed together — previewing
+// against either is what made an intended "+" land as a "−".
+router.get('/plant-stock/current', requireAdminRole, async (req: Request, res: Response) => {
+  const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+  const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+  if (!barcode || !plant) return res.status(400).json({ message: 'barcode and plant are required' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT in_stock, extra_qty FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2)`,
+      [barcode, plant],
+    );
+    const inStock = Number(rows[0]?.in_stock ?? 0);
+    const extraQty = Number(rows[0]?.extra_qty ?? 0);
+    // in_stock IS the physical total; extra_qty only says how many of those boxes were extra.
+    res.json({ inStock, extraQty, total: inStock });
+  } catch (error) {
+    console.error('Error fetching current plant stock:', error);
+    res.status(500).json({ message: 'Failed to fetch current stock' });
+  }
+});
+
+// POST /api/plant-stock/adjust — body: { barcode, plant, mode: 'add' | 'remove' | 'set', qty,
+// expectedCurrentQty?, reason? }
+//   - add / remove: qty is a positive amount to add or take away; set: qty is the new total.
+//   - expectedCurrentQty is the live total the dialog showed. If stock moved since (someone scanned
+//     meanwhile), the request is refused with 409 instead of silently applying a different change
+//     than the one previewed.
+//   - The on-hand total is in_stock ALONE — extras are already counted inside it, and extra_qty
+//     only says how many of those boxes were extra (see applyLiveScanStock in
+//     server/lib/orderGroupReport.ts). Adding the two together overstated the stock of any item with
+//     extras, which is what turned an intended "+" into a "−".
 router.post('/plant-stock/adjust', requireAdminRole, async (req: Request, res: Response) => {
   const barcode = typeof req.body?.barcode === 'string' ? req.body.barcode.trim() : '';
-  const plant = typeof req.body?.plant === 'string' ? req.body.plant.trim() : '';
-  const newQty = Math.round(Number(req.body?.newQty));
+  const requestedPlant = typeof req.body?.plant === 'string' ? req.body.plant.trim() : '';
+  const mode: 'add' | 'remove' | 'set' = req.body?.mode === 'add' || req.body?.mode === 'remove' ? req.body.mode : 'set';
+  const qty = Math.round(Number(req.body?.qty));
+  const rawExpected = req.body?.expectedCurrentQty;
+  const expectedCurrentQty = rawExpected === undefined || rawExpected === null || rawExpected === '' ? null : Math.round(Number(rawExpected));
   const reason = (typeof req.body?.reason === 'string' ? req.body.reason.trim() : '') || 'Manual adjustment (Overall Stock)';
-  if (!barcode || !plant) return res.status(400).json({ message: 'barcode and plant are required' });
-  if (!Number.isFinite(newQty) || newQty < 0) return res.status(400).json({ message: 'newQty must be a non-negative number' });
+  if (!barcode || !requestedPlant) return res.status(400).json({ message: 'barcode and plant are required' });
+  if (!Number.isFinite(qty) || qty < 0) return res.status(400).json({ message: 'Quantity must be a non-negative number' });
+  if (mode !== 'set' && qty === 0) return res.status(400).json({ message: 'Enter a quantity greater than 0' });
   const { userCode, userName } = actor(req);
+
+  const { rows: plantRows } = await pool.query(`SELECT name FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`, [requestedPlant]);
+  if (!plantRows[0]) return res.status(400).json({ message: `Unknown plant "${requestedPlant}"` });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT id, product_id, in_stock, extra_qty FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
-      [barcode, plant],
+      `SELECT id, product_id, plant, in_stock, extra_qty FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
+      [barcode, requestedPlant],
     );
     const existing = rows[0];
-    const currentTotal = existing ? Number(existing.in_stock ?? 0) + Number(existing.extra_qty ?? 0) : 0;
-    const delta = newQty - currentTotal;
+    // Reuse the stock row's own plant spelling when one exists, so a new ledger row can never
+    // split one plant into two differently-cased keys.
+    const plant: string = existing?.plant ?? plantRows[0].name;
+    const inStock = Number(existing?.in_stock ?? 0);
+    const extraQty = Number(existing?.extra_qty ?? 0);
+    const currentTotal = inStock;
+
+    if (expectedCurrentQty !== null && Number.isFinite(expectedCurrentQty) && expectedCurrentQty !== currentTotal) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        message: `Stock for this item at ${plant} is now ${currentTotal} (it was ${expectedCurrentQty} when you opened this). Check the new number and try again.`,
+        currentTotal,
+      });
+    }
+
+    const newTotal = mode === 'add' ? currentTotal + qty : mode === 'remove' ? currentTotal - qty : qty;
+    if (newTotal < 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: `Can't remove ${qty} — only ${currentTotal} in stock at ${plant}.` });
+    }
+    const delta = newTotal - currentTotal;
+
+    // The whole change lands on in_stock. extra_qty is only trimmed when fewer boxes remain than
+    // were marked extra — the extra portion can never be larger than the total.
+    const inStockDelta = delta;
+    const extraDelta = Math.min(0, newTotal - extraQty);
 
     if (delta !== 0) {
       const product = await storage.getProductByBarcode(barcode, plant);
       const productId = existing?.product_id ?? product?.id ?? null;
       if (existing) {
         await client.query(
-          `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW() WHERE id = $2`,
-          [delta, existing.id],
+          `UPDATE product_plant_stock SET in_stock = in_stock + $1, extra_qty = extra_qty + $2, updated_at = NOW() WHERE id = $3`,
+          [inStockDelta, extraDelta, existing.id],
         );
       } else {
+        // No row yet means currentTotal is 0, so only an increase can reach here.
         await client.query(
           `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty) VALUES ($1,$2,$3,$4,0)`,
-          [barcode, productId, plant, newQty],
+          [barcode, productId, plant, inStockDelta],
         );
       }
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6)`,
-        [barcode, productId, plant, delta, reason, userCode ?? null],
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+         VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'manual')`,
+        [barcode, productId, plant, inStockDelta, extraDelta, reason, userCode ?? null],
       );
       // Recompute the legacy cross-plant mirror from the live per-plant table.
       await client.query(
@@ -126,15 +192,15 @@ router.post('/plant-stock/adjust', requireAdminRole, async (req: Request, res: R
         action: 'update',
         entityType: 'plant_stock_item',
         entityId: `${barcode}@${plant}`,
-        details: `Adjusted ${barcode} at ${plant} by ${userName ?? userCode}: ${currentTotal} -> ${newQty} (${delta >= 0 ? '+' : ''}${delta}). Reason: ${reason}`,
+        details: `Adjusted ${barcode} at ${plant} by ${userName ?? userCode} (${mode}): ${currentTotal} -> ${newTotal} (${delta >= 0 ? '+' : ''}${delta}). Reason: ${reason}`,
         userCode,
         userName,
       });
     }
 
-    res.json({ success: true, previousQty: currentTotal, newQty, delta });
+    res.json({ success: true, previousQty: currentTotal, newQty: newTotal, delta, plant });
   } catch (error) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     console.error('Error adjusting plant stock:', error);
     res.status(500).json({ message: 'Failed to adjust stock' });
   } finally {

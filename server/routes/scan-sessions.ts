@@ -793,6 +793,12 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isExchange",
       false AS "isDispatch",
       false AS "isUnload",
+      -- Set by a qty edit, not a fresh scan ("Scan Adjust").
+      COALESCE(ose.is_adjust, false) AS "isAdjust",
+      -- Which page wrote the row. The flags above say what KIND of entry it is; this says where it
+      -- came from, and the two together make the Type label ("Scan Extra", "Load Adjust", …).
+      -- Needed on its own because a scan row and a stock-ledger row can carry identical flags.
+      'scan' AS "sourceKind",
       CASE WHEN ose.item_name LIKE 'Empty Box: %' THEN SUBSTRING(ose.item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
       ose.stv,
       ose.scanned_by_code  AS "scannedByCode",
@@ -832,6 +838,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       true AS "isExchange",
       false AS "isDispatch",
       false AS "isUnload",
+      false AS "isAdjust",
+      'stock' AS "sourceKind",
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
@@ -870,6 +878,9 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isExchange",
       true AS "isDispatch",
       false AS "isUnload",
+      -- The Loading Items table's +/- corrections ("Load Adjust"); still isDispatch.
+      COALESCE(lse.is_adjust, false) AS "isAdjust",
+      'loading' AS "sourceKind",
       NULL::text AS "emptyBoxNote",
       lse.stv,
       lse.scanned_by_code   AS "scannedByCode",
@@ -903,6 +914,9 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isExchange",
       false AS "isDispatch",
       true AS "isUnload",
+      -- Set by a qty edit, not a fresh scan ("Unload Adjust").
+      COALESCE(use.is_adjust, false) AS "isAdjust",
+      'unloading' AS "sourceKind",
       NULL::text AS "emptyBoxNote",
       use.stv,
       use.scanned_by_code   AS "scannedByCode",
@@ -917,6 +931,55 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       use.plant AS "plant"
     FROM unload_scan_events use
     JOIN unload_import_sessions uis ON uis.id = use.session_id
+
+    UNION ALL
+
+    -- Stock-level corrections that belong to no scanning page: Overall Stock's Adjust dialog
+    -- (tagged source = 'manual' by plant-stock-admin.ts), plus older or custom-worded adjustments
+    -- that never got that tag, and Clear Stock. Matching on the tag alone hid every adjustment
+    -- saved with the user's own reason text. Loading/Unloading rollbacks are still excluded (they
+    -- carry their own source and already appear as their own events), and so are Order Scan's
+    -- CSV-edit adjusts, which belong to the session they were made in. Same rule as Overall
+    -- Stock's own Adjust tab, so the two pages agree. totalQty is the signed physical change
+    -- (+added / −removed); extras are already inside sm.qty. id offset 5000000000+ keeps it out of
+    -- every other branch's id space.
+    SELECT
+      (5000000000 + sm.id) AS id,
+      sm.barcode,
+      COALESCE(
+        (SELECT p.name FROM products p WHERE p.id = sm.product_id),
+        (SELECT p.name FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1)
+      ) AS "itemName",
+      NULL::integer AS pallets,
+      sm.qty AS "totalQty",
+      NULL::integer AS "itemsPerPallet",
+      NULL::integer AS "looseQty",
+      false AS "isExtra",
+      false AS "isEmptyBox",
+      false AS "isExchange",
+      false AS "isDispatch",
+      false AS "isUnload",
+      true AS "isAdjust",
+      'stock' AS "sourceKind",
+      NULL::text AS "emptyBoxNote",
+      NULL::text AS stv,
+      sm.created_by_code AS "scannedByCode",
+      (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "scannedByName",
+      sm.created_at AS "scannedAt",
+      false AS voided,
+      NULL::timestamp AS "voidedAt",
+      NULL::text AS "voidReason",
+      COALESCE(
+        (SELECT p.new_sr FROM products p WHERE p.id = sm.product_id),
+        (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1)
+      ) AS "srNo",
+      sm.reason AS "orderName",
+      NULL::text AS "orderDate",
+      sm.plant AS "plant"
+    FROM stock_movements sm
+    WHERE sm.type = 'adjust'
+      AND (sm.source = 'manual' OR (sm.source IS NULL AND NOT EXISTS (
+            SELECT 1 FROM order_import_sessions ois WHERE ois.id = sm.session_id)))
   ) combined
 `;
 
@@ -1037,7 +1100,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const fromParam    = typeof req.query.from    === 'string' && req.query.from.trim()    ? req.query.from.trim()    : null;
     const toParam      = typeof req.query.to      === 'string' && req.query.to.trim()      ? req.query.to.trim()      : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
-    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange'].includes(req.query.type) ? req.query.type : null;
+    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange','adjust'].includes(req.query.type) ? req.query.type : null;
     // Three distinct sections on the Scan History page (client dropdown) — "Scan History"
     // (receiving + exchange corrections, the original page), "Load Event" (Loading's own
     // item-scanning history, server/routes/loading.ts), and "Unload Event" (Unloading's own scan
@@ -1089,10 +1152,13 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // they're never product scans — so 'regular'/'extra' filters must exclude both, and the
     // box/pallet totals below exclude them too (they don't count toward order quantity). A
     // dedicated 'empty'/'exchange' filter shows only that one status.
-    if (typeParam === 'regular')  conditions.push(`"isExtra" = false AND barcode <> 'EMPTY_BOX' AND NOT "isExchange"`);
-    if (typeParam === 'extra')    conditions.push(`"isExtra" = true AND barcode <> 'EMPTY_BOX'`);
+    if (typeParam === 'regular')  conditions.push(`"isExtra" = false AND barcode <> 'EMPTY_BOX' AND NOT "isExchange" AND NOT "isAdjust"`);
+    // Extra excludes corrections for the same reason Regular does — an edited row reads as Adjust.
+
+    if (typeParam === 'extra')    conditions.push(`"isExtra" = true AND barcode <> 'EMPTY_BOX' AND NOT "isAdjust"`);
     if (typeParam === 'empty')    conditions.push(`barcode = 'EMPTY_BOX'`);
     if (typeParam === 'exchange') conditions.push(`"isExchange" = true`);
+    if (typeParam === 'adjust')   conditions.push(`"isAdjust" = true`);
     if (searchParam) {
       params.push(`%${searchParam.toLowerCase()}%`);
       const n = params.length;
@@ -1108,7 +1174,9 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // where can be '' (no conditions at all — e.g. an admin with source=all and no other filter
     // picked), so this can't unconditionally append "AND ..." onto it — that leaves a bare "AND"
     // with no WHERE before it, a SQL syntax error.
-    const summaryWhere = where ? `${where} AND NOT "isExchange"` : `WHERE NOT "isExchange"`;
+    const summaryWhere = where
+      ? `${where} AND "sourceKind" <> 'stock'`
+      : `WHERE "sourceKind" <> 'stock'`;
     const summaryFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${summaryWhere}`;
 
     // Destructuring order must track the array below: data, count, summary, column totals, scanners.
@@ -1147,7 +1215,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
            UNION
            SELECT u.name FROM stock_movements sm
              JOIN users u ON u.user_code = sm.created_by_code
-             WHERE sm.type = 'exchange' AND u.name IS NOT NULL
+             WHERE (sm.type = 'exchange' OR (sm.type = 'adjust' AND sm.source = 'manual')) AND u.name IS NOT NULL
            UNION
            SELECT scanned_by_name AS name FROM loading_scan_events WHERE scanned_by_name IS NOT NULL
          ) s
@@ -1321,49 +1389,96 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         .map((p: any) => String(p.name).toLowerCase());
     }
 
-    // ── Date range → switch data source ──────────────────────────────────────
-    // product_plant_stock holds only CURRENT running totals (no history), so a date filter
-    // can't come from it. stock_movements is the append-only ledger where every scan writes a
-    // dated row, so when a range is given we aggregate that instead. The result deliberately
-    // covers ONLY what was received inside the window — earlier stock is not carried in, so
-    // the numbers mean "received in this period", not "balance as of".
-    //
-    // "Date" here means the ORDER's date (order_import_sessions.order_date — the date picked at
-    // CSV upload), NOT the real-world moment the box was physically scanned. Those two can differ
-    // by days: a CSV dated the 19th may not finish being scanned until the 30th. Every scan-driven
-    // row (receive/adjust) carries session_id, which resolves back to that order's date via the
-    // join below; only manual Product Exchange rows have no session_id, so they fall back to their
-    // own created_at (they aren't tied to any order — revisit later if that needs order-linking too).
+    // ── The stock ledger: Opening → Purchase → Sale → Closing ─────────────────────────────
+    // Every view is ONE running ledger over a period — no longer "current totals" without a date
+    // and "received in the window" with one:
+    //   - No date picked: the period runs from Settings > Stock Tracking Start through today.
+    //   - A single date or a range: exactly that date, or from → to.
+    // Per barcode + plant:
+    //   Opening  = everything BEFORE the period: all earlier purchases minus all earlier sales.
+    //   Purchase = stock in during the period — receiving scans, unloading, and every stock
+    //              correction (voids, CSV edits, manual Adjust, exchanges, opening stock, Clear
+    //              Stock). Extras are already inside it; Extra is only its breakdown.
+    //   Sale     = what Loading actually loaded (loading_scan_events: voids excluded, edits and
+    //              manual +/- already reflected), dated by its PROFORMA SLIP's order date.
+    //   Closing  = Opening + Purchase − Sale. With no date picked it's the live warehouse count.
+    // Loading's own ledger rows (source = 'loading': each load's −qty and its void/edit/reset
+    // corrections) are left out of the purchase side — Sale already accounts for every one, so
+    // counting them here too would pull loaded stock out of Purchase instead of showing it as Sale.
+    // A purchase-side row is dated by its ORDER (the date picked at CSV upload): the receiving CSV's
+    // session, or for source = 'unloading' the unloading batch's — the two session tables number
+    // independently, so each is joined to its own. Rows tied to no order (manual Adjust, exchange,
+    // opening stock, Clear Stock) use the day they were made.
     const from = typeof req.query.from === 'string' ? req.query.from.trim() : '';
     const to = typeof req.query.to === 'string' ? req.query.to.trim() : '';
     const extrasOnly = req.query.extrasOnly === 'true' || req.query.extrasOnly === '1';
     const sort = typeof req.query.sort === 'string' ? req.query.sort.trim() : '';
     const dateMode = !!(from || to);
 
-    const params: any[] = [];
-    const conds: string[] = [];
+    // Settings > Stock Tracking Start — where the default (no date picked) period begins; anything
+    // earlier is still counted, as the Opening.
+    const { rows: salesSettingsRows } = await pool.query(
+      `SELECT sales_tracking_start_date AS "salesTrackingStartDate" FROM sales_settings ORDER BY id LIMIT 1`,
+    );
+    const SALES_TRACKING_START = salesSettingsRows[0]?.salesTrackingStartDate ?? '2026-08-01';
+    const periodStart = from || SALES_TRACKING_START;
+    const periodEnd = to || null; // null = open-ended, through today
+    // Set only when exactly one date is in play — the "(date)" shown in the tile labels.
+    const singleDate: string | null = from && (!to || to === from) ? from : null;
 
-    // Date params must be pushed FIRST: they appear earlier in the final SQL text (inside the
-    // subquery) than the plant/search conditions, and pg placeholders are positional.
-    let sourceSql = 'product_plant_stock';
-    if (dateMode) {
-      const dateConds: string[] = [];
-      if (from) { params.push(from); dateConds.push(`COALESCE(ois.order_date::date, sm.created_at::date) >= $${params.length}::date`); }
-      if (to)   { params.push(to);   dateConds.push(`COALESCE(ois.order_date::date, sm.created_at::date) <= $${params.length}::date`); }
-      sourceSql = `(
-        SELECT sm.barcode,
-               sm.plant,
-               SUM(sm.qty)::int       AS in_stock,
-               SUM(sm.extra_qty)::int AS extra_qty,
-               MAX(sm.created_at)     AS updated_at,
-               MAX(sm.product_id)     AS product_id
+    // $1 / $2 are the period bounds, pushed first because they appear first in the SQL text.
+    const params: any[] = [periodStart, periodEnd];
+    // Hide rows with nothing at all to show for this period (no opening, purchase, sale or extra).
+    const conds: string[] = ['(pps.opening_stock <> 0 OR pps.in_stock <> 0 OR pps.sale_qty <> 0 OR pps.extra_qty <> 0)'];
+    const inPeriod = (dateExpr: string) => `(${dateExpr} >= $1::date AND ($2::date IS NULL OR ${dateExpr} <= $2::date))`;
+    const sourceSql = `(
+      WITH purchase_rows AS (
+        SELECT sm.barcode, sm.plant, sm.qty, sm.extra_qty, sm.product_id, sm.created_at,
+               COALESCE(
+                 CASE WHEN sm.source = 'unloading' THEN uis.order_date::date ELSE ois.order_date::date END,
+                 sm.created_at::date
+               ) AS d
         FROM stock_movements sm
-        LEFT JOIN order_import_sessions ois ON ois.id = sm.session_id
-        WHERE ${dateConds.join(' AND ')}
-        GROUP BY sm.barcode, sm.plant
-        HAVING SUM(sm.qty) <> 0 OR SUM(sm.extra_qty) <> 0
-      )`;
-    }
+        LEFT JOIN order_import_sessions ois ON sm.source IS DISTINCT FROM 'unloading' AND ois.id = sm.session_id
+        LEFT JOIN unload_import_sessions uis ON sm.source = 'unloading' AND uis.id = sm.session_id
+        WHERE sm.source IS DISTINCT FROM 'loading' AND sm.type <> 'dispatch'
+      ),
+      purchases AS (
+        SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,
+               COALESCE(SUM(qty) FILTER (WHERE d < $1::date), 0)::int AS opening_purchase,
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')}), 0)::int AS purchase,
+               COALESCE(SUM(extra_qty) FILTER (WHERE ${inPeriod('d')}), 0)::int AS extra,
+               MAX(created_at) FILTER (WHERE qty > 0) AS last_arrived,
+               MAX(product_id) AS product_id
+        FROM purchase_rows
+        GROUP BY 1, 2
+      ),
+      sale_rows AS (
+        SELECT lse.barcode, lse.plant, lse.total_qty,
+               COALESCE(ps.order_date::date, lse.scanned_at::date) AS d
+        FROM loading_scan_events lse
+        LEFT JOIN proforma_slips ps ON ps.order_number = lse.order_number
+        WHERE lse.voided IS NOT TRUE AND lse.barcode IS NOT NULL AND lse.plant IS NOT NULL
+      ),
+      sales AS (
+        SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,
+               COALESCE(SUM(total_qty) FILTER (WHERE d < $1::date), 0)::int AS opening_sale,
+               COALESCE(SUM(total_qty) FILTER (WHERE ${inPeriod('d')}), 0)::int AS sale
+        FROM sale_rows
+        GROUP BY 1, 2
+      )
+      SELECT COALESCE(pu.barcode, sa.barcode) AS barcode,
+             COALESCE(pu.plant, sa.plant) AS plant,
+             COALESCE(pu.purchase, 0) AS in_stock,
+             COALESCE(pu.extra, 0) AS extra_qty,
+             COALESCE(pu.opening_purchase, 0) - COALESCE(sa.opening_sale, 0) AS opening_stock,
+             COALESCE(sa.sale, 0) AS sale_qty,
+             COALESCE(pu.opening_purchase, 0) - COALESCE(sa.opening_sale, 0) + COALESCE(pu.purchase, 0) - COALESCE(sa.sale, 0) AS closing_stock,
+             pu.last_arrived AS updated_at,
+             pu.product_id
+      FROM purchases pu
+      FULL OUTER JOIN sales sa ON sa.bkey = pu.bkey AND sa.pkey = pu.pkey
+    )`;
 
     if (allowed !== null) {
       params.push(allowed);
@@ -1397,6 +1512,10 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         pps.plant,
         pps.in_stock                                       AS "inStock",
         pps.extra_qty                                      AS "extraQty",
+        pps.opening_stock                                  AS "openingStock",
+        pps.sale_qty                                       AS "saleQty",
+        pps.closing_stock                                  AS "closingStock",
+        COALESCE(live.in_stock, 0)                         AS "liveStock",
         COALESCE(p.name, p_bc.name, pps.barcode)            AS "itemName",
         COALESCE(p.item_no, p_bc.item_no)                   AS "itemNo",
         CASE
@@ -1420,6 +1539,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       FROM ${sourceSql} pps
       LEFT JOIN products p    ON p.id = pps.product_id
       LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(pps.plant)
+      -- Live on-hand stock right now, independent of the period — what Exchange can take from.
+      LEFT JOIN LATERAL (
+        SELECT SUM(x.in_stock)::int AS in_stock FROM product_plant_stock x
+        WHERE LOWER(TRIM(x.barcode)) = LOWER(TRIM(pps.barcode)) AND LOWER(TRIM(x.plant)) = LOWER(TRIM(pps.plant))
+      ) live ON true
       -- LATERAL + LIMIT 1: a barcode can legitimately match more than one Product Master row
       -- (the same barcode reused for a different plant's pack size) — a plain join here would
       -- silently fan this one stock row out into two. Picks exactly one, preferring whichever
@@ -1435,7 +1559,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       ) p_bc ON true
       ${where}
       ORDER BY ${
-        sort === 'stock' ? 'pps.in_stock DESC, "itemName" ASC'
+        sort === 'stock' ? 'pps.closing_stock DESC, "itemName" ASC'
         : sort === 'extra' ? 'pps.extra_qty DESC, "itemName" ASC'
         : '"itemName" ASC, pps.plant ASC'
       }
@@ -1460,52 +1584,18 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         itemsPerPallet: definedIpp || null,
         inStock,
         extraQty: Number(r.extraQty) || 0,
+        openingStock: Number(r.openingStock) || 0,
+        saleQty: Number(r.saleQty) || 0,
+        closingStock: Number(r.closingStock) || 0,
+        liveStock: Number(r.liveStock) || 0,
         pallets: parseFloat((inStock / ipp).toFixed(2)),
         extraPallets: parseFloat(((Number(r.extraQty) || 0) / ipp).toFixed(2)),
         lastArrived: r.lastArrived ?? null,
       };
     });
 
-    // ── Expected Qty — sum of every CSV's ordered quantity for the order date(s) currently
-    // relevant per plant ──────────────────────────────────────────────────────────────────
-    // Explicit date filter (from/to pin down one day, e.g. the "Today"/"Yesterday" presets or
-    // the user filling in just `from`): that ONE date applies to every plant.
-    // No filter at all: sum EVERY order ever uploaded, across every date — not scoped to
-    // whichever session happens to be "active" right now. Picking a date is what narrows it
-    // down to that one order; leaving it blank means "everything".
-    let singleDate: string | null = null;   // set only when exactly one date is in play — what the client shows as "(date)" in the tile label.
-    const allDatesMode = !from && !to;
-    if (from && (!to || to === from)) {
-      singleDate = from;
-    }
-
-    // ── Opening Stock — running balance as of the START of the selected date ──────────────
-    // Only meaningful for a single explicit date (the "date filter" view) — everything the
-    // client needs to build Opening → Today's Purchase → Closing as one running ledger, same
-    // COALESCE(order_date, created_at) date field the rest of this route already uses, so
-    // "yesterday" here means the same thing it means everywhere else on this page.
-    const openingByKey = new Map<string, number>();
-    if (singleDate) {
-      const openingParams: any[] = [singleDate];
-      const openingConds: string[] = [`COALESCE(ois.order_date::date, sm.created_at::date) < $1::date`];
-      if (allowed !== null) { openingParams.push(allowed); openingConds.push(`LOWER(sm.plant) = ANY($${openingParams.length}::text[])`); }
-      if (plantFilterList)  { openingParams.push(plantFilterList); openingConds.push(`LOWER(sm.plant) = ANY($${openingParams.length}::text[])`); }
-      // sm.qty is already the full physical quantity per movement, extra portion included —
-      // sm.extra_qty is tracked alongside it purely as a breakdown tag (same as
-      // product_plant_stock.in_stock/extra_qty, see orderGroupReport.ts's write path), so it
-      // must NOT be added here — that would double-count every extra scan.
-      const { rows: openingRows } = await pool.query(`
-        SELECT sm.barcode, sm.plant, SUM(sm.qty)::int AS "openingQty"
-        FROM stock_movements sm
-        LEFT JOIN order_import_sessions ois ON ois.id = sm.session_id
-        WHERE ${openingConds.join(' AND ')}
-        GROUP BY sm.barcode, sm.plant
-      `, openingParams);
-      for (const r of openingRows as any[]) {
-        openingByKey.set(`${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`, Number(r.openingQty) || 0);
-      }
-    }
-
+    // ── Expected Qty — sum of every CSV's ordered quantity for this barcode+plant over the same
+    // period as the ledger above.
     const expectedByKey = new Map<string, number>();
     let expectedTotal = 0;
     const expectedOnlyRows: typeof items = [];
@@ -1554,39 +1644,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       }
     }
 
-    // The configured tracking start date (Settings > Sales Tracking Start, sales_settings —
-    // see server/index.ts's migration and server/routes/settings-admin.ts's GET/PUT
-    // /settings/sales-tracking-start). Read here rather than next to the Sale Qty block below
-    // because BOTH Expected Qty and Sale Qty floor their "all dates" sums at it — data older
-    // than this isn't considered dependable for either.
-    const { rows: salesSettingsRows } = await pool.query(
-      `SELECT sales_tracking_start_date AS "salesTrackingStartDate" FROM sales_settings ORDER BY id LIMIT 1`,
-    );
-    const SALES_TRACKING_START = salesSettingsRows[0]?.salesTrackingStartDate ?? '2026-08-01';
 
-    if (singleDate) {
-      // Explicit date filter — one shared date.
-      const expParams: any[] = [singleDate];
-      const expConds: string[] = ['ois.order_date = $1', 'ois.is_deleted = false'];
-      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
-      if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
-      const { rows: expRows } = await pool.query(`
-        SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
-        FROM order_import_items oii
-        JOIN order_import_sessions ois ON ois.id = oii.session_id
-        WHERE ${expConds.join(' AND ')}
-        GROUP BY oii.barcode, oii.plant
-        HAVING SUM(oii.quantity) <> 0
-      `, expParams);
-      await applyExpectedRows(expRows);
-    } else if (allDatesMode) {
-      // No date filter — sum every order uploaded from the configured tracking start date
-      // onward, across every date, instead of scoping to whichever session is currently
-      // "active". Same floor Sale Qty uses below, so the two tiles always cover the same window.
-      const expParams: any[] = [SALES_TRACKING_START];
+    {
+      const expParams: any[] = [periodStart];
       const expConds: string[] = ['ois.order_date >= $1', 'ois.is_deleted = false'];
-      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
-      if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
+      if (periodEnd) { expParams.push(periodEnd); expConds.push(`ois.order_date <= $${expParams.length}`); }
+      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY(${expParams.length}::text[])`); }
+      if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY(${expParams.length}::text[])`); }
       const { rows: expRows } = await pool.query(`
         SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
         FROM order_import_items oii
@@ -1598,23 +1662,24 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       await applyExpectedRows(expRows);
     }
 
-    // ── Sale Qty — sum of Proforma Slip quantities for the order date(s) currently relevant,
+    // ── Expected Sale — sum of Proforma Slip quantities (what is PLANNED to go out; the real Sale
+    // is what Loading loaded, in the ledger above) over the period,
     // same shape as Expected Qty above but sourced from proforma_slip_items/proforma_slips
     // instead of order_import_items/order_import_sessions. Plant/date live on the SLIP (the
     // parent row), not the item, so every item in a slip is grouped under that one slip's plant.
     // The "all dates" default floors at SALES_TRACKING_START (read above) — earlier data isn't
     // dependable — exactly as Expected Qty now does, so both tiles cover the same window.
-    const saleByKey = new Map<string, number>();
-    let saleTotal = 0;
+    const expectedSaleByKey = new Map<string, number>();
+    let expectedSaleTotal = 0;
     const saleOnlyRows: typeof items = [];
 
     async function applySaleRows(saleRows: any[]) {
       const unmatchedBarcodes = new Set<string>();
       for (const r of saleRows) {
         const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
-        const qty = Number(r.saleQty) || 0;
-        saleByKey.set(key, qty);
-        saleTotal += qty;
+        const qty = Number(r.expectedSaleQty) || 0;
+        expectedSaleByKey.set(key, qty);
+        expectedSaleTotal += qty;
         if (r.barcode) unmatchedBarcodes.add(r.barcode);
       }
       const barcodesNeedingLookup = [...unmatchedBarcodes];
@@ -1641,7 +1706,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         const state = plantStateByName.get((r.plant ?? '').toLowerCase());
         const sapCode = p ? (state === 'GJ' ? (p.gj_sap ?? p.sap_code) : state === 'MP' ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
-        const ipp = definedIpp > 0 ? definedIpp : Math.max(1, Number(r.saleQty) || 0);
+        const ipp = definedIpp > 0 ? definedIpp : Math.max(1, Number(r.expectedSaleQty) || 0);
         saleOnlyRows.push({
           srNo: 0, barcode: r.barcode, plant: r.plant,
           itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
@@ -1652,27 +1717,14 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       }
     }
 
-    if (singleDate) {
-      const saleParams: any[] = [singleDate];
-      const saleConds: string[] = ['ps.order_date = $1', 'psi.barcode IS NOT NULL', 'ps.plant IS NOT NULL'];
-      if (allowed !== null) { saleParams.push(allowed); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
-      if (plantFilterList) { saleParams.push(plantFilterList); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
-      const { rows: saleRows } = await pool.query(`
-        SELECT psi.barcode, ps.plant, SUM(psi.quantity)::int AS "saleQty"
-        FROM proforma_slip_items psi
-        JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
-        WHERE ${saleConds.join(' AND ')}
-        GROUP BY psi.barcode, ps.plant
-        HAVING SUM(psi.quantity) <> 0
-      `, saleParams);
-      await applySaleRows(saleRows);
-    } else if (allDatesMode) {
-      const saleParams: any[] = [SALES_TRACKING_START];
+    {
+      const saleParams: any[] = [periodStart];
       const saleConds: string[] = ['ps.order_date >= $1', 'psi.barcode IS NOT NULL', 'ps.plant IS NOT NULL'];
-      if (allowed !== null) { saleParams.push(allowed); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
-      if (plantFilterList) { saleParams.push(plantFilterList); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
+      if (periodEnd) { saleParams.push(periodEnd); saleConds.push(`ps.order_date <= $${saleParams.length}`); }
+      if (allowed !== null) { saleParams.push(allowed); saleConds.push(`LOWER(ps.plant) = ANY(${saleParams.length}::text[])`); }
+      if (plantFilterList) { saleParams.push(plantFilterList); saleConds.push(`LOWER(ps.plant) = ANY(${saleParams.length}::text[])`); }
       const { rows: saleRows } = await pool.query(`
-        SELECT psi.barcode, ps.plant, SUM(psi.quantity)::int AS "saleQty"
+        SELECT psi.barcode, ps.plant, SUM(psi.quantity)::int AS "expectedSaleQty"
         FROM proforma_slip_items psi
         JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
         WHERE ${saleConds.join(' AND ')}
@@ -1682,43 +1734,41 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       await applySaleRows(saleRows);
     }
 
-    const hasExpected = singleDate != null || allDatesMode;
-    const hasSale = singleDate != null || allDatesMode;
-    const itemsWithExpected = (hasExpected || hasSale)
-      ? [...items, ...expectedOnlyRows, ...saleOnlyRows].map((it: any) => {
-          const key = `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}`;
-          const expectedQty = hasExpected ? (expectedByKey.get(key) ?? null) : null;
-          const saleQty = hasSale ? (saleByKey.get(key) ?? null) : null;
-          // Same qty÷itemsPerPallet rule as the Pallets/Extra Pallets columns above — each row's
-          // own pallet size, never one blended figure.
-          const ipp = it.itemsPerPallet ? Number(it.itemsPerPallet) : 0;
-          const pltOf = (q: number | null) => (ipp > 0 && q != null ? parseFloat((q / ipp).toFixed(2)) : null);
-          // Opening/Closing only apply to a single-date view — in dateMode, inStock already
-          // means "received on this date" (see sourceSql above) and already includes any extra
-          // portion (extraQty is a breakdown tag, not additional quantity — same as
-          // product_plant_stock.in_stock/extra_qty), so it alone IS that date's Purchase;
-          // Closing = Opening + Purchase − Sale, the physical count remaining at end of day,
-          // which becomes tomorrow's Opening automatically.
-          let openingStock: number | null = null;
-          let closingStock: number | null = null;
-          if (singleDate != null) {
-            openingStock = openingByKey.get(key) ?? 0;
-            const purchaseQty = Number(it.inStock) || 0;
-            closingStock = openingStock + purchaseQty - (saleQty ?? 0);
-          }
-          return {
-            ...it,
-            expectedQty,
-            saleQty,
-            expectedPallets: pltOf(expectedQty),
-            salePallets: pltOf(saleQty),
-            openingStock,
-            openingPallets: pltOf(openingStock),
-            closingStock,
-            closingPallets: pltOf(closingStock),
-          };
-        })
-      : items;
+    const hasExpected = true;
+    const ledgerRows = [...items, ...expectedOnlyRows, ...saleOnlyRows].map((it: any) => {
+      const key = `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}`;
+      // Same qty ÷ itemsPerPallet rule as the Pallets/Extra Pallets columns — each row's own pallet
+      // size, never one blended figure.
+      const ipp = it.itemsPerPallet ? Number(it.itemsPerPallet) : 0;
+      const pltOf = (q: number | null) => (ipp > 0 && q != null ? parseFloat((q / ipp).toFixed(2)) : null);
+      const expectedQty = expectedByKey.get(key) ?? null;
+      const expectedSaleQty = expectedSaleByKey.get(key) ?? null;
+      // Rows added only for Expected / Expected Sale carry no ledger figures — all zero.
+      const openingStock = Number(it.openingStock) || 0;
+      const saleQty = Number(it.saleQty) || 0;
+      const closingStock = openingStock + (Number(it.inStock) || 0) - saleQty;
+      return {
+        ...it,
+        expectedQty,
+        expectedPallets: pltOf(expectedQty),
+        expectedSaleQty,
+        expectedSalePallets: pltOf(expectedSaleQty),
+        openingStock,
+        openingPallets: pltOf(openingStock),
+        saleQty,
+        salePallets: pltOf(saleQty),
+        closingStock,
+        closingPallets: pltOf(closingStock),
+        liveStock: Number(it.liveStock) || 0,
+      };
+    });
+    // Only rows with something to show: stock left at the end of the period, anything sold, or
+    // anything expected / planned to sell. A row whose stock merely went in and back out with
+    // nothing else (Clear Stock, a voided scan, an adjustment back to zero) is hidden.
+    const itemsWithExpected = ledgerRows.filter((it: any) =>
+      it.closingStock !== 0 || it.saleQty !== 0 || (it.expectedQty ?? 0) !== 0 || (it.expectedSaleQty ?? 0) !== 0,
+    );
+    const saleTotal = itemsWithExpected.reduce((sum: number, it: any) => sum + (Number(it.saleQty) || 0), 0);
 
     // dateMode tells the client that inStock/extraQty mean "received in the selected window",
     // not "total on hand", so it can label the columns honestly.
@@ -1742,14 +1792,12 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     res.json({
       items: itemsWithExpected, total: itemsWithExpected.length, plants: allowed,
       emptyBoxByPlant, emptyBoxTotal, dateMode, from: from || null, to: to || null,
-      // expectedDate: set only when an explicit date filter is applied — null in the default
-      // "all dates" mode, where expectedTotal is a sum across every order ever uploaded instead.
+      // The ledger's period, echoed so the client labels "Since <date>" / the range correctly.
+      periodStart, periodEnd,
       expectedDate: singleDate, expectedTotal: hasExpected ? expectedTotal : null,
-      // saleDate mirrors expectedDate — null in "all dates" mode, where saleTotal is a sum from
-      // SALES_TRACKING_START onward rather than one explicit date's sales. salesTrackingStart is
-      // sent along so the client can label that "since ..." text with the real, admin-editable
-      // date (Settings > Sales Tracking Start) instead of hardcoding it.
-      saleDate: singleDate, saleTotal: hasSale ? saleTotal : null, salesTrackingStart: SALES_TRACKING_START,
+      // Expected Sale = proforma slips (planned); Sale = actually loaded. Both over the period.
+      expectedSaleTotal, saleDate: singleDate, saleTotal,
+      salesTrackingStart: SALES_TRACKING_START,
     });
   } catch (error) {
     console.error('Error generating plant stock report:', error);
@@ -1905,8 +1953,14 @@ router.get('/reports/stock-movements', async (req: Request, res: Response) => {
         sm.created_at AS "arrivedAt",
         ois.csv_file_name AS "orderName", ois.order_date AS "orderDate", ois.part_index AS "partIndex"
       FROM stock_movements sm
-      LEFT JOIN order_import_sessions ois ON ois.id = sm.session_id
+      JOIN order_import_sessions ois ON ois.id = sm.session_id
       WHERE LOWER(sm.barcode) = LOWER($1) AND LOWER(sm.plant) = LOWER($2)
+        -- Order Scan's own receiving scans only. The ledger holds every source, so without this the
+        -- list also showed Loading dispatch, Unloading receipts and manual adjustments — each of
+        -- which has its own tab. source is set for those (see tagStockMovementSources); Order
+        -- Scan's rows are the untagged ones that point at a real order import session. type
+        -- 'receive' then drops its CSV-edit adjustments, which belong to the Adjust tab.
+        AND sm.source IS NULL AND sm.type = 'receive'
       ORDER BY sm.created_at DESC
       LIMIT 500
     `, [barcode, plant]);
@@ -1982,7 +2036,7 @@ router.get('/reports/loading-history', async (req: Request, res: Response) => {
       SELECT
         e.id, e.total_qty AS qty, e.pallets, e.loose_qty AS "looseQty", e.is_extra AS "isExtra",
         e.voided, e.void_reason AS "voidReason", e.scanned_at AS "scannedAt",
-        e.scanned_by_name AS "scannedByName",
+        e.scanned_by_name AS "scannedByName", COALESCE(e.is_adjust, false) AS "isAdjust",
         e.order_number AS "orderNumber", ps.order_date AS "orderDate"
       FROM loading_scan_events e
       LEFT JOIN proforma_slips ps ON ps.order_number = e.order_number
@@ -1995,6 +2049,90 @@ router.get('/reports/loading-history', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching loading history:', error);
     res.status(500).json({ error: 'Failed to fetch loading history' });
+  }
+});
+
+// ── GET /api/scan-sessions/reports/adjust-history?barcode=X&plant=Y ─────────────────────────
+// Only adjustments for ONE item at ONE plant — Overall Stock's History > Adjust tab. Two kinds:
+//   manual  — a person's Adjust from Overall Stock (stock_movements, source 'manual')
+//   loading — the Loading Items table's +/- (loading_scan_events.is_adjust)
+// stockQty is always the change to stock (+ added / − removed): a loading +5 took 5 more out of
+// stock, so its stockQty is −5; loadedQty keeps the loading side's own sign.
+router.get('/reports/adjust-history', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!barcode || !plant) {
+      return res.status(400).json({ message: 'barcode and plant are required' });
+    }
+
+    const allowed = getUserPlants(req.user);
+    if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
+    const { rows } = await pool.query(`
+      SELECT * FROM (
+        SELECT
+          'manual' AS kind, sm.id, sm.qty AS "stockQty", NULL::integer AS "loadedQty",
+          sm.reason, NULL::text AS "orderNumber", NULL::text AS "orderDate",
+          sm.created_at AS "at",
+          (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "byName",
+          false AS voided
+        FROM stock_movements sm
+        WHERE sm.type = 'adjust' AND sm.source = 'manual'
+          AND LOWER(TRIM(sm.barcode)) = LOWER(TRIM($1)) AND LOWER(TRIM(sm.plant)) = LOWER(TRIM($2))
+
+        UNION ALL
+
+        -- Order Scan's own CSV-edit adjustments ("Scan Adjust") — an edit to an imported order that
+        -- moved stock, carrying the CSV/order it was made against.
+        SELECT
+          'scan' AS kind, sm.id, sm.qty AS "stockQty", NULL::integer AS "loadedQty",
+          sm.reason, ois.csv_file_name AS "orderNumber", ois.order_date::text AS "orderDate",
+          sm.created_at AS "at",
+          (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "byName",
+          false AS voided
+        FROM stock_movements sm
+        JOIN order_import_sessions ois ON ois.id = sm.session_id
+        WHERE sm.type = 'adjust' AND sm.source IS NULL
+          AND LOWER(TRIM(sm.barcode)) = LOWER(TRIM($1)) AND LOWER(TRIM(sm.plant)) = LOWER(TRIM($2))
+
+        UNION ALL
+
+        -- Corrections that belong to no scanning tab at all: Clear Stock, exchanges, opening stock
+        -- and other system adjusts.
+        SELECT
+          'correction' AS kind, sm.id, sm.qty AS "stockQty", NULL::integer AS "loadedQty",
+          sm.reason, NULL::text AS "orderNumber", NULL::text AS "orderDate",
+          sm.created_at AS "at",
+          (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "byName",
+          false AS voided
+        FROM stock_movements sm
+        WHERE sm.source IS NULL
+          AND (sm.type = 'exchange' OR (sm.type = 'adjust' AND NOT EXISTS (
+                SELECT 1 FROM order_import_sessions ois WHERE ois.id = sm.session_id)))
+          AND LOWER(TRIM(sm.barcode)) = LOWER(TRIM($1)) AND LOWER(TRIM(sm.plant)) = LOWER(TRIM($2))
+
+        UNION ALL
+
+        SELECT
+          'loading' AS kind, e.id, -e.total_qty AS "stockQty", e.total_qty AS "loadedQty",
+          NULL::text AS reason, e.order_number AS "orderNumber",
+          (SELECT ps.order_date::text FROM proforma_slips ps WHERE ps.order_number = e.order_number LIMIT 1) AS "orderDate",
+          e.scanned_at AS "at", e.scanned_by_name AS "byName", COALESCE(e.voided, false) AS voided
+        FROM loading_scan_events e
+        WHERE e.is_adjust = true
+          AND LOWER(TRIM(e.barcode)) = LOWER(TRIM($1)) AND LOWER(TRIM(e.plant)) = LOWER(TRIM($2))
+      ) adjustments
+      ORDER BY "at" DESC
+      LIMIT 500
+    `, [barcode, plant]);
+
+    res.json({ items: rows });
+  } catch (error) {
+    console.error('Error fetching adjust history:', error);
+    res.status(500).json({ error: 'Failed to fetch adjust history' });
   }
 });
 

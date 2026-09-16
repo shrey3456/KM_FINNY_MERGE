@@ -199,8 +199,8 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import-edit')
               [totalQty, extraQty, oldBarcode, session.plant],
             );
             await client.query(
-              `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-               VALUES ($1, $2, $3, $4, 'adjust', $5, $6, NOW())`,
+              `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at, source)
+               VALUES ($1, $2, $3, $4, 'adjust', $5, $6, NOW(),'unloading')`,
               [oldBarcode, session.plant, -totalQty, -extraQty, reason, id],
             );
 
@@ -222,8 +222,8 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import-edit')
               [barcode, newProductId, session.plant, totalQty, extraQty],
             );
             await client.query(
-              `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-               VALUES ($1, $2, $3, $4, $5, 'adjust', $6, $7, NOW())`,
+              `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at, source)
+               VALUES ($1, $2, $3, $4, $5, 'adjust', $6, $7, NOW(),'unloading')`,
               [barcode, newProductId, session.plant, totalQty, extraQty, reason, id],
             );
           }
@@ -267,8 +267,8 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import-edit')
                 [extraDelta, barcode, session.plant],
               );
               await client.query(
-                `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at)
-                 VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW())`,
+                `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at, source)
+                 VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW(),'unloading')`,
                 [barcode, session.plant, extraDelta, `Quantity correction (unloading edit): ${existing.quantity} -> ${quantity}`, id],
               );
             }

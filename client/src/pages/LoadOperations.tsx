@@ -1364,7 +1364,7 @@ export default function LoadOperations() {
               
               // Invalidate related queries to ensure data consistency across devices
               queryClient.invalidateQueries({ 
-                queryKey: [`/api/proforma-slips/order/${referenceNumber}`],
+                queryKey: [`/api/proforma-slips/order/${encodeURIComponent(referenceNumber)}`],
                 refetchType: 'active'
               });
             }
@@ -1471,7 +1471,7 @@ export default function LoadOperations() {
               
               // Invalidate related queries to ensure data consistency across devices
               queryClient.invalidateQueries({ 
-                queryKey: [`/api/proforma-slips/order/${referenceNumber}`],
+                queryKey: [`/api/proforma-slips/order/${encodeURIComponent(referenceNumber)}`],
                 refetchType: 'active'
               });
             }

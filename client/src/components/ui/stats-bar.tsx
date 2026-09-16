@@ -18,6 +18,9 @@ export interface StatItem {
   value: ReactNode;
   /** Small caption under the value. */
   label: ReactNode;
+  /** Optional smaller, lighter detail under the label — one line, or an array for one fact per line
+   *  (e.g. period, pallet count). Always shown in full: lines wrap rather than being cut off. */
+  hint?: ReactNode | ReactNode[];
   tone?: StatTone;
   /** Use for short words ("Connected") rather than numbers, so they don't render oversized. */
   isTextValue?: boolean;
@@ -50,6 +53,7 @@ interface StatsBarProps {
  */
 export function StatsBar({ stats, actions, columns, wrapLabels, className }: StatsBarProps) {
   const cols = Math.min(columns ?? stats.length, 6);
+  const hasHints = stats.some((stat) => stat.hint != null);
 
   return (
     <div className={cn("rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden", className)}>
@@ -66,7 +70,9 @@ export function StatsBar({ stats, actions, columns, wrapLabels, className }: Sta
           return (
             <div
               key={i}
-              className="flex items-center gap-2 px-3 py-3 sm:gap-3 sm:px-5 sm:py-4"
+              // Tiles with detail lines can differ in height — top-align them so every big number
+              // sits on the same line across the row.
+              className={cn("flex gap-2 px-3 py-3 sm:gap-3 sm:px-5 sm:py-4", hasHints ? "items-start" : "items-center")}
             >
               <div
                 className={cn(
@@ -89,6 +95,13 @@ export function StatsBar({ stats, actions, columns, wrapLabels, className }: Sta
                 <p className={cn("mt-0.5 text-sm font-medium text-gray-500 sm:text-base", wrapLabels ? "break-words" : "truncate")}>
                   {stat.label}
                 </p>
+                {(Array.isArray(stat.hint) ? stat.hint : [stat.hint])
+                  .filter((line) => line != null && line !== "" && line !== false)
+                  .map((line, lineIndex) => (
+                    <p key={lineIndex} className="mt-0.5 break-words text-xs font-medium leading-snug tabular-nums text-gray-400">
+                      {line}
+                    </p>
+                  ))}
               </div>
             </div>
           );

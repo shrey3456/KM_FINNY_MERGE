@@ -136,7 +136,7 @@ const proformaSlipItemFormSchema = z.object({
 });
 
 async function unlockSlip(orderNumber: string) {
-  const res = await apiRequest('POST', `/api/proforma-slips/order/${orderNumber}/unlock`);
+  const res = await apiRequest('POST', `/api/proforma-slips/order/${encodeURIComponent(orderNumber)}/unlock`);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || 'Failed to unlock');
@@ -144,7 +144,7 @@ async function unlockSlip(orderNumber: string) {
 }
 
 async function lockSlip(orderNumber: string, printedByCode?: string) {
-  const res = await apiRequest('POST', `/api/proforma-slips/order/${orderNumber}/lock`, {
+  const res = await apiRequest('POST', `/api/proforma-slips/order/${encodeURIComponent(orderNumber)}/lock`, {
     printedByCode
   });
   if (!res.ok) {
