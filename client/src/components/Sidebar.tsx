@@ -193,7 +193,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
         },
         {
           label: "Load Operations",
-          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          icon: (
+            <Factory
+              className="h-5 w-5 mr-3 text-[#001d6e]"
+              style={{ fill: "#4d7eff" }}
+            />
+          ),
           path: "/loading",
           pageKey: "loading",
         },
