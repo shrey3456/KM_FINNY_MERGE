@@ -725,6 +725,9 @@ export default function OverallStock() {
   const salesTrackingStartLabel = stockData?.salesTrackingStart
     ? new Date(`${stockData.salesTrackingStart}T00:00:00`).toLocaleDateString("en-IN", { year: "numeric", month: "short", day: "numeric" })
     : null;
+  // "61,049.19 plt" — a bare toFixed(2) ran the digits together at these sizes.
+  const pltLabel = (pallets: number) =>
+    `${pallets.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} plt`;
   // The period every tile covers: one date, a range, or since Stock Tracking Start.
   const periodLabel = saleDate
     ? saleDate
@@ -2074,9 +2077,9 @@ export default function OverallStock() {
           description="Plant-wise stock ledger — Opening, Purchase, Sale (loaded) and Closing for the date you pick, or since Stock Tracking Start."
         />
 
-        {/* Summary tiles — big number, full name, then each detail on its own line (period, pallets,
-            extra, plants). Nothing is cut off: every line wraps instead, and the tiles top-align so
-            the numbers still line up. */}
+        {/* Summary tiles — the figure, its name, then ONE detail line (period · pallets). The
+            details used to be a line each, which made the tiles different heights and pushed the
+            numbers out of alignment across the row. */}
         <StatsBar
           className="rounded-xl shadow-none border-gray-300 [&_.divide-x]:divide-gray-300"
           wrapLabels
@@ -2086,14 +2089,14 @@ export default function OverallStock() {
               tone: "navy" as const,
               value: expectedTotal.toLocaleString(),
               label: "Expected Purchase",
-              hint: [periodLabel, `${expectedPalletsTotal.toFixed(2)} plt`],
+              hint: `${periodLabel} · ${pltLabel(expectedPalletsTotal)}`,
             },
             {
               icon: History,
               tone: "navy" as const,
               value: totalOpening.toLocaleString(),
               label: "Opening",
-              hint: ["Start of period", `${totalOpeningPallets.toFixed(2)} plt`],
+              hint: `Start of period · ${pltLabel(totalOpeningPallets)}`,
             },
             {
               icon: Boxes,
@@ -2101,9 +2104,8 @@ export default function OverallStock() {
               value: totalPurchase.toLocaleString(),
               label: "Purchase",
               hint: [
-                `${totalPurchasePallets.toFixed(2)} plt`,
-                // Extra is already inside this total — this line only breaks it out.
-                totalExtra > 0 ? `+${totalExtra.toLocaleString()} extra (included)` : null,
+                // Extra is already inside this total — it is only broken out here.
+                `${pltLabel(totalPurchasePallets)}${totalExtra > 0 ? ` · +${totalExtra.toLocaleString()} extra` : ""}`,
                 activePlant ? activePlant
                   : activeState ? `${activeState} (${activeStateGroup?.plants.map((p) => p.name).join(", ") ?? activeState})`
                   : allowedPlants && allowedPlants.length ? plantOptions.join(", ") : "All Plants",
@@ -2114,21 +2116,21 @@ export default function OverallStock() {
               tone: "navy" as const,
               value: expectedSaleTotal.toLocaleString(),
               label: "Expected Sale",
-              hint: [periodLabel, `${expectedSalePalletsTotal.toFixed(2)} plt`],
+              hint: `${periodLabel} · ${pltLabel(expectedSalePalletsTotal)}`,
             },
             {
               icon: ShoppingCart,
               tone: "emerald" as const,
               value: totalSale.toLocaleString(),
               label: "Sale (loaded)",
-              hint: [periodLabel, `${totalSalePallets.toFixed(2)} plt`],
+              hint: `${periodLabel} · ${pltLabel(totalSalePallets)}`,
             },
             {
               icon: TrendingUp,
               tone: totalClosing < 0 ? "amber" as const : "navy" as const,
               value: totalClosing.toLocaleString(),
               label: "Closing",
-              hint: ["End of period", `${totalClosingPallets.toFixed(2)} plt`],
+              hint: `End of period · ${pltLabel(totalClosingPallets)}`,
             },
           ]}
         />

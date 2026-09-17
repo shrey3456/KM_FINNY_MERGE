@@ -4283,37 +4283,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Get all items for this slip
         const items = await storage.getProformaSlipItems(slip.id);
 
-        // Retrieve full product details for each item to get names, SKU, and Sr.No
-        const enhancedItems = await Promise.all(
-          items.map(async (item) => {
-            // Try to find the product details using productId
-            if (item.productId) {
-              try {
-                const product = await storage.getProduct(item.productId);
-                if (product) {
-                  return {
-                    ...item,
-                    itemName: product.name,
-                    sku: product.barcode,
-                    srNo: product.newSr,
-                    itemsPerPallet: product.itemsPerPallet,
-                  };
-                }
-              } catch (error) {
-                console.error(
-                  `Error fetching product ${item.productId}:`,
-                  error,
-                );
-              }
-            }
-            return item;
-          }),
-        );
+        // The slip's own rows, exactly as stored — Print Operations prints the proforma slip as it
+        // was imported, not a re-read of Product Master. This used to overwrite each item's name
+        // and Sr. No. with the product's CURRENT values whenever the item had a productId, so a
+        // product renamed or renumbered later in Notion changed old slips when they were printed,
+        // and items with no productId came out different again. proforma_slip_items already
+        // stores a snapshot of every printed field for exactly this reason (see its schema
+        // comment: "display always uses snapshot fields"). `sku` is kept for older callers and is
+        // the slip's own barcode.
+        const snapshotItems = items.map((item) => ({ ...item, sku: item.barcode }));
 
-        // Return slip with enhanced items
         res.json({
           slip,
-          items: enhancedItems,
+          items: snapshotItems,
         });
       } catch (error) {
         console.error("Error fetching proforma slip by order number:", error);
