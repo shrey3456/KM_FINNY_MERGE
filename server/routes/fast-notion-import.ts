@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { fetchProformaOrdersFromNotion, writeOrderToDb } from '../services/proformaNotionSync';
+import { requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -8,7 +9,10 @@ const router = Router();
 // version that shows a diff before writing anything, see /api/proforma-notion-sync/detect
 // + /apply (server/routes/proforma-notion-sync.ts), which share the same fetch/write logic
 // (server/services/proformaNotionSync.ts).
-router.post('/fast-notion-import', async (req, res) => {
+// Write access to 'proforma' (admins always pass) — the same people the page shows "Import
+// Notion" to. This route had no permission check at all, so any logged-in user, read-only ones
+// included, could write slips straight into the database by calling it directly.
+router.post('/fast-notion-import', requirePageWrite('proforma'), async (req, res) => {
   try {
     console.log('⚡ FAST Notion Import started');
 

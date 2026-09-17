@@ -260,13 +260,18 @@ const PrintOperations: React.FC = () => {
     return null;
   };
   
-  // Format product name to display in a single line with "wafers" shortened to "WAF"
+  // Product name as printed: the word WAFER / WAFERS is left out entirely (it used to be shortened
+  // to "WAF"). Print only — the slip, Product Master and every other page keep the full name.
+  // Whole word only, so a longer word that merely contains "wafer" is never cut, and the space it
+  // leaves behind is collapsed so the name doesn't print with a double gap.
   const formatProductName = (itemName: string | null): string[] => {
     if (!itemName) return [''];
-    
-    // Replace "wafers" with "WAF" (uppercase)
-    let formattedName = itemName.replace(/wafers/gi, 'WAF');
-    
+
+    const formattedName = itemName
+      .replace(/\bwafers?\b/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
     return [formattedName]; // Return as a single line
   };
   
@@ -421,7 +426,7 @@ const PrintOperations: React.FC = () => {
         }
       }
       
-      // Format product name for printing - single line with wafers -> waf
+      // Format product name for printing - single line, the word WAFER/WAFERS left out
       const formattedNameHTML = formatProductName(item.itemName || '')[0];
       
       return `
