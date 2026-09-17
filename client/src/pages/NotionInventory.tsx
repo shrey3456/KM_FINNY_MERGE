@@ -65,6 +65,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Product } from "@shared/schema";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 type SyncStatus = {
   isSyncing: boolean;
@@ -887,10 +888,7 @@ export default function NotionInventory() {
               <tbody>
                 {productsQuery.isLoading ? (
                   <tr>
-                    <td colSpan={visibleColumns.length} className="h-40 text-center text-muted-foreground">
-                      <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-[#001d6e]" />
-                      <div className="text-sm">Loading product master…</div>
-                    </td>
+                    <td colSpan={visibleColumns.length} className="p-0"><SectionSkeleton lines={6} /></td>
                   </tr>
                 ) : filteredProducts.length === 0 ? (
                   <tr>

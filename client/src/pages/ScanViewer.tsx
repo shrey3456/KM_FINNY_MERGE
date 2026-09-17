@@ -26,6 +26,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -1031,7 +1032,7 @@ export default function ScanViewer() {
     // inherits that full width. sticky left-0 pins it to the visible left edge instead.
     <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
       {historyQuery.isLoading ? (
-        <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+        <SectionSkeleton lines={3} />
       ) : historyEventsInStvScope.length === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">
           {activeStvFilterValues.length > 0
@@ -1538,7 +1539,6 @@ export default function ScanViewer() {
         </div>
       )}
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
-
         {/* Source switch — Order Scan (this page's original scope) vs Unloading, added as a
             second, independent picker/table/history flow below rather than threaded through the
             Order Scan state above, which stays completely untouched by picking Unloading. */}
@@ -1575,8 +1575,9 @@ export default function ScanViewer() {
         <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <div className="flex min-w-0 flex-1 items-center gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/90">
-            <ScanLine className="h-5 w-5 text-white" />
+          {/* Same icon as "Overall Scan Ops" in the sidebar, in the navy badge every page uses. */}
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e]">
+            <Eye className="h-5 w-5 text-white" />
           </span>
           <div className="min-w-0 flex-1">
             {filtersReady && selectedSession && (
@@ -1742,7 +1743,7 @@ export default function ScanViewer() {
             Pick a plant and an order date to view its scan progress.
           </div>
         ) : sessionsQuery.isLoading ? (
-          <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+          <SectionSkeleton lines={6} />
         ) : sessionOptions.length === 0 ? (
           <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
             No order found for {plant} on {date}.
@@ -1791,7 +1792,7 @@ export default function ScanViewer() {
                         </div>
                       </div>
                       {partItemsQuery.isLoading ? (
-                        <p className="animate-pulse px-3 py-4 text-center text-sm text-gray-400">Loading items…</p>
+                        <SectionSkeleton lines={3} />
                       ) : partItems.length === 0 ? (
                         <p className="px-3 py-4 text-center text-sm text-gray-400">No items</p>
                       ) : (
@@ -2407,7 +2408,7 @@ export default function ScanViewer() {
             }
           >
             {mvQuery.isLoading ? (
-              <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              <SectionSkeleton lines={6} />
             ) : (
               <>
               <DataTable<MvMergedItem>
@@ -2417,12 +2418,18 @@ export default function ScanViewer() {
                 columnOrder={mvColumnOrder}
                 onColumnOrderChange={setMvColumnOrder}
                 data={mvFiltered}
-                getRowId={(row) => row.barcode ?? row.itemName ?? String(Math.random())}
+                // A stable id for every row. The old Math.random() fallback gave rows without a barcode a
+                // new id on every render, so React rebuilt them each time — including on every mouse
+                // move while dragging a column edge.
+                getRowId={(row) => row.barcode ?? `name:${row.itemName ?? ""}`}
                 enableZebraStripes
                 rowClassName={(row) => (row.isExtraOnly ? "bg-orange-50/40" : undefined)}
                 emptyState={allMvItems.length === 0 ? "No items in this order." : "No items match your filters."}
                 enableTotalsRow
                 totalsLabelColumnId="item"
+                // Drag a column's right edge to resize it — same as the Part Order and Unloading tables on
+                // this page. This one never had it turned on. Widths are remembered like everywhere else.
+                enableColumnResizing
                 isStickyHeader
                 maxHeight={tableMaxHeight}
                 showMobileSwipeHint
@@ -3008,7 +3015,7 @@ function UnloadingViewerSection({
           <span className="font-mono text-xs text-gray-400">{row.barcode}</span>
         </div>
         {uHistoryQuery.isLoading ? (
-          <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+          <SectionSkeleton lines={3} />
         ) : (uHistoryQuery.data?.items?.length ?? 0) === 0 ? (
           <p className="py-4 text-center text-sm text-gray-400">No unloading history yet for this item.</p>
         ) : (
@@ -3187,13 +3194,13 @@ function UnloadingViewerSection({
           Pick a plant to view an unloading batch's progress.
         </div>
       ) : uSessionsQuery.isLoading || (uTodayEmpty && uActiveQuery.isLoading) ? (
-        <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+        <SectionSkeleton lines={6} />
       ) : uSessionOptions.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
           No unloading batches for {uPlant}{uDate ? ` on ${fmtOrderDate(uDate)}` : ""}.
         </div>
       ) : uSessionDetailQuery.isLoading ? (
-        <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+        <SectionSkeleton lines={6} />
       ) : (
         // Same plain bordered-card wrapper (not TableCard) + collapsible search header the real
         // Unloading page uses for its own items table, so this reads as the identical UI.

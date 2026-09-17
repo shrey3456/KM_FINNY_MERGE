@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { cn } from "@/lib/utils";
+import { TableSkeleton } from "@/components/ui/loading-skeletons";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ArrowDown, ArrowUp, ChevronsUpDown, Search, X } from "lucide-react";
@@ -347,6 +348,27 @@ export function DataTable<TData>({
     : columns;
   const visibleColumns = orderedColumns.filter((c) => visibleColumnIds.has(c.id));
 
+  // A "pinned" column keeps an exact pixel width: one marked fixedWidth, or one the user has dragged
+  // to a width. Everything else stretches to fill the table. Pinning dragged columns is what makes a
+  // resize follow the mouse both ways — as plain shares of a table that always fills the screen, a
+  // column widened past the screen couldn't be dragged back narrow: once the table fit again, every
+  // column re-stretched and the edge stopped following the cursor.
+  const isPinnedColumn = (c: DataTableColumn<TData>) => !!c.fixedWidth || colWidths[c.id] != null;
+  const hasFixedColumns = visibleColumns.some(isPinnedColumn);
+  // The scroll box's real width — needed only for that pixel layout (see pixelWidthOf below).
+  const scrollBoxRef = useRef<HTMLDivElement>(null);
+  const [scrollBoxWidth, setScrollBoxWidth] = useState(0);
+  useEffect(() => {
+    if (!hasFixedColumns) return;
+    const el = scrollBoxRef.current;
+    if (!el) return;
+    const update = () => setScrollBoxWidth(el.clientWidth);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasFixedColumns]);
+
   // ── Column reordering by dragging a header onto another ────────────────────
   const canReorderColumns = !!onColumnOrderChange;
   const [dragColId, setDragColId] = useState<string | null>(null);
@@ -506,7 +528,12 @@ export function DataTable<TData>({
     // should widen the column, never pick it up and move it.
     resizingRef.current = true;
     const startX = e.clientX;
-    const startWidth = getColWidth(col);
+    // Start from the width the column is actually drawn at. Before its first drag a column may be
+    // stretched wider than its set width; starting from the set width made it jump narrower the moment
+    // the drag began.
+    const headerCell = (e.currentTarget as HTMLElement).closest("th");
+    const drawnWidth = headerCell ? Math.round(headerCell.getBoundingClientRect().width) : 0;
+    const startWidth = drawnWidth > 0 ? drawnWidth : getColWidth(col);
     const minWidth = col.minWidth ?? 60;
 
     const onMove = (moveEvent: MouseEvent) => {
@@ -582,6 +609,24 @@ export function DataTable<TData>({
   const totalTableWidth =
     (enableRowSelection ? 40 : 0) + visibleColumns.reduce((sum, col) => sum + getColWidth(col), 0);
 
+  // Pixel layout for tables with fixedWidth columns: fixed columns (and the selection checkbox)
+  // keep their width, and the others split whatever space is left in proportion to their own
+  // widths — never below those widths, so a narrow screen still scrolls sideways instead of
+  // squeezing. The 1px spare keeps rounding from adding a stray horizontal scrollbar.
+  const usePixelLayout = hasFixedColumns && scrollBoxWidth > 0;
+  const fixedColumnsWidth =
+    (enableRowSelection ? 40 : 0) + visibleColumns.filter(isPinnedColumn).reduce((sum, col) => sum + getColWidth(col), 0);
+  const flexibleBaseWidth = visibleColumns.filter((c) => !isPinnedColumn(c)).reduce((sum, col) => sum + getColWidth(col), 0);
+  const flexibleSpace = Math.max(flexibleBaseWidth, scrollBoxWidth - fixedColumnsWidth - 1);
+  // Every column pinned and together narrower than the screen: the last one takes up the leftover, so
+  // the table (and its navy header) still reaches the right edge instead of stopping short.
+  const lastVisibleColumnId = visibleColumns[visibleColumns.length - 1]?.id;
+  const allPinnedSpare = flexibleBaseWidth <= 0 ? Math.max(0, scrollBoxWidth - fixedColumnsWidth - 1) : 0;
+  const pixelWidthOf = (col: DataTableColumn<TData>) =>
+    isPinnedColumn(col) || flexibleBaseWidth <= 0
+      ? getColWidth(col) + (col.id === lastVisibleColumnId ? allPinnedSpare : 0)
+      : (getColWidth(col) / flexibleBaseWidth) * flexibleSpace;
+
   const footerCtx: DataTableFooterContext = {
     pageIndex: safePageIndex,
     pageCount,
@@ -632,7 +677,11 @@ export function DataTable<TData>({
       )}
 
       {isLoading ? (
-        <div className="py-10 text-center text-sm text-muted-foreground">{loadingLabel}</div>
+        // Table-shaped placeholder with this table's own column count, so the page keeps its layout
+        // while the rows load. loadingLabel is still announced to screen readers.
+        <div aria-label={typeof loadingLabel === "string" ? loadingLabel : undefined}>
+          <TableSkeleton columns={visibleColumns.length} rows={6} className={containerClassName} />
+        </div>
       ) : (
         // The table always renders — even with no rows at all — so the column headers stay on
         // screen and you can see the shape of the data. The empty/no-results message goes in the
@@ -646,6 +695,7 @@ export function DataTable<TData>({
             </div>
           )}
           <div
+            ref={scrollBoxRef}
             className="w-full overflow-x-auto"
             style={{
               overflowY: isStickyHeader ? "auto" : undefined,
@@ -655,12 +705,23 @@ export function DataTable<TData>({
           >
             <table
               className="border-collapse"
-              style={{ width: "100%", minWidth: totalTableWidth, tableLayout: "fixed" }}
+              style={
+                usePixelLayout
+                  ? { width: fixedColumnsWidth + (flexibleBaseWidth > 0 ? flexibleSpace : allPinnedSpare), tableLayout: "fixed" }
+                  : { width: "100%", minWidth: totalTableWidth, tableLayout: "fixed" }
+              }
             >
               <colgroup>
-                {enableRowSelection && <col style={{ width: `${(40 / totalTableWidth) * 100}%` }} />}
+                {enableRowSelection && (
+                  <col style={{ width: usePixelLayout ? "40px" : `${(40 / totalTableWidth) * 100}%` }} />
+                )}
                 {visibleColumns.map((col) => (
-                  <col key={col.id} style={{ width: `${(getColWidth(col) / totalTableWidth) * 100}%` }} />
+                  <col
+                    key={col.id}
+                    style={{
+                      width: usePixelLayout ? `${pixelWidthOf(col)}px` : `${(getColWidth(col) / totalTableWidth) * 100}%`,
+                    }}
+                  />
                 ))}
               </colgroup>
               <thead>

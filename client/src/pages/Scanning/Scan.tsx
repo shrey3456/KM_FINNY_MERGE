@@ -66,6 +66,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+import { PageSkeleton, SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 type Product = {
   id: number;
@@ -1861,9 +1862,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // well under any realistic viewport keeps the whole thing on-screen at that position.
     <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
       {mvHistoryQuery.isLoading ? (
-        <div className="flex justify-center py-6">
-          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-        </div>
+        <SectionSkeleton lines={3} />
       ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
       ) : (
@@ -1939,9 +1938,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   const mvHistoryPanelMobile = (
     <div className="w-full bg-gray-50 p-3">
       {mvHistoryQuery.isLoading ? (
-        <div className="flex justify-center py-6">
-          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-        </div>
+        <SectionSkeleton lines={3} />
       ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
       ) : (
@@ -2003,9 +2000,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
   if (orderScanNotifLoading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-gray-50">
-        <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-      </div>
+      <PageSkeleton />
     );
   }
 
@@ -3639,9 +3634,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
               {/* Rows */}
               {osItemsQuery.isLoading ? (
-                <div className="flex justify-center py-10">
-                  <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-                </div>
+                <SectionSkeleton lines={4} />
               ) : (
                 <>
                   {/* This is the narrow-screen fallback: fields stack as labeled lines instead
@@ -3905,7 +3898,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {/* ── Master View Tab (mobile) ── */}
             {osTab === "master-view" && (
               <div className="space-y-3">
-                {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
+                {mvQuery.isLoading && <SectionSkeleton lines={3} />}
                 {mvData && (
                   <div ref={mvSearchMobileRef} className="bg-white border border-gray-300 overflow-hidden rounded-xl">
                     {/* Navy header — same treatment as the Scan tab's mobile header. Search
@@ -4224,7 +4217,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </Button>
                   )}
                 </div>
-                {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading files…</p>}
+                {csvSessQuery.isFetching && <SectionSkeleton lines={3} />}
                 {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400 py-4 text-center">No CSVs found for this date{csvEffPlant ? ` / ${csvEffPlant}` : ""}.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
@@ -4259,7 +4252,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               {csvSearch && <button onClick={() => setCsvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3 w-3 text-gray-400" /></button>}
                             </div>
                           </div>
-                          {csvItemsQuery2.isFetching && <p className="px-3 py-4 text-sm text-gray-400 animate-pulse text-center">Loading items…</p>}
+                          {csvItemsQuery2.isFetching && <SectionSkeleton lines={3} />}
                           {/* Structured table (business style): square corners, grid borders, full
                               item names — matching the Scan/Master View tables, so all three tabs
                               read as one system. */}
@@ -4444,8 +4437,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {/* Header row */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center bg-amber-400">
-                  <Scan className="h-4 w-4 text-white" />
+                {/* Same icon as "Scan Operations" in the sidebar, in the navy badge every page uses. */}
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e]">
+                  <ScanLine className="h-5 w-5 text-white" />
                 </div>
                 <div className="min-w-0">
                   {/* Order Date (what the CSV was uploaded FOR) rather than the CSV file name —
@@ -4897,7 +4891,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
               {osTab === "master-view" && (
                 <div className="space-y-4">
-                  {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
+                  {mvQuery.isLoading && <SectionSkeleton lines={3} />}
                   {mvData && (
                     <div>
                       {mvShowFiles && (
@@ -5019,7 +5013,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </Button>
                   )}
                 </div>
-                {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}
+                {csvSessQuery.isFetching && <SectionSkeleton lines={3} />}
                 {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No CSVs found for this date{csvEffPlant ? ` / ${csvEffPlant}` : ""}.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (

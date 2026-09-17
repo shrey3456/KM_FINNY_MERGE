@@ -59,6 +59,7 @@ import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 import { hasPageViewAccess, hasPageWriteAccess } from "@/lib/permissions";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // Solid navy fill, matching the Product Master action buttons.
 const FILTER_BTN_CLASS = "h-8 border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
@@ -904,9 +905,7 @@ const Users = () => {
                 below 480px (and in portrait) each user becomes a stacked card instead. */}
             <div className="min-[480px]:hidden landscape:hidden">
               {isLoading ? (
-                <div className="flex justify-center py-10">
-                  <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-                </div>
+                <SectionSkeleton lines={4} />
               ) : filteredUsers.length === 0 ? (
                 <p className="py-10 text-center text-sm text-gray-400">
                   {searchTerm ? "No users found matching your search." : "No users have been added yet."}

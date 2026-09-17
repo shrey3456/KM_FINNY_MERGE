@@ -43,27 +43,31 @@ type ActiveBlocker = { source: 'Order Import' | 'Unloading' | 'Loading'; plant: 
 // A date-scoped clear reverses only what's already been scanned so far for the in-scope period —
 // if a session/order in that same plant scope is still open (not yet completed), its numbers
 // aren't final: clearing now would reverse a partial amount, and whatever gets scanned into it
-// afterward would drift stock off with no way to catch it later. So ANY still-open session for
-// the plant scope blocks the whole clear, regardless of that session's own order date relative
-// to the chosen cutoff — not just ones dated inside the range. No-date (whole-plant) clears are
-// unaffected by this — that mode already existed before Clear Stock became date-scopable and
-// isn't part of this check.
-async function findActiveBlockers(queryable: { query: (sql: string, params?: any[]) => Promise<{ rows: any[] }> }, plant: string | null): Promise<ActiveBlocker[]> {
+// afterward would drift stock off with no way to catch it later. So a still-open session blocks
+// the clear — but only one dated ON OR BEFORE the cutoff. The clear reverses exactly the scans of
+// orders dated <= cutoff (see the three reversal queries in POST /settings/clear-stock), so an open
+// session dated after it is never touched: its scans keep adding to stock normally whether or not
+// it's finished. Blocking those too used to refuse a clear "up to 15 Sep" over sessions dated
+// 16 and 17 Sep, while calling them "in scope". No-date (whole-plant) clears are unaffected by
+// this — that mode already existed before Clear Stock became date-scopable and isn't part of it.
+async function findActiveBlockers(queryable: { query: (sql: string, params?: any[]) => Promise<{ rows: any[] }> }, plant: string | null, orderDateUpTo: string): Promise<ActiveBlocker[]> {
   const blockers: ActiveBlocker[] = [];
 
   const oi = await queryable.query(
     `SELECT plant, order_date AS "orderDate", csv_file_name AS "csvFileName"
      FROM order_import_sessions
-     WHERE is_deleted IS NOT TRUE AND scan_status <> 'completed' AND ($1::text IS NULL OR plant = $1)`,
-    [plant],
+     WHERE is_deleted IS NOT TRUE AND scan_status <> 'completed' AND ($1::text IS NULL OR plant = $1)
+       AND order_date <= $2`,
+    [plant, orderDateUpTo],
   );
   for (const r of oi.rows) blockers.push({ source: 'Order Import', plant: r.plant, orderDate: r.orderDate, label: r.csvFileName });
 
   const ul = await queryable.query(
     `SELECT plant, order_date AS "orderDate", vehicle_number AS "vehicleNumber"
      FROM unload_import_sessions
-     WHERE is_deleted IS NOT TRUE AND scan_status <> 'completed' AND ($1::text IS NULL OR plant = $1)`,
-    [plant],
+     WHERE is_deleted IS NOT TRUE AND scan_status <> 'completed' AND ($1::text IS NULL OR plant = $1)
+       AND order_date <= $2`,
+    [plant, orderDateUpTo],
   );
   for (const r of ul.rows) blockers.push({ source: 'Unloading', plant: r.plant, orderDate: r.orderDate, label: r.vehicleNumber });
 
@@ -73,8 +77,9 @@ async function findActiveBlockers(queryable: { query: (sql: string, params?: any
   const ld = await queryable.query(
     `SELECT plant, order_date AS "orderDate", order_number AS "orderNumber"
      FROM proforma_slips
-     WHERE vehicle_assigned_by_code IS NOT NULL AND loading_completed_at IS NULL AND ($1::text IS NULL OR plant = $1)`,
-    [plant],
+     WHERE vehicle_assigned_by_code IS NOT NULL AND loading_completed_at IS NULL AND ($1::text IS NULL OR plant = $1)
+       AND order_date <= $2::date`,
+    [plant, orderDateUpTo],
   );
   for (const r of ld.rows) blockers.push({ source: 'Loading', plant: r.plant, orderDate: r.orderDate, label: r.orderNumber });
 
@@ -109,7 +114,7 @@ router.get('/settings/clear-stock/preview', requireAdminRole, async (req: Reques
 
     // Only relevant once a date is picked — a no-date clear is unaffected (see
     // findActiveBlockers's comment).
-    const activeBlockers = dateParam ? await findActiveBlockers(pool, plant) : [];
+    const activeBlockers = dateParam ? await findActiveBlockers(pool, plant, dateParam) : [];
 
     res.json({
       productsWithStock: stockRes.rows[0]?.n ?? 0,
@@ -140,7 +145,7 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
     // this destructive. See findActiveBlockers's comment for why an open session anywhere in
     // the plant scope blocks a date-scoped clear outright.
     if (dateParam) {
-      const activeBlockers = await findActiveBlockers(client, plant);
+      const activeBlockers = await findActiveBlockers(client, plant, dateParam);
       if (activeBlockers.length > 0) {
         await client.query('ROLLBACK');
         return res.status(409).json({

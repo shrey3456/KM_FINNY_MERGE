@@ -60,10 +60,67 @@
         display: flex;
         flex-direction: column;
       }
+
+      /* Boot skeleton — shown inside #root only until the app's JavaScript has loaded and React
+         replaces it, so a refresh shows the shape of the app instead of a blank white page. Plain
+         CSS on purpose: Tailwind isn't available yet at this point. */
+      @keyframes boot-shimmer { 100% { transform: translateX(100%); } }
+      .boot { display: flex; height: 100%; background: #f9fafb; font-family: system-ui, sans-serif; }
+      .boot-side { width: 256px; flex-shrink: 0; background: #fff; border-right: 1px solid #e5e7eb; padding: 20px 16px; box-sizing: border-box; }
+      .boot-main { flex: 1; min-width: 0; padding: 24px; box-sizing: border-box; overflow: hidden; }
+      .boot-bar { position: relative; overflow: hidden; background: #e2e8f0; border-radius: 6px; }
+      .boot-bar::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+        background: linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.6), rgba(255,255,255,0));
+        animation: boot-shimmer 1.6s cubic-bezier(.4,0,.2,1) infinite; }
+      .boot-row { display: flex; gap: 12px; align-items: center; }
+      .boot-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; }
+      .boot-table { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+      .boot-thead { height: 40px; background: #001d6e; }
+      .boot-tr { display: flex; gap: 12px; padding: 14px 12px; border-top: 1px solid #f3f4f6; }
+      @media (max-width: 1023px) { .boot-side { display: none; } .boot-main { padding: 16px; } }
+      @media (max-width: 640px) { .boot-tiles { grid-template-columns: repeat(2, 1fr); } }
+      @media (prefers-reduced-motion: reduce) { .boot-bar::after { animation: none; } }
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot" role="status" aria-label="Loading">
+        <aside class="boot-side">
+          <div class="boot-bar" style="height:36px;width:120px;margin-bottom:28px"></div>
+          <div class="boot-bar" style="height:10px;width:60px;margin-bottom:14px"></div>
+          <div class="boot-bar" style="height:14px;width:80%;margin-bottom:14px"></div>
+          <div class="boot-bar" style="height:14px;width:70%;margin-bottom:14px"></div>
+          <div class="boot-bar" style="height:14px;width:75%;margin-bottom:28px"></div>
+          <div class="boot-bar" style="height:10px;width:80px;margin-bottom:14px"></div>
+          <div class="boot-bar" style="height:14px;width:85%;margin-bottom:14px"></div>
+          <div class="boot-bar" style="height:14px;width:65%;margin-bottom:14px"></div>
+          <div class="boot-bar" style="height:14px;width:78%;margin-bottom:14px"></div>
+        </aside>
+        <main class="boot-main">
+          <div class="boot-row">
+            <div class="boot-bar" style="height:36px;width:36px;border-radius:8px"></div>
+            <div style="flex:1">
+              <div class="boot-bar" style="height:18px;width:200px;max-width:100%;margin-bottom:8px"></div>
+              <div class="boot-bar" style="height:12px;width:320px;max-width:100%"></div>
+            </div>
+          </div>
+          <div class="boot-tiles">
+            <div class="boot-bar" style="height:80px;border-radius:12px"></div>
+            <div class="boot-bar" style="height:80px;border-radius:12px"></div>
+            <div class="boot-bar" style="height:80px;border-radius:12px"></div>
+            <div class="boot-bar" style="height:80px;border-radius:12px"></div>
+          </div>
+          <div class="boot-table">
+            <div class="boot-thead"></div>
+            <div class="boot-tr"><div class="boot-bar" style="height:12px;flex:2"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div></div>
+            <div class="boot-tr"><div class="boot-bar" style="height:12px;flex:2"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div></div>
+            <div class="boot-tr"><div class="boot-bar" style="height:12px;flex:2"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div></div>
+            <div class="boot-tr"><div class="boot-bar" style="height:12px;flex:2"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div></div>
+            <div class="boot-tr"><div class="boot-bar" style="height:12px;flex:2"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div><div class="boot-bar" style="height:12px;flex:1"></div></div>
+          </div>
+        </main>
+      </div>
+    </div>
     <!-- Add a noscript message for users without JavaScript -->
     <noscript>
       <div style="padding: 20px; text-align: center;">

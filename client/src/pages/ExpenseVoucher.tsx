@@ -46,6 +46,7 @@ import { TruckLoadingAnimation } from "@/components/TruckLoadingAnimation";
 import * as QRCode from "qrcode";
 import logoPath from "@assets/logo_wo_bg_1757152661130.png";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
 interface ExpenseVoucherItem {
   productCode: string;
@@ -1171,12 +1172,7 @@ export default function ExpenseVoucher() {
 
   if (accessLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#001d6e] mx-auto"></div>
-          <p className="mt-2 text-gray-600">Checking access permissions...</p>
-        </div>
-      </div>
+      <PageSkeleton />
     );
   }
 

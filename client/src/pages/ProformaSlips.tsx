@@ -282,6 +282,10 @@ export default function ProformaSlips() {
   })();
   const dateIsRange = dateValue.startsWith("r:");
   const isoOf = (x: Date) => format(x, "yyyy-MM-dd");
+  const dayOfIso = (value: string): Date | undefined => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : undefined;
+  };
   const datePresetValue = (key: string): string => {
     const d = new Date();
     if (key === "today") return `d:${isoOf(d)}`;
@@ -1128,26 +1132,39 @@ export default function ProformaSlips() {
           </button>
         ))}
       </div>
+      {/* The app's own calendar grid — the same one Load Operations' Calendar opens — instead of the
+          browser's native date box, which looked different on every browser and in the rotated
+          kiosk view could not turn with the page. Stored value is unchanged ("d:" / "r:"). */}
       {datePickMode === "single" ? (
-        <div className="space-y-1">
-          <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
-          <input
-            type="date"
-            value={fromStr}
-            onChange={(e) => { setDateValue(e.target.value ? `d:${e.target.value}` : ""); if (e.target.value) setDateOpen(false); setDateCalOpen(false); }}
-            className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
-          />
-        </div>
+        <Calendar
+          mode="single"
+          selected={dayOfIso(fromStr)}
+          defaultMonth={dayOfIso(fromStr)}
+          onSelect={(day) => {
+            // Clicking the already-selected day reports undefined — keep the date, just close.
+            if (day) setDateValue(`d:${isoOf(day)}`);
+            setDateOpen(false);
+            setDateCalOpen(false);
+          }}
+          initialFocus
+        />
       ) : (
-        <div className="grid grid-cols-2 gap-2">
-          <div className="space-y-1">
-            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
-            <input type="date" value={fromStr} max={toStr || undefined} onChange={(e) => setDateValue(`r:${e.target.value}:${toStr}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
-          </div>
-          <div className="space-y-1">
-            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
-            <input type="date" value={toStr} min={fromStr || undefined} onChange={(e) => setDateValue(`r:${fromStr}:${e.target.value}`)} className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs" />
-          </div>
+        <div className="space-y-1">
+          <p className="text-[11px] text-gray-500">
+            {fromStr ? (toStr ? "Range selected." : "Now pick the end date.") : "Pick the start date, then the end date."}
+          </p>
+          <Calendar
+            mode="range"
+            selected={{ from: dayOfIso(fromStr), to: dayOfIso(toStr) }}
+            defaultMonth={dayOfIso(fromStr)}
+            onSelect={(range) => {
+              if (!range?.from) return;
+              setDateValue(`r:${isoOf(range.from)}:${range.to ? isoOf(range.to) : ""}`);
+              // Close once both ends are chosen, so a range takes two clicks and no extra button.
+              if (range.to) setDateCalOpen(false);
+            }}
+            initialFocus
+          />
         </div>
       )}
     </div>
@@ -2323,7 +2340,7 @@ export default function ProformaSlips() {
                     Calendar
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
+                <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-auto p-3">
                   {dateCustomBody}
                 </PopoverContent>
               </Popover>

@@ -9,6 +9,12 @@ export interface DataTableColumn<TData> {
   sortable?: boolean;
   width?: number;
   minWidth?: number;
+  /**
+   * Keep this column at exactly `width` pixels. Normally every column is stretched in proportion to
+   * fill the table, which turns a small column (a progress ring, an icon) into a wide empty one on
+   * a wide screen. Fixed columns keep their size; the other columns share the rest.
+   */
+  fixedWidth?: boolean;
   isSticky?: boolean;
   isHiddenByDefault?: boolean;
   /** Set false to exclude this column from the column-visibility toggle (always shown). */

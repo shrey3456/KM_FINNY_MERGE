@@ -346,6 +346,13 @@ app.use((req, res, next) => {
     // Adjust"). Older ones are found through the stock ledger row the same request wrote (same
     // order, barcode, plant, opposite qty, within a few seconds); a negative qty is always one.
     await pool.query(`ALTER TABLE loading_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
+    // proforma_slips.notion_store_keeper_push — which loads push StoreKeeper Info to Notion (see
+    // shared/schema.ts). Defaults false, so every slip that exists today is left alone.
+    await pool.query(`ALTER TABLE proforma_slips ADD COLUMN IF NOT EXISTS notion_store_keeper_push BOOLEAN DEFAULT false`);
+    // proforma_slips.status_before_loading — restored when a load is deleted (see shared/schema.ts).
+    await pool.query(`ALTER TABLE proforma_slips ADD COLUMN IF NOT EXISTS status_before_loading TEXT`);
+    // order_import_sessions.scan_completed_by_code — who completed a Scan Order part (see schema).
+    await pool.query(`ALTER TABLE order_import_sessions ADD COLUMN IF NOT EXISTS scan_completed_by_code TEXT`);
     // Same marker on the two scanning tables, set by their qty-edit endpoints ("Scan Adjust" /
     // "Unload Adjust"). No backfill: an edit leaves nothing behind that identifies it afterwards,
     // so only edits made from now on are marked.

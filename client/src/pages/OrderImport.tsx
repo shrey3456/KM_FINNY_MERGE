@@ -72,6 +72,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import type { OrderImportSession, OrderImportItem } from "@shared/schema";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ── Fixed target columns ─────────────────────────────────────────────────────
 const TARGET_FIELDS = [
@@ -231,6 +232,8 @@ type ScanSession = {
   // was uploaded). All date filters/labels on this page use orderDate.
   orderDate: string | null;
   scanActivatedByName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null;
+  // Who completed the part — a name, "System", or null for parts completed before this was recorded.
+  scanCompletedByName?: string | null;
   scanActivatedByCode:string | null;
   // FIFO batch membership — already returned by /api/order-scan/sessions, just wasn't typed
   // here until Reports needed to know whether to offer group-level (Final/CSV-wise) reports.
@@ -1438,7 +1441,7 @@ export default function OrderImport() {
               <FileUp className="h-6 w-6" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-[#001d6e]">Order Import</h1>
+              <h1 className="text-2xl font-bold text-[#001d6e]">Order Management</h1>
               <p className="text-sm text-gray-500">Upload a CSV, map columns, and manage scan sessions</p>
             </div>
           </div>
@@ -1718,9 +1721,7 @@ export default function OrderImport() {
               </div>
               {/* Content */}
               {scanSessionsQuery.isFetching && availableScanSessions.length === 0 ? (
-                <div className="flex justify-center py-12">
-                  <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-                </div>
+                <SectionSkeleton lines={5} />
               ) : availableScanSessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-gray-400">
                   <ScanLine className="h-10 w-10 mb-3 opacity-20" />
@@ -1842,9 +1843,7 @@ export default function OrderImport() {
                               </span>
                             </div>
                             {scanItemsQuery.isLoading ? (
-                              <div className="flex justify-center py-6">
-                                <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-                              </div>
+                              <SectionSkeleton lines={3} />
                             ) : (
                               <>
                               {/* A 6-column table can't fit a phone without sideways scrolling,
@@ -2030,9 +2029,7 @@ export default function OrderImport() {
               </div>
               {/* Content */}
               {recentCompleteQuery.isFetching && completedScanSessions.length === 0 ? (
-                <div className="flex justify-center py-12">
-                  <Loader2 className="h-6 w-6 animate-spin text-green-600" />
-                </div>
+                <SectionSkeleton lines={5} />
               ) : completedScanSessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-gray-400">
                   <CheckCircle2 className="h-10 w-10 mb-3 opacity-20" />
@@ -2053,7 +2050,11 @@ export default function OrderImport() {
                                 For {s.orderDate}
                               </span>
                             )}
-                            {s.scanCompletedAt && <span className="text-xs text-green-700 font-medium">Done {fmtIST(s.scanCompletedAt)}</span>}
+                            {s.scanCompletedAt && (
+                              <span className="text-xs text-green-700 font-medium">
+                                Done {fmtIST(s.scanCompletedAt)}{s.scanCompletedByName ? ` · by ${s.scanCompletedByName}` : ""}
+                              </span>
+                            )}
                             {s.importedByName && <span className="text-xs text-gray-400">· {s.importedByName}</span>}
                             {s.scanActivatedByName && <span className="text-xs text-gray-400">· Scanned by {s.scanActivatedByName}</span>}
                           </div>
@@ -2127,9 +2128,7 @@ export default function OrderImport() {
               </div>
               {/* Content */}
               {sessionsQuery.isLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-                </div>
+                <SectionSkeleton lines={5} />
               ) : sessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <FileUp className="h-10 w-10 mb-3 opacity-20" />
@@ -2188,7 +2187,10 @@ export default function OrderImport() {
                                     <span className="text-xs text-gray-400">Started: {fmtIST((session as any).scanActivatedAt)}</span>
                                   )}
                                   {(session as any).scanCompletedAt && (
-                                    <span className="text-xs text-gray-400">Completed: {fmtIST((session as any).scanCompletedAt)}</span>
+                                    <span className="text-xs text-gray-400">
+                                      Completed: {fmtIST((session as any).scanCompletedAt)}
+                                      {(session as any).scanCompletedByName ? ` · by ${(session as any).scanCompletedByName}` : ""}
+                                    </span>
                                   )}
                                   {formatDuration((session as any).scanActivatedAt, (session as any).scanCompletedAt) && (
                                     <span className="bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
@@ -2262,9 +2264,7 @@ export default function OrderImport() {
                                 </span>
                               </div>
                               {itemsQuery.isLoading ? (
-                                <div className="flex justify-center py-6">
-                                  <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-                                </div>
+                                <SectionSkeleton lines={3} />
                               ) : (
                                 <>
                                 {/* Same reason as the Available tab: 7 columns won't fit a phone. */}
@@ -2491,7 +2491,7 @@ export default function OrderImport() {
                 </div>
               </div>
               {unloadCsvHistoryQuery.isLoading ? (
-                <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+                <SectionSkeleton lines={6} />
               ) : unloadCsvUploads.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 text-center">
                   <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">

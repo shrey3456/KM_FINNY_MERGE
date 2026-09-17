@@ -166,6 +166,8 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
         // /complete respectively (see order-scan.ts). Null until each happens.
         scanActivatedAt: orderImportSessions.scanActivatedAt,
         scanCompletedAt: orderImportSessions.scanCompletedAt,
+        // Who completed it — a name, "System", or null (see order_import_sessions.scanCompletedByCode).
+        scanCompletedByName: sql<string | null>`(CASE WHEN ${orderImportSessions.scanCompletedByCode} = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = ${orderImportSessions.scanCompletedByCode} LIMIT 1) END)`,
         // Ordered totals for this CSV. rowCount alone says how many LINES the file has, which
         // isn't what anyone means by "how big is this order" — these give the quantity and pallet
         // figures, so the list can show them without expanding every session to add them up.

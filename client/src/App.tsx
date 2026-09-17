@@ -14,7 +14,6 @@ import Purchases from "@/pages/Purchases";
 import LoadOperations from "./pages/LoadOperations"; // Renamed component
 import PrintOperations from "./pages/PrintOperationsFinal12";
 import Login from "./pages/Login";
-import SplashScreen from "./pages/SplashScreen";
 import ProformaSlips from "./pages/ProformaSlips";
 import Activities from "./pages/Activities";
 import Dispatch from "./pages/Dispatch";
@@ -27,6 +26,7 @@ import MessagesPage from "./pages/MessagesPage";
 import CheckInOutPage from "./pages/CheckInOutPage";
 import Profile from "./pages/Profile";
 import { useState, useEffect, useCallback, Suspense, lazy } from "react";
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 import Layout from "@/components/Layout";
 import { useToast } from "@/hooks/use-toast";
 import ProtectedRoute from "@/components/ProtectedRoute";
@@ -38,20 +38,21 @@ import VehicleMaster from "./pages/VehicleMaster";
 import LoadOperation from "./pages/Loading/LoadOperation";
 import Unloading from "./pages/Unloading/Unloading";
 
-// Loading indicator component for Suspense fallback
-const LoadingIndicator = () => (
-  <div className="flex h-screen w-full items-center justify-center">
-    <div className="h-16 w-16 animate-spin rounded-full border-b-2 border-t-2 border-primary"></div>
-  </div>
-);
+// Shown while a page's code is still loading — the same skeleton as every other page load,
+// instead of a spinning ring.
+const LoadingIndicator = () => <PageSkeleton />;
 
 // Router component with improved PWA support
 function Router() {
   const { user, logoutMutation } = useAuth();
   // We can derive isAuthenticated from user presence in useAuth context
   // But we'll keep local state for now to minimize disruption, syncing it with useAuth
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [showSplash, setShowSplash] = useState(true);
+  // Starts from the saved session, so a page refresh goes straight back to where you were. It used
+  // to start false and wait for the check below, which flashed the login screen for a moment — the
+  // 2.5-second splash screen that was shown on every load mainly existed to cover that flash.
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    try { return !!localStorage.getItem('currentUser'); } catch { return false; }
+  });
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isStandalone, setIsStandalone] = useState(false);
@@ -128,14 +129,6 @@ function Router() {
     };
   }, [toast]);
 
-  // Show splash screen for 2.5 seconds
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setShowSplash(false);
-    }, 2500);
-    return () => clearTimeout(timer);
-  }, []);
-
   // Handle Login
   const handleLogin = () => {
     setIsAuthenticated(true);
@@ -202,11 +195,6 @@ function Router() {
       window.removeEventListener("auth:unauthorized", handleUnauthorizedEvent);
     };
   }, [navigate, toast]);
-
-  // Show splash screen
-  if (showSplash) {
-    return <SplashScreen />;
-  }
 
   // Show login if not authenticated
   if (!isAuthenticated) {

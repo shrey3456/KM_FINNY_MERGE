@@ -25,9 +25,9 @@ function generateBarcodeDataUrl(text: string): string {
 }
 
 // Order-number barcode on the proforma slip (under #orderNumber, in both the on-screen preview and
-// every printed copy). Switched OFF for now at the user's request — all of its code is kept as is,
-// so turning it back on is only changing this to true.
-const SHOW_ORDER_BARCODE = false;
+// every printed copy), 7mm tall. Kept behind this switch so it can be turned off again by setting it
+// to false, without touching any of the code that draws it.
+const SHOW_ORDER_BARCODE = true;
 
 // The vehicle circle is a fixed 45px. At the old fixed 16pt, a longer code ("T-01", "MH-46") spilled
 // out of it and wrapped onto two lines; the font now steps down with the code's length so it always

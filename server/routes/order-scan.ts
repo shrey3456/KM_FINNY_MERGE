@@ -575,7 +575,7 @@ export async function sweepStaleCompletions(groupId: number, plant: string, user
     if ((remainRows[0]?.remaining ?? 1) !== 0) continue; // not fully scanned yet — leave it
 
     const { rowCount } = await pool.query(
-      `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW()
+      `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW(), scan_completed_by_code = 'system'
        WHERE id = $1 AND scan_status <> 'completed'`,
       [s.id],
     );
@@ -922,6 +922,7 @@ router.get('/order-scan/sessions/recent-complete', async (req: Request, res: Res
          s.created_at AS "createdAt", s.order_date AS "orderDate", s.scan_status AS "scanStatus",
          s.scan_activated_by_code AS "scanActivatedByCode", ab.name AS "scanActivatedByName",
          s.scan_activated_at AS "scanActivatedAt", s.scan_completed_at AS "scanCompletedAt",
+         CASE WHEN s.scan_completed_by_code = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = s.scan_completed_by_code LIMIT 1) END AS "scanCompletedByName",
          s.receiving_session_id AS "receivingSessionId", s.part_index AS "partIndex",
          COALESCE((SELECT SUM(oii.quantity) FROM order_import_items oii WHERE oii.session_id = s.id), 0)::int AS "totalQty",
          COALESCE((SELECT SUM(oii.expected_pallets) FROM order_import_items oii WHERE oii.session_id = s.id), 0)::float AS "totalPallets"
@@ -1136,10 +1137,10 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteAccess, async (r
     // (credits, auto-activate, broadcast) correctly no-ops instead of double-processing.
     const { rows: completedRows } = await pool.query(
       `UPDATE order_import_sessions
-       SET scan_status = 'completed', scan_completed_at = $1
+       SET scan_status = 'completed', scan_completed_at = $1, scan_completed_by_code = $3
        WHERE id = $2 AND scan_status <> 'completed'
        RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName", part_index AS "partIndex"`,
-      [new Date(), id],
+      [new Date(), id, (req.user as any)?.userCode ?? null],
     );
     const completed = completedRows[0];
 
@@ -1275,7 +1276,7 @@ router.post('/order-scan/sessions/:id/reopen', requirePageWrite('order-import'),
     }
 
     await client.query(
-      `UPDATE order_import_sessions SET scan_status = 'active', scan_completed_at = NULL WHERE id = $1`,
+      `UPDATE order_import_sessions SET scan_status = 'active', scan_completed_at = NULL, scan_completed_by_code = NULL WHERE id = $1`,
       [id],
     );
 
@@ -1715,9 +1716,9 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
         );
         if ((remainRows[0]?.remaining ?? 1) === 0) {
           const { rowCount } = await client.query(
-            `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW()
+            `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW(), scan_completed_by_code = $2
              WHERE id = $1 AND scan_status <> 'completed'`,
-            [sid],
+            [sid, userCode],
           );
           if (rowCount) newlyCompleted.push(sid);
         }

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
+  AlertTriangle, Calendar, Camera, CheckCircle2, Factory, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
   Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
@@ -38,6 +38,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, matchBarcodeNotInSystemError, matchExtraNotAllowedError, parseApiErrorMessage } from "@/lib/apiError";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // Width split (percent) between the Load Totals card and the Scan Items column — operator-
 // draggable, same mechanism (and same localStorage-key naming convention) as Order Scan's own
@@ -115,6 +116,8 @@ type LoadingRecord = {
   // straight from the source order data — the two can be days apart.
   createdAt: string; orderDate: string | null;
   loadingCompletedAt: string | null;
+  // Who completed the load (Complete button or the scan that finished it) — a name, or null.
+  loadingCompletedByCode?: string | null; loadingCompletedByName?: string | null;
   loadingOwnerCode: string | null; loadingOwnerName: string | null; loadingPausedAt: string | null;
   // The STV this load was started on (see the Create Operation dialog) — shown in the list and
   // filterable there.
@@ -182,9 +185,14 @@ function OwnerTimelineSummary({ timeline }: { timeline: OwnerTimelineEntry[] }) 
 function currentUser(): any {
   try { return JSON.parse(localStorage.getItem("currentUser") || "{}"); } catch { return {}; }
 }
+// Same admin roles the server accepts (WRITE_ADMIN_ROLES in server/lib/pageAccess.ts), compared the
+// same way — case-insensitive. Checking only the exact spellings "admin"/"super-admin" hid admin-only
+// buttons (Reopen) from an admin whose role was saved as e.g. "Super Admin", while the server would
+// have allowed the action.
+const ADMIN_ROLES = ["admin", "super-admin", "superadmin", "super_admin", "super admin"];
 function isAdminOrSuper(): boolean {
   const u = currentUser();
-  return u.role === "admin" || u.role === "super-admin";
+  return ADMIN_ROLES.includes(String(u.role ?? "").trim().toLowerCase());
 }
 // Mirrors the server's canCompleteLoad (server/routes/loading.ts) exactly, for a clean hide
 // instead of a click-then-403 — real enforcement still happens server-side either way.
@@ -344,6 +352,11 @@ export default function LoadOperation() {
   const recordDayOptions = (values: (string | null | undefined)[]) =>
     recordDistinct(values.map((v) => (v ? formatDay(new Date(v), "yyyy-MM-dd") : null)));
   const recordOwner = (r: LoadingRecord) => r.loadingOwnerName ?? r.loadingOwnerCode ?? "";
+  const recordCompletedBy = (r: LoadingRecord) =>
+    r.loadingCompletedAt ? (r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "") : "";
+  // Reopen: an admin/super-admin, or the load's current owner (server enforces the same rule).
+  const canReopenRecord = (r: LoadingRecord) =>
+    !!r.loadingCompletedAt && (admin || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
   const recordFilterColumns: FilterableColumn<LoadingRecord>[] = [
     { id: "orderNumber", label: "Order No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.orderNumber)), accessor: (r) => r.orderNumber },
     { id: "orderDate", label: "Order Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.orderDate)), accessor: (r) => r.orderDate },
@@ -353,7 +366,8 @@ export default function LoadOperation() {
     { id: "vehicle", label: "Vehicle No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.vehicleNumber)), accessor: (r) => r.vehicleNumber },
     { id: "stv", label: "STV", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => r.loadingStv)), accessor: (r) => r.loadingStv },
     { id: "status", label: "Status", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => recordStatus(r))), accessor: (r) => recordStatus(r) },
-    { id: "owner", label: "Owner", filterType: "text", options: recordDistinct(recordsItems.map(recordOwner)), accessor: recordOwner },
+    { id: "owner", label: "Current Owner", filterType: "text", options: recordDistinct(recordsItems.map(recordOwner)), accessor: recordOwner },
+    { id: "completedBy", label: "Completed By", filterType: "text", options: recordDistinct(recordsItems.map(recordCompletedBy)), accessor: recordCompletedBy },
     { id: "creator", label: "Creator", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.createdByName)), accessor: (r) => r.createdByName },
   ];
   const recordConditionList = Object.values(recordColumnConditions);
@@ -439,7 +453,19 @@ export default function LoadOperation() {
     queryFn: async () =>
       (await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(expandedRecordOrder ?? "")}/handoffs`)).json(),
     enabled: !!expandedRecordOrder,
+    // Also picks up changes made by someone else on another screen.
+    refetchInterval: 15000,
   });
+
+  // Owner history is worked out on the server from the load's current state — who holds it, when it
+  // was completed (the last owner's "to" time), and how much each owner loaded. It was loaded once and
+  // never told to reload, so after Complete it kept showing "to current" until the page was
+  // refreshed, and Reopen didn't bring "current" back. Every action that changes any of that calls
+  // this for its order.
+  function refreshOwnerHistory(orderNumber: string | null | undefined) {
+    if (!orderNumber) return;
+    queryClient.invalidateQueries({ queryKey: ["/api/loading/proforma", orderNumber, "handoffs"] });
+  }
 
   // Reopen (undo Complete) and Reset (the "Delete" action — undoes everything the order's
   // loading did: reverses stock, voids the scan history, un-assigns the vehicle, removes the
@@ -450,19 +476,30 @@ export default function LoadOperation() {
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Reopen failed");
       return res.json();
     },
-    onSuccess: () => { toast({ title: "Load reopened" }); recordsQuery.refetch(); },
+    onSuccess: (_data, orderNumber) => {
+      toast({ title: "Load reopened" });
+      recordsQuery.refetch();
+      refreshOwnerHistory(orderNumber);
+    },
     onError: (err: any) => toast({ title: "Reopen failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   const [resetTarget, setResetTarget] = useState<LoadingRecord | null>(null);
+  // mode "void" keeps the scan entries (marked Voided); "remove" deletes them for good. Both return
+  // the stock and put the slip back to its status from before Create Operation.
   const resetMutation = useMutation({
-    mutationFn: async (orderNumber: string) => {
-      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(orderNumber)}/reset`, {});
+    mutationFn: async ({ orderNumber, mode }: { orderNumber: string; mode: "void" | "remove" }) => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(orderNumber)}/reset`, { mode });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Delete failed");
       return res.json();
     },
     onSuccess: (data: any) => {
-      toast({ title: "Loading slip deleted", description: `${data?.reversedEvents ?? 0} scan(s) undone and stock reversed.` });
+      toast({
+        title: data?.mode === "remove" ? "Loading removed completely" : "Loading slip deleted",
+        description: data?.mode === "remove"
+          ? `Stock returned and all scan history deleted. Status back to ${data?.restoredStatus ?? "before loading"}.`
+          : `${data?.reversedEvents ?? 0} scan(s) voided and stock returned. Status back to ${data?.restoredStatus ?? "before loading"}.`,
+      });
       setResetTarget(null);
       setExpandedRecordOrder(null);
       recordsQuery.refetch();
@@ -484,6 +521,8 @@ export default function LoadOperation() {
     },
     onSuccess: () => {
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
+      refreshOwnerHistory(expandedRecordOrder);
+      refreshOwnerHistory(slip?.orderNumber);
       setVoidTarget(null);
       setVoidReason("");
       // Both history panels (landing table + this order's items table) read the same combined
@@ -653,6 +692,8 @@ export default function LoadOperation() {
     queryFn: async () =>
       (await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(slip?.orderNumber ?? "")}/handoffs`)).json(),
     enabled: !!slip,
+    // Also picks up changes made by someone else on another screen.
+    refetchInterval: 15000,
   });
 
   const orderSuggestionsQuery = useQuery<{ results: ProformaSuggestion[] }>({
@@ -735,11 +776,23 @@ export default function LoadOperation() {
     },
     onSuccess: (data) => {
       if (confirmRef.current) {
+        confirmRef.current = false;
+        silentLookupRef.current = false;
+        // A load operation already exists for this slip in our system (loadDate is set only by
+        // Create Operation) — open that load instead of offering to create it a second time. The
+        // Create dialog is only for a slip that has never been started here.
+        if (data.slip.loadDate) {
+          setSearchOpen(false);
+          commitSlip(data);
+          toast({
+            title: "Load operation already exists",
+            description: `#${data.slip.orderNumber} was already created — opened the existing load.`,
+          });
+          return;
+        }
         // Hold it in the dialog — nothing is opened until "Create Operation" is clicked.
         setPendingSlip(data);
         setOrderFocused(false);
-        confirmRef.current = false;
-        silentLookupRef.current = false;
         return;
       }
       commitSlip(data); // also sets view to "create"
@@ -1230,6 +1283,7 @@ export default function LoadOperation() {
     },
     onSuccess: (data) => {
       markItemScanned(adjustTarget?.item.barcode, data.items);
+      refreshOwnerHistory(data.slip.orderNumber);
       setSlip(data.slip);
       setItems(data.items);
       setAllComplete(data.allComplete);
@@ -1363,6 +1417,7 @@ export default function LoadOperation() {
     },
     onSuccess: (data) => {
       markItemScanned(data.event?.barcode, data.items);
+      refreshOwnerHistory(data.slip.orderNumber);
       setSlip(data.slip);
       setItems(data.items);
       setAllComplete(data.allComplete);
@@ -1403,6 +1458,7 @@ export default function LoadOperation() {
       setLoadedVolume(data.loadedVolume);
       setConfirmCompleteOpen(false);
       announceLoadComplete(data.slip, data.items, false);
+      refreshOwnerHistory(data.slip.orderNumber);
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
     onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
@@ -1421,6 +1477,7 @@ export default function LoadOperation() {
       setSlip(data.slip);
       toast({ title: "Load paused", description: "Anyone with write access can now claim it." });
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+      refreshOwnerHistory(data.slip.orderNumber);
     },
     onError: (err: any) => toast({ title: "Could not pause", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
@@ -1434,6 +1491,7 @@ export default function LoadOperation() {
       if (slip?.orderNumber === data.slip.orderNumber) setSlip(data.slip);
       toast({ title: "Load claimed", description: "You now own this load." });
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+      refreshOwnerHistory(data.slip.orderNumber);
     },
     onError: (err: any) => toast({ title: "Could not claim", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
@@ -1719,11 +1777,18 @@ export default function LoadOperation() {
       pallets += Math.floor(q / ipp);
       loose += q % ipp;
     }
+    // Pallets and loose share ONE smaller line under the total — stacked a line each, the totals
+    // row grew three lines tall and took more room than any item row above it.
+    const parts = [
+      itemUnitTab !== "loose" && pallets > 0 ? `${pallets} plt` : null,
+      itemUnitTab !== "pallet" && loose > 0 ? `${loose} loose` : null,
+    ].filter(Boolean);
     return (
       <>
-        <span className="block">{qty}</span>
-        {itemUnitTab !== "loose" && pallets > 0 && <span className="block text-sm font-semibold text-gray-500">{pallets} plt</span>}
-        {itemUnitTab !== "pallet" && loose > 0 && <span className="block text-sm font-semibold text-gray-500">{loose} loose</span>}
+        <span className="block leading-tight">{qty}</span>
+        {parts.length > 0 && (
+          <span className="block whitespace-nowrap text-xs font-semibold leading-tight text-gray-500">{parts.join(" · ")}</span>
+        )}
       </>
     );
   };
@@ -1744,7 +1809,9 @@ export default function LoadOperation() {
       // all that leftover space, reading as "way too much empty space around a tiny ring." Top-
       // aligning it (matching where the Item column's own text starts) puts all the slack below
       // the ring instead of split evenly around it.
-      width: 28, minWidth: 28, align: "center", cellClassName: "align-top", sortable: false, totalable: false,
+      // fixedWidth: stays 36px on any screen. Stretched in proportion with the other columns it
+      // grew to ~95px of empty space around a 20px ring on a wide monitor.
+      width: 36, minWidth: 36, fixedWidth: true, align: "center", cellClassName: "align-top px-1", headerClassName: "px-1", sortable: false, totalable: false,
       render: (row) => {
         const pct = row.expected > 0 ? Math.min(100, Math.round((row.loaded / row.expected) * 100)) : (row.loaded > 0 ? 100 : 0);
         return <CircularProgress percent={pct} size={20} strokeWidth={2} />;
@@ -1929,7 +1996,7 @@ export default function LoadOperation() {
     return (
       <div className="border-b border-gray-200 bg-gray-50 p-3">
         {orderLoadHistoryQuery.isLoading ? (
-          <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+          <SectionSkeleton lines={3} />
         ) : (
           <DataTable<LoadHistoryEvent>
             containerClassName="border border-gray-200 bg-white"
@@ -1980,7 +2047,7 @@ export default function LoadOperation() {
           <OwnerTimelineSummary timeline={expandedRecordHandoffsQuery.data!.timeline} />
         )
       ) : recordHistoryQuery.isLoading ? (
-        <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+        <SectionSkeleton lines={3} />
       ) : (recordHistoryQuery.data?.items.length ?? 0) === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">No scan history for this order yet.</p>
       ) : (
@@ -2069,9 +2136,11 @@ export default function LoadOperation() {
                 create/scan view (an open order, often with many items to scroll through) skips
                 it entirely instead; that view's only collapsible header now is the global
                 "Welcome" bar (Layout.tsx's HEADER_HIDEABLE_PATHS), not this one. */}
+            {/* Same name and icon as this page's sidebar entry ("Load Operations", the factory). */}
             <PageHeader
-              icon={Package}
-              title="Loading"
+              icon={Factory}
+              iconClassName="h-5 w-5 fill-[#4d7eff]"
+              title="Load Operations"
               description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
             />
             {canWrite && (
@@ -2164,7 +2233,7 @@ export default function LoadOperation() {
                       {orderFocused && debouncedOrderSearch.trim().length >= 2 && (
                         <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
                           {orderSuggestionsQuery.isFetching ? (
-                            <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+                            <SectionSkeleton lines={2} />
                           ) : orderSuggestions.length === 0 ? (
                             <p className="px-4 py-3 text-xs text-gray-400">No matching orders.</p>
                           ) : (
@@ -2199,7 +2268,7 @@ export default function LoadOperation() {
               </Dialog>
             )}
             {fetchSlipMutation.isPending ? (
-                        <div className="space-y-4 animate-pulse">
+                        <div className="space-y-4 skeleton-wave">
                           <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
                             <div className="flex flex-col gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 sm:flex-row sm:items-center sm:justify-between">
                               <div className="min-w-0 space-y-2">
@@ -2362,7 +2431,7 @@ export default function LoadOperation() {
             </div>
 
             {recordsQuery.isLoading ? (
-              <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              <SectionSkeleton lines={6} />
             ) : filteredRecords.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center border rounded-md">
                 <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">
@@ -2402,7 +2471,6 @@ export default function LoadOperation() {
                           instead of the plain shadcn default (muted-gray text on white) — makes
                           the header read as a header rather than blending into the rows. */}
                       <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
-                        <TableHead className="w-12 text-[11px] font-semibold uppercase tracking-wide text-white"></TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Order date (top) — the proforma slip's own date; Load date (below) — when this load operation was started">{recordColumnHeader("orderDate", "Order / Load Date")}</TableHead>
                         <TableHead
                           className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
@@ -2415,8 +2483,9 @@ export default function LoadOperation() {
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">{recordColumnHeader("vehicle", "Vehicle No.")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The STV/platform this load was started on — set once at Create Operation">{recordColumnHeader("stv", "STV")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Owner")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Who marked this load complete — the Complete button, or the scan that finished it">{recordColumnHeader("completedBy", "Completed By")}</TableHead>
                         <TableHead
                           className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
                           onClick={() => { setSortBy("creationDate"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
@@ -2431,21 +2500,13 @@ export default function LoadOperation() {
                         const isExpanded = expandedRecordOrder === r.orderNumber;
                         return (
                           <Fragment key={r.id}>
+                            {/* No arrow column — clicking anywhere on the row opens or closes its
+                                details. The open row is tinted so it's clear which one is expanded. */}
                             <TableRow
-                              className="cursor-pointer"
+                              className={`cursor-pointer ${isExpanded ? "bg-[#001d6e]/[0.04] hover:bg-[#001d6e]/[0.06]" : ""}`}
+                              title={isExpanded ? "Click to close details" : "Click to open details"}
                               onClick={() => toggleExpandedRecord(r.orderNumber)}
                             >
-                              <TableCell onClick={(e) => e.stopPropagation()}>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 rounded-full"
-                                  title="View scan history"
-                                  onClick={() => toggleExpandedRecord(r.orderNumber)}
-                                >
-                                  <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
-                                </Button>
-                              </TableCell>
                               <TableCell>
                                 <div className="flex flex-col">
                                   <span>
@@ -2469,7 +2530,7 @@ export default function LoadOperation() {
                               </TableCell>
                               <TableCell>
                                 {r.loadingStv
-                                  ? <span className="inline-flex items-center rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
+                                  ? <span className="inline-flex items-center whitespace-nowrap rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
                                   : <span className="text-muted-foreground">-</span>}
                               </TableCell>
                               <TableCell>
@@ -2502,6 +2563,18 @@ export default function LoadOperation() {
                               </TableCell>
                               <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
                               <TableCell>
+                                {r.loadingCompletedAt ? (
+                                  <div className="flex flex-col">
+                                    <span className="text-xs font-medium text-gray-700">{r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "—"}</span>
+                                    <span className="text-[11px] text-gray-400">
+                                      {new Date(r.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-gray-300">—</span>
+                                )}
+                              </TableCell>
+                              <TableCell>
                                 <div className="flex flex-col">
                                   <span className="font-medium">{r.createdByName ?? r.createdByCode ?? "Unknown"}</span>
                                   <span className="text-xs text-muted-foreground">
@@ -2525,7 +2598,7 @@ export default function LoadOperation() {
                                       requireReopenAccess in server/routes/loading.ts) —
                                       deliberately stricter than completing a load, since it
                                       un-does a finished, audited state. */}
-                                  {r.loadingCompletedAt && admin && (
+                                  {canReopenRecord(r) && (
                                     <Button
                                       variant="ghost"
                                       size="icon"
@@ -2553,7 +2626,7 @@ export default function LoadOperation() {
                             </TableRow>
                             {isExpanded && (
                               <TableRow>
-                                <TableCell colSpan={11} className="bg-gray-50 p-3">
+                                <TableCell colSpan={12} className="bg-gray-50 p-3">
                                   {historyPanel}
                                 </TableCell>
                               </TableRow>
@@ -2617,7 +2690,7 @@ export default function LoadOperation() {
                             >
                               <FileText className="h-4 w-4 text-[#001d6e]" />
                             </Button>
-                            {r.loadingCompletedAt && admin && (
+                            {canReopenRecord(r) && (
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -2659,6 +2732,9 @@ export default function LoadOperation() {
                               </span>
                             </span>
                             <span className="whitespace-nowrap">{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</span>
+                            {r.loadingCompletedAt && (r.loadingCompletedByName || r.loadingCompletedByCode) && (
+                              <span className="whitespace-nowrap text-emerald-700">Completed by {r.loadingCompletedByName ?? r.loadingCompletedByCode}</span>
+                            )}
                             <span className="flex items-center whitespace-nowrap">
                               <UserCircle2 className="h-3 w-3 mr-1 shrink-0" />
                               {r.createdByName ?? r.createdByCode ?? "Unknown"}
@@ -2836,7 +2912,7 @@ export default function LoadOperation() {
                     {vehicleFocused && !selectedVehicle && debouncedVehicleSearch.trim().length >= 1 && (
                       <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
                         {vehicleSuggestionsQuery.isFetching ? (
-                          <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+                          <SectionSkeleton lines={2} />
                         ) : vehicleSuggestions.length === 0 ? (
                           <p className="px-4 py-3 text-xs text-gray-400">No matching vehicles.</p>
                         ) : (
@@ -3181,7 +3257,7 @@ export default function LoadOperation() {
                       {vehicleFocused && !selectedVehicle && debouncedVehicleSearch.trim().length >= 1 && (
                         <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
                           {vehicleSuggestionsQuery.isFetching ? (
-                            <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+                            <SectionSkeleton lines={2} />
                           ) : vehicleSuggestions.length === 0 ? (
                             <p className="px-4 py-3 text-xs text-gray-400">No matching vehicles.</p>
                           ) : (
@@ -3673,7 +3749,7 @@ export default function LoadOperation() {
                       {vehicleFocused && !selectedVehicle && debouncedVehicleSearch.trim().length >= 1 && (
                         <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
                           {vehicleSuggestionsQuery.isFetching ? (
-                            <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+                            <SectionSkeleton lines={2} />
                           ) : vehicleSuggestions.length === 0 ? (
                             <p className="px-4 py-3 text-xs text-gray-400">No matching vehicles.</p>
                           ) : (
@@ -4085,27 +4161,52 @@ export default function LoadOperation() {
           scan history voided (kept for audit, same as individual Void), vehicle un-assigned,
           the row itself removed from this table. Cannot be undone from here. */}
       <Dialog open={!!resetTarget} onOpenChange={(o) => { if (!o) setResetTarget(null); }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-red-600">Delete this loading slip?</DialogTitle>
             <DialogDescription>
-              Order <span className="font-semibold text-gray-900">#{resetTarget?.orderNumber}</span> — this reverses every item scanned onto{" "}
-              <span className="font-semibold text-gray-900">{resetTarget?.vehicleNumber}</span> (stock is added back), un-assigns the vehicle, and
-              clears the completed status. The scan history stays visible in Scan History marked Voided, but this row disappears from this table.
-              This cannot be undone from here.
+              Order <span className="font-semibold text-gray-900">#{resetTarget?.orderNumber}</span>
+              {resetTarget?.vehicleNumber ? <> on <span className="font-semibold text-gray-900">{resetTarget.vehicleNumber}</span></> : null}.
+              Either way, all loaded stock is returned, the vehicle, owner and STV are cleared, the status goes back to what
+              it was before loading started, and the proforma slip itself is not changed.
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter className="gap-2">
+
+          {/* Two ways to delete — pick by what should be left behind. */}
+          <div className="space-y-2">
+            <button
+              type="button"
+              disabled={resetMutation.isPending}
+              onClick={() => { if (resetTarget) resetMutation.mutate({ orderNumber: resetTarget.orderNumber, mode: "void" }); }}
+              className="w-full rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-left transition-colors hover:bg-amber-100 disabled:opacity-60"
+            >
+              <span className="flex items-center gap-1.5 text-sm font-semibold text-amber-800">
+                {resetMutation.isPending && resetMutation.variables?.mode === "void" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Delete, keep history as Void
+              </span>
+              <span className="mt-0.5 block text-xs text-amber-700">
+                Scan entries stay in Scan History marked Voided, so there is still a record of what was loaded.
+              </span>
+            </button>
+            <button
+              type="button"
+              disabled={resetMutation.isPending}
+              onClick={() => { if (resetTarget) resetMutation.mutate({ orderNumber: resetTarget.orderNumber, mode: "remove" }); }}
+              className="w-full rounded-lg border border-red-300 bg-red-50 px-3 py-2.5 text-left transition-colors hover:bg-red-100 disabled:opacity-60"
+            >
+              <span className="flex items-center gap-1.5 text-sm font-semibold text-red-700">
+                {resetMutation.isPending && resetMutation.variables?.mode === "remove" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Remove completely
+              </span>
+              <span className="mt-0.5 block text-xs text-red-600">
+                All scan entries, handoff history and stock records for this load are permanently deleted from the database. This cannot be undone.
+              </span>
+            </button>
+          </div>
+
+          <DialogFooter>
             <Button variant="outline" onClick={() => setResetTarget(null)} disabled={resetMutation.isPending}>
               Cancel
-            </Button>
-            <Button
-              className="bg-red-600 text-white hover:bg-red-700"
-              disabled={resetMutation.isPending}
-              onClick={() => { if (resetTarget) resetMutation.mutate(resetTarget.orderNumber); }}
-            >
-              {resetMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
-              Delete Slip
             </Button>
           </DialogFooter>
         </DialogContent>

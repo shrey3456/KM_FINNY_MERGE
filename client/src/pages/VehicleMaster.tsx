@@ -21,6 +21,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import type { VehicleInfo } from "@shared/schema";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ─── Types (mirror server/services/notionVehicleSync.ts + vehicle-info route responses) ───
 type EnrichedVehicle = VehicleInfo & { lastEditedByName: string | null; createdByName: string | null };
@@ -532,10 +533,7 @@ export default function VehicleMaster() {
               <tbody>
                 {vehiclesQuery.isLoading ? (
                   <tr>
-                    <td colSpan={visibleColumns.length + (canWrite ? 1 : 0)} className="h-40 text-center text-muted-foreground">
-                      <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-[#001d6e]" />
-                      <div className="text-sm">Loading vehicle master…</div>
-                    </td>
+                    <td colSpan={visibleColumns.length + (canWrite ? 1 : 0)} className="p-0"><SectionSkeleton lines={6} /></td>
                   </tr>
                 ) : filteredVehicles.length === 0 ? (
                   <tr>

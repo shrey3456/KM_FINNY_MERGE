@@ -33,12 +33,15 @@ import { DataTable, buildPageList, type DataTableColumn } from "@/components/ui/
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ─── Types (mirror server/routes/unloading.ts responses) ─────────────────────
 type SessionListItem = {
   id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
   rowCount: number; groupId: number; partIndex: number; scanStatus: "available" | "active" | "completed";
   createdAt: string; scanActivatedAt: string | null; scanCompletedAt: string | null;
+  // Who completed the batch — a name, "System", or null (see server/routes/unloading.ts).
+  scanCompletedByName?: string | null;
   // scannedQty = every box scanned on this batch; receivedQty = the part of it that fills what the
   // file lists (each barcode capped at its own qty); extraQty = the rest (over-scans + products
   // not on the file). The opened batch's Received/Extra tiles use this same split.
@@ -246,6 +249,7 @@ export default function Unloading() {
     { id: "progress", label: "Progress", filterType: "text", disableConditions: true, options: distinctOptions(allSessions.map(sessionProgressLabel)), accessor: sessionProgressLabel },
     { id: "csvFile", label: "CSV File", filterType: "text", options: distinctOptions(allSessions.map((s) => s.csvFileName)), accessor: (s) => s.csvFileName },
     { id: "expectedQty", label: "Expected Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.expectedQty },
+    { id: "completedBy", label: "Completed By", filterType: "text", options: distinctOptions(allSessions.map((s) => (s.scanCompletedAt ? s.scanCompletedByName : null))), accessor: (s) => (s.scanCompletedAt ? s.scanCompletedByName ?? "" : "") },
     { id: "scannedQty", label: "Received Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.scannedQty },
     { id: "extraQty", label: "Extra Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.extraQty },
   ];
@@ -536,10 +540,6 @@ export default function Unloading() {
       return bSeq - aSeq;
     });
 
-  const activateMutation = useMutation({
-    mutationFn: (id: number) => apiRequest("POST", `/api/unloading/sessions/${id}/activate`, {}, false, true),
-    onError: (error: any) => toast({ title: "Can't start yet", description: parseApiErrorMessage(error) || "This batch can't be activated right now.", variant: "destructive" }),
-  });
 
   function enterSession(id: number) {
     setActiveSessionId(id);
@@ -552,18 +552,17 @@ export default function Unloading() {
   // Clicking "Scan" on a not-yet-opened batch is the explicit available -> active step (mirrors
   // Order Import's CSV lifecycle) — activates it server-side first, then opens the scan view.
   // A batch queued behind an earlier incomplete one (canActivate=false) can't be opened at all.
+  // Opening a batch only opens it — it stays "available" until its first product is actually
+  // scanned, and that scan is what makes it "active" (POST /scan activates an available batch
+  // itself, under the same lock and next-in-line check the separate activate call used). So a batch
+  // someone merely looked at, then left, no longer shows as Active on the list, and its start time
+  // is when unloading really began rather than when the screen was opened.
   function openSession(s: SessionListItem) {
-    if (s.scanStatus !== "available") { enterSession(s.id); return; }
-    if (!s.canActivate) {
+    if (s.scanStatus === "available" && !s.canActivate) {
       toast({ title: "Locked", description: "Complete the earlier batch for this vehicle first.", variant: "destructive" });
       return;
     }
-    activateMutation.mutate(s.id, {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
-        enterSession(s.id);
-      },
-    });
+    enterSession(s.id);
   }
   function backToList() {
     stopItemCamera();
@@ -635,6 +634,9 @@ export default function Unloading() {
       }
     },
     onSuccess: (data) => {
+      // This scan was the batch's first — it just became active, so the landing list and tab
+      // counts (still showing it as available) need a refresh.
+      const becameActive = detail?.session?.scanStatus === "available" && data.session?.scanStatus === "active";
       queryClient.setQueryData(["/api/unloading/sessions", activeSessionId], {
         session: data.session, items: data.items, allComplete: data.allComplete,
         offBatchExtraQty: data.offBatchExtraQty, offBatchExtraPallets: data.offBatchExtraPallets,
@@ -646,6 +648,9 @@ export default function Unloading() {
       // this item yet." until something else (e.g. a void, which invalidates more broadly)
       // happened to refresh it.
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId, "events"] });
+      if (becameActive) {
+        queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"], exact: false, predicate: (q) => q.queryKey[1] !== activeSessionId });
+      }
       if (data.allComplete) toast({ title: "Batch complete", description: "Every item's expected quantity has been matched." });
     },
     onError: (error: any) => {
@@ -1104,7 +1109,7 @@ export default function Unloading() {
     return (
       <div className="bg-gray-50 px-4 py-3">
         {itemHistoryQuery.isLoading ? (
-          <div className="flex justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+          <SectionSkeleton lines={2} />
         ) : rowEvents.length === 0 ? (
           <div className="py-2 text-xs text-gray-400">No scan history for this item yet.</div>
         ) : (
@@ -1161,7 +1166,10 @@ export default function Unloading() {
   // slot where "Unloading" sits on the list, and this carries the rest of the identity beside it.
   const scanVehicleTitle = scanSession ? (
     <div className="flex shrink-0 items-center gap-1.5 text-[#001d6e]">
-      <Truck className="h-5 w-5" />
+      {/* Same icon as "Unload Operations" in the sidebar, in the navy badge every page uses. */}
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e]">
+        <PackageOpen className="h-5 w-5 text-white" />
+      </span>
       <span className="text-2xl font-bold">{scanSession.vehicleNumber}</span>
     </div>
   ) : null;
@@ -1243,7 +1251,7 @@ export default function Unloading() {
         {!rotated && view === "list" && (
           <PageHeader
             icon={PackageOpen}
-            title="Unloading"
+            title="Unload Operations"
             description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
           />
         )}
@@ -1278,7 +1286,7 @@ export default function Unloading() {
               <div className="mb-3">
                 <PageHeader
                   icon={PackageOpen}
-                  title="Unloading"
+                  title="Unload Operations"
                   description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
                 />
               </div>
@@ -1407,7 +1415,7 @@ export default function Unloading() {
               // this tab's own comment above and /unloading/sessions/recent-complete's comment
               // in server/routes/unloading.ts for why this is a distinct list from History.
               recentCompleteQuery.isLoading ? (
-                <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+                <SectionSkeleton lines={6} />
               ) : recentCompleteSessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 text-center">
                   <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">
@@ -1431,7 +1439,10 @@ export default function Unloading() {
                       )}
                       <span className="text-xs text-gray-600"><span className="text-gray-400">Received </span><span className="font-bold tabular-nums">{s.scannedQty}/{s.expectedQty}</span>{s.extraQty > 0 && <span className="text-amber-600"> (incl. {s.extraQty} extra)</span>}</span>
                       {s.scanCompletedAt && (
-                        <span className="text-xs text-gray-400">Completed {new Date(s.scanCompletedAt).toLocaleString()}</span>
+                        <span className="text-xs text-gray-400">
+                          Completed {new Date(s.scanCompletedAt).toLocaleString()}
+                          {s.scanCompletedByName ? <> by <span className="font-medium text-gray-600">{s.scanCompletedByName}</span></> : null}
+                        </span>
                       )}
                       <div className="ml-auto flex items-center gap-1.5">
                         <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => openSession(s)}>
@@ -1459,7 +1470,7 @@ export default function Unloading() {
                 </div>
               )
             ) : sessionsQuery.isLoading ? (
-              <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              <SectionSkeleton lines={6} />
             ) : sessions.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">
@@ -1495,6 +1506,7 @@ export default function Unloading() {
                       <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("status", "Status")}</th>
                       <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("progress", "Progress")}</th>
                       <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Who marked this batch complete — the Complete button, or the scan that finished it">{sessionColumnHeader("completedBy", "Completed By")}</th>
                       <th className="px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
                     </tr>
                   </thead>
@@ -1524,6 +1536,9 @@ export default function Unloading() {
                             </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
                               {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">
+                              {s.scanCompletedAt ? (s.scanCompletedByName ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
                             </td>
                             <td className="border-b border-gray-200 px-1.5 py-2 break-words text-right">
                               <div className="flex flex-wrap items-center justify-end gap-1">
@@ -1655,7 +1670,7 @@ export default function Unloading() {
             )}
 
             {activeSessionQuery.isLoading || !detail ? (
-              <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              <SectionSkeleton lines={6} />
             ) : (
               <>
                 <div
