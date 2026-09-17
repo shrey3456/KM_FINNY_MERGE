@@ -42,6 +42,8 @@ type SessionListItem = {
   createdAt: string; scanActivatedAt: string | null; scanCompletedAt: string | null;
   // Who completed the batch — a name, "System", or null (see server/routes/unloading.ts).
   scanCompletedByName?: string | null;
+  // The vehicle's RTO registration from Vehicle Master, matched on its number — null if not found.
+  rtoNumber?: string | null;
   // scannedQty = every box scanned on this batch; receivedQty = the part of it that fills what the
   // file lists (each barcode capped at its own qty); extraQty = the rest (over-scans + products
   // not on the file). The opened batch's Received/Extra tiles use this same split.
@@ -550,7 +552,7 @@ export default function Unloading() {
   }
 
   // Clicking "Scan" on a not-yet-opened batch is the explicit available -> active step (mirrors
-  // Order Import's CSV lifecycle) — activates it server-side first, then opens the scan view.
+  // Order Import's CSV lifecycle) — now only opens the scan view; the first scan activates it.
   // A batch queued behind an earlier incomplete one (canActivate=false) can't be opened at all.
   // Opening a batch only opens it — it stays "available" until its first product is actually
   // scanned, and that scan is what makes it "active" (POST /scan activates an available batch
@@ -880,25 +882,37 @@ export default function Unloading() {
   // locked, no pop-up open) is checked by the handler itself, with current values.
   useEffect(() => {
     if (view !== "scan") return;
-    const MAX_GAP_MS = 50;
-    const BURST_END_MS = 80;
+    // Barcode gun timing. A gun types a code much faster than a person, but wireless/Bluetooth guns
+    // and busy tablets space characters out more than a wired gun on a fast PC — at the old 50 ms
+    // limit, a slower burst was cut in half and read as a wrong or partial code. Most guns also end
+    // with Enter or Tab, which now finishes the scan straight away instead of waiting for silence.
+    const MAX_GAP_MS = 100;
+    const BURST_END_MS = 120;
     let buffer = "";
     let lastAt = 0;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (buffer.length >= 3) { setItemScanMode("manual"); barcodeRef.current?.focus(); handleItemBarcodeRef.current(buffer); }
+      buffer = "";
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target === barcodeRef.current) return;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if ((e.key === "Enter" || e.key === "Tab") && buffer.length >= 3) {
+        e.preventDefault();
+        if (flushTimer) clearTimeout(flushTimer);
+        finish();
+        return;
+      }
+      if (e.key.length !== 1) return;
       const now = Date.now();
       if (now - lastAt > MAX_GAP_MS) buffer = "";
       lastAt = now;
       buffer += e.key;
       if (flushTimer) clearTimeout(flushTimer);
-      flushTimer = setTimeout(() => {
-        if (buffer.length >= 3) { setItemScanMode("manual"); barcodeRef.current?.focus(); handleItemBarcodeRef.current(buffer); }
-        buffer = "";
-      }, BURST_END_MS);
+      flushTimer = setTimeout(finish, BURST_END_MS);
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => { window.removeEventListener("keydown", handleKeyDown, true); if (flushTimer) clearTimeout(flushTimer); };
@@ -1432,6 +1446,7 @@ export default function Unloading() {
                       className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 ${i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                     >
                       <span className="text-sm font-bold text-[#001d6e]">{s.vehicleNumber}</span>
+                      {s.rtoNumber && <span className="text-xs text-gray-500">RTO: {s.rtoNumber}</span>}
                       <PlantBadge plant={s.plant} />
                       <span className="text-xs text-gray-500">{s.orderDate}</span>
                       {s.partsCount > 1 && (
@@ -1519,7 +1534,10 @@ export default function Unloading() {
                             className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${s.scanStatus === "active" ? "bg-emerald-50/60" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                           >
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-400 tabular-nums">{offset + i + 1}</td>
-                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words font-semibold text-[#001d6e]">
+                              {s.vehicleNumber}
+                              {s.rtoNumber && <span className="block text-[11px] font-normal text-gray-500">RTO: {s.rtoNumber}</span>}
+                            </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">{s.orderDate}</td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words"><PlantBadge plant={s.plant} /></td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">

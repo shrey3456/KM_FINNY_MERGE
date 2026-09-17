@@ -1672,9 +1672,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   useEffect(() => {
     if (!activeOrderScanSession) return;
 
-    const MAX_KEY_INTERVAL = 50;  // ms between chars -- faster than any human types
+    // Two limits on purpose. Inside the qty box, 50 ms still decides "gun, not a person typing",
+    // because a slower limit there would treat fast manual typing as a scan and undo it. Everywhere
+    // else nobody is typing, so the limit is relaxed for wireless/Bluetooth guns and busy tablets,
+    // which space characters out more — at 50 ms their scans were cut in half.
+    const MAX_KEY_INTERVAL = 50;         // qty box only
+    const MAX_KEY_INTERVAL_GLOBAL = 100; // anywhere else on the page
     const MIN_BARCODE_LENGTH = 3;
-    const BURST_END_DELAY = 80;   // ms of silence = end of scan, for guns with no suffix key
+    const BURST_END_DELAY = 120;  // ms of silence = end of scan, for guns with no suffix key
 
     let buffer = "";
     let lastKeyAt = 0;
@@ -1762,7 +1767,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         return;
       }
 
-      if (delta > MAX_KEY_INTERVAL) buffer = ""; // gap too long -- not a scanner burst
+      if (delta > MAX_KEY_INTERVAL_GLOBAL) buffer = ""; // gap too long -- not a scanner burst
       buffer += e.key;
 
       clearFlush();
@@ -1771,7 +1776,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     window.addEventListener("keydown", handleKeyDown, true);
     return () => { window.removeEventListener("keydown", handleKeyDown, true); clearFlush(); };
-  }, [activeOrderScanSession]);
+    // Keyed on the session's id, not the session object: the order refreshes every few seconds with
+    // a new object, which re-attached this listener each time and lost a scan arriving right then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrderScanSession?.id]);
 
   // ── Master View item history drill-down (click a row → see every raw scan for it) ────────
   // Declared here — BEFORE the early loading-state return below — so these hooks always run on

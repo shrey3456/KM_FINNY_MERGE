@@ -29,7 +29,7 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from 'react-hook-form';
 import { useEffect, useState } from 'react';
-import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, CalendarDays, RefreshCw } from 'lucide-react';
+import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, CalendarDays, RefreshCw, Webhook, ExternalLink } from 'lucide-react';
 import Papa from 'papaparse';
 import { apiRequest } from '@/lib/queryClient';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -77,6 +77,13 @@ const Settings = () => {
   const form = useForm();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  // Where "Open status" (Notion Webhook Status card) goes — NOTION_WEBHOOK_STATUS_URL in the server's
+  // .env, or this app's own status page if that isn't set.
+  const webhookStatusLinkQuery = useQuery<{ url: string; fromEnv: boolean }>({
+    queryKey: ['/api/webhooks/notion/status-link'],
+    queryFn: () => apiRequest('GET', '/api/webhooks/notion/status-link', undefined, false, true),
+    staleTime: 5 * 60 * 1000,
+  });
   const [isClearing, setIsClearing] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [showClearDialog, setShowClearDialog] = useState(false);
@@ -775,6 +782,30 @@ const Settings = () => {
                       >
                         {recalcChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check stock'}
                       </Button>
+                    </div>
+
+                    {/* Notion webhook check — opens the admin-only status page in a new tab: is the token set,
+                        and what did the last changes from Notion do (updated / unchanged / error). */}
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><Webhook className="h-4 w-4 mr-2" /> Notion Webhook Status</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Check that changes made in Notion (order status, vehicles, products) are reaching the app, and see what
+                        happened to the most recent ones.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => window.open(webhookStatusLinkQuery.data?.url ?? '/api/webhooks/notion/status', '_blank', 'noopener')}
+                        disabled={!isAdminUser}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> Open status
+                      </Button>
+                      {isAdminUser && webhookStatusLinkQuery.data && (
+                        <p className="mt-2 break-all text-xs text-gray-400">
+                          Opens {webhookStatusLinkQuery.data.url}
+                          {!webhookStatusLinkQuery.data.fromEnv && ' (set NOTION_WEBHOOK_STATUS_URL in .env to change it)'}
+                        </p>
+                      )}
                     </div>
 
                     <div className="p-4 border border-red-200 rounded-lg bg-red-50">

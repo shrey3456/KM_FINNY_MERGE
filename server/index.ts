@@ -22,7 +22,14 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+  limit: '10mb',
+  // Notion signs the exact bytes of each webhook request, so keep them for that one route
+  // (checked in server/routes/notion-webhook.ts). Every other route is unaffected.
+  verify: (req, _res, buf) => {
+    if ((req as any).originalUrl?.startsWith('/api/webhooks/notion')) (req as any).rawBody = Buffer.from(buf);
+  },
+}));
 app.use(express.urlencoded({ extended: false, limit: '10mb' }));
 
 app.use((req, res, next) => {
@@ -353,6 +360,13 @@ app.use((req, res, next) => {
     await pool.query(`ALTER TABLE proforma_slips ADD COLUMN IF NOT EXISTS status_before_loading TEXT`);
     // order_import_sessions.scan_completed_by_code — who completed a Scan Order part (see schema).
     await pool.query(`ALTER TABLE order_import_sessions ADD COLUMN IF NOT EXISTS scan_completed_by_code TEXT`);
+    // Unloading batches are active only once scanned. Put back any left active by the old
+    // "opening = active" behaviour that never had a single scan.
+    await pool.query(`
+      UPDATE unload_import_sessions s
+      SET scan_status = 'available', scan_activated_by_code = NULL, scan_activated_at = NULL
+      WHERE s.scan_status = 'active' AND s.is_deleted = false
+        AND NOT EXISTS (SELECT 1 FROM unload_scan_events e WHERE e.session_id = s.id)`);
     // Same marker on the two scanning tables, set by their qty-edit endpoints ("Scan Adjust" /
     // "Unload Adjust"). No backfill: an edit leaves nothing behind that identifies it afterwards,
     // so only edits made from now on are marked.

@@ -413,6 +413,10 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
     const [dataRes, countRes] = await Promise.all([
       pool.query(
         `SELECT s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+                (SELECT vi.rto_number FROM vehicle_info vi
+                  WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
+                  ORDER BY (LOWER(TRIM(COALESCE(vi.plant, ''))) = LOWER(TRIM(COALESCE(s.plant, '')))) DESC, vi.id DESC
+                  LIMIT 1) AS "rtoNumber",
                 s.csv_file_name AS "csvFileName", s.row_count AS "rowCount", s.group_id AS "groupId",
                 s.part_index AS "partIndex", s.scan_status AS "scanStatus", s.created_at AS "createdAt",
                 s.scan_activated_at AS "scanActivatedAt", s.scan_completed_at AS "scanCompletedAt",
@@ -581,6 +585,10 @@ router.get('/unloading/sessions/recent-complete', requirePageAccess('unloading')
     const { rows } = await pool.query(
       `SELECT DISTINCT ON (s.plant)
          s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+         (SELECT vi.rto_number FROM vehicle_info vi
+                  WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
+                  ORDER BY (LOWER(TRIM(COALESCE(vi.plant, ''))) = LOWER(TRIM(COALESCE(s.plant, '')))) DESC, vi.id DESC
+                  LIMIT 1) AS "rtoNumber",
          s.csv_file_name AS "csvFileName", s.group_id AS "groupId", s.part_index AS "partIndex",
          s.scan_status AS "scanStatus", s.scan_activated_at AS "scanActivatedAt",
          s.scan_completed_at AS "scanCompletedAt",
@@ -800,12 +808,11 @@ router.post('/unloading/sessions/:id/activate', requirePageWrite('unloading'), a
       });
     }
 
-    const { userCode } = actor(req);
-    await pool.query(
-      `UPDATE unload_import_sessions SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = NOW() WHERE id = $2`,
-      [userCode ?? null, id],
-    );
-    res.json({ scanStatus: 'active' });
+    // Opening a batch no longer makes it active — its first real scan does (POST /scan below, under
+    // the same lock and next-in-line check). This request is kept only for a device still running
+    // the previously cached page, which calls it on open: it answers "ok, you may open it" without
+    // changing anything, so a batch opened and closed without scanning stays available.
+    res.json({ scanStatus: session.scan_status });
   } catch (error) {
     console.error('Error activating unloading session:', error);
     res.status(500).json({ message: 'Failed to activate' });

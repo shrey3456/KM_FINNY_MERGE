@@ -97,6 +97,7 @@ function parseOrderDate(dateString: string): Date | null {
 import { setupAuth } from "./auth";
 import fastNotionImportRoutes from "./routes/fast-notion-import";
 import proformaNotionSyncRoutes from "./routes/proforma-notion-sync";
+import notionWebhookRoutes from "./routes/notion-webhook";
 import dispatchRoutes from "./routes/dispatch-simple";
 import dispatchOrdersRoutes from "./routes/dispatch-orders";
 import expenseVoucherRoutes from "./routes/expense-voucher";
@@ -8106,6 +8107,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount fast import routes
   apiRouter.use(fastNotionImportRoutes);
   apiRouter.use(proformaNotionSyncRoutes);
+  // Notion calls this when a page changes (status, vehicles, products) — see routes/notion-webhook.ts.
+  apiRouter.use(notionWebhookRoutes);
 
   // Mount dispatch routes
   apiRouter.use(dispatchRoutes);

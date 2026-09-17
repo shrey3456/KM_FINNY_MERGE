@@ -1679,30 +1679,10 @@ export default function ScanViewer() {
           {filtersReady && selectedSession && (() => {
             const realItems = items.filter((i) => (i.expectedQty ?? 0) > 0);
             const fullyDone = realItems.filter((i) => (i.totalScannedQty ?? 0) >= (i.expectedQty ?? 0)).length;
-            const total = realItems.length;
-            const pct = total > 0 ? Math.round((fullyDone / total) * 100) : 0;
-            return (
-              <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto sm:shrink-0">
-                <div className="h-2 flex-1 overflow-hidden rounded-full bg-gray-100 sm:w-28 sm:flex-none">
-                  <div
-                    className={`h-full rounded-full transition-[width] duration-300 ${pct >= 100 && total > 0 ? "bg-emerald-500" : "bg-[#001d6e]"}`}
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-                <span className="whitespace-nowrap text-right text-xs font-medium leading-tight">
-                  {pct >= 100 && total > 0 ? (
-                    <span className="inline-flex items-center gap-1 font-semibold text-emerald-600">
-                      <CheckCircle2 className="h-3.5 w-3.5" /> Complete
-                    </span>
-                  ) : (
-                    <>
-                      <span className="block text-gray-700">{fullyDone}/{total}</span>
-                      <span className="block text-[10px] font-semibold text-gray-400">{pct}%</span>
-                    </>
-                  )}
-                </span>
-              </div>
-            );
+            const expectedQty = realItems.reduce((sum, i) => sum + (i.expectedQty ?? 0), 0);
+            const receivedQty = realItems.reduce((sum, i) => sum + Math.min(i.totalScannedQty ?? 0, i.expectedQty ?? 0), 0);
+            const pct = expectedQty > 0 ? Math.min(100, Math.round((receivedQty / expectedQty) * 100)) : 0;
+            return <ProgressReadout pct={pct} doneItems={fullyDone} totalItems={realItems.length} />;
           })()}
         </div>
         </div>
@@ -1899,7 +1879,7 @@ export default function ScanViewer() {
               <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
                 <div
                   className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
-                  style={{ width: `${totals.expected > 0 ? Math.min(100, (totals.done / totals.expected) * 100) : 0}%` }}
+                  style={{ width: `${totals.expected > 0 ? Math.min(100, (totals.done / totals.expected) * 100) : 0}%`, minWidth: totals.done > 0 ? 10 : 0 }}
                 />
               </div>
               <div className="flex justify-between text-[10px] font-medium text-gray-400">
@@ -2365,7 +2345,7 @@ export default function ScanViewer() {
               <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
                 <div
                   className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
-                  style={{ width: `${mvTotals.expected > 0 ? Math.min(100, (mvTotals.done / mvTotals.expected) * 100) : 0}%` }}
+                  style={{ width: `${mvTotals.expected > 0 ? Math.min(100, (mvTotals.done / mvTotals.expected) * 100) : 0}%`, minWidth: mvTotals.done > 0 ? 10 : 0 }}
                 />
               </div>
               <div className="flex justify-between text-[10px] font-medium text-gray-400">
@@ -2664,6 +2644,40 @@ export default function ScanViewer() {
 // one order. So this picks its own plant, then a specific vehicle's session for a date (same
 // picker shape the Unloading page itself uses), and shows that one session's live progress —
 // no Master View / Part Order tabs, since there's nothing here to merge across.
+
+// Progress readout in the top-right of an order or batch: a bar plus the percentage, with how many
+// items are fully done underneath. The percentage is by QUANTITY received (each item counted only up
+// to its own expected qty, so extras can't push it up) — the same figure as the table's progress ring
+// and the totals card. It used to be "items fully done ÷ items", so an order with most boxes in but
+// few items quite finished read 5%, and at that size the rounded bar collapsed to a dot.
+function ProgressReadout({ pct, doneItems, totalItems }: { pct: number; doneItems: number; totalItems: number }) {
+  const complete = totalItems > 0 && pct >= 100;
+  return (
+    <div className="flex w-full items-center gap-3 sm:ml-auto sm:w-auto sm:shrink-0">
+      <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-gray-200 sm:w-44 sm:flex-none">
+        <div
+          className={`h-full rounded-full transition-[width] duration-500 ease-out ${complete ? "bg-emerald-500" : "bg-[#001d6e]"}`}
+          // A small but non-zero amount still shows as a short bar, never a dot.
+          style={{ width: `${Math.min(100, Math.max(0, pct))}%`, minWidth: pct > 0 ? 10 : 0 }}
+        />
+      </div>
+      <div className="whitespace-nowrap text-right leading-tight">
+        {complete ? (
+          <span className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+            <CheckCircle2 className="h-4 w-4" /> Complete
+          </span>
+        ) : (
+          <>
+            <span className="block text-sm font-bold tabular-nums text-gray-800">{pct}%</span>
+            <span className="block text-[10px] font-medium text-gray-400">
+              {doneItems}/{totalItems} items done
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // Matches GET /api/unloading/sessions' row shape (only the fields this section needs).
 type UnloadingSessionOption = {
@@ -3129,6 +3143,9 @@ function UnloadingViewerSection({
             )}
             {uSelectedSession?.scanStatus && uSessionStatusBadge(uSelectedSession.scanStatus)}
           </div>
+          {uSessionId != null && uItems.length > 0 && (
+            <ProgressReadout pct={uItemPct} doneItems={uFullyDone} totalItems={uTotalReal} />
+          )}
         </div>
       </div>
 
@@ -3179,7 +3196,7 @@ function UnloadingViewerSection({
           </div>
           <div className="space-y-1">
             <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
-              <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${uItemPct}%` }} />
+              <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${uItemPct}%`, minWidth: uItemPct > 0 ? 10 : 0 }} />
             </div>
             <div className="flex justify-between text-[10px] font-medium text-gray-400">
               <span>{uItemTotals.received} received</span>

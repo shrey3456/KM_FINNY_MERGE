@@ -672,3 +672,43 @@ export async function setAutoApplyEnabled(enabled: boolean, updatedBy: string): 
     [enabled, updatedBy],
   );
 }
+
+// ─── Webhook: apply ONE changed Notion page straight away ────────────────────
+// Called by the Notion webhook (server/routes/notion-webhook.ts) the moment a Product Master page
+// changes in Notion — the same field mapping and matching as a full detect + apply, just for that
+// single page, including its photo (only re-downloaded when the image content actually changed).
+// 'busy' means a full sync is running right now; the webhook retries the page a little later.
+export type WebhookApplyResult = 'updated' | 'created' | 'unchanged' | 'skipped' | 'busy';
+
+export async function applyProductPageFromNotionWebhook(page: any): Promise<WebhookApplyResult> {
+  if (isSyncing) return 'busy';
+  const { rows } = await pool.query(`SELECT id FROM products WHERE notion_page_id = $1 LIMIT 1`, [page.id]);
+  const existing = rows[0] ? await storage.getProduct(rows[0].id) : undefined;
+  const result = await computeChanges([page], existing ? [existing] : [], 'notion-webhook');
+  if (result.errors.length) throw new Error(result.errors.join('; '));
+  if (result.notFound > 0) return 'skipped'; // no barcode and no name — the full sync skips these too
+
+  let outcome: WebhookApplyResult = 'unchanged';
+  for (const [productId, updates] of Array.from(result.updatesMap.entries())) {
+    await storage.updateProduct(productId, updates);
+    outcome = 'updated';
+  }
+  for (const [productId, imageUrl] of Array.from(result.imageUrlByProductId.entries())) {
+    const current = await storage.getProduct(productId);
+    const image = await syncProductImage(productId, imageUrl, current?.productImageHash);
+    if (image) {
+      await storage.updateProduct(productId, image);
+      outcome = 'updated';
+    }
+  }
+  if (result.toCreate.length > 0) {
+    const created = await storage.createProduct(result.toCreate[0] as any);
+    const imageUrl = result.imageUrlByCreateIndex.get(0);
+    if (imageUrl) {
+      const image = await syncProductImage(created.id, imageUrl, null);
+      if (image) await storage.updateProduct(created.id, image);
+    }
+    return 'created';
+  }
+  return outcome;
+}

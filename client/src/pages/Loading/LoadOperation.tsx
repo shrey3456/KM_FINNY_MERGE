@@ -905,6 +905,8 @@ export default function LoadOperation() {
     setCameraReady(false);
   }
 
+  // Depends on whether an order is open, not on its data — the whole slip object is replaced on
+  // every refresh, and depending on it restarted the camera each time.
   useEffect(() => {
     if (view !== "list" || scanMode !== "camera" || slip) { stopCamera(); return; }
     let cancelled = false;
@@ -930,7 +932,7 @@ export default function LoadOperation() {
     })();
     return () => { cancelled = true; scanner.stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, scanMode, slip]);
+  }, [view, scanMode, !!slip]);
 
   // Barcode gun for finding an order — now active on the landing list too, not just once you've
   // already clicked into the "create"/search screen. A gun scan is just a burst of very fast
@@ -949,39 +951,53 @@ export default function LoadOperation() {
   // the create screen's own search UI.
   useEffect(() => {
     if (view !== "list" || slip) return;
-    const MAX_GAP_MS = 50;
-    const BURST_END_MS = 80;
+    // Barcode gun timing. A gun types a code much faster than a person, but wireless/Bluetooth guns
+    // and busy tablets space characters out more than a wired gun on a fast PC — at the old 50 ms
+    // limit, a slower burst was cut in half and read as a wrong or partial code. Most guns also end
+    // with Enter or Tab, which now finishes the scan straight away instead of waiting for silence.
+    const MAX_GAP_MS = 100;
+    const BURST_END_MS = 120;
     let buffer = "";
     let lastAt = 0;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (buffer.length >= 3) {
+        // A gun scan on the landing list opens the order search itself and shows what was
+        // scanned, so the user sees where the lookup came from instead of a dialog appearing
+        // over an apparently untouched page. (This listener only runs on the list — the create
+        // screen has its own item-barcode listener.)
+        setSearchOpen(true);
+        setScanMode("manual");
+        setOrderSearch(buffer);
+        openOrder(buffer, { confirm: true });
+      }
+      buffer = "";
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target === orderInputRef.current) return;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if ((e.key === "Enter" || e.key === "Tab") && buffer.length >= 3) {
+        e.preventDefault();
+        if (flushTimer) clearTimeout(flushTimer);
+        finish();
+        return;
+      }
+      if (e.key.length !== 1) return;
       const now = Date.now();
       if (now - lastAt > MAX_GAP_MS) buffer = "";
       lastAt = now;
       buffer += e.key;
       if (flushTimer) clearTimeout(flushTimer);
-      flushTimer = setTimeout(() => {
-        if (buffer.length >= 3) {
-          // A gun scan on the landing list opens the order search itself and shows what was
-          // scanned, so the user sees where the lookup came from instead of a dialog appearing
-          // over an apparently untouched page. (This listener only runs on the list — the create
-          // screen has its own item-barcode listener.)
-          setSearchOpen(true);
-          setScanMode("manual");
-          setOrderSearch(buffer);
-          openOrder(buffer, { confirm: true });
-        }
-        buffer = "";
-      }, BURST_END_MS);
+      flushTimer = setTimeout(finish, BURST_END_MS);
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => { window.removeEventListener("keydown", handleKeyDown, true); if (flushTimer) clearTimeout(flushTimer); };
+    // Only whether an order is open matters here. Depending on the whole slip object re-attached
+    // this listener on every data refresh, dropping any barcode that was arriving at that moment.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, slip]);
+  }, [view, !!slip]);
 
   useEffect(() => { if (view === "list" && !slip && scanMode === "manual") orderInputRef.current?.focus(); }, [view, slip, scanMode]);
 
@@ -1614,11 +1630,18 @@ export default function LoadOperation() {
     setItemBarcode("");
   }
 
+  // Always the latest handleItemBarcode, so the item camera and gun below can stay attached across
+  // data refreshes (after every scan, and every 15 s in the background) and still act on current
+  // items. They used to depend on the whole slip object and were torn down and rebuilt on each
+  // refresh — the camera restarted, and a gun scan arriving at that moment was lost.
+  const handleItemBarcodeRef = useRef(handleItemBarcode);
+  handleItemBarcodeRef.current = handleItemBarcode;
+
   useEffect(() => {
     if (view !== "create" || itemScanMode !== "camera" || !slip || locked || !slip.vehicleNumber) { stopItemCamera(); return; }
     let cancelled = false;
     const scanner = new BarcodeScanner({
-      onDetected: (result: Result) => { const code = result.getText(); if (code && !cancelled) handleItemBarcode(code); },
+      onDetected: (result: Result) => { const code = result.getText(); if (code && !cancelled) handleItemBarcodeRef.current(code); },
       onError: (err: Error) => { if (!cancelled) { setItemCameraError(err.message); setItemScanMode("manual"); } },
     });
     itemScannerRef.current = scanner;
@@ -1636,35 +1659,49 @@ export default function LoadOperation() {
     })();
     return () => { cancelled = true; scanner.stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, itemScanMode, slip, locked]);
+  }, [view, itemScanMode, slip?.orderNumber, !!slip?.vehicleNumber, locked]);
 
   // Barcode gun for items — active once a slip is open, a vehicle is linked, and not yet complete.
   useEffect(() => {
     if (view !== "create" || !slip || locked || !slip.vehicleNumber) return;
-    const MAX_GAP_MS = 50;
-    const BURST_END_MS = 80;
+    // Barcode gun timing. A gun types a code much faster than a person, but wireless/Bluetooth guns
+    // and busy tablets space characters out more than a wired gun on a fast PC — at the old 50 ms
+    // limit, a slower burst was cut in half and read as a wrong or partial code. Most guns also end
+    // with Enter or Tab, which now finishes the scan straight away instead of waiting for silence.
+    const MAX_GAP_MS = 100;
+    const BURST_END_MS = 120;
     let buffer = "";
     let lastAt = 0;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (buffer.length >= 3) { setItemScanMode("manual"); itemInputRef.current?.focus(); handleItemBarcodeRef.current(buffer); }
+      buffer = "";
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target === itemInputRef.current) return;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if ((e.key === "Enter" || e.key === "Tab") && buffer.length >= 3) {
+        e.preventDefault();
+        if (flushTimer) clearTimeout(flushTimer);
+        finish();
+        return;
+      }
+      if (e.key.length !== 1) return;
       const now = Date.now();
       if (now - lastAt > MAX_GAP_MS) buffer = "";
       lastAt = now;
       buffer += e.key;
       if (flushTimer) clearTimeout(flushTimer);
-      flushTimer = setTimeout(() => {
-        if (buffer.length >= 3) { setItemScanMode("manual"); itemInputRef.current?.focus(); handleItemBarcode(buffer); }
-        buffer = "";
-      }, BURST_END_MS);
+      flushTimer = setTimeout(finish, BURST_END_MS);
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => { window.removeEventListener("keydown", handleKeyDown, true); if (flushTimer) clearTimeout(flushTimer); };
+    // Keyed on the order, its vehicle and the lock — not the whole slip object, which is replaced on
+    // every refresh (see handleItemBarcodeRef above).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, slip, locked]);
+  }, [view, slip?.orderNumber, !!slip?.vehicleNumber, locked]);
 
   // Once a vehicle is CLAIMED (vehicleAssignedByCode set — someone actually confirmed it via
   // this Link/Change UI), only that user or an admin can change it — everyone else with write
