@@ -26,6 +26,18 @@ export interface StatItem {
   isTextValue?: boolean;
 }
 
+// A seven-digit total can't be shown at the same size as a two-digit one in a tile that is a
+// sixth of the row — it either overflows or crowds the icon. The step down is by character count
+// (grouping separators included, since they take space too), so ordinary numbers keep the big
+// type and only genuinely long ones shrink, and nothing is ever cut off or abbreviated.
+function valueSizeClass(value: ReactNode): string {
+  const length = typeof value === "string" || typeof value === "number" ? String(value).length : 0;
+  if (length >= 12) return "text-sm sm:text-base";   // 1,234,567,890
+  if (length >= 10) return "text-base sm:text-lg";   // 123,456,789
+  if (length >= 8) return "text-lg sm:text-xl";      // 2,947,087
+  return "text-xl sm:text-2xl";
+}
+
 // Static classes only — Tailwind can't see dynamically built class names at build time.
 const MD_COLS: Record<number, string> = {
   1: "md:grid-cols-1",
@@ -86,13 +98,17 @@ export function StatsBar({ stats, actions, columns, wrapLabels, className }: Sta
                 <p
                   className={cn(
                     "font-extrabold leading-none",
-                    stat.isTextValue ? "text-xs sm:text-sm font-bold" : "text-xl sm:text-2xl",
+                    // tabular-nums: every digit the same width, so the figures line up down the
+                    // row instead of drifting against each other.
+                    stat.isTextValue ? "text-xs sm:text-sm font-bold" : cn("tabular-nums", valueSizeClass(stat.value)),
                     tone.value,
                   )}
                 >
                   {stat.value}
                 </p>
-                <p className={cn("mt-0.5 text-sm font-medium text-gray-500 sm:text-base", wrapLabels ? "break-words" : "truncate")}>
+                {/* text-sm at every width: at sm:text-base a two-word caption ("Expected Purchase")
+                    wrapped onto a second line and left the tiles at uneven heights. */}
+                <p className={cn("mt-0.5 text-sm font-medium text-gray-500", wrapLabels ? "break-words" : "truncate")}>
                   {stat.label}
                 </p>
                 {(Array.isArray(stat.hint) ? stat.hint : [stat.hint])

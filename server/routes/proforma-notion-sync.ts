@@ -5,11 +5,15 @@ import {
   applyPendingProformaChanges,
   clearPendingProformaChanges,
 } from '../services/proformaNotionSync';
-import { requireAdminRole } from '../lib/pageAccess';
+import { requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
 
-router.use('/proforma-notion-sync', requireAdminRole);
+// Same rule as the Proforma Slips page itself: anyone with write access to 'proforma' can
+// check and apply Notion changes (admins always pass). It used to be admin-only here while the
+// page showed "Sync from Notion" to every write user, so for them the button just failed with
+// "Admin access required".
+router.use('/proforma-notion-sync', requirePageWrite('proforma'));
 
 function callerName(req: Request): string {
   const u = req.user as any;
