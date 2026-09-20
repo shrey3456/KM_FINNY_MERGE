@@ -799,8 +799,8 @@ export default function PlantSettings() {
     <div className="w-full px-4 py-6 sm:py-8 sm:px-6">
       <div className="flex flex-col gap-3 mb-6 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-xl sm:text-2xl font-bold flex items-center gap-2">
-            <Factory className="h-6 w-6 shrink-0" />
-            Plant Management
+            <Factory className="h-6 w-6 shrink-0 text-[#001d6e]" style={{ fill: "#4d7eff" }} />
+            Plant Master
         </h1>
         <div className="flex gap-2">
           <Link href="/print-operations" className="flex-1 sm:flex-initial">

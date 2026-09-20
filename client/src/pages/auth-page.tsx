@@ -12,6 +12,7 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import finnyLogo from "@assets/finny-logo.png";
 import ganpatiImage from "@assets/ganpati.png";
 import { Loader2 } from "lucide-react";
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
 const loginSchema = z.object({
   username: z.string().min(1, "Username is required"),
@@ -77,9 +78,7 @@ export default function AuthPage() {
   
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-      </div>
+      <PageSkeleton />
     );
   }
   

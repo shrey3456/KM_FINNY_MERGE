@@ -14,7 +14,6 @@ import Purchases from "@/pages/Purchases";
 import LoadOperations from "./pages/LoadOperations"; // Renamed component
 import PrintOperations from "./pages/PrintOperationsFinal12";
 import Login from "./pages/Login";
-import SplashScreen from "./pages/SplashScreen";
 import ProformaSlips from "./pages/ProformaSlips";
 import Activities from "./pages/Activities";
 import Dispatch from "./pages/Dispatch";
@@ -27,6 +26,7 @@ import MessagesPage from "./pages/MessagesPage";
 import CheckInOutPage from "./pages/CheckInOutPage";
 import Profile from "./pages/Profile";
 import { useState, useEffect, useCallback, Suspense, lazy } from "react";
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 import Layout from "@/components/Layout";
 import { useToast } from "@/hooks/use-toast";
 import ProtectedRoute from "@/components/ProtectedRoute";
@@ -38,20 +38,21 @@ import VehicleMaster from "./pages/VehicleMaster";
 import LoadOperation from "./pages/Loading/LoadOperation";
 import Unloading from "./pages/Unloading/Unloading";
 
-// Loading indicator component for Suspense fallback
-const LoadingIndicator = () => (
-  <div className="flex h-screen w-full items-center justify-center">
-    <div className="h-16 w-16 animate-spin rounded-full border-b-2 border-t-2 border-primary"></div>
-  </div>
-);
+// Shown while a page's code is still loading — the same skeleton as every other page load,
+// instead of a spinning ring.
+const LoadingIndicator = () => <PageSkeleton />;
 
 // Router component with improved PWA support
 function Router() {
   const { user, logoutMutation } = useAuth();
   // We can derive isAuthenticated from user presence in useAuth context
   // But we'll keep local state for now to minimize disruption, syncing it with useAuth
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [showSplash, setShowSplash] = useState(true);
+  // Starts from the saved session, so a page refresh goes straight back to where you were. It used
+  // to start false and wait for the check below, which flashed the login screen for a moment — the
+  // 2.5-second splash screen that was shown on every load mainly existed to cover that flash.
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    try { return !!localStorage.getItem('currentUser'); } catch { return false; }
+  });
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isStandalone, setIsStandalone] = useState(false);
@@ -83,18 +84,46 @@ function Router() {
 
     setIsStandalone(isInStandaloneMode());
 
-    // Listen for beforeinstallprompt event
+    // The install offer is the BROWSER's own dialog now — nothing is drawn inside the app.
+    // The browser fires this event when it decides the app is installable (on a fresh load, so
+    // on a hard refresh and after logging in); taking it over with preventDefault() and calling
+    // prompt() right away is what makes that native "Install KM Finny?" window appear by itself
+    // instead of only a small icon in the address bar.
+    //
+    // Some browsers refuse prompt() unless the person has just interacted with the page. When
+    // that happens the event is kept and fired on their very next click or key press, so the
+    // dialog still comes up instead of being lost.
+    let promptEvent: any = null;
+    const openInstallDialog = async () => {
+      if (!promptEvent) return;
+      const e = promptEvent;
+      promptEvent = null;
+      try {
+        await e.prompt();
+        await e.userChoice;
+        setDeferredPrompt(null);
+      } catch {
+        // Needs a gesture (or was already used) — retry on the next interaction.
+        promptEvent = e;
+        window.addEventListener('pointerdown', onFirstInteraction, { once: true });
+        window.addEventListener('keydown', onFirstInteraction, { once: true });
+      }
+    };
+    const onFirstInteraction = () => { void openInstallDialog(); };
+
     const handleBeforeInstallPrompt = (e: Event) => {
-      // Prevent Chrome 76+ from automatically showing the prompt
-      e.preventDefault();
-      // Stash the event so it can be triggered later
-      setDeferredPrompt(e);
+      e.preventDefault();          // we show it ourselves, immediately, via the browser's dialog
+      promptEvent = e;
+      setDeferredPrompt(e);        // kept so an in-app Install button could still trigger it
+      void openInstallDialog();
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('pointerdown', onFirstInteraction);
+      window.removeEventListener('keydown', onFirstInteraction);
     };
   }, []);
 
@@ -127,14 +156,6 @@ function Router() {
       window.removeEventListener('offline', handleOnlineStatus);
     };
   }, [toast]);
-
-  // Show splash screen for 2.5 seconds
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setShowSplash(false);
-    }, 2500);
-    return () => clearTimeout(timer);
-  }, []);
 
   // Handle Login
   const handleLogin = () => {
@@ -202,11 +223,6 @@ function Router() {
       window.removeEventListener("auth:unauthorized", handleUnauthorizedEvent);
     };
   }, [navigate, toast]);
-
-  // Show splash screen
-  if (showSplash) {
-    return <SplashScreen />;
-  }
 
   // Show login if not authenticated
   if (!isAuthenticated) {
@@ -293,51 +309,9 @@ const OfflineBanner = ({ isOnline }: { isOnline: boolean }) => {
   );
 };
 
-// Install PWA prompt banner
-const InstallPromptBanner = ({ 
-  deferredPrompt, 
-  isStandalone, 
-  onInstallClick,
-  onDismiss
-}: { 
-  deferredPrompt: any;
-  isStandalone: boolean;
-  onInstallClick: () => void;
-  onDismiss: () => void;
-}) => {
-  if (isStandalone || !deferredPrompt) return null;
-
-  return (
-    <div className="fixed bottom-0 left-0 right-0 z-50 bg-primary p-2 text-white">
-       <div className="flex items-center justify-between">
-        <span>Install KM Finny for offline use</span>
-        <div className="flex items-center gap-2">
-          <button 
-            onClick={onInstallClick}
-            className="rounded bg-white px-2 py-1 text-sm font-medium text-primary"
-          >
-            Install
-          </button>
-          <button 
-            onClick={onDismiss}
-            className="ml-2 rounded p-1 hover:bg-white/20"
-            aria-label="Dismiss"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-          </button>
-        </div>
-      </div> 
-    </div>
-  );
-};
 function App() {
   // Track online status
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
-  const [isStandalone, setIsStandalone] = useState(false);
-  // State to track dismissal for the current session only.
-  // This resets to false on every page reload, ensuring the option is given every time the user visits.
-  const [isInstallBannerDismissed, setIsInstallBannerDismissed] = useState(false);
 
   // Handle online/offline status
   useEffect(() => {
@@ -352,31 +326,12 @@ function App() {
     };
   }, []);
 
-  // Handle PWA installation and initialize state preservation
+  // Install is handled in one place only — Router's own beforeinstallprompt effect, which opens
+  // the browser's native install dialog. A second listener here would have fought it for the
+  // same one-shot event.
   useEffect(() => {
-    // Initialize state preservation utilities
     initializeStatePreservation();
     console.log("State preservation utilities initialized");
-    
-    // Check if already installed
-    const isInStandaloneMode = () => 
-      (window.matchMedia('(display-mode: standalone)').matches) || 
-      (window.navigator as any).standalone || 
-      document.referrer.includes('android-app://');
-
-    setIsStandalone(isInStandaloneMode());
-
-    // Listen for beforeinstallprompt event
-    const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-    };
-
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-
-    return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    };
   }, []);
 
   useEffect(() => {
@@ -399,19 +354,6 @@ function App() {
     };
   }, []);
 
-  const handleInstallClick = async () => {
-    if (!deferredPrompt) return;
-
-    deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
-
-    if (outcome === 'accepted') {
-      setIsStandalone(true);
-    }
-
-    setDeferredPrompt(null);
-  };
-
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
@@ -419,14 +361,6 @@ function App() {
           <Router />
           <Toaster />
           <OfflineBanner isOnline={isOnline} />
-          {!isInstallBannerDismissed && (
-            <InstallPromptBanner 
-              deferredPrompt={deferredPrompt}
-              isStandalone={isStandalone}
-              onInstallClick={handleInstallClick}
-              onDismiss={() => setIsInstallBannerDismissed(true)}
-            />
-          )}
         </Suspense>
       </AuthProvider>
     </QueryClientProvider>

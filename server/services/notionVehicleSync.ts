@@ -417,3 +417,29 @@ export async function fullSyncVehiclesFromNotion(triggeredBy: string, triggeredB
     isSyncing = false;
   }
 }
+
+// ─── Webhook: apply ONE changed Notion page straight away ────────────────────
+// Called by the Notion webhook (server/routes/notion-webhook.ts) the moment a Vehicle Master page
+// changes in Notion — the same mapping and the same "match by Notion page id, else create" rule as a
+// full detect + apply, just for that single page, so no scheduled or manual sync is needed for it.
+// 'busy' means a full sync is running right now; the webhook retries the page a little later.
+export type WebhookApplyResult = 'updated' | 'created' | 'unchanged' | 'skipped' | 'busy';
+
+export async function applyVehiclePageFromNotionWebhook(page: any): Promise<WebhookApplyResult> {
+  if (isSyncing) return 'busy';
+  const { rows } = await pool.query(`SELECT id FROM vehicle_info WHERE notion_page_id = $1 LIMIT 1`, [page.id]);
+  const existing = rows[0] ? await storage.getVehicleInfo(rows[0].id) : undefined;
+  const { updatesMap, toCreate, notFound, errors } = computeChanges([page], existing ? [existing] : []);
+  if (errors.length) throw new Error(errors.join('; '));
+  if (notFound > 0) return 'skipped'; // page has no vehicle number — the full sync skips these too
+
+  for (const [vehicleId, updates] of Array.from(updatesMap.entries())) {
+    await storage.updateVehicleInfo(vehicleId, updates as any);
+    return 'updated';
+  }
+  if (toCreate.length > 0) {
+    await storage.createVehicleInfo(toCreate[0] as any);
+    return 'created';
+  }
+  return 'unchanged';
+}

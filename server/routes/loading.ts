@@ -4,7 +4,7 @@ import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
-import { pushOrderStatusToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
+import { pushOrderStatusToNotion, pushStoreKeeperInfoToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
 
 // Loading — two things happen here:
 //   1. Link a vehicle (from Vehicle Master) onto a Proforma Slip: sets the slip's vehicleNumber,
@@ -171,17 +171,33 @@ async function plantStvList(plant: string | null | undefined): Promise<string[]>
   return rows.map((r: any) => String(r.stv));
 }
 
-// Renders "who started this load, on which platform" the way the existing Notion-authored values
-// in this column already read — "SHEKHAR KUMAR, pt: 5" — so hand-written and app-written rows
-// stay one consistent format. First name only (per request) and upper-cased to match them, and
-// the STV's platform number is unwrapped from its "PLT-04"/"STV-04" code since those rows write
-// the bare number. A code that isn't in that shape (e.g. "STV-01&02") is kept verbatim rather
-// than mangled.
+// StoreKeeper Info = everyone who has held this load, in the order they took it, then the STV name
+// exactly as configured for the plant: "YASH, PLT-05", and after a handoff "YASH, RAHUL, PLT-05".
+// First names only, upper-cased. It used to reduce the STV to a bare platform number ("YASH, pt: 5"),
+// which hid which STV was picked and made "STV-01" read the same as "PLT-01".
+const firstNameOf = (userName: string | null | undefined) =>
+  String(userName ?? '').trim().split(/\s+/)[0]?.toUpperCase() ?? '';
+
+function buildStoreKeeperInfo(names: string[], stv: string): string {
+  // Each person once, first appearance kept — someone who pauses and later claims the same load
+  // back is not listed twice.
+  const seen = new Set<string>();
+  const unique = names
+    .map((n) => n.trim().toUpperCase())
+    .filter((n) => n && !seen.has(n) && seen.add(n));
+  const stvName = stv.trim();
+  return unique.length ? `${unique.join(', ')}, ${stvName}` : stvName;
+}
+
+// The names already recorded: every comma-separated part except the last, which is the STV (in both
+// "YASH, RAHUL, PLT-05" and the older "YASH, pt: 5"). A value with no comma holds no names.
+function storeKeeperNames(info: string | null | undefined): string[] {
+  const parts = String(info ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+  return parts.length >= 2 ? parts.slice(0, -1) : [];
+}
+
 function formatStoreKeeperInfo(userName: string | null | undefined, stv: string): string {
-  const firstName = String(userName ?? '').trim().split(/\s+/)[0]?.toUpperCase() ?? '';
-  const numeric = /^(?:PLT|STV)-0*(\d+)$/i.exec(stv.trim());
-  const platform = numeric ? numeric[1] : stv.trim();
-  return firstName ? `${firstName}, pt: ${platform}` : `pt: ${platform}`;
+  return buildStoreKeeperInfo([firstNameOf(userName)], stv);
 }
 
 // Mirrors Order Scan's canCompletePart exactly (server/routes/order-scan.ts) — anyone can
@@ -200,13 +216,11 @@ function requireCompleteLoadAccess(req: Request, res: Response, next: NextFuncti
   next();
 }
 
-// Reopening (undoing Complete) is admin-only — deliberately stricter than completing a load.
-// Completing is a routine step anyone with load-completion rights can do; reopening un-does a
-// finished, audited state (and re-enables scanning/stock changes against it), so it's reserved
-// for admin/super-admin rather than everyone canCompleteLoad() already allows.
+// Reopening (undoing Complete) is stricter than completing: an admin/super-admin, or the load's
+// CURRENT owner (the person holding it when it finished). This middleware only checks the user is
+// signed in — the owner half needs the slip, so the rule itself is applied inside the handler.
 function requireReopenAccess(req: Request, res: Response, next: NextFunction) {
   if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
-  if (!isAdmin(req)) return res.status(403).json({ message: 'Only an admin can reopen a completed load.' });
   next();
 }
 
@@ -300,7 +314,12 @@ async function withProgress(slip: any, items: any[]) {
     }
     return {
       ...item, expected, loaded, remaining: Math.max(0, expected - loaded),
-      itemsPerPallet, isComplete: expected > 0 && loaded >= expected, stockAvailable,
+      itemsPerPallet,
+      // The pallet size actually configured in Product Master (0 when GJ/MP PLT is blank).
+      // itemsPerPallet falls back to the line quantity so totals still count one pallet; this
+      // field is the honest answer, so the page can refuse to auto-scan a size nobody set.
+      realPackSize: getPalletSize(product ?? null, state),
+      isComplete: expected > 0 && loaded >= expected, stockAvailable,
     };
   }));
 
@@ -414,7 +433,11 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
     }
 
     if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS) {
-      const updated = await storage.updateProformaSlip(slip.id, { notionStatus: NOTION_LOADING_STATUS } as any);
+      // Remember what LOADING replaces, so deleting this load later can put it back.
+      const updated = await storage.updateProformaSlip(slip.id, {
+        notionStatus: NOTION_LOADING_STATUS,
+        statusBeforeLoading: slip.notionStatus ?? '',
+      } as any);
       if (updated) slip = updated;
       void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
     }
@@ -437,9 +460,15 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
       if (!slip.loadingStv) {
         patch.loadingStv = matchedStv;
         patch.storeKeeperInfo = formatStoreKeeperInfo(userName, matchedStv);
+        // From here on this load's StoreKeeper Info is mirrored to Notion — only loads created
+        // from now, never ones started before this existed.
+        patch.notionStoreKeeperPush = true;
       }
       const updated = await storage.updateProformaSlip(slip.id, patch as any);
-      if (updated) slip = updated;
+      if (updated) {
+        slip = updated;
+        if (patch.storeKeeperInfo) void pushStoreKeeperInfoToNotion(slip.orderNumber, (slip as any).storeKeeperInfo);
+      }
     }
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
@@ -473,16 +502,19 @@ router.patch('/loading/proforma/:orderNumber/stv', requirePageWrite('loading'), 
       return res.status(400).json({ message: `"${requestedStv}" is not an STV configured for plant ${slip.plant ?? '—'}.` });
     }
 
-    // Reuse the name already in storeKeeperInfo ("NAME, pt: 4" → "NAME") so a correction only
-    // changes the platform. Falls back to the recorded owner for a slip whose storeKeeperInfo
-    // came from Notion in some other shape, or is empty.
-    const existingName = /^\s*([^,]+?)\s*,\s*pt\s*:/i.exec(String(slip.storeKeeperInfo ?? ''))?.[1];
+    // Keep every name already recorded (all owners so far, in order) so a correction only changes
+    // the STV. Falls back to the current owner for a slip whose storeKeeperInfo holds no names.
+    const existingNames = storeKeeperNames(slip.storeKeeperInfo);
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingStv: matchedStv,
-      storeKeeperInfo: formatStoreKeeperInfo(existingName ?? slip.loadingOwnerName, matchedStv),
+      storeKeeperInfo: buildStoreKeeperInfo(
+        existingNames.length ? existingNames : [firstNameOf(slip.loadingOwnerName)],
+        matchedStv,
+      ),
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to update STV' });
     res.json({ slip: updated });
+    if ((slip as any).notionStoreKeeperPush) void pushStoreKeeperInfoToNotion(updated.orderNumber, (updated as any).storeKeeperInfo);
   } catch (error) {
     console.error('Error updating load STV:', error);
     res.status(500).json({ message: 'Failed to update STV' });
@@ -540,11 +572,32 @@ router.post('/loading/proforma/:orderNumber/claim', requirePageWrite('loading'),
         [slip.orderNumber, owner.code, owner.name, userCode ?? null, userName ?? null, slip.loadingPausedAt],
       );
     }
+    // The person claiming is added to StoreKeeper Info after the earlier owners ("YASH, PLT-05" →
+    // "YASH, RAHUL, PLT-05"). Only for a load started here with a recorded STV — a slip whose
+    // StoreKeeper Info was typed in Notion isn't rewritten.
+    const slipStv = (slip as any).loadingStv as string | null | undefined;
+    const storeKeeperPatch = slipStv
+      ? {
+          storeKeeperInfo: buildStoreKeeperInfo(
+            [...storeKeeperNames(slip.storeKeeperInfo), firstNameOf(userName)],
+            slipStv,
+          ),
+        }
+      : {};
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingOwnerCode: userCode ?? null, loadingOwnerName: userName ?? null, loadingPausedAt: null,
+      ...storeKeeperPatch,
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to claim load' });
     res.json({ slip: await withRto(updated) });
+    // Only when the claim actually changed StoreKeeper Info (a new name joined), and only for a
+    // load created after the Notion push began.
+    if (
+      (slip as any).notionStoreKeeperPush
+      && (updated as any).storeKeeperInfo !== slip.storeKeeperInfo
+    ) {
+      void pushStoreKeeperInfoToNotion(updated.orderNumber, (updated as any).storeKeeperInfo);
+    }
   } catch (error) {
     console.error('Error claiming load:', error);
     res.status(500).json({ message: 'Failed to claim load' });
@@ -639,6 +692,8 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 -- same raw pool.query date-shift bug, same fix.
                 ps.order_date::text AS "orderDate",
                 ps.loading_completed_at AS "loadingCompletedAt",
+                ps.loading_completed_by_code AS "loadingCompletedByCode",
+                CASE WHEN ps.loading_completed_by_code = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = ps.loading_completed_by_code LIMIT 1) END AS "loadingCompletedByName",
                 ps.loading_owner_code AS "loadingOwnerCode", ps.loading_owner_name AS "loadingOwnerName",
                 ps.loading_paused_at AS "loadingPausedAt",
                 ps.loading_stv AS "loadingStv"
@@ -1132,6 +1187,10 @@ router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading')
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    const isCurrentOwner = !!slip.loadingOwnerCode && slip.loadingOwnerCode === (req.user as any)?.userCode;
+    if (!isAdmin(req) && !isCurrentOwner) {
+      return res.status(403).json({ message: 'Only the current owner of this load or an admin can reopen it.' });
+    }
 
     const { userCode, userName } = actor(req);
     const updated = await storage.updateProformaSlip(slip.id, {
@@ -1160,26 +1219,44 @@ router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading')
   }
 });
 
-// POST /api/loading/proforma/:orderNumber/reset — the landing table's "Delete" action: undoes
-// everything Loading has done for this order, as if it was never touched. Same permission as
-// voiding a single load event (this is exactly that, applied to every row for the order at once):
-//   1. Every non-voided loading_scan_events row for this order is reversed (stock added back to
-//      product_plant_stock, a correcting stock_movements row logged) and marked voided — same
-//      audit-preserving pattern as POST /events/:id/void, never physically deleted.
-//   2. The vehicle link is cleared (vehicleNumber/vehicleAssignedByCode/totalVolume) and the
-//      completed status is cleared — the slip goes back to "no vehicle assigned yet".
-//   3. The loading_records row(s) for this order (the landing table's own history log) ARE
-//      physically deleted — that table is just a log of "a vehicle was linked", which is no
-//      longer true once step 2 undoes it; nothing about it needs to survive as audit history the
-//      way the underlying stock-affecting scan events do.
+// Status a deleted load goes back to when the slip's pre-loading status was never recorded (loads
+// started before status_before_loading existed): "ready to load", the step just before LOADING.
+const STATUS_AFTER_DELETE_FALLBACK = 'READY≈LOAD';
+
+// POST /api/loading/proforma/:orderNumber/reset — the landing table's "Delete" action, body
+// { mode: 'void' | 'remove' } (default 'void'). Same permission as voiding a single load event.
+// Both modes undo everything Loading did for this order, so the slip can go through Create
+// Operation again:
+//   - stock: every non-voided scan is reversed — its qty added back to product_plant_stock (a
+//     negative +/- correction is taken back out, which the old reset skipped);
+//   - the slip: vehicle, completion, owner, pause, STV and StoreKeeper Info are cleared, and its
+//     Finny Status goes back to what it was before Create Operation (app and Notion). Leaving it
+//     LOADING, as the old reset did, made Create Operation refuse the slip for good;
+//   - loading_records (the landing table's own row) is deleted.
+// They differ only in what's left behind:
+//   'void'   — scan entries stay, marked Voided (visible in Scan History), with a correcting
+//              stock ledger row each; handoff history stays.
+//   'remove' — scan entries, handoff history and this order's Loading ledger rows are deleted
+//              outright, as if the load never happened. Ledger rows are matched by the order
+//              number in their reason; a quantity edit's rows carry no order number and stay, but
+//              Loading's ledger rows are never read by any stock total or history view (those all
+//              read the scan entries), so nothing shows or counts them.
+// The proforma slip and its items are never touched.
 router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
+    const mode: 'void' | 'remove' = req.body?.mode === 'remove' ? 'remove' : 'void';
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
 
     const { userCode, userName } = actor(req);
+    const previousStatus = String((slip as any).statusBeforeLoading ?? '').trim();
+    const restoredStatus = previousStatus && previousStatus.toUpperCase() !== NOTION_LOADING_STATUS
+      ? previousStatus
+      : STATUS_AFTER_DELETE_FALLBACK;
+    const hadNotionStoreKeeper = !!(slip as any).notionStoreKeeperPush;
+
     await client.query('BEGIN');
 
     const { rows: events } = await client.query(
@@ -1188,7 +1265,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
     );
     for (const event of events) {
       const qty = Number(event.total_qty ?? 0);
-      if (qty > 0 && event.plant && event.barcode) {
+      if (qty !== 0 && event.plant && event.barcode) {
         const product = await storage.getProductByBarcode(event.barcode, event.plant);
         await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
         await client.query(
@@ -1196,38 +1273,71 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
            WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
           [qty, event.barcode, event.plant],
         );
+        if (mode === 'void') {
+          await client.query(
+            `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+             VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
+            [event.barcode, product?.id ?? null, event.plant, qty, `Loading slip ${slip.orderNumber} reset — deleted from landing table`, userCode ?? null],
+          );
+        }
+      }
+      if (mode === 'void') {
         await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
-           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
-          [event.barcode, product?.id ?? null, event.plant, qty, `Loading slip ${slip.orderNumber} reset — deleted from landing table`, userCode ?? null],
+          `UPDATE loading_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
+          [userCode ?? null, 'Loading slip reset (deleted from landing table)', event.id],
         );
       }
-      await client.query(
-        `UPDATE loading_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
-        [userCode ?? null, 'Loading slip reset (deleted from landing table)', event.id],
-      );
+    }
+
+    let removedEvents = 0;
+    let removedLedgerRows = 0;
+    if (mode === 'remove') {
+      // Every scan entry for the order, already-voided ones included.
+      removedEvents = (await client.query(`DELETE FROM loading_scan_events WHERE order_number = $1`, [slip.orderNumber])).rowCount ?? 0;
+      await client.query(`DELETE FROM loading_handoffs WHERE order_number = $1`, [slip.orderNumber]);
+      // Exact suffix/prefix matches on this order number — never LIKE with the raw number, so
+      // order "100" can't take "1001"'s rows.
+      const suffix = ` for order ${slip.orderNumber}`;
+      removedLedgerRows = (await client.query(
+        `DELETE FROM stock_movements
+         WHERE source = 'loading' AND (
+           RIGHT(reason, LENGTH($1)) = $1
+           OR LEFT(reason, LENGTH($2)) = $2
+         )`,
+        [suffix, `Loading slip ${slip.orderNumber} reset`],
+      )).rowCount ?? 0;
     }
 
     await client.query(
       `UPDATE proforma_slips
        SET vehicle_number = NULL, vehicle_info_id = NULL, vehicle_assigned_by_code = NULL,
-           loading_completed_at = NULL, loading_completed_by_code = NULL
+           loading_completed_at = NULL, loading_completed_by_code = NULL,
+           loading_owner_code = NULL, loading_owner_name = NULL, loading_paused_at = NULL,
+           loading_stv = NULL, storekeeper_info = NULL,
+           notion_store_keeper_push = false, notion_status = $2, status_before_loading = NULL
        WHERE id = $1`,
-      [slip.id],
+      [slip.id, restoredStatus],
     );
     await client.query(`DELETE FROM loading_records WHERE order_number = $1`, [slip.orderNumber]);
 
     await client.query('COMMIT');
 
+    // Notion follows the app: the status goes back, and StoreKeeper tags the app wrote are cleared
+    // (only for loads whose tags the app pushed — hand-typed Notion values on older loads stay).
+    void pushOrderStatusToNotion(slip.orderNumber, restoredStatus);
+    if (hadNotionStoreKeeper) void pushStoreKeeperInfoToNotion(slip.orderNumber, '');
+
     if (userCode) {
       await storage.logActivity({
         pageName: 'Loading', action: 'delete', entityType: 'proforma_slip', entityId: slip.id,
-        details: `Loading reset for order ${slip.orderNumber} by ${userName ?? userCode} — ${events.length} scan(s) voided, vehicle un-assigned`,
+        details: mode === 'remove'
+          ? `Loading removed completely for order ${slip.orderNumber} by ${userName ?? userCode} — ${events.length} scan(s) reversed, ${removedEvents} scan entr(ies) and ${removedLedgerRows} ledger row(s) deleted, status back to ${restoredStatus}`
+          : `Loading reset for order ${slip.orderNumber} by ${userName ?? userCode} — ${events.length} scan(s) voided, vehicle un-assigned, status back to ${restoredStatus}`,
         userCode, userName,
       });
     }
 
-    res.json({ success: true, reversedEvents: events.length });
+    res.json({ success: true, mode, reversedEvents: events.length, removedEvents, restoredStatus });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Error resetting loading slip:', error);

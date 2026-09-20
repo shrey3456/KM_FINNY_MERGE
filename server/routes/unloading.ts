@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
-import { getPlantStateCode, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
+import { getPlantStateCode, resolvePalletSizeOrQty, getPalletSize, getUserPlants } from './order-scan';
 import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
 import { computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId } from '../lib/unloadGroupReport';
@@ -117,7 +117,11 @@ async function withProgress(session: any) {
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     return {
       ...item, expected, scanned, remaining: Math.max(0, expected - scanned),
-      itemsPerPallet, isComplete: expected > 0 && scanned >= expected,
+      itemsPerPallet,
+      // Real Product Master pallet size (0 when GJ/MP PLT is blank) — itemsPerPallet falls back to
+      // the line quantity, so this is what tells the page a size was never set.
+      realPackSize: getPalletSize(product ?? null, state),
+      isComplete: expected > 0 && scanned >= expected,
     };
   }));
 
@@ -413,9 +417,14 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
     const [dataRes, countRes] = await Promise.all([
       pool.query(
         `SELECT s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+                (SELECT vi.rto_number FROM vehicle_info vi
+                  WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
+                  ORDER BY (LOWER(TRIM(COALESCE(vi.plant, ''))) = LOWER(TRIM(COALESCE(s.plant, '')))) DESC, vi.id DESC
+                  LIMIT 1) AS "rtoNumber",
                 s.csv_file_name AS "csvFileName", s.row_count AS "rowCount", s.group_id AS "groupId",
                 s.part_index AS "partIndex", s.scan_status AS "scanStatus", s.created_at AS "createdAt",
                 s.scan_activated_at AS "scanActivatedAt", s.scan_completed_at AS "scanCompletedAt",
+                CASE WHEN s.scan_completed_by_code = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = s.scan_completed_by_code LIMIT 1) END AS "scanCompletedByName",
                 (SELECT COUNT(*) FROM unload_import_sessions g WHERE g.group_id = s.group_id AND g.is_deleted = false) AS "partsCount",
                 COALESCE((SELECT SUM(quantity) FROM unload_import_items WHERE session_id = s.id), 0)::int AS "expectedQty",
                 COALESCE((SELECT SUM(total_qty) FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE), 0)::int AS "scannedQty",
@@ -580,9 +589,14 @@ router.get('/unloading/sessions/recent-complete', requirePageAccess('unloading')
     const { rows } = await pool.query(
       `SELECT DISTINCT ON (s.plant)
          s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+         (SELECT vi.rto_number FROM vehicle_info vi
+                  WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
+                  ORDER BY (LOWER(TRIM(COALESCE(vi.plant, ''))) = LOWER(TRIM(COALESCE(s.plant, '')))) DESC, vi.id DESC
+                  LIMIT 1) AS "rtoNumber",
          s.csv_file_name AS "csvFileName", s.group_id AS "groupId", s.part_index AS "partIndex",
          s.scan_status AS "scanStatus", s.scan_activated_at AS "scanActivatedAt",
          s.scan_completed_at AS "scanCompletedAt",
+         CASE WHEN s.scan_completed_by_code = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = s.scan_completed_by_code LIMIT 1) END AS "scanCompletedByName",
          (SELECT COUNT(*) FROM unload_import_sessions g WHERE g.group_id = s.group_id AND g.is_deleted = false) AS "partsCount",
          COALESCE((SELECT SUM(quantity) FROM unload_import_items WHERE session_id = s.id), 0)::int AS "expectedQty",
          COALESCE((SELECT SUM(total_qty) FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE), 0)::int AS "scannedQty",
@@ -798,12 +812,11 @@ router.post('/unloading/sessions/:id/activate', requirePageWrite('unloading'), a
       });
     }
 
-    const { userCode } = actor(req);
-    await pool.query(
-      `UPDATE unload_import_sessions SET scan_status = 'active', scan_activated_by_code = $1, scan_activated_at = NOW() WHERE id = $2`,
-      [userCode ?? null, id],
-    );
-    res.json({ scanStatus: 'active' });
+    // Opening a batch no longer makes it active — its first real scan does (POST /scan below, under
+    // the same lock and next-in-line check). This request is kept only for a device still running
+    // the previously cached page, which calls it on open: it answers "ok, you may open it" without
+    // changing anything, so a batch opened and closed without scanning stays available.
+    res.json({ scanStatus: session.scan_status });
   } catch (error) {
     console.error('Error activating unloading session:', error);
     res.status(500).json({ message: 'Failed to activate' });

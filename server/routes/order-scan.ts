@@ -575,7 +575,7 @@ export async function sweepStaleCompletions(groupId: number, plant: string, user
     if ((remainRows[0]?.remaining ?? 1) !== 0) continue; // not fully scanned yet — leave it
 
     const { rowCount } = await pool.query(
-      `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW()
+      `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW(), scan_completed_by_code = 'system'
        WHERE id = $1 AND scan_status <> 'completed'`,
       [s.id],
     );
@@ -922,6 +922,7 @@ router.get('/order-scan/sessions/recent-complete', async (req: Request, res: Res
          s.created_at AS "createdAt", s.order_date AS "orderDate", s.scan_status AS "scanStatus",
          s.scan_activated_by_code AS "scanActivatedByCode", ab.name AS "scanActivatedByName",
          s.scan_activated_at AS "scanActivatedAt", s.scan_completed_at AS "scanCompletedAt",
+         CASE WHEN s.scan_completed_by_code = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = s.scan_completed_by_code LIMIT 1) END AS "scanCompletedByName",
          s.receiving_session_id AS "receivingSessionId", s.part_index AS "partIndex",
          COALESCE((SELECT SUM(oii.quantity) FROM order_import_items oii WHERE oii.session_id = s.id), 0)::int AS "totalQty",
          COALESCE((SELECT SUM(oii.expected_pallets) FROM order_import_items oii WHERE oii.session_id = s.id), 0)::float AS "totalPallets"
@@ -1136,10 +1137,10 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteAccess, async (r
     // (credits, auto-activate, broadcast) correctly no-ops instead of double-processing.
     const { rows: completedRows } = await pool.query(
       `UPDATE order_import_sessions
-       SET scan_status = 'completed', scan_completed_at = $1
+       SET scan_status = 'completed', scan_completed_at = $1, scan_completed_by_code = $3
        WHERE id = $2 AND scan_status <> 'completed'
        RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName", part_index AS "partIndex"`,
-      [new Date(), id],
+      [new Date(), id, (req.user as any)?.userCode ?? null],
     );
     const completed = completedRows[0];
 
@@ -1275,7 +1276,7 @@ router.post('/order-scan/sessions/:id/reopen', requirePageWrite('order-import'),
     }
 
     await client.query(
-      `UPDATE order_import_sessions SET scan_status = 'active', scan_completed_at = NULL WHERE id = $1`,
+      `UPDATE order_import_sessions SET scan_status = 'active', scan_completed_at = NULL, scan_completed_by_code = NULL WHERE id = $1`,
       [id],
     );
 
@@ -1319,11 +1320,41 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
       const plant = sessionRow?.plant ?? '';
       const state = await getPlantStateCode(pool, plant);
       const prodRows = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
-         FROM products WHERE LOWER(barcode) = ANY($1)`,
+        `SELECT LOWER(barcode) AS barcode, name, plant, items_per_pallet, pallets, gj_plt, mp_plt
+         FROM products WHERE LOWER(barcode) = ANY($1) ORDER BY id`,
         [barcodes],
       );
-      const productMap = new Map(prodRows.rows.map((p: any) => [p.barcode, p]));
+      // A barcode can have more than one Product Master row (different plants). Pick the row the
+      // same way the Master View endpoint does, so the Scan tab and the Master View never read a
+      // different pallet size for the same item: the row whose plant column covers this session's
+      // state wins ("VAL & IND" covers Valsad and Indore alike), then the first row that actually
+      // has a size for that state, then simply the first row.
+      const { rows: allPlantRows } = await pool.query(`SELECT name, state FROM plants`);
+      const statesOfPlantLabel = (label: string | null | undefined): Set<string> => {
+        const states = new Set<string>();
+        if (!label) return states;
+        for (const token of String(label).split(/[^a-zA-Z]+/).map((x) => x.trim().toUpperCase()).filter(Boolean)) {
+          const found = (allPlantRows as any[]).find((pl) => String(pl.name).toUpperCase() === token)
+            ?? (allPlantRows as any[]).find((pl) => String(pl.name).toUpperCase().startsWith(token));
+          if (found?.state) states.add(String(found.state).trim().toUpperCase());
+        }
+        return states;
+      };
+      const sizeOfRow = (r: any) => (state === 'GJ' ? Number(r.gj_plt) || 0 : state === 'MP' ? Number(r.mp_plt) || 0 : 0);
+      const rowsByBarcode = new Map<string, any[]>();
+      for (const row of prodRows.rows as any[]) {
+        const list = rowsByBarcode.get(row.barcode);
+        if (list) list.push(row); else rowsByBarcode.set(row.barcode, [row]);
+      }
+      const productMap = new Map<string, any>();
+      for (const [barcode, rows] of rowsByBarcode) {
+        const picked = rows.length === 1
+          ? rows[0]
+          : rows.find((r) => state && statesOfPlantLabel(r.plant).has(state))
+            ?? rows.find((r) => sizeOfRow(r) > 0)
+            ?? rows[0];
+        productMap.set(barcode, picked);
+      }
       for (const item of items as any[]) {
         const p = item.barcode ? productMap.get(item.barcode.toLowerCase()) : null;
         if (!p) continue;
@@ -1715,9 +1746,9 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
         );
         if ((remainRows[0]?.remaining ?? 1) === 0) {
           const { rowCount } = await client.query(
-            `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW()
+            `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW(), scan_completed_by_code = $2
              WHERE id = $1 AND scan_status <> 'completed'`,
-            [sid],
+            [sid, userCode],
           );
           if (rowCount) newlyCompleted.push(sid);
         }

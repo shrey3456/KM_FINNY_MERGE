@@ -301,3 +301,38 @@ body[data-portal-rotation="270"] [data-radix-popper-content-wrapper]:not(#root [
     border-left: 1px solid rgba(0, 0, 0, 0.05);
   }
 }
+
+/* ── Loading skeletons ───────────────────────────────────────────────────────────────────────
+   A soft light sweep across grey placeholder shapes (components/ui/loading-skeletons.tsx and the
+   Skeleton component), instead of a spinner or an on/off blink. .skeleton-wave gives the same sweep
+   to the grey bars inside an older hand-built skeleton block. Motion is dropped for anyone who has
+   asked their system for reduced motion. */
+@keyframes skeleton-shimmer {
+  100% { transform: translateX(100%); }
+}
+.skeleton-shimmer,
+.skeleton-wave [class*="bg-gray-100"],
+.skeleton-wave [class*="bg-gray-200"] {
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-shimmer {
+  background-color: rgb(226 232 240);
+}
+.skeleton-shimmer::after,
+.skeleton-wave [class*="bg-gray-100"]::after,
+.skeleton-wave [class*="bg-gray-200"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.6) 50%, rgba(255, 255, 255, 0) 100%);
+  animation: skeleton-shimmer 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer::after,
+  .skeleton-wave [class*="bg-gray-100"]::after,
+  .skeleton-wave [class*="bg-gray-200"]::after {
+    animation: none;
+  }
+}

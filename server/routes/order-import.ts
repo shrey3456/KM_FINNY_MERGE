@@ -166,6 +166,8 @@ router.get('/order-import/sessions', requireImportViewAccess, async (req, res) =
         // /complete respectively (see order-scan.ts). Null until each happens.
         scanActivatedAt: orderImportSessions.scanActivatedAt,
         scanCompletedAt: orderImportSessions.scanCompletedAt,
+        // Who completed it — a name, "System", or null (see order_import_sessions.scanCompletedByCode).
+        scanCompletedByName: sql<string | null>`(CASE WHEN ${orderImportSessions.scanCompletedByCode} = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = ${orderImportSessions.scanCompletedByCode} LIMIT 1) END)`,
         // Ordered totals for this CSV. rowCount alone says how many LINES the file has, which
         // isn't what anyone means by "how big is this order" — these give the quantity and pallet
         // figures, so the list can show them without expanding every session to add them up.
@@ -1138,23 +1140,56 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
     const stateByPlant = new Map(planRows.map((p: any) => [String(p.name).toLowerCase(), String(p.state ?? '').toUpperCase()]));
     const stateBySession = new Map(sessions.map((s) => [s.id, stateByPlant.get((s.plant ?? '').toLowerCase()) ?? null]));
 
+    // A barcode can have MORE THAN ONE product row — the same item entered once per plant, and
+    // often with the pallet size filled in on only one of them. Keeping just one row per barcode
+    // (whichever came last) picked the empty one about half the time, so this page reported "no
+    // pallet size" for an item Scan Operations sized correctly, and the two pages' pallet totals
+    // disagreed. Every row is kept here and the one matching the session's plant is chosen, the
+    // same rule storage.getProductByBarcode uses — including combined labels like "VAL & IND",
+    // which covers Valsad AND Indore.
+    const { rows: allPlantRows } = await pool.query(`SELECT name, state FROM plants`);
+    const statesOfPlantLabel = (label: string | null | undefined): Set<string> => {
+      const states = new Set<string>();
+      if (!label) return states;
+      for (const token of String(label).split(/[^a-zA-Z]+/).map((t) => t.trim().toUpperCase()).filter(Boolean)) {
+        const found = (allPlantRows as any[]).find((pl) => String(pl.name).toUpperCase() === token)
+          ?? (allPlantRows as any[]).find((pl) => String(pl.name).toUpperCase().startsWith(token));
+        if (found?.state) states.add(String(found.state).trim().toUpperCase());
+      }
+      return states;
+    };
+
     const itemBarcodes = Array.from(new Set(rawItems.map((i: any) => i.barcode).filter((b: any): b is string => !!b)));
-    const packByBarcode = new Map<string, { gjPlt: number; mpPlt: number }>();
+    type PackRow = { plant: string | null; gjPlt: number; mpPlt: number };
+    const packRowsByBarcode = new Map<string, PackRow[]>();
     if (itemBarcodes.length > 0) {
       const { rows: prodRows } = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, gj_plt, mp_plt FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
+        `SELECT LOWER(barcode) AS barcode, plant, gj_plt, mp_plt FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`,
         [itemBarcodes.map((b) => b.toLowerCase())],
       );
-      for (const p of prodRows as any[]) packByBarcode.set(p.barcode, { gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0 });
+      for (const p of prodRows as any[]) {
+        const list = packRowsByBarcode.get(p.barcode) ?? [];
+        list.push({ plant: p.plant ?? null, gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0 });
+        packRowsByBarcode.set(p.barcode, list);
+      }
     }
     const resolvePackSize = (sessionId: number, barcode: string | null): number => {
       if (!barcode) return 0;
       const state = stateBySession.get(sessionId);
-      const pack = packByBarcode.get(barcode.toLowerCase());
-      if (!pack || !state) return 0;
-      if (state === 'GJ') return pack.gjPlt;
-      if (state === 'MP') return pack.mpPlt;
-      return 0;
+      const rows = packRowsByBarcode.get(barcode.toLowerCase());
+      if (!rows || rows.length === 0 || !state) return 0;
+      const sizeOf = (r: PackRow) => (state === 'GJ' ? r.gjPlt : state === 'MP' ? r.mpPlt : 0);
+      // The row for this session's own plant wins ("VAL & IND" covers Valsad and Indore alike).
+      // With no plant match, the first row that actually has a size for this state is used — a
+      // duplicated barcode usually has the size filled in on only one of its rows, and picking
+      // blindly would report "no pallet size" for an item that has one. Only when no row has a
+      // size does it fall back to the first row (which then reports 0, i.e. "not set").
+      const pack = rows.length === 1
+        ? rows[0]
+        : rows.find((r) => statesOfPlantLabel(r.plant).has(state))
+          ?? rows.find((r) => sizeOf(r) > 0)
+          ?? rows[0];
+      return sizeOf(pack);
     };
 
     const allItems: Array<{
@@ -1199,14 +1234,20 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
     // Extra scans can be for barcodes that never appeared in any CSV, so they weren't covered
     // by the itemBarcodes lookup above — fetch pack sizes for whichever of those are missing.
     const missingExtraBarcodes = Array.from(new Set(
-      extraRows.map((ex: any) => ex.barcode).filter((b: any) => b && !packByBarcode.has(String(b).toLowerCase())),
+      extraRows.map((ex: any) => ex.barcode).filter((b: any) => b && !packRowsByBarcode.has(String(b).toLowerCase())),
     ));
     if (missingExtraBarcodes.length > 0) {
+      // Same every-row-kept shape as above, so an extra-only barcode entered twice is resolved by
+      // plant too rather than by whichever row happened to come last.
       const { rows: extraProdRows } = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, gj_plt, mp_plt FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
+        `SELECT LOWER(barcode) AS barcode, plant, gj_plt, mp_plt FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`,
         [missingExtraBarcodes.map((b: any) => String(b).toLowerCase())],
       );
-      for (const p of extraProdRows as any[]) packByBarcode.set(p.barcode, { gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0 });
+      for (const p of extraProdRows as any[]) {
+        const list = packRowsByBarcode.get(p.barcode) ?? [];
+        list.push({ plant: p.plant ?? null, gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0 });
+        packRowsByBarcode.set(p.barcode, list);
+      }
     }
 
     extraRows.forEach((ex: any, idx: number) => {

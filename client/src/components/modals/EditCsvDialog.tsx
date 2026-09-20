@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 interface EditableItem {
   key: string;
@@ -293,9 +294,7 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
         )}
 
         {itemsQuery.isLoading ? (
-          <div className="flex justify-center py-10">
-            <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-          </div>
+          <SectionSkeleton lines={4} />
         ) : (
           <>
             <div className="overflow-x-auto rounded-xl border border-gray-200 shadow-sm">

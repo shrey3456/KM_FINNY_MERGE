@@ -66,6 +66,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+import { PageSkeleton, SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 type Product = {
   id: number;
@@ -88,6 +89,10 @@ type OsScanItem = {
   id: number; sessionId: number;
   barcode: string | null; itemName: string | null; sapCode: string | null;
   expectedQty: number; itemsPerPallet: number;
+  // The pallet size actually configured in Product Master for this plant's state (GJ PLT /
+  // MP PLT), 0 when nobody set one. itemsPerPallet can be a fallback (the item's own qty),
+  // so only this field can answer "is a real pallet size set?".
+  realPackSize?: number | null;
   scannedPallets: number; scannedLooseQty: number; totalScannedQty: number;
   status: string; lastScannedAt: string | null;
 };
@@ -1178,9 +1183,14 @@ export default function ScanOrderPage() {
     const remaining = match ? Math.max(0, (match.expectedQty ?? 0) - (match.totalScannedQty ?? 0)) : 0;
     // One full pallet (or more) of order qty still remaining → auto-scan exactly one pallet.
     // Never overshoots: remaining >= plantPalletSize means scanned + one pallet <= expected.
+    // No real GJ/MP PLT in Product Master → never auto-scan: the pallet size used here would be
+    // a guess (the item's own quantity), so the dialog always opens and the operator types the
+    // amount themselves.
+    const packSizeMissing = !!match && !((match.realPackSize ?? 0) > 0);
     const canAutoScan =
       autoScanEnabled &&
       !!match &&
+      !packSizeMissing &&
       (match.expectedQty ?? 0) > 0 &&
       plantPalletSize >= 1 &&
       remaining >= plantPalletSize;
@@ -1205,10 +1215,12 @@ export default function ScanOrderPage() {
     }
 
     // Opening the dialog now — osPendingRef takes over as the reentrancy guard from here.
-    const defaultQty = _defaultScanQty(match, plantPalletSize);
+    // Pallet size missing → leave the quantity box empty (Confirm stays off until it's typed)
+    // instead of pre-filling a guessed amount.
+    const defaultQty = packSizeMissing ? 0 : _defaultScanQty(match, plantPalletSize);
     osScanLockRef.current = false;
     setOsQty(defaultQty);
-    setOsPalletsInput(plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
+    setOsPalletsInput(!packSizeMissing && plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
     setOsPallets(1);
     setOsLooseQty(0);
     setOsPending({ barcode, matchedItem: match, inventoryProduct: invProduct, plantPalletSize });
@@ -1293,10 +1305,12 @@ export default function ScanOrderPage() {
     const barcode = osMultiMatch.barcode;
     const invProduct = osMultiMatch.inventoryProduct;
     const plantPalletSize = _computePlantPalletSize(item, invProduct);
-    const defaultQty = _defaultScanQty(item, plantPalletSize);
+    // Same rule as the single-match path: no real GJ/MP PLT → empty quantity box, no guess.
+    const packSizeMissing = !((item.realPackSize ?? 0) > 0);
+    const defaultQty = packSizeMissing ? 0 : _defaultScanQty(item, plantPalletSize);
     setOsMultiMatch(null);
     setOsQty(defaultQty);
-    setOsPalletsInput(plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
+    setOsPalletsInput(!packSizeMissing && plantPalletSize > 0 ? (defaultQty / plantPalletSize).toFixed(2) : "");
     setOsPallets(1);
     setOsLooseQty(0);
     setOsPending({ barcode, matchedItem: item, inventoryProduct: invProduct, plantPalletSize });
@@ -1656,14 +1670,34 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     return list[0];
   };
 
+  // The pallet size for a barcode at a given plant, picked exactly the way the Master View
+  // endpoint picks it server-side (see resolvePackSize in server/routes/order-import.ts) so both
+  // this page and Scan Viewer read the SAME size for a barcode that has more than one Product
+  // Master row: the row whose plant column covers this plant's state wins ("VAL & IND" covers
+  // Valsad and Indore alike), then the first row that actually has a size for that state, then
+  // simply the first row (which reports 0 — "not set").
+  const resolvePackSizeForPlant = (key: string, plantName: string): number => {
+    const state = getPlantState(plantName);
+    if (!state) return 0;
+    const list = productLookupAll.get(key);
+    if (!list || list.length === 0) return 0;
+    const sizeOf = (p: Product) => getStatePalletSize(p, state);
+    if (list.length === 1) return sizeOf(list[0]);
+    const targetStates = resolveStatesForPlantLabel(plantName);
+    const byPlant = list.find((c) => {
+      for (const s of resolveStatesForPlantLabel(c.plant)) if (targetStates.has(s)) return true;
+      return false;
+    });
+    return sizeOf(byPlant ?? list.find((c) => sizeOf(c) > 0) ?? list[0]);
+  };
+
   // Pallet-count cell: qty ÷ items-per-pallet, or a muted 0.00 when not applicable. Shared by
   // Part Order's CSV Items table. Looks up the item's own GJ/MP PLT in Product Master (NOT the
   // CSV's own Pallets/expectedPallets column, and not "Packets"/itemsPerPallet) — falling back
   // to treating the item as exactly one pallet sized to its own quantity when no PLT is defined.
   const impItemsPerPallet = (i: { barcode: string | null; quantity: number | null }): number => {
     const qty = i.quantity ?? 0;
-    const invProduct = i.barcode ? resolveInvProduct(normalize(i.barcode), csvEffPlant) : null;
-    const defined = invProduct ? getStatePalletSize(invProduct, getPlantState(csvEffPlant)) : 0;
+    const defined = i.barcode ? resolvePackSizeForPlant(normalize(i.barcode), csvEffPlant) : 0;
     return defined > 0 ? defined : Math.max(1, qty || 1);
   };
 
@@ -1671,9 +1705,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   useEffect(() => {
     if (!activeOrderScanSession) return;
 
-    const MAX_KEY_INTERVAL = 50;  // ms between chars -- faster than any human types
+    // Two limits on purpose. Inside the qty box, 50 ms still decides "gun, not a person typing",
+    // because a slower limit there would treat fast manual typing as a scan and undo it. Everywhere
+    // else nobody is typing, so the limit is relaxed for wireless/Bluetooth guns and busy tablets,
+    // which space characters out more — at 50 ms their scans were cut in half.
+    const MAX_KEY_INTERVAL = 50;         // qty box only
+    const MAX_KEY_INTERVAL_GLOBAL = 100; // anywhere else on the page
     const MIN_BARCODE_LENGTH = 3;
-    const BURST_END_DELAY = 80;   // ms of silence = end of scan, for guns with no suffix key
+    const BURST_END_DELAY = 120;  // ms of silence = end of scan, for guns with no suffix key
 
     let buffer = "";
     let lastKeyAt = 0;
@@ -1761,7 +1800,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         return;
       }
 
-      if (delta > MAX_KEY_INTERVAL) buffer = ""; // gap too long -- not a scanner burst
+      if (delta > MAX_KEY_INTERVAL_GLOBAL) buffer = ""; // gap too long -- not a scanner burst
       buffer += e.key;
 
       clearFlush();
@@ -1770,7 +1809,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
     window.addEventListener("keydown", handleKeyDown, true);
     return () => { window.removeEventListener("keydown", handleKeyDown, true); clearFlush(); };
-  }, [activeOrderScanSession]);
+    // Keyed on the session's id, not the session object: the order refreshes every few seconds with
+    // a new object, which re-attached this listener each time and lost a scan arriving right then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrderScanSession?.id]);
 
   // ── Master View item history drill-down (click a row → see every raw scan for it) ────────
   // Declared here — BEFORE the early loading-state return below — so these hooks always run on
@@ -1861,9 +1903,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // well under any realistic viewport keeps the whole thing on-screen at that position.
     <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
       {mvHistoryQuery.isLoading ? (
-        <div className="flex justify-center py-6">
-          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-        </div>
+        <SectionSkeleton lines={3} />
       ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
       ) : (
@@ -1939,9 +1979,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   const mvHistoryPanelMobile = (
     <div className="w-full bg-gray-50 p-3">
       {mvHistoryQuery.isLoading ? (
-        <div className="flex justify-center py-6">
-          <Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" />
-        </div>
+        <SectionSkeleton lines={3} />
       ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
       ) : (
@@ -2003,9 +2041,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
   if (orderScanNotifLoading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-gray-50">
-        <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-      </div>
+      <PageSkeleton />
     );
   }
 
@@ -2025,7 +2061,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
-          const invProduct = resolveInvProduct(normalize(item.barcode ?? item.itemName ?? ""), mvPlant);
           // Only the GJ/MP-PLT-defined size (0 if not defined) — the expected-qty fallback
           // needs this item's FINAL summed quantity across every contributing file, which
           // isn't known until the accumulation loop below finishes, so that fallback is
@@ -2033,7 +2068,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           g = {
             barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
             quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
-            itemsPerPallet: invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0,
+            itemsPerPallet: resolvePackSizeForPlant(normalize(item.barcode ?? item.itemName ?? ""), mvPlant),
             _files: [], _isExtra: true, _lastScannedAt: null,
           };
           groups.set(key, g);
@@ -2228,8 +2263,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         }
         // Informational only — the item's real GJ/MP PLT pack size, never used in any qty/plt
         // calculation on this page (same treatment as the Scan tab and Scan Viewer).
-        const invProduct = i.barcode ? resolveInvProduct(normalize(i.barcode), mvPlant) : null;
-        const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
+        const packSize = i.barcode ? resolvePackSizeForPlant(normalize(i.barcode), mvPlant) : 0;
         return (
           <>
             <span className="block">{i.itemName ?? "—"}</span>
@@ -3058,6 +3092,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       ? (osPending.matchedItem.totalScannedQty ?? 0) >= (osPending.matchedItem.expectedQty ?? 1)
       : false;
     const osResolvedImageName = osPending?.matchedItem?.itemName ?? osPending?.inventoryProduct?.name;
+    // Matched CSV item whose GJ PLT / MP PLT is blank in Product Master — the dialog then asks
+    // for the quantity instead of offering a guessed pallet amount.
+    const osPackSizeMissing = !!osPending?.matchedItem && !((osPending.matchedItem.realPackSize ?? 0) > 0);
 
 
     return (
@@ -3639,9 +3676,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
               {/* Rows */}
               {osItemsQuery.isLoading ? (
-                <div className="flex justify-center py-10">
-                  <Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" />
-                </div>
+                <SectionSkeleton lines={4} />
               ) : (
                 <>
                   {/* This is the narrow-screen fallback: fields stack as labeled lines instead
@@ -3905,7 +3940,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {/* ── Master View Tab (mobile) ── */}
             {osTab === "master-view" && (
               <div className="space-y-3">
-                {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading…</p>}
+                {mvQuery.isLoading && <SectionSkeleton lines={3} />}
                 {mvData && (
                   <div ref={mvSearchMobileRef} className="bg-white border border-gray-300 overflow-hidden rounded-xl">
                     {/* Navy header — same treatment as the Scan tab's mobile header. Search
@@ -4017,8 +4052,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                   {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                                 </p>
                                 {(() => {
-                                  const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), mvPlant) : null;
-                                  const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
+                                  const packSize = item.barcode ? resolvePackSizeForPlant(normalize(item.barcode), mvPlant) : 0;
                                   return packSize > 0 ? (
                                     <p className="mt-0.5 text-sm font-semibold text-gray-600">{packSize} per pallet</p>
                                   ) : null;
@@ -4140,8 +4174,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                       {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                                     </p>
                                     {(() => {
-                                      const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), mvPlant) : null;
-                                      const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(mvPlant)) : 0;
+                                      const packSize = item.barcode ? resolvePackSizeForPlant(normalize(item.barcode), mvPlant) : 0;
                                       return packSize > 0 ? (
                                         <p className="text-sm font-semibold text-gray-600">{packSize} per pallet</p>
                                       ) : null;
@@ -4224,7 +4257,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </Button>
                   )}
                 </div>
-                {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse py-4 text-center">Loading files…</p>}
+                {csvSessQuery.isFetching && <SectionSkeleton lines={3} />}
                 {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400 py-4 text-center">No CSVs found for this date{csvEffPlant ? ` / ${csvEffPlant}` : ""}.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
@@ -4259,7 +4292,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                               {csvSearch && <button onClick={() => setCsvSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2"><X className="h-3 w-3 text-gray-400" /></button>}
                             </div>
                           </div>
-                          {csvItemsQuery2.isFetching && <p className="px-3 py-4 text-sm text-gray-400 animate-pulse text-center">Loading items…</p>}
+                          {csvItemsQuery2.isFetching && <SectionSkeleton lines={3} />}
                           {/* Structured table (business style): square corners, grid borders, full
                               item names — matching the Scan/Master View tables, so all three tabs
                               read as one system. */}
@@ -4444,8 +4477,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             {/* Header row */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-3 min-w-0">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center bg-amber-400">
-                  <Scan className="h-4 w-4 text-white" />
+                {/* Same icon as "Scan Operations" in the sidebar, in the navy badge every page uses. */}
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e]">
+                  <ScanLine className="h-5 w-5 text-white" />
                 </div>
                 <div className="min-w-0">
                   {/* Order Date (what the CSV was uploaded FOR) rather than the CSV file name —
@@ -4897,7 +4931,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
               {osTab === "master-view" && (
                 <div className="space-y-4">
-                  {mvQuery.isLoading && <p className="text-sm text-gray-400 animate-pulse">Loading…</p>}
+                  {mvQuery.isLoading && <SectionSkeleton lines={3} />}
                   {mvData && (
                     <div>
                       {mvShowFiles && (
@@ -5019,7 +5053,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </Button>
                   )}
                 </div>
-                {csvSessQuery.isFetching && <p className="text-sm text-gray-400 animate-pulse">Loading files…</p>}
+                {csvSessQuery.isFetching && <SectionSkeleton lines={3} />}
                 {csvSessions.length === 0 && !csvSessQuery.isFetching && <p className="text-sm text-gray-400">No CSVs found for this date{csvEffPlant ? ` / ${csvEffPlant}` : ""}.</p>}
                 <div className="space-y-2">
                   {csvSessions.map((sess) => (
@@ -5361,6 +5395,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 {osItemIsComplete && (
                   <p className="text-lg text-amber-600 mt-1">Order already complete — these extra boxes will be logged separately.</p>
                 )}
+                {osPackSizeMissing && (
+                  <p className="mt-1 rounded-lg bg-amber-50 px-3 py-2 text-base font-semibold text-amber-700">
+                    Pallet size is not set for this item in Product Master — enter the quantity you are scanning.
+                  </p>
+                )}
               </DialogDescription>
             </DialogHeader>
 
@@ -5430,7 +5469,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* Off-rotation: Qty + Pallets side by side (sm:grid-cols-2). Rotated: keep a single
                   CSS column — the rotate-90 turns that vertical stack into the side-by-side pair
                   the kiosk layout expects (a CSS two-column grid would rotate into a stacked pair). */}
-              <div className={`grid gap-3 ${plt > 1 && !osQuarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+              <div className={`grid gap-3 ${plt > 1 && !osPackSizeMissing && !osQuarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
                 {/* Qty — −/+ step one box at a time. */}
                 <div className="space-y-1">
                   <Label className="text-sm">Qty (boxes)</Label>
@@ -5458,6 +5497,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         setOsPalletsInput(plt > 0 ? (q / plt).toFixed(2) : "");
                       }}
                       onBlur={(e) => {
+                        // With no pallet size set the box stays empty until the operator types
+                        // a number — snapping it to 1 here would hand them a guess again.
+                        if (osPackSizeMissing) return;
                         if (!e.target.value || parseInt(e.target.value) < 1) {
                           setOsQty(1);
                           setOsPalletsInput(plt > 0 ? (1 / plt).toFixed(2) : "");
@@ -5488,7 +5530,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </div>
 
                 {/* Pallets — −/+ step one full pallet; only shown when a pallet size is configured. */}
-                {plt > 1 && (
+                {plt > 1 && !osPackSizeMissing && (
                   <div className="space-y-1">
                     <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {plt}/pallet</span></Label>
                     {/* One bordered box holding −, the pallet count, and + together. */}
@@ -5551,7 +5593,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               </Button>
               <Button
                 onClick={handleOsConfirmScan}
-                disabled={osScanMutation.isPending || (stvs.length > 0 && !osSelectedStv) || !canScanWrite}
+                disabled={osScanMutation.isPending || (stvs.length > 0 && !osSelectedStv) || !canScanWrite || osQty < 1}
                 className={`rounded-xl ${(!osPending?.matchedItem || osItemIsComplete)
                   ? "bg-amber-600 hover:bg-amber-700 text-white"
                   : "bg-[#001d6e] hover:bg-[#00154b] text-white"}`}

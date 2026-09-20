@@ -34,6 +34,7 @@ import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import ExchangeProductDialog, { type ExchangeSourceRow } from "@/components/modals/ExchangeProductDialog";
 import { ColumnFilterPopoverContent, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, conditionSummary, isConditionEmpty, matchAllConditions } from "@/lib/columnFilters";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1693,7 +1694,7 @@ export default function OverallStock() {
         </thead>
         <tbody>
           {sourceBreakdownLoading && !sourceBreakdownData ? (
-            <tr><td colSpan={7} className="py-8 text-center"><Loader2 className="mx-auto h-5 w-5 animate-spin text-[#001d6e]" /></td></tr>
+            <tr><td colSpan={7} className="p-0"><SectionSkeleton lines={3} /></td></tr>
           ) : detailPlantRows.map(({ plant, stock, breakdown }) => (
             <tr key={plant} className="border-b border-gray-200 bg-white">
               <td className="border-r border-gray-200 px-3 py-2 font-medium text-gray-900">{plant}</td>
@@ -1733,7 +1734,7 @@ export default function OverallStock() {
         </thead>
         <tbody>
           {partyBreakdownLoading && !partyBreakdownData ? (
-            <tr><td colSpan={3} className="py-8 text-center"><Loader2 className="mx-auto h-5 w-5 animate-spin text-[#001d6e]" /></td></tr>
+            <tr><td colSpan={3} className="p-0"><SectionSkeleton lines={3} /></td></tr>
           ) : (partyBreakdownData?.parties?.length ?? 0) === 0 ? (
             <tr><td colSpan={3} className="py-6 text-center text-gray-400">No proforma orders for this item yet.</td></tr>
           ) : partyBreakdownData!.parties.map((p) => {
@@ -1798,7 +1799,7 @@ export default function OverallStock() {
   // row's entries carry a Plant column since they span more than one; a normal single-plant row
   // just repeats the same plant on every line, which is harmless.
   const scanningHistoryContent = scanningHistoryLoading ? (
-    <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+    <SectionSkeleton lines={3} />
   ) : (scanningHistoryData?.items?.length ?? 0) === 0 ? (
     <p className="py-6 text-center text-sm text-gray-400">No Scan Order movements yet for this item.</p>
   ) : (
@@ -1858,7 +1859,7 @@ export default function OverallStock() {
   );
 
   const unloadingHistoryContent = unloadingHistoryLoading ? (
-    <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+    <SectionSkeleton lines={3} />
   ) : (unloadingHistoryData?.items?.length ?? 0) === 0 ? (
     <p className="py-6 text-center text-sm text-gray-400">No unloading movements yet for this item.</p>
   ) : (
@@ -1907,7 +1908,7 @@ export default function OverallStock() {
   );
 
   const loadingHistoryContent = loadingHistoryLoading ? (
-    <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+    <SectionSkeleton lines={3} />
   ) : (loadingHistoryData?.items?.length ?? 0) === 0 ? (
     <p className="py-6 text-center text-sm text-gray-400">No loading (dispatch) movements yet for this item.</p>
   ) : (
@@ -1964,7 +1965,7 @@ export default function OverallStock() {
   // Adjust dialog, the Loading Items table's +/- ("Loading Adjust"), and stock corrections like
   // Clear Stock or an exchange. Qty is always the change to stock.
   const adjustHistoryContent = adjustHistoryLoading ? (
-    <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+    <SectionSkeleton lines={3} />
   ) : (adjustHistoryData?.items?.length ?? 0) === 0 ? (
     <p className="py-6 text-center text-sm text-gray-400">No adjustments yet for this item.</p>
   ) : (
@@ -2832,7 +2833,7 @@ export default function OverallStock() {
             </DialogDescription>
           </DialogHeader>
           {deletePreviewLoading ? (
-            <div className="flex justify-center py-4"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+            <SectionSkeleton lines={2} />
           ) : deletePreview && (
             <div className="grid grid-cols-2 gap-2 text-sm">
               <div className="p-2 rounded border bg-white">

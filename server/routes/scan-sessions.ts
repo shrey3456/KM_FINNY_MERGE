@@ -1649,8 +1649,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       const expParams: any[] = [periodStart];
       const expConds: string[] = ['ois.order_date >= $1', 'ois.is_deleted = false'];
       if (periodEnd) { expParams.push(periodEnd); expConds.push(`ois.order_date <= $${expParams.length}`); }
-      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY(${expParams.length}::text[])`); }
-      if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY(${expParams.length}::text[])`); }
+      if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
+      if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
       const { rows: expRows } = await pool.query(`
         SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
         FROM order_import_items oii
@@ -1721,8 +1721,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       const saleParams: any[] = [periodStart];
       const saleConds: string[] = ['ps.order_date >= $1', 'psi.barcode IS NOT NULL', 'ps.plant IS NOT NULL'];
       if (periodEnd) { saleParams.push(periodEnd); saleConds.push(`ps.order_date <= $${saleParams.length}`); }
-      if (allowed !== null) { saleParams.push(allowed); saleConds.push(`LOWER(ps.plant) = ANY(${saleParams.length}::text[])`); }
-      if (plantFilterList) { saleParams.push(plantFilterList); saleConds.push(`LOWER(ps.plant) = ANY(${saleParams.length}::text[])`); }
+      if (allowed !== null) { saleParams.push(allowed); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
+      if (plantFilterList) { saleParams.push(plantFilterList); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
       const { rows: saleRows } = await pool.query(`
         SELECT psi.barcode, ps.plant, SUM(psi.quantity)::int AS "expectedSaleQty"
         FROM proforma_slip_items psi

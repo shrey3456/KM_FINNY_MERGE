@@ -13,6 +13,7 @@ import { borderBottomLeftRadius } from 'html2canvas/dist/types/css/property-desc
 import { text } from 'stream/consumers';
 import { TruckLoadingAnimation } from '@/components/TruckLoadingAnimation';
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
 interface TollVoucherData {
   orderNumber: string;
@@ -452,12 +453,7 @@ console.log(length, partyFontPt);
   // Access control
   if (accessLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
+      <PageSkeleton />
     );
   }
 

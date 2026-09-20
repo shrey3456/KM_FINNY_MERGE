@@ -128,6 +128,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 // Import the DataTable directly since it's a local component
 import { DataTable } from '../components/DataTable';
 import { SelectableDataTable } from '../components/SelectableDataTable';
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 interface BackupSettings {
   id: number;
@@ -1175,9 +1176,7 @@ export default function BackupPage() {
           </DialogHeader>
           
           {saleDetailsModal.isLoading ? (
-            <div className="py-8 flex justify-center items-center">
-              <Loader2 className="h-8 w-8 animate-spin opacity-70" />
-            </div>
+            <SectionSkeleton lines={3} />
           ) : saleDetailsModal.items.length > 0 ? (
             <ScrollArea className="h-96">
               <Table>
@@ -1261,9 +1260,7 @@ export default function BackupPage() {
               </CardHeader>
               <CardContent>
                 {isLoadingSettings ? (
-                  <div className="py-6 flex items-center justify-center">
-                    <Loader2 className="h-6 w-6 animate-spin" />
-                  </div>
+                  <SectionSkeleton lines={3} />
                 ) : backupSettings ? (
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
@@ -1462,9 +1459,7 @@ export default function BackupPage() {
             </CardHeader>
             <CardContent>
               {isLoadingScans ? (
-                <div className="py-12 flex items-center justify-center">
-                  <Loader2 className="h-6 w-6 animate-spin" />
-                </div>
+                <SectionSkeleton lines={5} />
               ) : scanBackups && scanBackups.length > 0 ? (
                 <ScrollArea className="h-[500px]">
                   <DataTable
@@ -1515,9 +1510,7 @@ export default function BackupPage() {
             </CardHeader>
             <CardContent>
               {isLoadingLoadingOps ? (
-                <div className="py-12 flex items-center justify-center">
-                  <Loader2 className="h-6 w-6 animate-spin" />
-                </div>
+                <SectionSkeleton lines={5} />
               ) : loadingOpBackups && loadingOpBackups.length > 0 ? (
                 <ScrollArea className="h-[500px]">
                   <DataTable
@@ -1568,9 +1561,7 @@ export default function BackupPage() {
             </CardHeader>
             <CardContent>
               {isLoadingSales ? (
-                <div className="py-12 flex items-center justify-center">
-                  <Loader2 className="h-6 w-6 animate-spin" />
-                </div>
+                <SectionSkeleton lines={5} />
               ) : saleBackups && saleBackups.length > 0 ? (
                 <ScrollArea className="h-[500px]">
                   <DataTable
@@ -1642,9 +1633,7 @@ export default function BackupPage() {
             </CardHeader>
             <CardContent>
               {isLoadingProformaSlips ? (
-                <div className="py-12 flex items-center justify-center">
-                  <Loader2 className="h-6 w-6 animate-spin" />
-                </div>
+                <SectionSkeleton lines={5} />
               ) : proformaSlipBackups && proformaSlipBackups.length > 0 ? (
                 <ScrollArea className="h-[500px]">
                   <SelectableDataTable

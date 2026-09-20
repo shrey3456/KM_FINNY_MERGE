@@ -1,4 +1,5 @@
 import React from 'react';
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 import { Route } from 'wouter';
 import { getCurrentUserPermissions } from '../lib/permissions';
 import { useAuth } from '../hooks/use-auth';
@@ -28,8 +29,9 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   return (
     <Route path={path}>
       {(params) => {
-        // While session user is loading, don't block access yet
-        if (isLoading) return null;
+        // While the session user is loading (every page refresh), show the page skeleton — this used
+        // to return nothing, which is the blank white area right after a manual refresh.
+        if (isLoading) return <PageSkeleton />;
 
         if (requireAdmin && !userPermissions.canManageUsers) {
           return <NotFound />;

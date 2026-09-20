@@ -396,6 +396,13 @@ export const proformaSlips = pgTable("proforma_slips", {
   // once this is set, that column is ours (same "a person confirmed this locally" guard
   // vehicleAssignedByCode already gives vehicleNumber).
   loadingStv: text("loading_stv"),
+  // Set by Create Operation from the point StoreKeeper Info started being pushed to Notion. Only
+  // slips with this set get their StoreKeeper Info written to Notion (on create, on a handoff, on
+  // an admin STV change) — loads started before then are never rewritten there.
+  notionStoreKeeperPush: boolean("notion_store_keeper_push").default(false),
+  // The Finny Status this slip had when Create Operation moved it to LOADING — put back if the load
+  // is deleted from the Loading page. Null for loads started before this was recorded.
+  statusBeforeLoading: text("status_before_loading"),
 });
 
 export const insertProformaSlipSchema = createInsertSchema(proformaSlips, {
@@ -979,6 +986,10 @@ export const orderImportSessions = pgTable("order_import_sessions", {
   scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
   scanActivatedAt: timestamp("scan_activated_at"),
   scanCompletedAt: timestamp("scan_completed_at"),
+  // Who completed this part: the user who pressed Complete, the scanner whose scan finished it
+  // (Auto Complete), or 'system' when it closed with no person involved. Null for parts completed
+  // before this was recorded.
+  scanCompletedByCode: text("scan_completed_by_code"),
   // FIFO grouping is automatic by (plant + order date): every CSV uploaded for the same
   // plant and order date shares one receivingSessionId (the group's Part 1 uses its own id
   // as the group id) and gets the next partIndex. orderDate is the "Order Date" chosen at

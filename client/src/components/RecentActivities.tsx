@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Loader2, FileText, Package, TruckIcon } from "lucide-react";
 import { format, parseISO } from "date-fns";
 import { useUser } from "@/hooks/use-user";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // Function to determine the icon based on the activity type
 const getActivityIcon = (type: string) => {
@@ -44,9 +45,7 @@ export function RecentActivities() {
           <CardTitle className="text-lg">Recent Activities</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex justify-center py-8">
-            <Loader2 className="h-6 w-6 animate-spin text-blue-500" />
-          </div>
+          <SectionSkeleton lines={3} />
         </CardContent>
       </Card>
     );

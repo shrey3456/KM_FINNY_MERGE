@@ -3,7 +3,6 @@ import { useLocation, Link } from 'wouter';
 import Header from './Header';
 import Sidebar from './Sidebar';
 import MobileNavigation from './MobileNavigation';
-import InstallPrompt from './InstallPrompt';
 import finnyLogo from '@assets/finny-logo.png';
 import { Home, Menu, ChevronUp, ChevronDown } from 'lucide-react';
 import { formatUsername } from '@/lib/format-username';
@@ -270,9 +269,6 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
         {/* Mobile Navigation - shown on home, messages, and profile pages */}
         {(location === '/' || location === '/messages' || location === '/profile') && <MobileNavigation onLogout={onLogout} />}
       </div>
-      
-      {/* Install prompt for "Add to Home Screen" functionality */}
-      <InstallPrompt />
     </div>
     </SidebarContext.Provider>
   );

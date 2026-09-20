@@ -33,12 +33,17 @@ import { DataTable, buildPageList, type DataTableColumn } from "@/components/ui/
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess } from "@/lib/permissions";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ─── Types (mirror server/routes/unloading.ts responses) ─────────────────────
 type SessionListItem = {
   id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
   rowCount: number; groupId: number; partIndex: number; scanStatus: "available" | "active" | "completed";
   createdAt: string; scanActivatedAt: string | null; scanCompletedAt: string | null;
+  // Who completed the batch — a name, "System", or null (see server/routes/unloading.ts).
+  scanCompletedByName?: string | null;
+  // The vehicle's RTO registration from Vehicle Master, matched on its number — null if not found.
+  rtoNumber?: string | null;
   // scannedQty = every box scanned on this batch; receivedQty = the part of it that fills what the
   // file lists (each barcode capped at its own qty); extraQty = the rest (over-scans + products
   // not on the file). The opened batch's Received/Extra tiles use this same split.
@@ -51,6 +56,10 @@ type SessionListItem = {
 type SessionItem = {
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null; quantity: number;
   expected: number; scanned: number; remaining: number; itemsPerPallet: number; isComplete: boolean;
+  // The pallet size actually set in Product Master for this plant's state (GJ PLT / MP PLT),
+  // 0 when nobody set one. itemsPerPallet falls back to the line quantity, so only this field
+  // can answer "is a real pallet size set?".
+  realPackSize?: number;
 };
 type SessionDetail = {
   id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
@@ -246,6 +255,7 @@ export default function Unloading() {
     { id: "progress", label: "Progress", filterType: "text", disableConditions: true, options: distinctOptions(allSessions.map(sessionProgressLabel)), accessor: sessionProgressLabel },
     { id: "csvFile", label: "CSV File", filterType: "text", options: distinctOptions(allSessions.map((s) => s.csvFileName)), accessor: (s) => s.csvFileName },
     { id: "expectedQty", label: "Expected Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.expectedQty },
+    { id: "completedBy", label: "Completed By", filterType: "text", options: distinctOptions(allSessions.map((s) => (s.scanCompletedAt ? s.scanCompletedByName : null))), accessor: (s) => (s.scanCompletedAt ? s.scanCompletedByName ?? "" : "") },
     { id: "scannedQty", label: "Received Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.scannedQty },
     { id: "extraQty", label: "Extra Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.extraQty },
   ];
@@ -536,10 +546,6 @@ export default function Unloading() {
       return bSeq - aSeq;
     });
 
-  const activateMutation = useMutation({
-    mutationFn: (id: number) => apiRequest("POST", `/api/unloading/sessions/${id}/activate`, {}, false, true),
-    onError: (error: any) => toast({ title: "Can't start yet", description: parseApiErrorMessage(error) || "This batch can't be activated right now.", variant: "destructive" }),
-  });
 
   function enterSession(id: number) {
     setActiveSessionId(id);
@@ -550,20 +556,19 @@ export default function Unloading() {
   }
 
   // Clicking "Scan" on a not-yet-opened batch is the explicit available -> active step (mirrors
-  // Order Import's CSV lifecycle) — activates it server-side first, then opens the scan view.
+  // Order Import's CSV lifecycle) — now only opens the scan view; the first scan activates it.
   // A batch queued behind an earlier incomplete one (canActivate=false) can't be opened at all.
+  // Opening a batch only opens it — it stays "available" until its first product is actually
+  // scanned, and that scan is what makes it "active" (POST /scan activates an available batch
+  // itself, under the same lock and next-in-line check the separate activate call used). So a batch
+  // someone merely looked at, then left, no longer shows as Active on the list, and its start time
+  // is when unloading really began rather than when the screen was opened.
   function openSession(s: SessionListItem) {
-    if (s.scanStatus !== "available") { enterSession(s.id); return; }
-    if (!s.canActivate) {
+    if (s.scanStatus === "available" && !s.canActivate) {
       toast({ title: "Locked", description: "Complete the earlier batch for this vehicle first.", variant: "destructive" });
       return;
     }
-    activateMutation.mutate(s.id, {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
-        enterSession(s.id);
-      },
-    });
+    enterSession(s.id);
   }
   function backToList() {
     stopItemCamera();
@@ -635,6 +640,9 @@ export default function Unloading() {
       }
     },
     onSuccess: (data) => {
+      // This scan was the batch's first — it just became active, so the landing list and tab
+      // counts (still showing it as available) need a refresh.
+      const becameActive = detail?.session?.scanStatus === "available" && data.session?.scanStatus === "active";
       queryClient.setQueryData(["/api/unloading/sessions", activeSessionId], {
         session: data.session, items: data.items, allComplete: data.allComplete,
         offBatchExtraQty: data.offBatchExtraQty, offBatchExtraPallets: data.offBatchExtraPallets,
@@ -646,6 +654,9 @@ export default function Unloading() {
       // this item yet." until something else (e.g. a void, which invalidates more broadly)
       // happened to refresh it.
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions", activeSessionId, "events"] });
+      if (becameActive) {
+        queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"], exact: false, predicate: (q) => q.queryKey[1] !== activeSessionId });
+      }
       if (data.allComplete) toast({ title: "Batch complete", description: "Every item's expected quantity has been matched." });
     },
     onError: (error: any) => {
@@ -713,6 +724,9 @@ export default function Unloading() {
   // name is never treated as failed until it specifically fails.
   const [dialogImageFailed, setDialogImageFailed] = useState<string | null>(null);
   const dialogPlt = pending?.item?.itemsPerPallet ?? (pending?.product ? extraProductPalletSize(pending.product) : 0);
+  // Batch item whose GJ PLT / MP PLT is blank in Product Master — dialogPlt is then only the
+  // line's own quantity standing in for a pallet, so the dialog asks for the amount instead.
+  const dialogPackSizeMissing = !!pending?.item && !((pending.item.realPackSize ?? 0) > 0);
   const dialogResolvedImageName = pending?.item?.itemName ?? pending?.product?.name ?? pending?.barcode;
 
   const [autoFeedback, setAutoFeedback] = useState<
@@ -737,13 +751,17 @@ export default function Unloading() {
   function defaultDialogQty(item: SessionItem | null, product: Product | null): number {
     const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 1);
     if (!item) return ipp;
+    // No real GJ/MP PLT set → nothing honest to pre-fill: leave it empty (Confirm stays off)
+    // so the operator types what they are actually unloading.
+    if (!((item.realPackSize ?? 0) > 0)) return 0;
     return item.remaining > 0 && item.remaining < ipp ? item.remaining : ipp;
   }
   function openConfirmDialog(barcode: string, item: SessionItem | null, product: Product | null) {
     const qty = defaultDialogQty(item, product);
     const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 0);
+    const packSizeMissing = !!item && !((item.realPackSize ?? 0) > 0);
     setDialogQty(qty);
-    setDialogPalletsInput(ipp > 0 ? (qty / ipp).toFixed(2) : "");
+    setDialogPalletsInput(ipp > 0 && !packSizeMissing ? (qty / ipp).toFixed(2) : "");
     setPending({ barcode, item, product });
   }
 
@@ -813,7 +831,10 @@ export default function Unloading() {
     }
 
     const ipp = item?.itemsPerPallet ?? 0;
-    const canAutoScan = autoScanEnabled && !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
+    // A pallet size that was never set in Product Master is never auto-scanned — ipp would be a
+    // guess (the line's own quantity), so the dialog always opens and asks for the amount.
+    const canAutoScan = autoScanEnabled && !!item && (item.realPackSize ?? 0) > 0
+      && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
       scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null }, {
         onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra, data.event.productId),
@@ -875,25 +896,37 @@ export default function Unloading() {
   // locked, no pop-up open) is checked by the handler itself, with current values.
   useEffect(() => {
     if (view !== "scan") return;
-    const MAX_GAP_MS = 50;
-    const BURST_END_MS = 80;
+    // Barcode gun timing. A gun types a code much faster than a person, but wireless/Bluetooth guns
+    // and busy tablets space characters out more than a wired gun on a fast PC — at the old 50 ms
+    // limit, a slower burst was cut in half and read as a wrong or partial code. Most guns also end
+    // with Enter or Tab, which now finishes the scan straight away instead of waiting for silence.
+    const MAX_GAP_MS = 100;
+    const BURST_END_MS = 120;
     let buffer = "";
     let lastAt = 0;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (buffer.length >= 3) { setItemScanMode("manual"); barcodeRef.current?.focus(); handleItemBarcodeRef.current(buffer); }
+      buffer = "";
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target === barcodeRef.current) return;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if ((e.key === "Enter" || e.key === "Tab") && buffer.length >= 3) {
+        e.preventDefault();
+        if (flushTimer) clearTimeout(flushTimer);
+        finish();
+        return;
+      }
+      if (e.key.length !== 1) return;
       const now = Date.now();
       if (now - lastAt > MAX_GAP_MS) buffer = "";
       lastAt = now;
       buffer += e.key;
       if (flushTimer) clearTimeout(flushTimer);
-      flushTimer = setTimeout(() => {
-        if (buffer.length >= 3) { setItemScanMode("manual"); barcodeRef.current?.focus(); handleItemBarcodeRef.current(buffer); }
-        buffer = "";
-      }, BURST_END_MS);
+      flushTimer = setTimeout(finish, BURST_END_MS);
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => { window.removeEventListener("keydown", handleKeyDown, true); if (flushTimer) clearTimeout(flushTimer); };
@@ -1104,7 +1137,7 @@ export default function Unloading() {
     return (
       <div className="bg-gray-50 px-4 py-3">
         {itemHistoryQuery.isLoading ? (
-          <div className="flex justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-[#001d6e]" /></div>
+          <SectionSkeleton lines={2} />
         ) : rowEvents.length === 0 ? (
           <div className="py-2 text-xs text-gray-400">No scan history for this item yet.</div>
         ) : (
@@ -1161,7 +1194,10 @@ export default function Unloading() {
   // slot where "Unloading" sits on the list, and this carries the rest of the identity beside it.
   const scanVehicleTitle = scanSession ? (
     <div className="flex shrink-0 items-center gap-1.5 text-[#001d6e]">
-      <Truck className="h-5 w-5" />
+      {/* Same icon as "Unload Operations" in the sidebar, in the navy badge every page uses. */}
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e]">
+        <PackageOpen className="h-5 w-5 text-white" />
+      </span>
       <span className="text-2xl font-bold">{scanSession.vehicleNumber}</span>
     </div>
   ) : null;
@@ -1243,7 +1279,7 @@ export default function Unloading() {
         {!rotated && view === "list" && (
           <PageHeader
             icon={PackageOpen}
-            title="Unloading"
+            title="Unload Operations"
             description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
           />
         )}
@@ -1278,7 +1314,7 @@ export default function Unloading() {
               <div className="mb-3">
                 <PageHeader
                   icon={PackageOpen}
-                  title="Unloading"
+                  title="Unload Operations"
                   description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
                 />
               </div>
@@ -1407,7 +1443,7 @@ export default function Unloading() {
               // this tab's own comment above and /unloading/sessions/recent-complete's comment
               // in server/routes/unloading.ts for why this is a distinct list from History.
               recentCompleteQuery.isLoading ? (
-                <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+                <SectionSkeleton lines={6} />
               ) : recentCompleteSessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 text-center">
                   <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">
@@ -1424,6 +1460,7 @@ export default function Unloading() {
                       className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 ${i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                     >
                       <span className="text-sm font-bold text-[#001d6e]">{s.vehicleNumber}</span>
+                      {s.rtoNumber && <span className="text-xs text-gray-500">RTO: {s.rtoNumber}</span>}
                       <PlantBadge plant={s.plant} />
                       <span className="text-xs text-gray-500">{s.orderDate}</span>
                       {s.partsCount > 1 && (
@@ -1431,7 +1468,10 @@ export default function Unloading() {
                       )}
                       <span className="text-xs text-gray-600"><span className="text-gray-400">Received </span><span className="font-bold tabular-nums">{s.scannedQty}/{s.expectedQty}</span>{s.extraQty > 0 && <span className="text-amber-600"> (incl. {s.extraQty} extra)</span>}</span>
                       {s.scanCompletedAt && (
-                        <span className="text-xs text-gray-400">Completed {new Date(s.scanCompletedAt).toLocaleString()}</span>
+                        <span className="text-xs text-gray-400">
+                          Completed {new Date(s.scanCompletedAt).toLocaleString()}
+                          {s.scanCompletedByName ? <> by <span className="font-medium text-gray-600">{s.scanCompletedByName}</span></> : null}
+                        </span>
                       )}
                       <div className="ml-auto flex items-center gap-1.5">
                         <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => openSession(s)}>
@@ -1459,7 +1499,7 @@ export default function Unloading() {
                 </div>
               )
             ) : sessionsQuery.isLoading ? (
-              <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              <SectionSkeleton lines={6} />
             ) : sessions.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#001d6e]/10">
@@ -1495,6 +1535,7 @@ export default function Unloading() {
                       <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("status", "Status")}</th>
                       <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("progress", "Progress")}</th>
                       <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
+                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Who marked this batch complete — the Complete button, or the scan that finished it">{sessionColumnHeader("completedBy", "Completed By")}</th>
                       <th className="px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
                     </tr>
                   </thead>
@@ -1507,7 +1548,10 @@ export default function Unloading() {
                             className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${s.scanStatus === "active" ? "bg-emerald-50/60" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                           >
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-400 tabular-nums">{offset + i + 1}</td>
-                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words font-semibold text-[#001d6e]">{s.vehicleNumber}</td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words font-semibold text-[#001d6e]">
+                              {s.vehicleNumber}
+                              {s.rtoNumber && <span className="block text-[11px] font-normal text-gray-500">RTO: {s.rtoNumber}</span>}
+                            </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">{s.orderDate}</td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words"><PlantBadge plant={s.plant} /></td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">
@@ -1524,6 +1568,9 @@ export default function Unloading() {
                             </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
                               {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">
+                              {s.scanCompletedAt ? (s.scanCompletedByName ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
                             </td>
                             <td className="border-b border-gray-200 px-1.5 py-2 break-words text-right">
                               <div className="flex flex-wrap items-center justify-end gap-1">
@@ -1655,7 +1702,7 @@ export default function Unloading() {
             )}
 
             {activeSessionQuery.isLoading || !detail ? (
-              <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              <SectionSkeleton lines={6} />
             ) : (
               <>
                 <div
@@ -1983,6 +2030,11 @@ export default function Unloading() {
               {pending?.item?.isComplete && (
                 <p className="text-lg text-amber-600 mt-1">Item already complete — these extra units will be logged separately.</p>
               )}
+              {dialogPackSizeMissing && (
+                <p className="mt-1 rounded-lg bg-amber-50 px-3 py-2 text-base font-semibold text-amber-700">
+                  Pallet size is not set for this item in Product Master — enter the quantity you are scanning.
+                </p>
+              )}
             </DialogDescription>
           </DialogHeader>
 
@@ -2038,7 +2090,7 @@ export default function Unloading() {
             {/* Qty (boxes) and Pallets side by side — each with −/+ steppers. Off-rotation: side by
                 side (sm:grid-cols-2). Rotated: single CSS column, since the rotate-90 turns that
                 vertical stack into the side-by-side pair the kiosk layout expects. */}
-            <div className={`grid gap-3 ${dialogPlt > 1 && !quarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+            <div className={`grid gap-3 ${dialogPlt > 1 && !dialogPackSizeMissing && !quarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
               <div className="space-y-1">
                 <Label className="text-sm">Qty (boxes)</Label>
                 <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
@@ -2063,6 +2115,9 @@ export default function Unloading() {
                       if (dialogPlt > 0) setDialogPalletsInput((q / dialogPlt).toFixed(2));
                     }}
                     onBlur={(e) => {
+                      // With no pallet size set the box stays empty until a number is typed —
+                      // snapping it to 1 here would hand the operator a guess again.
+                      if (dialogPackSizeMissing) return;
                       if (!e.target.value || parseInt(e.target.value) < 1) {
                         setDialogQty(1);
                         if (dialogPlt > 0) setDialogPalletsInput((1 / dialogPlt).toFixed(2));
@@ -2094,7 +2149,7 @@ export default function Unloading() {
                 </div>
               </div>
 
-              {dialogPlt > 1 && (
+              {dialogPlt > 1 && !dialogPackSizeMissing && (
                 <div className="space-y-1">
                   <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {dialogPlt}/pallet</span></Label>
                   <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-[#001d6e]/30 bg-white focus-within:border-[#001d6e]">

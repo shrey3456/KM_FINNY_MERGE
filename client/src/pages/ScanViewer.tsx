@@ -26,6 +26,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
+import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -496,7 +497,13 @@ export default function ScanViewer() {
         }
       });
     });
-    return Array.from(groups.values()).sort(byRecency);
+    const merged = Array.from(groups.values());
+    // An item with no GJ/MP PLT configured counts as ONE pallet of its own merged quantity — the
+    // same rule Scan Operations' Master View and the scan endpoints use. Without it those items
+    // added nothing here, so this page's pallet totals came out lower than Scan Operations' for
+    // the very same order.
+    merged.forEach((g) => { if (!(g.itemsPerPallet > 0)) g.itemsPerPallet = Math.max(1, g.quantity || 1); });
+    return merged.sort(byRecency);
   }, [mvQuery.data]);
 
   const itemsQuery = useQuery<OsScanItem[]>({
@@ -1031,7 +1038,7 @@ export default function ScanViewer() {
     // inherits that full width. sticky left-0 pins it to the visible left edge instead.
     <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
       {historyQuery.isLoading ? (
-        <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+        <SectionSkeleton lines={3} />
       ) : historyEventsInStvScope.length === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">
           {activeStvFilterValues.length > 0
@@ -1538,7 +1545,6 @@ export default function ScanViewer() {
         </div>
       )}
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
-
         {/* Source switch — Order Scan (this page's original scope) vs Unloading, added as a
             second, independent picker/table/history flow below rather than threaded through the
             Order Scan state above, which stays completely untouched by picking Unloading. */}
@@ -1575,8 +1581,9 @@ export default function ScanViewer() {
         <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <div className="flex min-w-0 flex-1 items-center gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/90">
-            <ScanLine className="h-5 w-5 text-white" />
+          {/* Same icon as "Overall Scan Ops" in the sidebar, in the navy badge every page uses. */}
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e]">
+            <Eye className="h-5 w-5 text-white" />
           </span>
           <div className="min-w-0 flex-1">
             {filtersReady && selectedSession && (
@@ -1678,30 +1685,10 @@ export default function ScanViewer() {
           {filtersReady && selectedSession && (() => {
             const realItems = items.filter((i) => (i.expectedQty ?? 0) > 0);
             const fullyDone = realItems.filter((i) => (i.totalScannedQty ?? 0) >= (i.expectedQty ?? 0)).length;
-            const total = realItems.length;
-            const pct = total > 0 ? Math.round((fullyDone / total) * 100) : 0;
-            return (
-              <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto sm:shrink-0">
-                <div className="h-2 flex-1 overflow-hidden rounded-full bg-gray-100 sm:w-28 sm:flex-none">
-                  <div
-                    className={`h-full rounded-full transition-[width] duration-300 ${pct >= 100 && total > 0 ? "bg-emerald-500" : "bg-[#001d6e]"}`}
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-                <span className="whitespace-nowrap text-right text-xs font-medium leading-tight">
-                  {pct >= 100 && total > 0 ? (
-                    <span className="inline-flex items-center gap-1 font-semibold text-emerald-600">
-                      <CheckCircle2 className="h-3.5 w-3.5" /> Complete
-                    </span>
-                  ) : (
-                    <>
-                      <span className="block text-gray-700">{fullyDone}/{total}</span>
-                      <span className="block text-[10px] font-semibold text-gray-400">{pct}%</span>
-                    </>
-                  )}
-                </span>
-              </div>
-            );
+            const expectedQty = realItems.reduce((sum, i) => sum + (i.expectedQty ?? 0), 0);
+            const receivedQty = realItems.reduce((sum, i) => sum + Math.min(i.totalScannedQty ?? 0, i.expectedQty ?? 0), 0);
+            const pct = expectedQty > 0 ? Math.min(100, Math.round((receivedQty / expectedQty) * 100)) : 0;
+            return <ProgressReadout pct={pct} doneItems={fullyDone} totalItems={realItems.length} />;
           })()}
         </div>
         </div>
@@ -1742,7 +1729,7 @@ export default function ScanViewer() {
             Pick a plant and an order date to view its scan progress.
           </div>
         ) : sessionsQuery.isLoading ? (
-          <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+          <SectionSkeleton lines={6} />
         ) : sessionOptions.length === 0 ? (
           <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
             No order found for {plant} on {date}.
@@ -1791,7 +1778,7 @@ export default function ScanViewer() {
                         </div>
                       </div>
                       {partItemsQuery.isLoading ? (
-                        <p className="animate-pulse px-3 py-4 text-center text-sm text-gray-400">Loading items…</p>
+                        <SectionSkeleton lines={3} />
                       ) : partItems.length === 0 ? (
                         <p className="px-3 py-4 text-center text-sm text-gray-400">No items</p>
                       ) : (
@@ -1898,7 +1885,7 @@ export default function ScanViewer() {
               <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
                 <div
                   className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
-                  style={{ width: `${totals.expected > 0 ? Math.min(100, (totals.done / totals.expected) * 100) : 0}%` }}
+                  style={{ width: `${totals.expected > 0 ? Math.min(100, (totals.done / totals.expected) * 100) : 0}%`, minWidth: totals.done > 0 ? 10 : 0 }}
                 />
               </div>
               <div className="flex justify-between text-[10px] font-medium text-gray-400">
@@ -2364,7 +2351,7 @@ export default function ScanViewer() {
               <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
                 <div
                   className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
-                  style={{ width: `${mvTotals.expected > 0 ? Math.min(100, (mvTotals.done / mvTotals.expected) * 100) : 0}%` }}
+                  style={{ width: `${mvTotals.expected > 0 ? Math.min(100, (mvTotals.done / mvTotals.expected) * 100) : 0}%`, minWidth: mvTotals.done > 0 ? 10 : 0 }}
                 />
               </div>
               <div className="flex justify-between text-[10px] font-medium text-gray-400">
@@ -2407,7 +2394,7 @@ export default function ScanViewer() {
             }
           >
             {mvQuery.isLoading ? (
-              <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+              <SectionSkeleton lines={6} />
             ) : (
               <>
               <DataTable<MvMergedItem>
@@ -2417,12 +2404,18 @@ export default function ScanViewer() {
                 columnOrder={mvColumnOrder}
                 onColumnOrderChange={setMvColumnOrder}
                 data={mvFiltered}
-                getRowId={(row) => row.barcode ?? row.itemName ?? String(Math.random())}
+                // A stable id for every row. The old Math.random() fallback gave rows without a barcode a
+                // new id on every render, so React rebuilt them each time — including on every mouse
+                // move while dragging a column edge.
+                getRowId={(row) => row.barcode ?? `name:${row.itemName ?? ""}`}
                 enableZebraStripes
                 rowClassName={(row) => (row.isExtraOnly ? "bg-orange-50/40" : undefined)}
                 emptyState={allMvItems.length === 0 ? "No items in this order." : "No items match your filters."}
                 enableTotalsRow
                 totalsLabelColumnId="item"
+                // Drag a column's right edge to resize it — same as the Part Order and Unloading tables on
+                // this page. This one never had it turned on. Widths are remembered like everywhere else.
+                enableColumnResizing
                 isStickyHeader
                 maxHeight={tableMaxHeight}
                 showMobileSwipeHint
@@ -2657,6 +2650,40 @@ export default function ScanViewer() {
 // one order. So this picks its own plant, then a specific vehicle's session for a date (same
 // picker shape the Unloading page itself uses), and shows that one session's live progress —
 // no Master View / Part Order tabs, since there's nothing here to merge across.
+
+// Progress readout in the top-right of an order or batch: a bar plus the percentage, with how many
+// items are fully done underneath. The percentage is by QUANTITY received (each item counted only up
+// to its own expected qty, so extras can't push it up) — the same figure as the table's progress ring
+// and the totals card. It used to be "items fully done ÷ items", so an order with most boxes in but
+// few items quite finished read 5%, and at that size the rounded bar collapsed to a dot.
+function ProgressReadout({ pct, doneItems, totalItems }: { pct: number; doneItems: number; totalItems: number }) {
+  const complete = totalItems > 0 && pct >= 100;
+  return (
+    <div className="flex w-full items-center gap-3 sm:ml-auto sm:w-auto sm:shrink-0">
+      <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-gray-200 sm:w-44 sm:flex-none">
+        <div
+          className={`h-full rounded-full transition-[width] duration-500 ease-out ${complete ? "bg-emerald-500" : "bg-[#001d6e]"}`}
+          // A small but non-zero amount still shows as a short bar, never a dot.
+          style={{ width: `${Math.min(100, Math.max(0, pct))}%`, minWidth: pct > 0 ? 10 : 0 }}
+        />
+      </div>
+      <div className="whitespace-nowrap text-right leading-tight">
+        {complete ? (
+          <span className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+            <CheckCircle2 className="h-4 w-4" /> Complete
+          </span>
+        ) : (
+          <>
+            <span className="block text-sm font-bold tabular-nums text-gray-800">{pct}%</span>
+            <span className="block text-[10px] font-medium text-gray-400">
+              {doneItems}/{totalItems} items done
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // Matches GET /api/unloading/sessions' row shape (only the fields this section needs).
 type UnloadingSessionOption = {
@@ -3008,7 +3035,7 @@ function UnloadingViewerSection({
           <span className="font-mono text-xs text-gray-400">{row.barcode}</span>
         </div>
         {uHistoryQuery.isLoading ? (
-          <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#001d6e]" /></div>
+          <SectionSkeleton lines={3} />
         ) : (uHistoryQuery.data?.items?.length ?? 0) === 0 ? (
           <p className="py-4 text-center text-sm text-gray-400">No unloading history yet for this item.</p>
         ) : (
@@ -3122,6 +3149,9 @@ function UnloadingViewerSection({
             )}
             {uSelectedSession?.scanStatus && uSessionStatusBadge(uSelectedSession.scanStatus)}
           </div>
+          {uSessionId != null && uItems.length > 0 && (
+            <ProgressReadout pct={uItemPct} doneItems={uFullyDone} totalItems={uTotalReal} />
+          )}
         </div>
       </div>
 
@@ -3172,7 +3202,7 @@ function UnloadingViewerSection({
           </div>
           <div className="space-y-1">
             <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
-              <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${uItemPct}%` }} />
+              <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${uItemPct}%`, minWidth: uItemPct > 0 ? 10 : 0 }} />
             </div>
             <div className="flex justify-between text-[10px] font-medium text-gray-400">
               <span>{uItemTotals.received} received</span>
@@ -3187,13 +3217,13 @@ function UnloadingViewerSection({
           Pick a plant to view an unloading batch's progress.
         </div>
       ) : uSessionsQuery.isLoading || (uTodayEmpty && uActiveQuery.isLoading) ? (
-        <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+        <SectionSkeleton lines={6} />
       ) : uSessionOptions.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-sm text-gray-400">
           No unloading batches for {uPlant}{uDate ? ` on ${fmtOrderDate(uDate)}` : ""}.
         </div>
       ) : uSessionDetailQuery.isLoading ? (
-        <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#001d6e]" /></div>
+        <SectionSkeleton lines={6} />
       ) : (
         // Same plain bordered-card wrapper (not TableCard) + collapsible search header the real
         // Unloading page uses for its own items table, so this reads as the identical UI.
