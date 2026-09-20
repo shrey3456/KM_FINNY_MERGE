@@ -198,6 +198,7 @@ const Settings = () => {
   // orders DATED on or before it — the CSV's / proforma slip's own order date, never the day
   // someone scanned. See the header comment in server/routes/settings-admin.ts.
   const [rdOrderDateUpTo, setRdOrderDateUpTo] = useState('');
+  const [resetError, setResetError] = useState<string | null>(null);
 
   // Recalculate Stock — Check (read-only) shows every stored stock total that doesn't match the
   // history; Apply corrects them. See server/lib/stockRecalc.ts.
@@ -344,13 +345,14 @@ const Settings = () => {
 
   const handleResetDialogOpenChange = (open: boolean) => {
     setShowResetDialog(open);
-    if (!open) { setRdPlant(''); setRdConfirmText(''); setRdOrderDateUpTo(''); }
+    if (!open) { setRdPlant(''); setRdConfirmText(''); setRdOrderDateUpTo(''); setResetError(null); }
   };
 
   const expectedRdConfirmText = rdPlant === 'all' ? 'DELETE ALL' : `DELETE ${rdPlant}`.toUpperCase();
 
   const resetOperationsData = async () => {
     if (!rdPlant) return;
+    setResetError(null);
     setIsResettingOps(true);
     try {
       const data = await apiRequest(
@@ -363,20 +365,27 @@ const Settings = () => {
         false, true,
       );
       toast({
-        title: 'Data removed',
-        description: `${data.totalRows} row(s) deleted for ${rdPlant === 'all' ? 'all plants' : rdPlant}`
+        title: data.warning ? 'Data removed (with a note)' : 'Data removed',
+        description: (data.warning ? `${data.warning} ` : '')
+          + `${data.totalRows} row(s) deleted for ${rdPlant === 'all' ? 'all plants' : rdPlant}`
           + `${rdOrderDateUpTo ? ` (orders up to ${rdOrderDateUpTo})` : ''}. `
           + `${data.dateScoped ? `${data.counts.stockRows} stock row(s) adjusted back` : `${data.counts.stockRows} stock row(s) deleted`}, `
           + `${data.counts.slipsLoadingReset} proforma slip(s) can be loaded again from the start.`,
       });
       // Everything on screen was just built from data that no longer exists.
       queryClient.invalidateQueries();
+      // Closed only once the removal actually succeeded.
+      handleResetDialogOpenChange(false);
     } catch (error: any) {
       console.error('Error resetting operations data:', error);
-      toast({ title: 'Error', description: error?.message || 'Failed to remove the data', variant: 'destructive' });
+      // The dialog deliberately STAYS OPEN on a failure: closing it used to hide the reason and
+      // leave the person unsure whether anything was deleted (nothing is — the whole removal runs
+      // in one transaction that rolls back). The message is shown in the dialog as well as in a
+      // toast, so it can be read and retried without reopening and re-typing the phrase.
+      setResetError(error?.message || 'Failed to remove the data');
+      toast({ title: 'Nothing was removed', description: error?.message || 'Failed to remove the data', variant: 'destructive' });
     } finally {
       setIsResettingOps(false);
-      handleResetDialogOpenChange(false);
     }
   };
 
@@ -1388,6 +1397,13 @@ const Settings = () => {
               </>
             )}
           </div>
+
+          {resetError && (
+            <div className="mt-3 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <div className="font-medium">Nothing was removed.</div>
+              <p className="mt-1 break-words">{resetError}</p>
+            </div>
+          )}
 
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isResettingOps}>Cancel</AlertDialogCancel>
