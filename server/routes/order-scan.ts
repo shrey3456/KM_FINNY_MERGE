@@ -1320,11 +1320,41 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
       const plant = sessionRow?.plant ?? '';
       const state = await getPlantStateCode(pool, plant);
       const prodRows = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, name, items_per_pallet, pallets, gj_plt, mp_plt
-         FROM products WHERE LOWER(barcode) = ANY($1)`,
+        `SELECT LOWER(barcode) AS barcode, name, plant, items_per_pallet, pallets, gj_plt, mp_plt
+         FROM products WHERE LOWER(barcode) = ANY($1) ORDER BY id`,
         [barcodes],
       );
-      const productMap = new Map(prodRows.rows.map((p: any) => [p.barcode, p]));
+      // A barcode can have more than one Product Master row (different plants). Pick the row the
+      // same way the Master View endpoint does, so the Scan tab and the Master View never read a
+      // different pallet size for the same item: the row whose plant column covers this session's
+      // state wins ("VAL & IND" covers Valsad and Indore alike), then the first row that actually
+      // has a size for that state, then simply the first row.
+      const { rows: allPlantRows } = await pool.query(`SELECT name, state FROM plants`);
+      const statesOfPlantLabel = (label: string | null | undefined): Set<string> => {
+        const states = new Set<string>();
+        if (!label) return states;
+        for (const token of String(label).split(/[^a-zA-Z]+/).map((x) => x.trim().toUpperCase()).filter(Boolean)) {
+          const found = (allPlantRows as any[]).find((pl) => String(pl.name).toUpperCase() === token)
+            ?? (allPlantRows as any[]).find((pl) => String(pl.name).toUpperCase().startsWith(token));
+          if (found?.state) states.add(String(found.state).trim().toUpperCase());
+        }
+        return states;
+      };
+      const sizeOfRow = (r: any) => (state === 'GJ' ? Number(r.gj_plt) || 0 : state === 'MP' ? Number(r.mp_plt) || 0 : 0);
+      const rowsByBarcode = new Map<string, any[]>();
+      for (const row of prodRows.rows as any[]) {
+        const list = rowsByBarcode.get(row.barcode);
+        if (list) list.push(row); else rowsByBarcode.set(row.barcode, [row]);
+      }
+      const productMap = new Map<string, any>();
+      for (const [barcode, rows] of rowsByBarcode) {
+        const picked = rows.length === 1
+          ? rows[0]
+          : rows.find((r) => state && statesOfPlantLabel(r.plant).has(state))
+            ?? rows.find((r) => sizeOfRow(r) > 0)
+            ?? rows[0];
+        productMap.set(barcode, picked);
+      }
       for (const item of items as any[]) {
         const p = item.barcode ? productMap.get(item.barcode.toLowerCase()) : null;
         if (!p) continue;

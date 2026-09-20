@@ -3,6 +3,7 @@ import { storage } from '../storage';
 import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
 import { checkStock, recalculateStock, StockBusyError } from '../lib/stockRecalc';
+import { runCsvBackup } from '../lib/csvBackup';
 
 // Settings > Data Management > "Clear Stock" — an admin-only action that resets stock numbers
 // for a chosen plant (or every plant), optionally scoped further to only orders/slips dated on
@@ -368,6 +369,374 @@ router.post('/settings/recalculate-stock', requireAdminRole, async (req: Request
     if (error instanceof StockBusyError) return res.status(409).json({ message: error.message });
     console.error('Error recalculating stock:', error);
     res.status(500).json({ message: 'Failed to recalculate stock' });
+  }
+});
+
+// ── Settings > Data Management > "Remove All Operations Data" ───────────────────────────────────
+// Admin-only. Deletes the day-to-day WORK of a plant (or of every plant) from the database for
+// good: order scanning (sessions, items, events), unloading (batches, items, events), loading
+// (records, scan events, handoffs, load operations), stock (rows and their stock_movements
+// ledger), and the legacy scan-history tables.
+//
+// Optionally scoped to an ORDER DATE: "remove everything up to 15 Sep" means everything belonging
+// to orders DATED on or before 15 Sep — never the day someone happened to scan it. Each area has
+// its own order date and every rule below uses that one:
+//   Order scanning  → order_import_sessions.order_date  (the date picked when the CSV was uploaded)
+//   Unloading       → unload_import_sessions.order_date
+//   Loading         → the PROFORMA SLIP's order_date (records/scans/handoffs all hang off the slip)
+//   Load operations → its own order_date column
+//   Stock movements → the order date of the order the movement came from; a movement with no order
+//                     (manual Adjust, Opening Stock, exchange, Clear Stock) uses the day it was
+//                     made — the same rule the Overall Stock ledger already follows
+//   Old scan history→ the slip's order_date
+// Rows that have no order date at all (the activity log, the legacy scan_sessions tables) are only
+// removed by a full, no-date reset; a date-scoped reset leaves them alone rather than guessing.
+//
+// Stock needs its own treatment when a date is set: a stock row is a running TOTAL with no date of
+// its own, so deleting it would also throw away stock that orders AFTER the cutoff brought in.
+// With a date, the rows are therefore kept and adjusted by exactly what the in-scope orders
+// contributed (receiving and unloading added stock, loading took it away) — the same reversal
+// Clear Stock does — with one audit movement per item+plant. With no date the rows are deleted.
+//
+// Deliberately KEPT either way: Product Master, Vehicle Master, proforma slips (only their loading
+// progress is reset, so an order can be loaded again from scratch), users, plants and settings.
+// Nothing here can be undone — the rows are deleted, not voided — so it is gated by an impact
+// preview, a typed confirm phrase, the same still-open-session check Clear Stock uses, and every
+// run is written to the activity log.
+type ResetCounts = {
+  orderSessions: number; orderItems: number; orderScanItems: number; orderScanEvents: number;
+  unloadSessions: number; unloadItems: number; unloadScanEvents: number;
+  loadingRecords: number; loadingScanEvents: number; loadingHandoffs: number;
+  loadOperations: number; loadOperationItems: number;
+  stockRows: number; stockMovements: number;
+  scanHistory: number; legacyScanSessions: number;
+  slipsLoadingReset: number; activities: number;
+};
+type ResetPart = { key: keyof ResetCounts; table: string; where: string };
+
+// $1 = plant (NULL = every plant), $2 = order date cut-off as text (NULL = no cut-off).
+const PLANT_MATCH = `($1::text IS NULL OR LOWER(TRIM(plant)) = LOWER(TRIM($1)))`;
+// order_import_sessions.order_date and unload_import_sessions.order_date are TEXT in ISO form, so
+// they compare as text; proforma_slips.order_date is a real date and load_operations.order_date a
+// timestamp, so those get an explicit cast. Each statement casts $2 the one way it needs.
+const ORDER_SESSIONS_IN_SCOPE = `SELECT id FROM order_import_sessions WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR order_date <= $2::text)`;
+const UNLOAD_SESSIONS_IN_SCOPE = `SELECT id FROM unload_import_sessions WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR order_date <= $2::text)`;
+const SLIP_NUMBERS_IN_SCOPE = `SELECT order_number FROM proforma_slips WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR order_date <= $2::date)`;
+
+// What a movement's ORDER date is: its receiving/unloading session's, else the day it was made.
+const MOVEMENT_ORDER_DATE = `COALESCE(
+  CASE WHEN source = 'unloading'
+       THEN (SELECT uis.order_date FROM unload_import_sessions uis WHERE uis.id = stock_movements.session_id)
+       ELSE (SELECT ois.order_date FROM order_import_sessions ois WHERE ois.id = stock_movements.session_id) END,
+  created_at::date::text)`;
+
+function resetScope(dateScoped: boolean): ResetPart[] {
+  const parts: ResetPart[] = [
+    // FIRST, before the sessions below are gone: a movement's order date is looked up through its
+    // session, so deleting the sessions first would make every movement look undated (and a
+    // date-scoped run would then leave them all behind).
+    { key: 'stockMovements', table: 'stock_movements', where: `${PLANT_MATCH} AND ($2::text IS NULL OR ${MOVEMENT_ORDER_DATE} <= $2::text)` },
+    { key: 'orderScanEvents', table: 'order_scan_events', where: `session_id IN (${ORDER_SESSIONS_IN_SCOPE})` },
+    { key: 'orderScanItems', table: 'order_scan_items', where: `session_id IN (${ORDER_SESSIONS_IN_SCOPE})` },
+    { key: 'orderItems', table: 'order_import_items', where: `session_id IN (${ORDER_SESSIONS_IN_SCOPE})` },
+    { key: 'orderSessions', table: 'order_import_sessions', where: `id IN (${ORDER_SESSIONS_IN_SCOPE})` },
+    { key: 'unloadScanEvents', table: 'unload_scan_events', where: `session_id IN (${UNLOAD_SESSIONS_IN_SCOPE})` },
+    { key: 'unloadItems', table: 'unload_import_items', where: `session_id IN (${UNLOAD_SESSIONS_IN_SCOPE})` },
+    { key: 'unloadSessions', table: 'unload_import_sessions', where: `id IN (${UNLOAD_SESSIONS_IN_SCOPE})` },
+    // Loading is dated by its proforma slip, never by when the boxes were scanned onto the vehicle.
+    { key: 'loadingScanEvents', table: 'loading_scan_events', where: `${PLANT_MATCH} AND ($2::text IS NULL OR order_number IN (${SLIP_NUMBERS_IN_SCOPE}))` },
+    { key: 'loadingRecords', table: 'loading_records', where: `${PLANT_MATCH} AND ($2::text IS NULL OR order_number IN (${SLIP_NUMBERS_IN_SCOPE}))` },
+    { key: 'loadingHandoffs', table: 'loading_handoffs', where: `order_number IN (${SLIP_NUMBERS_IN_SCOPE})` },
+    { key: 'loadOperationItems', table: 'load_operations_items', where: `load_operations_id IN (SELECT id FROM load_operations WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR order_date::date <= $2::date))` },
+    { key: 'loadOperations', table: 'load_operations', where: `${PLANT_MATCH} AND ($2::text IS NULL OR order_date::date <= $2::date)` },
+    { key: 'scanHistory', table: 'scan_history', where: `order_number IN (${SLIP_NUMBERS_IN_SCOPE})` },
+  ];
+  if (!dateScoped) {
+    // Only a full reset deletes these: a stock row is a running total (adjusted instead when a date
+    // is set — see the header), and the legacy scan tables carry no order date to judge them by.
+    parts.push({ key: 'stockRows', table: 'product_plant_stock', where: `${PLANT_MATCH} AND $2::text IS NULL` });
+    parts.push({ key: 'legacyScanSessions', table: 'scan_sessions', where: `${PLANT_MATCH} AND $2::text IS NULL` });
+  }
+  return parts;
+}
+
+// Legacy per-session children of scan_sessions — emptied alongside it, counted under it.
+const LEGACY_SCAN_CHILDREN = ['scan_session_pallet_scans', 'scan_session_items', 'scan_session_extras'];
+
+const SLIPS_LOADING_WHERE = `${PLANT_MATCH} AND ($2::text IS NULL OR order_date <= $2::date)
+  AND (vehicle_assigned_by_code IS NOT NULL OR loading_completed_at IS NOT NULL
+       OR loading_owner_code IS NOT NULL OR loading_paused_at IS NOT NULL OR loading_stv IS NOT NULL)`;
+
+const EMPTY_COUNTS: ResetCounts = {
+  orderSessions: 0, orderItems: 0, orderScanItems: 0, orderScanEvents: 0,
+  unloadSessions: 0, unloadItems: 0, unloadScanEvents: 0,
+  loadingRecords: 0, loadingScanEvents: 0, loadingHandoffs: 0,
+  loadOperations: 0, loadOperationItems: 0,
+  stockRows: 0, stockMovements: 0,
+  scanHistory: 0, legacyScanSessions: 0,
+  slipsLoadingReset: 0, activities: 0,
+};
+
+const countedAsDeleted = (counts: ResetCounts) =>
+  (Object.keys(counts) as (keyof ResetCounts)[])
+    .filter((key) => key !== 'slipsLoadingReset')
+    .reduce((sum, key) => sum + counts[key], 0);
+
+async function countResetScope(plant: string | null, orderDateUpTo: string | null): Promise<ResetCounts> {
+  const counts: ResetCounts = { ...EMPTY_COUNTS };
+  for (const part of resetScope(!!orderDateUpTo)) {
+    const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM ${part.table} WHERE ${part.where}`, [plant, orderDateUpTo]);
+    counts[part.key] = rows[0]?.n ?? 0;
+  }
+  const { rows: slipRows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM proforma_slips WHERE ${SLIPS_LOADING_WHERE}`, [plant, orderDateUpTo],
+  );
+  counts.slipsLoadingReset = slipRows[0]?.n ?? 0;
+  // With a date the stock rows aren't deleted but adjusted — show how many rows that touches.
+  if (orderDateUpTo) {
+    const { rows: stockRows } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM product_plant_stock
+       WHERE ${PLANT_MATCH} AND $2::text IS NOT NULL AND (in_stock <> 0 OR extra_qty <> 0)`,
+      [plant, orderDateUpTo],
+    );
+    counts.stockRows = stockRows[0]?.n ?? 0;
+  }
+  // Activity log: only ever in scope for a full all-plants reset (it has no plant and no order date).
+  if (plant === null && !orderDateUpTo) {
+    const { rows: actRows } = await pool.query(`SELECT COUNT(*)::int AS n FROM activities`);
+    counts.activities = actRows[0]?.n ?? 0;
+  }
+  return counts;
+}
+
+// The phrase the person has to type, so a mis-click can never run this.
+const resetConfirmPhrase = (plantParam: string) =>
+  (plantParam.toLowerCase() === 'all' ? 'DELETE ALL' : `DELETE ${plantParam}`).toUpperCase();
+
+// GET /api/settings/reset-operations/preview?plant=<name|all>&orderDateUpTo=<YYYY-MM-DD>
+// Exactly what would be removed, plus any still-open session that blocks a date-scoped run.
+router.get('/settings/reset-operations/preview', requireAdminRole, async (req: Request, res: Response) => {
+  try {
+    const plantParam = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!plantParam) return res.status(400).json({ message: 'Plant is required' });
+    const plant = plantParam.toLowerCase() === 'all' ? null : plantParam;
+    const orderDateUpTo = typeof req.query.orderDateUpTo === 'string' && req.query.orderDateUpTo.trim()
+      ? req.query.orderDateUpTo.trim() : null;
+
+    const counts = await countResetScope(plant, orderDateUpTo);
+    // Same rule as Clear Stock: an unfinished session's numbers aren't final, so its stock can't be
+    // reversed reliably. Only a date-scoped run reverses anything, so only it is blocked.
+    const activeBlockers = orderDateUpTo ? await findActiveBlockers(pool, plant, orderDateUpTo) : [];
+    res.json({
+      counts,
+      totalRows: countedAsDeleted(counts),
+      dateScoped: !!orderDateUpTo,
+      activeBlockers,
+      canReset: activeBlockers.length === 0,
+      confirmPhrase: resetConfirmPhrase(plantParam),
+    });
+  } catch (error) {
+    console.error('Error building reset preview:', error);
+    res.status(500).json({ message: 'Failed to build the reset preview' });
+  }
+});
+
+// POST /api/settings/reset-operations { plant, orderDateUpTo?, confirm } — all or nothing.
+router.post('/settings/reset-operations', requireAdminRole, async (req: Request, res: Response) => {
+  const plantParam = typeof req.body?.plant === 'string' ? req.body.plant.trim() : '';
+  if (!plantParam) return res.status(400).json({ message: 'Plant is required' });
+  const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm.trim().toUpperCase() : '';
+  // Re-checked on the server, never trusted from the client alone — this cannot be undone.
+  if (confirm !== resetConfirmPhrase(plantParam)) {
+    return res.status(400).json({ message: `Type ${resetConfirmPhrase(plantParam)} to confirm this reset.` });
+  }
+  const plant = plantParam.toLowerCase() === 'all' ? null : plantParam;
+  const orderDateUpTo = typeof req.body?.orderDateUpTo === 'string' && req.body.orderDateUpTo.trim()
+    ? req.body.orderDateUpTo.trim() : null;
+  const { userCode, userName } = actor(req);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    if (orderDateUpTo) {
+      const activeBlockers = await findActiveBlockers(client, plant, orderDateUpTo);
+      if (activeBlockers.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message: `Cannot remove data up to ${orderDateUpTo} — still-open session(s) in scope: ${describeBlockers(activeBlockers)}. Finish or complete these first.`,
+        });
+      }
+    }
+
+    const counts: ResetCounts = { ...EMPTY_COUNTS };
+
+    // 1. Stock, when a date is set: reverse exactly what the in-scope orders contributed, BEFORE
+    //    their scan events are deleted (the events are what the amounts are read from).
+    if (orderDateUpTo) {
+      const { rows: receivingRows } = await client.query(
+        `SELECT e.barcode, s.plant, SUM(e.total_qty)::int AS total, SUM(e.total_qty) FILTER (WHERE e.is_extra)::int AS extra
+         FROM order_scan_events e JOIN order_import_sessions s ON s.id = e.session_id
+         WHERE e.voided IS NOT TRUE AND ($1::text IS NULL OR LOWER(TRIM(s.plant)) = LOWER(TRIM($1))) AND s.order_date <= $2::text
+         GROUP BY e.barcode, s.plant`,
+        [plant, orderDateUpTo],
+      );
+      const { rows: unloadingRows } = await client.query(
+        `SELECT e.barcode, e.plant, SUM(e.total_qty)::int AS total
+         FROM unload_scan_events e JOIN unload_import_sessions s ON s.id = e.session_id
+         WHERE e.voided IS NOT TRUE AND ($1::text IS NULL OR LOWER(TRIM(e.plant)) = LOWER(TRIM($1))) AND s.order_date <= $2::text
+         GROUP BY e.barcode, e.plant`,
+        [plant, orderDateUpTo],
+      );
+      const { rows: loadingRows } = await client.query(
+        `SELECT lse.barcode, lse.plant, SUM(lse.total_qty)::int AS total
+         FROM loading_scan_events lse JOIN proforma_slips ps ON ps.order_number = lse.order_number
+         WHERE lse.voided IS NOT TRUE AND ($1::text IS NULL OR LOWER(TRIM(lse.plant)) = LOWER(TRIM($1))) AND ps.order_date <= $2::date
+         GROUP BY lse.barcode, lse.plant`,
+        [plant, orderDateUpTo],
+      );
+
+      const deltaByKey = new Map<string, { barcode: string; plant: string; inStockDelta: number; extraQtyDelta: number }>();
+      const bump = (barcode: string, plantName: string, inStockDelta: number, extraQtyDelta: number) => {
+        const key = `${barcode.toLowerCase()}::${plantName.toLowerCase()}`;
+        const cur = deltaByKey.get(key) ?? { barcode, plant: plantName, inStockDelta: 0, extraQtyDelta: 0 };
+        cur.inStockDelta += inStockDelta;
+        cur.extraQtyDelta += extraQtyDelta;
+        deltaByKey.set(key, cur);
+      };
+      for (const r of receivingRows as any[]) bump(r.barcode, r.plant, -Number(r.total ?? 0), -Number(r.extra ?? 0));
+      for (const r of unloadingRows as any[]) bump(r.barcode, r.plant, -Number(r.total ?? 0), 0);
+      for (const r of loadingRows as any[]) bump(r.barcode, r.plant, Number(r.total ?? 0), 0);
+
+      for (const d of deltaByKey.values()) {
+        if (d.inStockDelta === 0 && d.extraQtyDelta === 0) continue;
+        const { rows: updated } = await client.query(
+          `UPDATE product_plant_stock
+           SET in_stock = GREATEST(0, in_stock + $1), extra_qty = GREATEST(0, extra_qty + $2), updated_at = NOW()
+           WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($3)) AND LOWER(TRIM(plant)) = LOWER(TRIM($4))
+           RETURNING product_id`,
+          [d.inStockDelta, d.extraQtyDelta, d.barcode, d.plant],
+        );
+        if (updated.length === 0) continue;
+        counts.stockRows += updated.length;
+        // The audit line is dated today and belongs to no order, so the delete below (which only
+        // takes in-scope movements) never removes it.
+        await client.query(
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
+           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
+          [d.barcode, updated[0]?.product_id ?? null, d.plant, d.inStockDelta, d.extraQtyDelta,
+           `Remove operations data (Settings) — orders up to ${orderDateUpTo}`, userCode ?? null],
+        );
+      }
+    }
+
+    // 2. The deletions. Children before parents, since a child's scope is defined by its parent.
+    for (const part of resetScope(!!orderDateUpTo)) {
+      if (part.key === 'legacyScanSessions') {
+        for (const childTable of LEGACY_SCAN_CHILDREN) {
+          await client.query(
+            `DELETE FROM ${childTable} WHERE session_id IN (SELECT id FROM scan_sessions WHERE ${part.where})`,
+            [plant, orderDateUpTo],
+          );
+        }
+      }
+      const result = await client.query(`DELETE FROM ${part.table} WHERE ${part.where}`, [plant, orderDateUpTo]);
+      // stockRows already holds the adjusted-row count in date mode; only a full reset deletes them.
+      counts[part.key] = result.rowCount ?? 0;
+    }
+
+    // 3. Proforma slips themselves stay — only the loading progress on them is wiped, so each order
+    //    can be loaded again from the beginning instead of looking half-loaded with no records.
+    const slipReset = await client.query(
+      `UPDATE proforma_slips SET
+         loading_completed_at = NULL, loading_completed_by_code = NULL, vehicle_assigned_by_code = NULL,
+         loading_owner_code = NULL, loading_owner_name = NULL, loading_paused_at = NULL, loading_stv = NULL
+       WHERE ${SLIPS_LOADING_WHERE}`,
+      [plant, orderDateUpTo],
+    );
+    counts.slipsLoadingReset = slipReset.rowCount ?? 0;
+
+    // 4. products.in_stock is the legacy cross-plant mirror of product_plant_stock — recomputed from
+    //    what is LEFT, so resetting one plant never wipes stock another plant still holds.
+    await client.query(
+      `UPDATE products p SET in_stock = COALESCE(
+         (SELECT SUM(pps.in_stock)::int FROM product_plant_stock pps WHERE LOWER(TRIM(pps.barcode)) = LOWER(TRIM(p.barcode))), 0)`,
+    );
+
+    if (plant === null && !orderDateUpTo) {
+      const act = await client.query(`DELETE FROM activities`);
+      counts.activities = act.rowCount ?? 0;
+    }
+    await client.query('COMMIT');
+
+    // Logged after the commit — for a full all-plants reset the log was just emptied, so this row is
+    // the first entry of the fresh history, saying who did it and what went.
+    const totalRows = countedAsDeleted(counts);
+    await storage.createActivity({
+      pageName: 'Settings',
+      action: 'delete',
+      entityType: 'reset_operations',
+      entityId: plant ?? 'all',
+      details: `Removed operations data for ${plant ?? 'all plants'}`
+        + (orderDateUpTo ? `, orders up to ${orderDateUpTo}` : '')
+        + ` by ${userName ?? userCode}: ${totalRows} row(s) deleted `
+        + `(order scanning ${counts.orderSessions} CSV(s) / ${counts.orderScanEvents} scan(s), `
+        + `unloading ${counts.unloadSessions} batch(es) / ${counts.unloadScanEvents} scan(s), `
+        + `loading ${counts.loadingRecords} record(s) / ${counts.loadingScanEvents} scan(s), `
+        + `${counts.stockMovements} stock movement(s)); `
+        + (orderDateUpTo
+          ? `${counts.stockRows} stock row(s) adjusted back; `
+          : `${counts.stockRows} stock row(s) deleted; `)
+        + `${counts.slipsLoadingReset} proforma slip(s) reset for loading.`,
+      userCode,
+      userName,
+    });
+
+    res.json({ success: true, counts, totalRows, dateScoped: !!orderDateUpTo, orderDateUpTo });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error resetting operations data:', error);
+    res.status(500).json({ message: 'Failed to remove operations data — nothing was deleted.' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── Settings > Data Management > "Backup CSV" ───────────────────────────────────────────────────
+// Writes one <table>.csv per table into backups/<database>-csv-<date>_<time>/ on the server — the
+// same folder layout scripts/backup-database-csv.ps1 produces, so scripts/restore-database-csv.ps1
+// loads it back unchanged. Runs inside the app (no psql, no PowerShell), so a backup is one button
+// instead of a terminal session.
+//
+// Only one at a time: the export walks every table, and two of them running together would just
+// slow each other down and leave two half-written folders.
+let csvBackupRunning = false;
+
+router.post('/settings/backup-csv', requireAdminRole, async (req: Request, res: Response) => {
+  if (csvBackupRunning) {
+    return res.status(409).json({ message: 'A backup is already running — wait for it to finish.' });
+  }
+  csvBackupRunning = true;
+  const { userCode, userName } = actor(req);
+  try {
+    const result = await runCsvBackup();
+    const megabytes = result.totalBytes / (1024 * 1024);
+    await storage.createActivity({
+      pageName: 'Settings',
+      action: 'create',
+      entityType: 'backup_csv',
+      entityId: result.folder,
+      details: `CSV backup by ${userName ?? userCode}: ${result.tables.length} table(s), `
+        + `${result.totalRows} row(s), ${megabytes.toFixed(1)} MB → ${result.folder}`,
+      userCode,
+      userName,
+    });
+    res.json({ success: true, ...result, megabytes });
+  } catch (error) {
+    console.error('Error running CSV backup:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to write the CSV backup' });
+  } finally {
+    csvBackupRunning = false;
   }
 });
 

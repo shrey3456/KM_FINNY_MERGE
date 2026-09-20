@@ -1,4 +1,4 @@
-import { Package, History, Upload, PieChart, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, Receipt, IndianRupee, Activity, Factory, PrinterCheck, Truck } from 'lucide-react';
+import { Package, History, Upload, FileUp, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, Receipt, IndianRupee, Activity, Factory, PrinterCheck, Truck } from 'lucide-react';
 import useEmblaCarousel from 'embla-carousel-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -245,9 +245,9 @@ const Home = () => {
             <div className="flex flex-col items-center">
               <Link href="/order-import" className="flex flex-col items-center">
                 <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                  <PieChart className="h-7 w-7 text-[#001d6e]" />
+                  <FileUp className="h-7 w-7 text-[#001d6e]" />
                 </div>
-                <span className="text-gray-800 text-sm text-center">Reports</span>
+                <span className="text-gray-800 text-sm text-center">Order Management</span>
               </Link>
             </div>
           )}

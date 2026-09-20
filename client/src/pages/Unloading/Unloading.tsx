@@ -56,6 +56,10 @@ type SessionListItem = {
 type SessionItem = {
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null; quantity: number;
   expected: number; scanned: number; remaining: number; itemsPerPallet: number; isComplete: boolean;
+  // The pallet size actually set in Product Master for this plant's state (GJ PLT / MP PLT),
+  // 0 when nobody set one. itemsPerPallet falls back to the line quantity, so only this field
+  // can answer "is a real pallet size set?".
+  realPackSize?: number;
 };
 type SessionDetail = {
   id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
@@ -720,6 +724,9 @@ export default function Unloading() {
   // name is never treated as failed until it specifically fails.
   const [dialogImageFailed, setDialogImageFailed] = useState<string | null>(null);
   const dialogPlt = pending?.item?.itemsPerPallet ?? (pending?.product ? extraProductPalletSize(pending.product) : 0);
+  // Batch item whose GJ PLT / MP PLT is blank in Product Master — dialogPlt is then only the
+  // line's own quantity standing in for a pallet, so the dialog asks for the amount instead.
+  const dialogPackSizeMissing = !!pending?.item && !((pending.item.realPackSize ?? 0) > 0);
   const dialogResolvedImageName = pending?.item?.itemName ?? pending?.product?.name ?? pending?.barcode;
 
   const [autoFeedback, setAutoFeedback] = useState<
@@ -744,13 +751,17 @@ export default function Unloading() {
   function defaultDialogQty(item: SessionItem | null, product: Product | null): number {
     const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 1);
     if (!item) return ipp;
+    // No real GJ/MP PLT set → nothing honest to pre-fill: leave it empty (Confirm stays off)
+    // so the operator types what they are actually unloading.
+    if (!((item.realPackSize ?? 0) > 0)) return 0;
     return item.remaining > 0 && item.remaining < ipp ? item.remaining : ipp;
   }
   function openConfirmDialog(barcode: string, item: SessionItem | null, product: Product | null) {
     const qty = defaultDialogQty(item, product);
     const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 0);
+    const packSizeMissing = !!item && !((item.realPackSize ?? 0) > 0);
     setDialogQty(qty);
-    setDialogPalletsInput(ipp > 0 ? (qty / ipp).toFixed(2) : "");
+    setDialogPalletsInput(ipp > 0 && !packSizeMissing ? (qty / ipp).toFixed(2) : "");
     setPending({ barcode, item, product });
   }
 
@@ -820,7 +831,10 @@ export default function Unloading() {
     }
 
     const ipp = item?.itemsPerPallet ?? 0;
-    const canAutoScan = autoScanEnabled && !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
+    // A pallet size that was never set in Product Master is never auto-scanned — ipp would be a
+    // guess (the line's own quantity), so the dialog always opens and asks for the amount.
+    const canAutoScan = autoScanEnabled && !!item && (item.realPackSize ?? 0) > 0
+      && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
       scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null }, {
         onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra, data.event.productId),
@@ -2016,6 +2030,11 @@ export default function Unloading() {
               {pending?.item?.isComplete && (
                 <p className="text-lg text-amber-600 mt-1">Item already complete — these extra units will be logged separately.</p>
               )}
+              {dialogPackSizeMissing && (
+                <p className="mt-1 rounded-lg bg-amber-50 px-3 py-2 text-base font-semibold text-amber-700">
+                  Pallet size is not set for this item in Product Master — enter the quantity you are scanning.
+                </p>
+              )}
             </DialogDescription>
           </DialogHeader>
 
@@ -2071,7 +2090,7 @@ export default function Unloading() {
             {/* Qty (boxes) and Pallets side by side — each with −/+ steppers. Off-rotation: side by
                 side (sm:grid-cols-2). Rotated: single CSS column, since the rotate-90 turns that
                 vertical stack into the side-by-side pair the kiosk layout expects. */}
-            <div className={`grid gap-3 ${dialogPlt > 1 && !quarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+            <div className={`grid gap-3 ${dialogPlt > 1 && !dialogPackSizeMissing && !quarterTurn ? "sm:grid-cols-2" : "grid-cols-1"}`}>
               <div className="space-y-1">
                 <Label className="text-sm">Qty (boxes)</Label>
                 <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
@@ -2096,6 +2115,9 @@ export default function Unloading() {
                       if (dialogPlt > 0) setDialogPalletsInput((q / dialogPlt).toFixed(2));
                     }}
                     onBlur={(e) => {
+                      // With no pallet size set the box stays empty until a number is typed —
+                      // snapping it to 1 here would hand the operator a guess again.
+                      if (dialogPackSizeMissing) return;
                       if (!e.target.value || parseInt(e.target.value) < 1) {
                         setDialogQty(1);
                         if (dialogPlt > 0) setDialogPalletsInput((1 / dialogPlt).toFixed(2));
@@ -2127,7 +2149,7 @@ export default function Unloading() {
                 </div>
               </div>
 
-              {dialogPlt > 1 && (
+              {dialogPlt > 1 && !dialogPackSizeMissing && (
                 <div className="space-y-1">
                   <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {dialogPlt}/pallet</span></Label>
                   <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-[#001d6e]/30 bg-white focus-within:border-[#001d6e]">

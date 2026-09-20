@@ -71,6 +71,10 @@ type ProformaItem = {
   quantity: number | null;
   // Progress fields, added by withProgress() server-side
   expected: number; loaded: number; remaining: number; itemsPerPallet: number;
+  // The pallet size actually set in Product Master for this plant's state (GJ PLT / MP PLT),
+  // 0 when nobody set one. itemsPerPallet falls back to the line quantity, so only this field
+  // can answer "is a real pallet size set?".
+  realPackSize?: number;
   isComplete: boolean; stockAvailable: number | null;
 };
 type ProformaSlip = {
@@ -1514,6 +1518,9 @@ export default function LoadOperation() {
 
   function defaultDialogQty(item: ProformaItem | null): number {
     if (!item) return 1;
+    // No real GJ/MP PLT in Product Master → no amount to pre-fill: leave it at 0 (the box shows
+    // empty and Confirm stays off) so the operator types what they are actually loading.
+    if (!((item.realPackSize ?? 0) > 0)) return 0;
     const ipp = item.itemsPerPallet || 1;
     return item.remaining > 0 && item.remaining < ipp ? item.remaining : ipp;
   }
@@ -1521,7 +1528,7 @@ export default function LoadOperation() {
   function openConfirmDialog(barcode: string, item: ProformaItem | null) {
     const qty = defaultDialogQty(item);
     setDialogQty(qty);
-    setDialogPalletsInput(item && item.itemsPerPallet > 0 ? (qty / item.itemsPerPallet).toFixed(2) : "");
+    setDialogPalletsInput(item && (item.realPackSize ?? 0) > 0 && item.itemsPerPallet > 0 ? (qty / item.itemsPerPallet).toFixed(2) : "");
     setPending({ barcode, item });
   }
 
@@ -1614,7 +1621,10 @@ export default function LoadOperation() {
     // feedback popup — same shape as Order Scan's Auto Scan path, gated by the SAME plant-level
     // Auto Scan toggle Order Scan reads. Auto Scan OFF → every scan opens the confirm dialog.
     const ipp = item?.itemsPerPallet ?? 0;
-    const canAutoScan = autoScanEnabled && !!item && item.expected > 0 && ipp >= 1 && item.remaining >= ipp && (item.stockAvailable ?? 0) >= ipp;
+    // A pallet size that was never set in Product Master is never auto-scanned — ipp would be a
+    // guess (the line's own quantity), so the dialog always opens and asks for the amount.
+    const canAutoScan = autoScanEnabled && !!item && (item.realPackSize ?? 0) > 0
+      && item.expected > 0 && ipp >= 1 && item.remaining >= ipp && (item.stockAvailable ?? 0) >= ipp;
     if (canAutoScan) {
       const qty = ipp;
       scanItemMutation.mutate({ barcode, qty }, {
@@ -3894,7 +3904,12 @@ export default function LoadOperation() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            {pending?.item && pending.item.itemsPerPallet > 0 ? (
+            {pending?.item && !((pending.item.realPackSize ?? 0) > 0) && (
+              <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">
+                Pallet size is not set for this item in Product Master — enter the quantity you are loading.
+              </p>
+            )}
+            {pending?.item && (pending.item.realPackSize ?? 0) > 0 && pending.item.itemsPerPallet > 0 ? (
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label className="text-xs">Pallets</Label>
@@ -3911,7 +3926,7 @@ export default function LoadOperation() {
                 <div>
                   <Label className="text-xs">Qty</Label>
                   <Input
-                    value={dialogQty}
+                    value={dialogQty === 0 ? "" : dialogQty}
                     onChange={(e) => {
                       const q = parseInt(e.target.value, 10) || 0;
                       setDialogQty(q);
@@ -3924,7 +3939,7 @@ export default function LoadOperation() {
             ) : (
               <div>
                 <Label className="text-xs">Qty</Label>
-                <Input value={dialogQty} onChange={(e) => setDialogQty(parseInt(e.target.value, 10) || 0)} type="number" min="1" />
+                <Input value={dialogQty === 0 ? "" : dialogQty} onChange={(e) => setDialogQty(parseInt(e.target.value, 10) || 0)} type="number" min="1" autoFocus />
               </div>
             )}
             {pending && (pending.item?.stockAvailable ?? Infinity) < dialogQty && (

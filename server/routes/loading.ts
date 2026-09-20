@@ -314,7 +314,12 @@ async function withProgress(slip: any, items: any[]) {
     }
     return {
       ...item, expected, loaded, remaining: Math.max(0, expected - loaded),
-      itemsPerPallet, isComplete: expected > 0 && loaded >= expected, stockAvailable,
+      itemsPerPallet,
+      // The pallet size actually configured in Product Master (0 when GJ/MP PLT is blank).
+      // itemsPerPallet falls back to the line quantity so totals still count one pallet; this
+      // field is the honest answer, so the page can refuse to auto-scan a size nobody set.
+      realPackSize: getPalletSize(product ?? null, state),
+      isComplete: expected > 0 && loaded >= expected, stockAvailable,
     };
   }));
 

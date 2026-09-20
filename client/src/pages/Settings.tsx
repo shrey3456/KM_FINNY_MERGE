@@ -29,7 +29,7 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from 'react-hook-form';
 import { useEffect, useState } from 'react';
-import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, CalendarDays, RefreshCw, Webhook, ExternalLink } from 'lucide-react';
+import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, Download, CalendarDays, RefreshCw, Webhook, ExternalLink } from 'lucide-react';
 import Papa from 'papaparse';
 import { apiRequest } from '@/lib/queryClient';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -149,6 +149,55 @@ const Settings = () => {
   // and only orders/vehicles/deliveries dated on or before it clear (Order Import, Unloading, and
   // Loading via its proforma slip's own order date).
   const [csOrderDateUpTo, setCsOrderDateUpTo] = useState('');
+
+  // Backup CSV — writes one <table>.csv per table into backups/<database>-csv-<date>_<time>/ on the
+  // server, the same folder scripts/restore-database-csv.ps1 reads back.
+  const [isBackingUpCsv, setIsBackingUpCsv] = useState(false);
+  const [csvBackupResult, setCsvBackupResult] = useState<{ folder: string; tables: number; rows: number; megabytes: number } | null>(null);
+
+  const runCsvBackup = async () => {
+    setIsBackingUpCsv(true);
+    try {
+      const data = await apiRequest('POST', '/api/settings/backup-csv', {}, false, true);
+      setCsvBackupResult({
+        folder: data.folder,
+        tables: data.tables?.length ?? 0,
+        rows: data.totalRows ?? 0,
+        megabytes: data.megabytes ?? 0,
+      });
+      toast({
+        title: 'Backup saved',
+        description: `${data.tables?.length ?? 0} table(s), ${data.totalRows ?? 0} row(s) written to ${data.folder}`,
+      });
+    } catch (error: any) {
+      console.error('Error running CSV backup:', error);
+      toast({ title: 'Backup failed', description: error?.message || 'Could not write the CSV backup', variant: 'destructive' });
+    } finally {
+      setIsBackingUpCsv(false);
+    }
+  };
+
+  // Reset Operations Data — deletes the day-to-day work (scan history, stock, loading,
+  // unloading, order imports) from the database for good, for one plant or for all of them.
+  // Product Master, Vehicle Master, proforma slips, users and plants are kept. Same
+  // preview + type-to-confirm gate as Clear Stock, because this one cannot be undone at all.
+  type ResetCounts = {
+    orderSessions: number; orderItems: number; orderScanItems: number; orderScanEvents: number;
+    unloadSessions: number; unloadItems: number; unloadScanEvents: number;
+    loadingRecords: number; loadingScanEvents: number; loadingHandoffs: number;
+    loadOperations: number; loadOperationItems: number;
+    stockRows: number; stockMovements: number;
+    scanHistory: number; legacyScanSessions: number;
+    slipsLoadingReset: number; activities: number;
+  };
+  const [showResetDialog, setShowResetDialog] = useState(false);
+  const [isResettingOps, setIsResettingOps] = useState(false);
+  const [rdPlant, setRdPlant] = useState<string>('');
+  const [rdConfirmText, setRdConfirmText] = useState('');
+  // Optional cut-off. Blank removes everything for the plant; set, it removes only what belongs to
+  // orders DATED on or before it — the CSV's / proforma slip's own order date, never the day
+  // someone scanned. See the header comment in server/routes/settings-admin.ts.
+  const [rdOrderDateUpTo, setRdOrderDateUpTo] = useState('');
 
   // Recalculate Stock — Check (read-only) shows every stored stock total that doesn't match the
   // history; Apply corrects them. See server/lib/stockRecalc.ts.
@@ -275,6 +324,59 @@ const Settings = () => {
     } finally {
       setIsClearingStock(false);
       handleClearStockDialogOpenChange(false);
+    }
+  };
+
+  const { data: rdPreview, isFetching: rdPreviewLoading } = useQuery<{
+    counts: ResetCounts; totalRows: number; dateScoped: boolean;
+    activeBlockers: { source: string; plant: string; orderDate: string | null; label: string }[];
+    canReset: boolean; confirmPhrase: string;
+  }>({
+    queryKey: ['/api/settings/reset-operations/preview', rdPlant, rdOrderDateUpTo],
+    queryFn: () =>
+      apiRequest(
+        'GET',
+        `/api/settings/reset-operations/preview?plant=${encodeURIComponent(rdPlant)}`
+          + `${rdOrderDateUpTo ? `&orderDateUpTo=${encodeURIComponent(rdOrderDateUpTo)}` : ''}`,
+      ).then((r) => r.json()),
+    enabled: showResetDialog && !!rdPlant,
+  });
+
+  const handleResetDialogOpenChange = (open: boolean) => {
+    setShowResetDialog(open);
+    if (!open) { setRdPlant(''); setRdConfirmText(''); setRdOrderDateUpTo(''); }
+  };
+
+  const expectedRdConfirmText = rdPlant === 'all' ? 'DELETE ALL' : `DELETE ${rdPlant}`.toUpperCase();
+
+  const resetOperationsData = async () => {
+    if (!rdPlant) return;
+    setIsResettingOps(true);
+    try {
+      const data = await apiRequest(
+        'POST', '/api/settings/reset-operations',
+        {
+          plant: rdPlant,
+          ...(rdOrderDateUpTo ? { orderDateUpTo: rdOrderDateUpTo } : {}),
+          confirm: rdConfirmText.trim().toUpperCase(),
+        },
+        false, true,
+      );
+      toast({
+        title: 'Data removed',
+        description: `${data.totalRows} row(s) deleted for ${rdPlant === 'all' ? 'all plants' : rdPlant}`
+          + `${rdOrderDateUpTo ? ` (orders up to ${rdOrderDateUpTo})` : ''}. `
+          + `${data.dateScoped ? `${data.counts.stockRows} stock row(s) adjusted back` : `${data.counts.stockRows} stock row(s) deleted`}, `
+          + `${data.counts.slipsLoadingReset} proforma slip(s) can be loaded again from the start.`,
+      });
+      // Everything on screen was just built from data that no longer exists.
+      queryClient.invalidateQueries();
+    } catch (error: any) {
+      console.error('Error resetting operations data:', error);
+      toast({ title: 'Error', description: error?.message || 'Failed to remove the data', variant: 'destructive' });
+    } finally {
+      setIsResettingOps(false);
+      handleResetDialogOpenChange(false);
     }
   };
 
@@ -808,6 +910,31 @@ const Settings = () => {
                       )}
                     </div>
 
+                    <div className="p-4 border rounded-lg">
+                      <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Backup CSV</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Saves every table as its own .csv file on the server, under
+                        <span className="font-mono"> backups/&lt;database&gt;-csv-&lt;date&gt;_&lt;time&gt;/</span> — the same
+                        folder the restore script reads back. Nothing is changed or deleted.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={runCsvBackup}
+                        disabled={isBackingUpCsv || !isAdminUser}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        {isBackingUpCsv
+                          ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Backing up…</>
+                          : <><Download className="mr-1.5 h-3.5 w-3.5" /> Backup CSV</>}
+                      </Button>
+                      {csvBackupResult && (
+                        <p className="mt-2 break-all text-xs text-gray-500">
+                          Last backup: {csvBackupResult.tables} table(s), {csvBackupResult.rows.toLocaleString()} row(s),
+                          {' '}{csvBackupResult.megabytes.toFixed(1)} MB → <span className="font-mono">{csvBackupResult.folder}</span>
+                        </p>
+                      )}
+                    </div>
+
                     <div className="p-4 border border-red-200 rounded-lg bg-red-50">
                       <h4 className="font-medium text-[#001d6e] flex items-center"><Shield className="h-4 w-4 mr-2" /> Danger Zone</h4>
                       <p className="text-sm text-[#001d6e] mt-1 mb-3">These actions are irreversible</p>
@@ -820,6 +947,15 @@ const Settings = () => {
                           title={!isAdminUser ? "Admin access required" : undefined}
                         >
                           Clear Stock
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => setShowResetDialog(true)}
+                          disabled={!isAdminUser}
+                          title={!isAdminUser ? "Admin access required" : undefined}
+                        >
+                          Remove All Operations Data
                         </Button>
                         <Button
                           variant="destructive"
@@ -1125,6 +1261,145 @@ const Settings = () => {
               }
             >
               {isClearingStock ? "Clearing..." : "Clear Stock"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Remove All Operations Data — permanent deletion, so: pick the scope, see exactly how many
+          rows go, then type the phrase. */}
+      <AlertDialog open={showResetDialog} onOpenChange={handleResetDialogOpenChange}>
+        <AlertDialogContent className="max-h-[90vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove all operations data?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This <strong>deletes</strong> the day-to-day work from the database — scan history, stock, loading,
+              unloading and imported order CSVs. It is not a void and not a backup: the rows are gone and cannot
+              be brought back. Product Master, Vehicle Master, proforma slips, users and plants are kept.
+              Set an Order Date below to remove only the orders dated on or before it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label htmlFor="rdPlant">Plant</Label>
+              <Select value={rdPlant} onValueChange={(v) => { setRdPlant(v); setRdConfirmText(''); }}>
+                <SelectTrigger id="rdPlant">
+                  <SelectValue placeholder="Select a plant" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Plants</SelectItem>
+                  {(allPlants ?? []).map((p: any) => (
+                    <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="rdOrderDateUpTo">Order date up to (optional)</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="rdOrderDateUpTo"
+                  type="date"
+                  value={rdOrderDateUpTo}
+                  onChange={(e) => { setRdOrderDateUpTo(e.target.value); setRdConfirmText(''); }}
+                  className="w-auto"
+                />
+                {rdOrderDateUpTo && (
+                  <Button variant="ghost" size="sm" onClick={() => { setRdOrderDateUpTo(''); setRdConfirmText(''); }}>
+                    Clear date
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-gray-500">
+                Leave blank to remove everything for this plant. Set a date and only orders dated on or before it
+                are removed — the order date on the CSV, and for loading the proforma slip's own order date, never
+                the day someone scanned. Stock is then adjusted back by exactly what those orders added or took
+                out, instead of being deleted.
+              </p>
+            </div>
+
+            {rdPlant && (
+              <>
+                {!rdPreviewLoading && (rdPreview?.activeBlockers?.length ?? 0) > 0 && (
+                  <div className="rounded border border-red-200 bg-red-50 p-3 text-sm">
+                    <div className="mb-1 font-medium text-red-700">Can't remove — still-open session(s) in scope:</div>
+                    <ul className="list-disc space-y-0.5 pl-5 text-red-700">
+                      {rdPreview!.activeBlockers.slice(0, 5).map((b, i) => (
+                        <li key={i}>{b.source} — {b.label} ({b.plant}{b.orderDate ? `, ${b.orderDate}` : ''})</li>
+                      ))}
+                      {rdPreview!.activeBlockers.length > 5 && <li>and {rdPreview!.activeBlockers.length - 5} more</li>}
+                    </ul>
+                    <p className="mt-1.5 text-xs text-red-600">
+                      A date-scoped removal has to reverse stock, and an open session's numbers aren't final yet.
+                      Finish or complete these first, or remove without a date.
+                    </p>
+                  </div>
+                )}
+
+                <div className="rounded border bg-white p-3 text-sm">
+                  <div className="mb-2 font-medium">
+                    {rdPreviewLoading ? 'Counting…' : `${rdPreview?.totalRows ?? 0} row(s) will be deleted`}
+                  </div>
+                  {rdPreview && (
+                    <ul className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+                      <li>Order scan history: <strong>{rdPreview.counts.orderScanEvents}</strong></li>
+                      <li>Order CSVs / items: <strong>{rdPreview.counts.orderSessions} / {rdPreview.counts.orderItems}</strong></li>
+                      <li>Unloading scans: <strong>{rdPreview.counts.unloadScanEvents}</strong></li>
+                      <li>Unloading batches / items: <strong>{rdPreview.counts.unloadSessions} / {rdPreview.counts.unloadItems}</strong></li>
+                      <li>Loading scans: <strong>{rdPreview.counts.loadingScanEvents}</strong></li>
+                      <li>Loading records: <strong>{rdPreview.counts.loadingRecords}</strong></li>
+                      <li>
+                        {rdPreview.dateScoped ? 'Stock rows adjusted: ' : 'Stock rows deleted: '}
+                        <strong>{rdPreview.counts.stockRows}</strong>
+                      </li>
+                      <li>Stock movements: <strong>{rdPreview.counts.stockMovements}</strong></li>
+                      {rdPreview.counts.activities > 0 && (
+                        <li>Activity log: <strong>{rdPreview.counts.activities}</strong></li>
+                      )}
+                      <li>Slips reset for loading: <strong>{rdPreview.counts.slipsLoadingReset}</strong></li>
+                    </ul>
+                  )}
+                </div>
+
+                <div className="rounded border border-yellow-200 bg-yellow-50 p-3 text-sm">
+                  Everything listed above for {rdPlant === 'all' ? 'every plant' : rdPlant}
+                  {rdOrderDateUpTo ? ` dated on or before ${rdOrderDateUpTo}` : ''} is removed from the database
+                  permanently. Proforma slips stay, but the loading progress of the orders in scope is wiped so
+                  they can be loaded again from the start.
+                  {rdOrderDateUpTo
+                    ? ' Stock is not deleted here — it is adjusted by exactly what those orders added or took out,'
+                      + ' with one audit line per item. An Opening Stock or manual adjustment inside that range is'
+                      + ' not reversed (it belongs to no order) — run Recalculate Stock afterwards to check.'
+                    : ' Stock rows are deleted outright.'}
+                  {(rdPlant !== 'all' || !!rdOrderDateUpTo) && ' The activity log has no plant and no order date, so it is only cleared by a full all-plants removal with no date.'}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="rdConfirmText">Type {expectedRdConfirmText} to confirm</Label>
+                  <Input
+                    id="rdConfirmText"
+                    value={rdConfirmText}
+                    onChange={(e) => setRdConfirmText(e.target.value)}
+                    placeholder={expectedRdConfirmText}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isResettingOps}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={resetOperationsData}
+              className="bg-red-600 hover:bg-red-700"
+              disabled={
+                isResettingOps || !rdPlant || rdConfirmText.trim().toUpperCase() !== expectedRdConfirmText
+                || (rdPreview != null && !rdPreview.canReset)
+              }
+            >
+              {isResettingOps ? 'Removing…' : 'Remove data'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

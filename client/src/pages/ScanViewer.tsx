@@ -497,7 +497,13 @@ export default function ScanViewer() {
         }
       });
     });
-    return Array.from(groups.values()).sort(byRecency);
+    const merged = Array.from(groups.values());
+    // An item with no GJ/MP PLT configured counts as ONE pallet of its own merged quantity — the
+    // same rule Scan Operations' Master View and the scan endpoints use. Without it those items
+    // added nothing here, so this page's pallet totals came out lower than Scan Operations' for
+    // the very same order.
+    merged.forEach((g) => { if (!(g.itemsPerPallet > 0)) g.itemsPerPallet = Math.max(1, g.quantity || 1); });
+    return merged.sort(byRecency);
   }, [mvQuery.data]);
 
   const itemsQuery = useQuery<OsScanItem[]>({

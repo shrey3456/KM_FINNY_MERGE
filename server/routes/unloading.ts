@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
-import { getPlantStateCode, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
+import { getPlantStateCode, resolvePalletSizeOrQty, getPalletSize, getUserPlants } from './order-scan';
 import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
 import { computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId } from '../lib/unloadGroupReport';
@@ -117,7 +117,11 @@ async function withProgress(session: any) {
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     return {
       ...item, expected, scanned, remaining: Math.max(0, expected - scanned),
-      itemsPerPallet, isComplete: expected > 0 && scanned >= expected,
+      itemsPerPallet,
+      // Real Product Master pallet size (0 when GJ/MP PLT is blank) — itemsPerPallet falls back to
+      // the line quantity, so this is what tells the page a size was never set.
+      realPackSize: getPalletSize(product ?? null, state),
+      isComplete: expected > 0 && scanned >= expected,
     };
   }));
 
