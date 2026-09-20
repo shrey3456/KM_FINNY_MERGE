@@ -436,6 +436,9 @@ function resetScope(dateScoped: boolean): ResetPart[] {
     // session, so deleting the sessions first would make every movement look undated (and a
     // date-scoped run would then leave them all behind).
     { key: 'stockMovements', table: 'stock_movements', where: `${PLANT_MATCH} AND ($2::text IS NULL OR ${MOVEMENT_ORDER_DATE} <= $2::text)` },
+    // Strictly by session. A scan row of a LATER part that points at an in-scope CSV row (this
+    // happens after a remap) is left alone — its foreign key is ON DELETE SET NULL, so nothing
+    // breaks, and that part's own scanning is not this removal's to take.
     { key: 'orderScanEvents', table: 'order_scan_events', where: `session_id IN (${ORDER_SESSIONS_IN_SCOPE})` },
     { key: 'orderScanItems', table: 'order_scan_items', where: `session_id IN (${ORDER_SESSIONS_IN_SCOPE})` },
     { key: 'orderItems', table: 'order_import_items', where: `session_id IN (${ORDER_SESSIONS_IN_SCOPE})` },
@@ -507,6 +510,39 @@ async function countResetScope(plant: string | null, orderDateUpTo: string | nul
     counts.activities = actRows[0]?.n ?? 0;
   }
   return counts;
+}
+
+// Brings products.in_stock (the legacy cross-plant total) back in line with product_plant_stock.
+// Only rows whose value is actually wrong are written, in id order, so two of these can never take
+// each other's locks in the opposite order; a lost deadlock race is retried a couple of times and,
+// failing that, reported as a warning rather than an error — the removal itself is already done and
+// Settings > Recalculate Stock fixes the mirror at any time.
+async function recomputeProductStockMirror(): Promise<string | null> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await pool.query(
+        `UPDATE products p SET in_stock = t.correct
+         FROM (
+           SELECT p2.id,
+                  COALESCE((SELECT SUM(pps.in_stock)::int FROM product_plant_stock pps
+                            WHERE LOWER(TRIM(pps.barcode)) = LOWER(TRIM(p2.barcode))), 0) AS correct
+           FROM products p2
+           ORDER BY p2.id
+         ) t
+         WHERE t.id = p.id AND p.in_stock IS DISTINCT FROM t.correct`,
+      );
+      return null;
+    } catch (error: any) {
+      const isDeadlock = error?.code === '40P01';
+      if (!isDeadlock || attempt === 3) {
+        console.error('Could not recompute products.in_stock after a reset:', error);
+        return 'The data was removed, but the product stock totals could not be refreshed '
+          + '(the database was busy). Run Settings > Recalculate Stock to fix them.';
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+  }
+  return null;
 }
 
 // The phrase the person has to type, so a mis-click can never run this.
@@ -640,7 +676,12 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
           );
         }
       }
-      const result = await client.query(`DELETE FROM ${part.table} WHERE ${part.where}`, [plant, orderDateUpTo]);
+      let result;
+      try {
+        result = await client.query(`DELETE FROM ${part.table} WHERE ${part.where}`, [plant, orderDateUpTo]);
+      } catch (error) {
+        throw new Error(`while clearing ${part.table}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       // stockRows already holds the adjusted-row count in date mode; only a full reset deletes them.
       counts[part.key] = result.rowCount ?? 0;
     }
@@ -656,18 +697,22 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
     );
     counts.slipsLoadingReset = slipReset.rowCount ?? 0;
 
-    // 4. products.in_stock is the legacy cross-plant mirror of product_plant_stock — recomputed from
-    //    what is LEFT, so resetting one plant never wipes stock another plant still holds.
-    await client.query(
-      `UPDATE products p SET in_stock = COALESCE(
-         (SELECT SUM(pps.in_stock)::int FROM product_plant_stock pps WHERE LOWER(TRIM(pps.barcode)) = LOWER(TRIM(p.barcode))), 0)`,
-    );
-
     if (plant === null && !orderDateUpTo) {
       const act = await client.query(`DELETE FROM activities`);
       counts.activities = act.rowCount ?? 0;
     }
     await client.query('COMMIT');
+
+    // products.in_stock is the legacy cross-plant mirror of product_plant_stock — recomputed from
+    // what is LEFT, so resetting one plant never wipes stock another plant still holds.
+    //
+    // Deliberately AFTER the commit and in its own statement: inside the transaction it rewrote
+    // every products row and held those locks for the whole removal, which deadlocked against the
+    // Notion product sync writing the same table — and took the entire deletion down with it
+    // ("deadlock detected ... while updating tuple in relation products"). Out here it touches only
+    // the rows whose number actually changes (usually a handful), and if it still loses a deadlock
+    // race the data is already removed; the response then says so instead of failing.
+    const mirrorWarning = await recomputeProductStockMirror();
 
     // Logged after the commit — for a full all-plants reset the log was just emptied, so this row is
     // the first entry of the fresh history, saying who did it and what went.
@@ -692,11 +737,15 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
       userName,
     });
 
-    res.json({ success: true, counts, totalRows, dateScoped: !!orderDateUpTo, orderDateUpTo });
+    res.json({ success: true, counts, totalRows, dateScoped: !!orderDateUpTo, orderDateUpTo, warning: mirrorWarning });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Error resetting operations data:', error);
-    res.status(500).json({ message: 'Failed to remove operations data — nothing was deleted.' });
+    // The real reason, not a generic line: this is an admin-only screen, the message names the
+    // table that refused, and without it there is nothing to act on but the server log.
+    res.status(500).json({
+      message: `Failed to remove operations data — nothing was deleted (${error instanceof Error ? error.message : String(error)}).`,
+    });
   } finally {
     client.release();
   }
