@@ -1765,14 +1765,26 @@ export default function LoadOperation() {
   // one active list. An item with no pallet size configured (itemsPerPallet <= 0) has no pallet
   // concept at all — its whole expected qty counts as loose, same as the fallback everywhere else.
   const [itemUnitTab, setItemUnitTab] = useState<"all" | "pallet" | "loose">("all");
-  const expectedPalletsOf = (it: ProformaItem) => {
+  // Which quantity the Pallet/Loose tabs judge an item by: whatever the status filter above them
+  // is showing. Looking at Remaining and asking for Loose means "what is still to load that does
+  // not fill a pallet" — judging that by the item's EXPECTED split (what this used to do) hid the
+  // very rows being asked for: an item ordered as a clean 200 (2 full pallets, no loose at all)
+  // with 50 left to load has a loose remainder, but no loose expected, so it never appeared.
+  const unitBasisQty = (it: ProformaItem) =>
+    itemStatusFilter === "remaining" ? it.remaining
+    : itemStatusFilter === "done"    ? it.loaded
+    : itemStatusFilter === "extra"   ? Math.max(0, it.loaded - it.expected)
+    : it.expected;
+  const palletsOfQty = (it: ProformaItem, qty: number) => {
     const ipp = it.itemsPerPallet ?? 0;
-    return ipp > 0 ? Math.floor(it.expected / ipp) : 0;
+    return ipp > 0 ? Math.floor(qty / ipp) : 0;
   };
-  const expectedLooseOf = (it: ProformaItem) => {
+  const looseOfQty = (it: ProformaItem, qty: number) => {
     const ipp = it.itemsPerPallet ?? 0;
-    return ipp > 0 ? it.expected % ipp : it.expected;
+    return ipp > 0 ? qty % ipp : qty;
   };
+  const expectedPalletsOf = (it: ProformaItem) => palletsOfQty(it, it.expected);
+  const expectedLooseOf = (it: ProformaItem) => looseOfQty(it, it.expected);
   // Scan order, newest first — same as Unloading's item table (itemScanSeqRef there): each scan
   // or +/- stamps that row with a rising number, and rows are sorted by it, so whatever was just
   // handled sits at the top instead of staying wherever its Sr. No. put it. Rows nobody has
@@ -1781,8 +1793,8 @@ export default function LoadOperation() {
     if (itemStatusFilter === "done" && !(it.loaded > 0)) return false;
     if (itemStatusFilter === "remaining" && !(it.remaining > 0)) return false;
     if (itemStatusFilter === "extra" && !(it.loaded > it.expected)) return false;
-    if (itemUnitTab === "pallet" && !(expectedPalletsOf(it) > 0)) return false;
-    if (itemUnitTab === "loose" && !(expectedLooseOf(it) > 0)) return false;
+    if (itemUnitTab === "pallet" && !(palletsOfQty(it, unitBasisQty(it)) > 0)) return false;
+    if (itemUnitTab === "loose" && !(looseOfQty(it, unitBasisQty(it)) > 0)) return false;
     if (itemSearchText.trim()) {
       const q = itemSearchText.trim().toLowerCase();
       const hay = `${it.itemName ?? ""} ${it.barcode ?? ""} ${it.sapCode ?? ""}`.toLowerCase();

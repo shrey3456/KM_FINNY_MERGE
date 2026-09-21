@@ -389,6 +389,27 @@ app.use((req, res, next) => {
     // so only edits made from now on are marked.
     await pool.query(`ALTER TABLE order_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
     await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
+    // The retired "load-operations" page grant. "Load Operations" in the sidebar is the /loading
+    // page (key "loading"); the old /load-operations screen carried the same name in the User
+    // Management list, so granting the obvious one gave a page that is not in the sidebar at all
+    // and nothing appeared. That entry is gone from the grantable list (shared/pageKeys.ts), which
+    // also means it can no longer be UNticked by hand — so any copy still sitting on a user is
+    // taken out here. Nothing is granted in its place: whoever should have Load Operations gets it
+    // by ticking it, now that the name in the list matches the sidebar.
+    for (const column of ['allowed_pages', 'page_write_access']) {
+      const { rowCount } = await pool.query(`
+        UPDATE users
+        SET ${column} = COALESCE((
+          SELECT jsonb_agg(value)::text
+          FROM jsonb_array_elements_text(${column}::jsonb) AS value
+          WHERE value <> 'load-operations'
+        ), '[]')
+        WHERE ${column} IS NOT NULL
+          AND TRIM(${column}) LIKE '[%'
+          AND ${column} LIKE '%"load-operations"%'`);
+      if (rowCount) console.log(`[migration] removed the retired load-operations grant from ${rowCount} user(s) (${column})`);
+    }
+
     // hidden_in_history — "Remove entry" on the Scan History page, allowed only on a row that is
     // already VOIDED or on a stock line written by Settings > Remove All Operations Data (see the
     // endpoint, which re-checks that rule). The row itself is KEPT on purpose: Overall Stock sums
