@@ -307,11 +307,10 @@ export default function OrderImport() {
   // operational roles who shouldn't be the ones deciding to close an order out. Mirrors
   // Scan.tsx's canCompletePart and the server's requireCompleteAccess exactly.
   const canCompleteOrder = isAdminOrSuper || !["loader", "helper", "driver", "scanner"].includes(designation);
-  // The Edit (pencil) button on Available/Active rows is gated by its OWN page key —
-  // "order-import-edit" — independent of Order Import's own access above, exactly as it was
-  // when this lived on its own page. hasPageViewAccess just controls whether the button is
-  // shown at all; EditCsvDialog itself further disables its inputs unless hasPageWriteAccess.
-  const canViewCsvEdit = hasPageViewAccess("order-import-edit");
+  // The Edit (pencil) button on Available/Active rows follows Order Management itself: the page
+  // grant shows the button, and EditCsvDialog disables its inputs without WRITE access on the
+  // same page. It used to carry a separate "order-import-edit" key for the identical split.
+  const canViewCsvEdit = hasPageViewAccess("order-import");
 
   // Form state
   const [plant, setPlant] = useState("");

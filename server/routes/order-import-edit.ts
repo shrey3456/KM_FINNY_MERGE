@@ -40,7 +40,7 @@ router.use('/order-import-edit', (_req: Request, res: Response, next) => {
 });
 
 // GET /api/order-import-edit/sessions?date=YYYY-MM-DD
-router.get('/order-import-edit/sessions', requirePageAccess('order-import-edit'), async (req: Request, res: Response) => {
+router.get('/order-import-edit/sessions', requirePageAccess('order-import'), async (req: Request, res: Response) => {
   try {
     const date = String(req.query.date ?? '');
     if (!date) return res.status(400).json({ message: 'date is required' });
@@ -89,7 +89,7 @@ router.get('/order-import-edit/sessions', requirePageAccess('order-import-edit')
 });
 
 // GET /api/order-import-edit/sessions/:id/items
-router.get('/order-import-edit/sessions/:id/items', requirePageAccess('order-import-edit'), async (req: Request, res: Response) => {
+router.get('/order-import-edit/sessions/:id/items', requirePageAccess('order-import'), async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
@@ -143,7 +143,7 @@ type EditItemInput = {
 };
 
 // PUT /api/order-import-edit/sessions/:id
-router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import-edit'), async (req: Request, res: Response) => {
+router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 

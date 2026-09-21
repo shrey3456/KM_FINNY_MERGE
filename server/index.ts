@@ -372,6 +372,15 @@ app.use((req, res, next) => {
     // so only edits made from now on are marked.
     await pool.query(`ALTER TABLE order_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
     await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
+    // hidden_in_history — "Remove entry" on the Scan History page, allowed only on a row that is
+    // already VOIDED or on a stock line written by Settings > Remove All Operations Data (see the
+    // endpoint, which re-checks that rule). The row itself is KEPT on purpose: Overall Stock sums
+    // its Opening/Purchase/Sale straight out of stock_movements, and a voided scan is what proves
+    // the void happened — deleting either would quietly change numbers that are already right.
+    // The flag only takes the line out of the Scan History list, and Activities records who did it.
+    for (const table of ['order_scan_events', 'loading_scan_events', 'unload_scan_events', 'stock_movements']) {
+      await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS hidden_in_history BOOLEAN DEFAULT false`);
+    }
     await pool.query(`
       UPDATE loading_scan_events lse SET is_adjust = true
       WHERE lse.is_adjust IS NOT TRUE AND (
