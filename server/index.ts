@@ -225,6 +225,23 @@ app.use((req, res, next) => {
         ADD COLUMN IF NOT EXISTS voided_at TIMESTAMP,
         ADD COLUMN IF NOT EXISTS void_reason TEXT
     `);
+    // Per-plant breakdown of a loading_scan_events row's stock debit — see server/lib/statePool.ts.
+    // Loading now pools stock across every plant in the same state (plants.state), so a single
+    // scan can pull from more than one plant's product_plant_stock row; this is what lets a void
+    // or reset credit each contributing plant back exactly, instead of assuming it all came from
+    // the loading plant's own row.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loading_stock_pulls (
+        id SERIAL PRIMARY KEY,
+        loading_scan_event_id INTEGER NOT NULL REFERENCES loading_scan_events(id) ON DELETE CASCADE,
+        source_plant TEXT NOT NULL,
+        qty INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_loading_stock_pulls_event_id ON loading_stock_pulls(loading_scan_event_id)
+    `);
     // Unloading (server/routes/unloading.ts) — vehicle-wise receiving. See unloadImportSessions'
     // comment in shared/schema.ts: FIFO grouping like order_import_sessions, but scoped one level
     // deeper by vehicleNumber (plant + vehicleNumber + orderDate), so one CSV upload can span
