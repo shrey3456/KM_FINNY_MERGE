@@ -66,7 +66,7 @@ type EditCsvDialogProps = {
   // opened from a vehicle chip in OrderImport.tsx's own "Unloading" mode CSV History). Both
   // expose the identical items/save shape (server/routes/unloading-edit.ts mirrors
   // order-import-edit.ts's barcode-relink/quantity-resplit fixes), gated by the SAME
-  // "order-import-edit" permission either way — see unloading-edit.ts's own comment for why.
+  // Order Management permission either way — see unloading-edit.ts's own comment for why.
   // The one real difference: unloading items have no "Expected Pallets" field (Unloading doesn't
   // store one — pallet size is resolved live from the product/plant state), so that column is
   // hidden in unloading mode.
@@ -76,13 +76,14 @@ type EditCsvDialogProps = {
 // Fixes a mistake in an already-uploaded, not-yet-completed CSV (e.g. one wrong barcode)
 // without deleting and re-uploading the whole file — opened from a row's Edit button in
 // OrderImport.tsx's Available/Active tabs (and, via basePath="unloading", a vehicle chip in
-// its own "Unloading" mode CSV History). Gated by its own "order-import-edit" page key
-// (allowedPages = read-only view, pageWriteAccess = can save), independent of the caller's
-// own Order Import/Unloading access, plus the same plant scoping enforced server-side.
+// its own "Unloading" mode CSV History). Gated by Order Management's own grant — the page to
+// see it, WRITE access on that page to save — plus the same plant scoping enforced server-side.
+// It used to have a separate "order-import-edit" key, which meant granting the same feature
+// twice, in two lists that had to agree.
 export default function EditCsvDialog({ sessionId, onClose, basePath = "order-import" }: EditCsvDialogProps) {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const canWrite = hasPageWriteAccess("order-import-edit");
+  const canWrite = hasPageWriteAccess("order-import");
   const isUnloading = basePath === "unloading";
 
   const [rows, setRows] = useState<EditableItem[]>([]);

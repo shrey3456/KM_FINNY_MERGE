@@ -256,7 +256,7 @@ function Router() {
     <Layout onLogout={handleLogout}>
       <Switch>
         <Route path="/" component={Home} />
-        <ProtectedRoute path="/notion-inventory" component={NotionInventory} requireAdmin={true} requiredPage="notion-inventory" />
+        <ProtectedRoute path="/notion-inventory" component={NotionInventory} requiredPage="notion-inventory" />
         <ProtectedRoute path="/vehicle-master" component={VehicleMaster} requiredPage="vehicle-master" />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
         <ProtectedRoute path="/load-operations" component={LoadOperations} requiredPage="load-operations" />

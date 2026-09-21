@@ -9,9 +9,10 @@ import { resplitUnloadEventsExtraFlag } from '../lib/unloadRemap';
 // UNLOADING EDIT — fixes a mistake in an already-uploaded, not-yet-completed unload CSV (one
 // vehicle's item list) without deleting and re-uploading. Opened from a vehicle chip in the
 // expanded CSV History row on the Order Import page's own "Unloading" mode
-// (client/src/pages/OrderImport.tsx). Deliberately reuses the SAME "order-import-edit" page key
-// Order Import's own edit feature is gated by, rather than a separate permission — whoever can
-// already edit an Order Import CSV from that page can edit an Unloading one there too.
+// (client/src/pages/OrderImport.tsx). Deliberately answers to the SAME permission Order Import's
+// own edit feature does — Order Management (page grant to open, write access to save) — rather
+// than a separate one: whoever can already edit an Order Import CSV from that page can edit an
+// Unloading one there too.
 //
 // Mirrors server/routes/order-import-edit.ts's two real correctness fixes, adapted to Unloading's
 // simpler (no cached order_scan_items-style progress table — expected/remaining/isComplete are
@@ -36,7 +37,7 @@ router.use('/unloading-edit', (_req: Request, res: Response, next) => {
 });
 
 // GET /api/unloading-edit/sessions/:id/items
-router.get('/unloading-edit/sessions/:id/items', requirePageAccess('order-import-edit'), async (req: Request, res: Response) => {
+router.get('/unloading-edit/sessions/:id/items', requirePageAccess('order-import'), async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
@@ -82,7 +83,7 @@ type EditItemInput = {
 };
 
 // PUT /api/unloading-edit/sessions/:id
-router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import-edit'), async (req: Request, res: Response) => {
+router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
 

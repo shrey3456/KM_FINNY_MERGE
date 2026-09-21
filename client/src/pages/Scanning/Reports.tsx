@@ -5,7 +5,7 @@ import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
-  History, X, RefreshCw, FileDown, ChevronDown, ChevronLeft,
+  History, X, RefreshCw, FileDown, ChevronDown, ChevronLeft, ChevronRight,
   Loader2, Upload, Trash2, Plus, ListFilter, Filter, CalendarDays, Pencil,
 } from "lucide-react";
 import { useAuth } from "../../hooks/use-auth";
@@ -24,14 +24,14 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
-import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
 import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
@@ -139,7 +139,8 @@ const HISTORY_OPTIONAL_COLUMNS = ["barcode", "orderNumber", "order", "plant", "q
 
 // Rows per request. One page per view keeps the load to a single query — see the note on the
 // query below for why this page is paginated rather than loading the whole history.
-const HISTORY_PAGE_SIZE = 20;
+const HISTORY_PAGE_SIZE = 20;               // the default; the footer's "Show" picker changes it
+const HISTORY_PAGE_SIZE_OPTIONS = [20, 50, 100] as const;  // 100 is the server's own cap on `limit`
 
 // Filters survive leaving the page and coming back — they live in component state, so navigating
 // away used to drop whatever the history had been narrowed to. sessionStorage rather than
@@ -209,17 +210,26 @@ function downloadPdf(filename: string, title: string, rows: Array<Array<string |
 // never also triggers the header's click-to-sort) but picks from a small fixed option list
 // instead of the generic Values/Condition engine, since these aren't real table columns with
 // their own accessor — they're server-side exact-match params.
+// `multiple` turns the list into a checklist: `value` is then a comma-separated set ("extra,adjust")
+// and a row matching ANY of the ticked types passes (the server reads it the same way). The popover
+// stays open while ticking, since picking several is the point.
 function SimpleFilterHeaderButton({
-  label, options, value, onChange, onClear,
+  label, options, value, onChange, onClear, multiple,
 }: {
   label: string;
   options: { value: string; label: string }[];
   value: string;
   onChange: (value: string) => void;
   onClear: () => void;
+  multiple?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const active = !!value;
+  const selected = value ? value.split(",").filter(Boolean) : [];
+  const toggle = (option: string) => {
+    const next = selected.includes(option) ? selected.filter((s) => s !== option) : [...selected, option];
+    onChange(next.join(","));
+  };
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -238,14 +248,24 @@ function SimpleFilterHeaderButton({
           <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{label}</p>
           <div className="space-y-0.5">
             {options.map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                onClick={() => { onChange(o.value); setOpen(false); }}
-                className={`block w-full rounded px-2 py-1.5 text-left text-xs ${value === o.value ? "bg-[#001d6e] text-white" : "text-gray-700 hover:bg-gray-50"}`}
-              >
-                {o.label}
-              </button>
+              multiple ? (
+                <label
+                  key={o.value}
+                  className={`flex w-full cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-left text-xs ${selected.includes(o.value) ? "bg-[#001d6e]/10 text-[#001d6e]" : "text-gray-700 hover:bg-gray-50"}`}
+                >
+                  <Checkbox checked={selected.includes(o.value)} onCheckedChange={() => toggle(o.value)} />
+                  {o.label}
+                </label>
+              ) : (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => { onChange(o.value); setOpen(false); }}
+                  className={`block w-full rounded px-2 py-1.5 text-left text-xs ${value === o.value ? "bg-[#001d6e] text-white" : "text-gray-700 hover:bg-gray-50"}`}
+                >
+                  {o.label}
+                </button>
+              )
             ))}
           </div>
           {active && (
@@ -294,6 +314,27 @@ const Reports = () => {
   const canVoidUnloadEvent = isAdmin || hasPageWriteAccess("unloading");
   const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
   const [voidReason, setVoidReason] = useState("");
+  // "Remove entry" — takes a finished row out of this list for good. Offered on exactly two
+  // kinds of row, and the server re-checks both: a scan that is already VOIDED (it counts
+  // towards nothing any more), and a stock line written by Settings > Remove All Operations
+  // Data (the minus entries that removal leaves behind). A live scan or somebody's manual
+  // Stock Adjust is never offered — those still mean something.
+  const canRemoveEntry = isAdmin || hasPageWriteAccess("scan-history");
+  const isRemovableEntry = (row: ScanHistoryItem) =>
+    !!row.voided
+    || (row.sourceKind === "stock" && (row.orderName ?? "").startsWith("Remove operations data (Settings)"));
+  const [removeTarget, setRemoveTarget] = useState<ScanHistoryItem | null>(null);
+  const removeMutation = useMutation({
+    mutationFn: (row: ScanHistoryItem) =>
+      apiRequest("POST", "/api/scan-sessions/reports/scan-history/remove", { id: row.id }, false, true),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
+      setRemoveTarget(null);
+      toast({ title: "Entry removed", description: "Gone from this list. The record stays in Activities." });
+    },
+    onError: (err: any) => toast({ title: "Could not remove the entry", description: err?.message, variant: "destructive" }),
+  });
+
   const voidMutation = useMutation({
     mutationFn: (payload: { id: number; reason: string; isDispatch?: boolean; isUnload?: boolean }) =>
       apiRequest(
@@ -363,6 +404,9 @@ const Reports = () => {
   // Seeded from whatever was left applied last time — see HISTORY_FILTERS_KEY.
   const [historySearch,  setHistorySearch]  = useState(() => readSavedHistoryFilters().search ?? "");
   const [historyPage,    setHistoryPage]    = useState(1);
+  // Kept per browser like the other filters, so a person who works in 100-row pages gets them
+  // back next time instead of re-picking on every visit.
+  const [historyPageSize, setHistoryPageSize] = usePersistentFilter<number>("scanHistory:pageSize", HISTORY_PAGE_SIZE);
   const [historyExporting, setHistoryExporting] = useState<string | null>(null);
   // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Overall Stock's
   // Date (kept separate from the generic column engine below since each is a simple exact-match
@@ -393,22 +437,22 @@ const Reports = () => {
   // filter only offers what can actually occur there (matched what was expected, or went over).
   const TYPE_OPTIONS = historySource === "dispatch"
     ? [
-        { value: "regular", label: "Load Regular only" },
-        { value: "extra", label: "Load Extra only" },
-        { value: "adjust", label: "Load Adjust only" },
+        { value: "regular", label: "Load Regular" },
+        { value: "extra", label: "Load Extra" },
+        { value: "adjust", label: "Load Adjust" },
       ]
     : historySource === "unload"
     ? [
-        { value: "regular", label: "Unload Regular only" },
-        { value: "extra", label: "Unload Extra only" },
-        { value: "adjust", label: "Unload Adjust only" },
+        { value: "regular", label: "Unload Regular" },
+        { value: "extra", label: "Unload Extra" },
+        { value: "adjust", label: "Unload Adjust" },
       ]
     : [
-        { value: "regular", label: "Scan Regular only" },
-        { value: "extra", label: "Scan Extra only" },
-        { value: "empty", label: "Scan Empty Box only" },
-        { value: "exchange", label: "Stock Exchange only" },
-        { value: "adjust", label: "Adjust only (Scan + Stock)" },
+        { value: "regular", label: "Scan Regular" },
+        { value: "extra", label: "Scan Extra" },
+        { value: "empty", label: "Scan Empty Box" },
+        { value: "exchange", label: "Stock Exchange" },
+        { value: "adjust", label: "Adjust (Scan + Stock)" },
       ];
 
   // Date filter — same control/encoding as Overall Stock: the stored value is either a single
@@ -462,7 +506,11 @@ const Reports = () => {
       return `Scan Date: ${value}`;
     }
     if (field === "scanner") return `Scanned By: ${value}`;
-    if (field === "type") return `Type: ${TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value}`;
+    if (field === "type") {
+      const picked = value.split(",").filter(Boolean);
+      const labels = picked.map((v) => TYPE_OPTIONS.find((o) => o.value === v)?.label ?? v);
+      return `Type: ${labels.join(", ") || value}`;
+    }
     return value;
   };
 
@@ -757,7 +805,7 @@ const Reports = () => {
   // corrected page-1 request landed a moment later. Comparing a signature of the filter values
   // at render time (not in an effect) means the very first render after a filter change already
   // computes page 1 for the query, so that wrong intermediate request never happens at all.
-  const historyFilterSignature = JSON.stringify([historySource, selectedDate, historySearch, historyScanner, historyType, filtersJson]);
+  const historyFilterSignature = JSON.stringify([historySource, selectedDate, historySearch, historyScanner, historyType, filtersJson, historyPageSize]);
   const lastHistoryFilterSignatureRef = useRef(historyFilterSignature);
   const effectiveHistoryPage = historyFilterSignature !== lastHistoryFilterSignatureRef.current ? 1 : historyPage;
   useEffect(() => {
@@ -784,7 +832,7 @@ const Reports = () => {
     }
   }, [historySearch, activeFilters, columnConditions]);
 
-  const historyOffset = (effectiveHistoryPage - 1) * HISTORY_PAGE_SIZE;
+  const historyOffset = (effectiveHistoryPage - 1) * historyPageSize;
   const historyUrl = buildQueryUrl("/api/scan-sessions/reports/scan-history", {
     source:  historySource,
     from:    fromDate       || undefined,
@@ -793,7 +841,7 @@ const Reports = () => {
     scanner: historyScanner || undefined,
     type:    historyType    || undefined,
     filters: filtersJson,
-    limit:   HISTORY_PAGE_SIZE,
+    limit:   historyPageSize,
     offset:  historyOffset,
   });
 
@@ -801,11 +849,11 @@ const Reports = () => {
     useQuery<ScanHistoryResponse>({
       queryKey: [
         "/api/scan-sessions/reports/scan-history",
-        historySource, selectedDate, historySearch, historyScanner, historyType, filtersJson, effectiveHistoryPage,
+        historySource, selectedDate, historySearch, historyScanner, historyType, filtersJson, effectiveHistoryPage, historyPageSize,
       ],
       queryFn: async () => {
         const r = await apiRequest("GET", historyUrl, undefined, false, true);
-        return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: HISTORY_PAGE_SIZE, offset: 0 };
+        return r ?? { items: [], total: 0, totalBoxes: 0, totalPallets: 0, extraCount: 0, scanners: [], limit: historyPageSize, offset: 0 };
       },
       // Only auto-polls on page 1. This page sorts newest-first, and new scans keep landing at
       // the top in a busy warehouse — every new one pushes page 2+'s fixed OFFSET window down
@@ -823,6 +871,8 @@ const Reports = () => {
   const historyTotal        = historyData?.total ?? 0;
   const historyScanners     = historyData?.scanners ?? [];
   const historyHasMore      = historyOffset + historyItems.length < historyTotal;
+  // Page count for the numbered pager — at least one, so an empty result still renders "1".
+  const historyPageCount    = Math.max(1, Math.ceil(historyTotal / historyPageSize));
 
   // Export must cover every row matching the current filters — the server caps `limit` at 100
   // (see /reports/scan-history), so this pages through with the SAME filters until it has
@@ -1034,7 +1084,8 @@ const Reports = () => {
             label="Type"
             options={TYPE_OPTIONS}
             value={historyType}
-            onChange={(v) => upsertSimpleFilter("type", v)}
+            multiple
+            onChange={(v) => (v ? upsertSimpleFilter("type", v) : clearSimpleFilter("type"))}
             onClear={() => clearSimpleFilter("type")}
           />
         </span>
@@ -1054,7 +1105,7 @@ const Reports = () => {
       cellClassName: "whitespace-nowrap text-gray-500",
       render: (row) => (row.scannedAt ? format(new Date(row.scannedAt), "MMM d, h:mm a") : dash),
     },
-    ...(canVoidScan || canVoidLoadEvent || canVoidUnloadEvent
+    ...(canVoidScan || canVoidLoadEvent || canVoidUnloadEvent || canRemoveEntry
       ? [
           {
             id: "edit",
@@ -1071,6 +1122,21 @@ const Reports = () => {
                   onClick={() => { setEditTarget(row); setEditQty(String(row.totalQty ?? 0)); setEditStv(row.stv ?? ""); }}
                   title="Edit this scan">
                   <Pencil className="h-3.5 w-3.5" />
+                </Button>
+              ),
+          } as DataTableColumn<ScanHistoryItem>,
+          {
+            id: "remove",
+            header: "Remove",
+            hideable: false,
+            width: 64,
+            align: "center" as const,
+            render: (row: ScanHistoryItem) =>
+              canRemoveEntry && isRemovableEntry(row) && (
+                <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                  onClick={() => setRemoveTarget(row)}
+                  title={row.voided ? "Remove this voided entry from history" : "Remove this leftover stock entry from history"}>
+                  <X className="h-3.5 w-3.5" />
                 </Button>
               ),
           } as DataTableColumn<ScanHistoryItem>,
@@ -1289,12 +1355,27 @@ const Reports = () => {
                       </button>
                       <div className="space-y-1">
                         <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Type</label>
-                        <Select onValueChange={(v) => { upsertSimpleFilter("type", v); setFilterPickerOpen(false); setFilterPickerKey(""); }}>
-                          <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Choose a type…" /></SelectTrigger>
-                          <SelectContent>
-                            {TYPE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-                          </SelectContent>
-                        </Select>
+                        {/* Tick as many as you like — the list stays open and a row matching any of
+                            them is shown. */}
+                        <div className="space-y-0.5">
+                          {TYPE_OPTIONS.map((o) => {
+                            const picked = historyType ? historyType.split(",").filter(Boolean) : [];
+                            const on = picked.includes(o.value);
+                            return (
+                              <label key={o.value} className={`flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs ${on ? "bg-[#001d6e]/10 text-[#001d6e]" : "text-gray-700 hover:bg-gray-50"}`}>
+                                <Checkbox
+                                  checked={on}
+                                  onCheckedChange={() => {
+                                    const next = on ? picked.filter((v) => v !== o.value) : [...picked, o.value];
+                                    if (next.length) upsertSimpleFilter("type", next.join(","));
+                                    else clearSimpleFilter("type");
+                                  }}
+                                />
+                                {o.label}
+                              </label>
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
                   ) : pickedFilterColumn ? (
@@ -1352,12 +1433,25 @@ const Reports = () => {
                         {editFilterKey === "type" && (
                           <div className="space-y-1">
                             <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Type</label>
-                            <Select value={historyType} onValueChange={(v) => { upsertSimpleFilter("type", v); setEditFilterKey(""); }}>
-                              <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Choose a type…" /></SelectTrigger>
-                              <SelectContent>
-                                {TYPE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-                              </SelectContent>
-                            </Select>
+                            <div className="space-y-0.5">
+                              {TYPE_OPTIONS.map((o) => {
+                                const picked = historyType ? historyType.split(",").filter(Boolean) : [];
+                                const on = picked.includes(o.value);
+                                return (
+                                  <label key={o.value} className={`flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs ${on ? "bg-[#001d6e]/10 text-[#001d6e]" : "text-gray-700 hover:bg-gray-50"}`}>
+                                    <Checkbox
+                                      checked={on}
+                                      onCheckedChange={() => {
+                                        const next = on ? picked.filter((v) => v !== o.value) : [...picked, o.value];
+                                        if (next.length) upsertSimpleFilter("type", next.join(","));
+                                        else clearSimpleFilter("type");
+                                      }}
+                                    />
+                                    {o.label}
+                                  </label>
+                                );
+                              })}
+                            </div>
                           </div>
                         )}
                         {editFilterKey === "date" && (
@@ -1462,11 +1556,13 @@ const Reports = () => {
                         setHistoryExporting(fmt);
                         try {
                           const rows = historyExportRows(await fetchAllHistoryItems());
-                          const dateSuffix = dateValue ? `-${fromDate}${dateIsRange ? `_to_${toDate}` : ""}` : "";
-                          const suffix = `${dateSuffix}-${format(new Date(), "yyyy-MM-dd")}`;
-                          if (fmt === "CSV")   downloadCsv(`scan-history${suffix}.csv`, rows);
-                          if (fmt === "Excel") downloadExcel(`scan-history${suffix}.xlsx`, rows);
-                          if (fmt === "PDF")   downloadPdf(`scan-history${suffix}.pdf`, "Scan History", rows);
+                          // Named the way the page is, so a downloaded file reads as "Scan History"
+                          // in the folder rather than "scan-history".
+                          const dateSuffix = dateValue ? ` - ${fromDate}${dateIsRange ? ` to ${toDate}` : ""}` : "";
+                          const name = `Scan History${dateSuffix} - ${format(new Date(), "yyyy-MM-dd")}`;
+                          if (fmt === "CSV")   downloadCsv(`${name}.csv`, rows);
+                          if (fmt === "Excel") downloadExcel(`${name}.xlsx`, rows);
+                          if (fmt === "PDF")   downloadPdf(`${name}.pdf`, "Scan History", rows);
                         } catch (err: any) {
                           toast({ title: `${fmt} export failed`, description: err?.message, variant: "destructive" });
                         } finally {
@@ -1543,17 +1639,56 @@ const Reports = () => {
               <tfoot>
                 <tr>
                   <td colSpan={ctx.columnCount} className="border-t border-gray-300 bg-white px-4 py-2.5">
-                    <div className="flex items-center justify-between text-xs text-gray-500">
+                    {/* Three tracks so the page numbers sit in the TRUE centre of the row: with a
+                        plain justify-between they would only look centred when the text on the
+                        left happened to match the picker on the right. */}
+                    <div className="grid grid-cols-1 items-center gap-2 text-xs text-gray-500 sm:grid-cols-[1fr_auto_1fr]">
                       <span>
                         {historyTotal > 0
                           ? `Showing ${historyOffset + 1}–${Math.min(historyOffset + historyItems.length, historyTotal)} of ${historyTotal.toLocaleString()} events`
                           : "No events"}
                       </span>
-                      <div className="flex gap-2">
-                        <Button variant="outline" size="sm" className="rounded-xl" disabled={historyPage <= 1}
-                          onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                        <Button variant="outline" size="sm" className="rounded-xl" disabled={!historyHasMore}
-                          onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
+                      {/* Numbered pages, the same buildPageList pattern every other table here
+                          uses — Prev/Next alone gave no idea where you were in 40 pages of events. */}
+                      <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
+                        <Button variant="outline" size="sm" className="h-8 w-8 rounded-xl p-0" disabled={historyPage <= 1}
+                          onClick={() => setHistoryPage((pg) => Math.max(1, pg - 1))} aria-label="Previous page">
+                          <ChevronLeft className="h-4 w-4" />
+                        </Button>
+                        {buildPageList(effectiveHistoryPage - 1, historyPageCount).map((pg, i) =>
+                          pg === "gap" ? (
+                            <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-gray-400">…</span>
+                          ) : (
+                            <Button
+                              key={pg}
+                              variant={pg === effectiveHistoryPage - 1 ? "default" : "outline"}
+                              size="sm"
+                              className={`h-8 min-w-8 rounded-xl px-2 tabular-nums ${pg === effectiveHistoryPage - 1 ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
+                              onClick={() => setHistoryPage(pg + 1)}
+                              aria-label={`Page ${pg + 1}`}
+                              aria-current={pg === effectiveHistoryPage - 1 ? "page" : undefined}
+                            >
+                              {pg + 1}
+                            </Button>
+                          ),
+                        )}
+                        <Button variant="outline" size="sm" className="h-8 w-8 rounded-xl p-0" disabled={!historyHasMore}
+                          onClick={() => setHistoryPage((pg) => pg + 1)} aria-label="Next page">
+                          <ChevronRight className="h-4 w-4" />
+                        </Button>
+                      </nav>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <span className="whitespace-nowrap">Show</span>
+                        {/* The shared Select, not a native one: a native list is drawn by the
+                            browser and would stay upright on a rotated kiosk screen. */}
+                        <Select value={String(historyPageSize)} onValueChange={(v) => { setHistoryPageSize(Number(v)); setHistoryPage(1); }}>
+                          <SelectTrigger className="h-7 w-[72px] rounded-lg text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {HISTORY_PAGE_SIZE_OPTIONS.map((n) => (
+                              <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </div>
                     </div>
                   </td>
@@ -1621,17 +1756,49 @@ const Reports = () => {
 
             {/* The table's pager lives in its <tfoot>, which is hidden with the table — so the
                 card list needs its own or a phone can only ever see page 1. */}
-            <div className="flex items-center justify-between gap-2 border-t border-gray-200 px-4 py-3">
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-t border-gray-200 px-4 py-3">
               <span className="text-xs text-gray-500">
                 {historyTotal > 0
                   ? `${(historyOffset + 1).toLocaleString()}–${Math.min(historyOffset + historyItems.length, historyTotal).toLocaleString()} of ${historyTotal.toLocaleString()}`
                   : "No events"}
               </span>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" className="h-8 rounded-xl" disabled={historyPage <= 1}
-                  onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                <Button variant="outline" size="sm" className="h-8 rounded-xl" disabled={!historyHasMore}
-                  onClick={() => setHistoryPage((p) => p + 1)}>Next</Button>
+              {/* Same numbered pager as the table's, narrower window so it fits a phone. */}
+              <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Pagination">
+                <Button variant="outline" size="sm" className="h-8 w-8 rounded-xl p-0" disabled={historyPage <= 1}
+                  onClick={() => setHistoryPage((pg) => Math.max(1, pg - 1))} aria-label="Previous page">
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                {buildPageList(effectiveHistoryPage - 1, historyPageCount, 0).map((pg, i) =>
+                  pg === "gap" ? (
+                    <span key={`gap-${i}`} aria-hidden className="select-none px-1 text-xs text-gray-400">…</span>
+                  ) : (
+                    <Button
+                      key={pg}
+                      variant={pg === effectiveHistoryPage - 1 ? "default" : "outline"}
+                      size="sm"
+                      className={`h-8 min-w-8 rounded-xl px-2 text-xs tabular-nums ${pg === effectiveHistoryPage - 1 ? "bg-[#001d6e] text-white hover:bg-[#00154b]" : ""}`}
+                      onClick={() => setHistoryPage(pg + 1)}
+                      aria-label={`Page ${pg + 1}`}
+                      aria-current={pg === effectiveHistoryPage - 1 ? "page" : undefined}
+                    >
+                      {pg + 1}
+                    </Button>
+                  ),
+                )}
+                <Button variant="outline" size="sm" className="h-8 w-8 rounded-xl p-0" disabled={!historyHasMore}
+                  onClick={() => setHistoryPage((pg) => pg + 1)} aria-label="Next page">
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </nav>
+              <div className="flex items-center justify-end gap-1.5 text-xs text-gray-500">
+                <Select value={String(historyPageSize)} onValueChange={(v) => { setHistoryPageSize(Number(v)); setHistoryPage(1); }}>
+                  <SelectTrigger className="h-7 w-[64px] rounded-lg text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {HISTORY_PAGE_SIZE_OPTIONS.map((n) => (
+                      <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           </div>
@@ -1745,6 +1912,36 @@ const Reports = () => {
 
     {/* Void scan confirmation — admin or scan-history write access. Keeps the row in history (never deleted), marked
         Voided; excluded from totals and reversed out of stock. */}
+    <Dialog open={!!removeTarget} onOpenChange={(o) => { if (!o) setRemoveTarget(null); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Remove this entry from history?</DialogTitle>
+          <DialogDescription className="space-y-2 pt-1">
+            <p>
+              <span className="font-semibold text-gray-900">{removeTarget?.itemName ?? removeTarget?.barcode ?? "This entry"}</span>
+              {removeTarget ? ` · ${scanTypeLabel(removeTarget).label} · ${removeTarget.totalQty}` : ""}
+            </p>
+            <p className="text-sm">
+              It disappears from this list. Stock is not touched — a voided scan was already
+              reversed, and a removal's stock line is what explains the change in Stock Overview,
+              so both are kept in the ledger. Who removed it is recorded in Activities.
+            </p>
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={() => setRemoveTarget(null)} disabled={removeMutation.isPending}>Cancel</Button>
+          <Button
+            className="bg-red-600 text-white hover:bg-red-700"
+            disabled={removeMutation.isPending}
+            onClick={() => removeTarget && removeMutation.mutate(removeTarget)}
+          >
+            {removeMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Remove entry
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <Dialog open={!!voidTarget} onOpenChange={(o) => { if (!o) { setVoidTarget(null); setVoidReason(""); } }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>

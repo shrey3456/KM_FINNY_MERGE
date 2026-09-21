@@ -780,6 +780,21 @@ router.get('/reports/notion-config', (_req: Request, res: Response) => {
 // exchanges only ever ADD rows to what this endpoint already returned before they existed.
 const SCAN_HISTORY_COMBINED_SOURCE = `
   (
+    -- Item name / Sr. No / order date / user name used to be looked up with a correlated
+    -- sub-SELECT per row — and because products.barcode is matched through LOWER(TRIM(...)), no
+    -- index could help, so every row of every branch meant a fresh scan of products. On a page
+    -- that also polls itself, that was the lag. The same lookups are prepared once here and
+    -- joined, which turns thousands of little scans into one hash join per branch.
+    WITH product_by_barcode AS (
+      SELECT LOWER(TRIM(barcode)) AS bkey, MIN(new_sr) AS new_sr, MIN(name) AS name
+      FROM products WHERE barcode IS NOT NULL GROUP BY LOWER(TRIM(barcode))
+    ),
+    slip_order_date AS (
+      SELECT order_number, MIN(order_date) AS order_date FROM proforma_slips GROUP BY order_number
+    ),
+    user_name AS (
+      SELECT user_code, MIN(name) AS name FROM users GROUP BY user_code
+    )
     SELECT
       ose.id,
       ose.barcode,
@@ -808,14 +823,16 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       ose.voided_at        AS "voidedAt",
       ose.void_reason      AS "voidReason",
       -- Inventory Sr. No for this item (products.new_sr, matched by barcode) so the same item
-      -- always carries the same Sr. No here as on the Inventory page. LIMIT 1 avoids row
-      -- duplication if a barcode ever appears on more than one product row.
-      (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(ose.barcode)) LIMIT 1) AS "srNo",
+      -- always carries the same Sr. No here as on the Inventory page. One row per barcode, so a
+      -- barcode sitting on more than one product row can never duplicate the event.
+      pb.new_sr            AS "srNo",
       ois.csv_file_name    AS "orderName",
       ois.order_date       AS "orderDate",
       ois.plant            AS "plant"
     FROM order_scan_events ose
     JOIN order_import_sessions ois ON ois.id = ose.session_id
+    LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ose.barcode))
+    WHERE NOT COALESCE(ose.hidden_in_history, false)
 
     UNION ALL
 
@@ -825,10 +842,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       -- Prefer the stable product_id link (set at write time — see its comment in
       -- shared/schema.ts); a barcode-only lookup here would show nothing once the product's
       -- barcode is later edited (most commonly via the Notion inventory sync).
-      COALESCE(
-        (SELECT p.name FROM products p WHERE p.id = sm.product_id),
-        (SELECT p.name FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1)
-      ) AS "itemName",
+      COALESCE(pid.name, pb.name) AS "itemName",
       NULL::integer AS pallets,
       sm.qty AS "totalQty",
       NULL::integer AS "itemsPerPallet",
@@ -843,20 +857,21 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
-      (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "scannedByName",
+      un.name AS "scannedByName",
       sm.created_at AS "scannedAt",
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
-      COALESCE(
-        (SELECT p.new_sr FROM products p WHERE p.id = sm.product_id),
-        (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1)
-      ) AS "srNo",
+      COALESCE(pid.new_sr, pb.new_sr) AS "srNo",
       sm.reason AS "orderName",
       NULL::text AS "orderDate",
       sm.plant AS "plant"
     FROM stock_movements sm
+    LEFT JOIN products pid ON pid.id = sm.product_id
+    LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(sm.barcode))
+    LEFT JOIN user_name un ON un.user_code = sm.created_by_code
     WHERE sm.type = 'exchange'
+      AND NOT COALESCE(sm.hidden_in_history, false)
 
     UNION ALL
 
@@ -889,11 +904,14 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       COALESCE(lse.voided, false) AS voided,
       lse.voided_at         AS "voidedAt",
       lse.void_reason       AS "voidReason",
-      (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(lse.barcode)) LIMIT 1) AS "srNo",
+      pb.new_sr AS "srNo",
       lse.order_number AS "orderName",
-      (SELECT ps.order_date::text FROM proforma_slips ps WHERE ps.order_number = lse.order_number LIMIT 1) AS "orderDate",
+      sod.order_date::text AS "orderDate",
       lse.plant AS "plant"
     FROM loading_scan_events lse
+    LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(lse.barcode))
+    LEFT JOIN slip_order_date sod ON sod.order_number = lse.order_number
+    WHERE NOT COALESCE(lse.hidden_in_history, false)
 
     UNION ALL
 
@@ -925,12 +943,14 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       COALESCE(use.voided, false) AS voided,
       use.voided_at         AS "voidedAt",
       use.void_reason       AS "voidReason",
-      (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(use.barcode)) LIMIT 1) AS "srNo",
+      pb.new_sr AS "srNo",
       use.vehicle_number AS "orderName",
       uis.order_date AS "orderDate",
       use.plant AS "plant"
     FROM unload_scan_events use
     JOIN unload_import_sessions uis ON uis.id = use.session_id
+    LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(use.barcode))
+    WHERE NOT COALESCE(use.hidden_in_history, false)
 
     UNION ALL
 
@@ -946,10 +966,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
     SELECT
       (5000000000 + sm.id) AS id,
       sm.barcode,
-      COALESCE(
-        (SELECT p.name FROM products p WHERE p.id = sm.product_id),
-        (SELECT p.name FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1)
-      ) AS "itemName",
+      COALESCE(pid.name, pb.name) AS "itemName",
       NULL::integer AS pallets,
       sm.qty AS "totalQty",
       NULL::integer AS "itemsPerPallet",
@@ -964,20 +981,21 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
-      (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "scannedByName",
+      un.name AS "scannedByName",
       sm.created_at AS "scannedAt",
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
-      COALESCE(
-        (SELECT p.new_sr FROM products p WHERE p.id = sm.product_id),
-        (SELECT p.new_sr FROM products p WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1)
-      ) AS "srNo",
+      COALESCE(pid.new_sr, pb.new_sr) AS "srNo",
       sm.reason AS "orderName",
       NULL::text AS "orderDate",
       sm.plant AS "plant"
     FROM stock_movements sm
+    LEFT JOIN products pid ON pid.id = sm.product_id
+    LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(sm.barcode))
+    LEFT JOIN user_name un ON un.user_code = sm.created_by_code
     WHERE sm.type = 'adjust'
+      AND NOT COALESCE(sm.hidden_in_history, false)
       AND (sm.source = 'manual' OR (sm.source IS NULL AND NOT EXISTS (
             SELECT 1 FROM order_import_sessions ois WHERE ois.id = sm.session_id)))
   ) combined
@@ -1087,6 +1105,30 @@ function buildScanHistoryFilterClause(
   return null;
 }
 
+// The names offered in the page's "Scanned by" dropdown. Three tables, scanned end to end with a
+// DISTINCT — and it was re-run on every request of a page that polls itself every few seconds,
+// for a list that changes when a new person scans for the first time. Held for a minute instead.
+let scannerNameCache: { names: string[]; at: number } | null = null;
+const SCANNER_NAME_TTL_MS = 60 * 1000;
+async function scanHistoryScannerNames(): Promise<string[]> {
+  if (scannerNameCache && Date.now() - scannerNameCache.at < SCANNER_NAME_TTL_MS) return scannerNameCache.names;
+  const { rows } = await pool.query(
+    `SELECT DISTINCT name FROM (
+       SELECT scanned_by_name AS name FROM order_scan_events WHERE scanned_by_name IS NOT NULL
+       UNION
+       SELECT u.name FROM stock_movements sm
+         JOIN users u ON u.user_code = sm.created_by_code
+         WHERE (sm.type = 'exchange' OR (sm.type = 'adjust' AND sm.source = 'manual')) AND u.name IS NOT NULL
+       UNION
+       SELECT scanned_by_name AS name FROM loading_scan_events WHERE scanned_by_name IS NOT NULL
+     ) s
+     ORDER BY name`,
+  );
+  const names = rows.map((r: any) => r.name as string);
+  scannerNameCache = { names, at: Date.now() };
+  return names;
+}
+
 router.get('/reports/scan-history', async (_req: Request, res: Response) => {
   try {
     const req = _req;
@@ -1100,7 +1142,13 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const fromParam    = typeof req.query.from    === 'string' && req.query.from.trim()    ? req.query.from.trim()    : null;
     const toParam      = typeof req.query.to      === 'string' && req.query.to.trim()      ? req.query.to.trim()      : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
-    const typeParam    = typeof req.query.type    === 'string' && ['regular','extra','empty','exchange','adjust'].includes(req.query.type) ? req.query.type : null;
+    // One or more types, comma-separated ("extra,adjust") — the page's Type filter is a
+    // checklist now, and picking two means "either of these", not neither. A single value still
+    // works exactly as it did for any older caller.
+    const KNOWN_TYPES = ['regular', 'extra', 'empty', 'exchange', 'adjust'];
+    const typeParams   = typeof req.query.type === 'string'
+      ? String(req.query.type).split(',').map((s) => s.trim().toLowerCase()).filter((s) => KNOWN_TYPES.includes(s))
+      : [];
     // Three distinct sections on the Scan History page (client dropdown) — "Scan History"
     // (receiving + exchange corrections, the original page), "Load Event" (Loading's own
     // item-scanning history, server/routes/loading.ts), and "Unload Event" (Unloading's own scan
@@ -1152,13 +1200,18 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // they're never product scans — so 'regular'/'extra' filters must exclude both, and the
     // box/pallet totals below exclude them too (they don't count toward order quantity). A
     // dedicated 'empty'/'exchange' filter shows only that one status.
-    if (typeParam === 'regular')  conditions.push(`"isExtra" = false AND barcode <> 'EMPTY_BOX' AND NOT "isExchange" AND NOT "isAdjust"`);
     // Extra excludes corrections for the same reason Regular does — an edited row reads as Adjust.
-
-    if (typeParam === 'extra')    conditions.push(`"isExtra" = true AND barcode <> 'EMPTY_BOX' AND NOT "isAdjust"`);
-    if (typeParam === 'empty')    conditions.push(`barcode = 'EMPTY_BOX'`);
-    if (typeParam === 'exchange') conditions.push(`"isExchange" = true`);
-    if (typeParam === 'adjust')   conditions.push(`"isAdjust" = true`);
+    const TYPE_CONDITION: Record<string, string> = {
+      regular:  `("isExtra" = false AND barcode <> 'EMPTY_BOX' AND NOT "isExchange" AND NOT "isAdjust")`,
+      extra:    `("isExtra" = true AND barcode <> 'EMPTY_BOX' AND NOT "isAdjust")`,
+      empty:    `(barcode = 'EMPTY_BOX')`,
+      exchange: `("isExchange" = true)`,
+      adjust:   `("isAdjust" = true)`,
+    };
+    // Several types selected → a row matching ANY of them passes.
+    if (typeParams.length > 0) {
+      conditions.push(`(${typeParams.map((type) => TYPE_CONDITION[type]).join(' OR ')})`);
+    }
     if (searchParam) {
       params.push(`%${searchParam.toLowerCase()}%`);
       const n = params.length;
@@ -1168,19 +1221,15 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const baseFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${where}`;
-    // Summary tiles are about genuine scanning activity — always exclude exchanges from them
-    // regardless of the active type filter, so "Total Boxes"/"Total Pallets" never mix in a
-    // stock-correction quantity.
-    // where can be '' (no conditions at all — e.g. an admin with source=all and no other filter
-    // picked), so this can't unconditionally append "AND ..." onto it — that leaves a bare "AND"
-    // with no WHERE before it, a SQL syntax error.
-    const summaryWhere = where
-      ? `${where} AND "sourceKind" <> 'stock'`
-      : `WHERE "sourceKind" <> 'stock'`;
-    const summaryFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${summaryWhere}`;
 
-    // Destructuring order must track the array below: data, count, summary, column totals, scanners.
-    const [dataRes, countRes, summaryRes, columnTotalsRes, scannersRes] = await Promise.all([
+    // Every number in one pass over the matching rows. This used to be three separate queries
+    // (count, summary tiles, table totals) with the same WHERE, so the whole union was built and
+    // scanned FOUR times per request — the page's own poll then did that every few seconds. The
+    // tiles ignore stock corrections and the table totals ignore voided rows, which is what the
+    // FILTERs below say, so one scan answers all of it.
+    //
+    // Destructuring order must track the array below: data, aggregates, scanners.
+    const [dataRes, aggRes, scanners] = await Promise.all([
       pool.query(
         `SELECT *
          ${baseFrom}
@@ -1188,57 +1237,118 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         [...params, limit, offset],
       ),
-      pool.query(`SELECT COUNT(*) AS total ${baseFrom}`, params),
       pool.query(
         `SELECT
-           COALESCE(SUM("totalQty") FILTER (WHERE barcode <> 'EMPTY_BOX'), 0)  AS "totalBoxes",
-           COALESCE(SUM(pallets)    FILTER (WHERE barcode <> 'EMPTY_BOX'), 0)  AS "totalPallets",
-           COUNT(*) FILTER (WHERE "isExtra" = true AND barcode <> 'EMPTY_BOX') AS "extraCount",
-           COALESCE(SUM("totalQty") FILTER (WHERE barcode = 'EMPTY_BOX'), 0)   AS "emptyBoxCount"
-         ${summaryFrom}`,
-        params,
-      ),
-      // Column totals for the Reports table's totals row. Distinct from the tiles above: these
-      // cover exactly the rows the table lists (same WHERE — exchanges and empty boxes included)
-      // minus voided ones, which the void action promises to exclude from totals. Computed here
-      // because the browser only holds one page of rows and cannot sum the set itself.
-      pool.query(
-        `SELECT
-           COALESCE(SUM("totalQty") FILTER (WHERE NOT COALESCE(voided, false)), 0) AS "qtyTotal",
-           COALESCE(SUM(pallets)    FILTER (WHERE NOT COALESCE(voided, false)), 0) AS "palletsTotal"
+           COUNT(*) AS total,
+           COALESCE(SUM("totalQty") FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" <> 'stock'), 0)  AS "totalBoxes",
+           COALESCE(SUM(pallets)    FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" <> 'stock'), 0)  AS "totalPallets",
+           COUNT(*) FILTER (WHERE "isExtra" = true AND barcode <> 'EMPTY_BOX' AND "sourceKind" <> 'stock') AS "extraCount",
+           COALESCE(SUM("totalQty") FILTER (WHERE barcode = 'EMPTY_BOX' AND "sourceKind" <> 'stock'), 0)   AS "emptyBoxCount",
+           -- Stock corrections (a delete, a void or a manual Adjust writes a signed ledger row)
+           -- are listed, but they are not scanning, and a negative one used to pull this total
+           -- below what was actually scanned — a day with one big correction could even read as
+           -- a minus. Counted the same way the tiles above already count: scans only.
+           COALESCE(SUM("totalQty") FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" <> 'stock'), 0) AS "qtyTotal",
+           COALESCE(SUM(pallets)    FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" <> 'stock'), 0) AS "palletsTotal"
          ${baseFrom}`,
         params,
       ),
-      pool.query(
-        `SELECT DISTINCT name FROM (
-           SELECT scanned_by_name AS name FROM order_scan_events WHERE scanned_by_name IS NOT NULL
-           UNION
-           SELECT u.name FROM stock_movements sm
-             JOIN users u ON u.user_code = sm.created_by_code
-             WHERE (sm.type = 'exchange' OR (sm.type = 'adjust' AND sm.source = 'manual')) AND u.name IS NOT NULL
-           UNION
-           SELECT scanned_by_name AS name FROM loading_scan_events WHERE scanned_by_name IS NOT NULL
-         ) s
-         ORDER BY name`,
-      ),
+      scanHistoryScannerNames(),
     ]);
 
     return res.json({
       items:        dataRes.rows,
-      total:        parseInt(countRes.rows[0].total, 10),
-      totalBoxes:   parseInt(summaryRes.rows[0].totalBoxes, 10),
-      totalPallets: parseFloat(summaryRes.rows[0].totalPallets),
-      extraCount:   parseInt(summaryRes.rows[0].extraCount, 10),
-      emptyBoxCount: parseInt(summaryRes.rows[0].emptyBoxCount, 10),
-      scanners:     scannersRes.rows.map((r: any) => r.name as string),
-      qtyTotal:     parseInt(columnTotalsRes.rows[0].qtyTotal, 10),
-      palletsTotal: parseFloat(columnTotalsRes.rows[0].palletsTotal),
+      total:        parseInt(aggRes.rows[0].total, 10),
+      totalBoxes:   parseInt(aggRes.rows[0].totalBoxes, 10),
+      totalPallets: parseFloat(aggRes.rows[0].totalPallets),
+      extraCount:   parseInt(aggRes.rows[0].extraCount, 10),
+      emptyBoxCount: parseInt(aggRes.rows[0].emptyBoxCount, 10),
+      scanners,
+      qtyTotal:     parseInt(aggRes.rows[0].qtyTotal, 10),
+      palletsTotal: parseFloat(aggRes.rows[0].palletsTotal),
       limit,
       offset,
     });
   } catch (error) {
     console.error('Error generating scan history:', error);
     return res.status(500).json({ error: 'Failed to generate scan history' });
+  }
+});
+
+// ── POST /reports/scan-history/remove ────────────────────────────────────────────────────────
+// Takes one row out of the Scan History list. Deliberately narrow — only two kinds of row can go:
+//   • a scan that is already VOIDED (receiving, loading or unloading). It counts towards nothing
+//     any more, so the line is just noise once it has been dealt with.
+//   • a stock line written by Settings > Remove All Operations Data — the minus entries that
+//     removal leaves behind to explain where the stock went.
+// A live scan, a manual Adjust from Stock Overview and an exchange are all refused: those either
+// still count, or are somebody's deliberate correction.
+//
+// "Remove" hides the row; the underlying record stays. Overall Stock sums its Opening / Purchase /
+// Sale straight out of stock_movements, and a voided scan is the proof the void happened, so
+// deleting either would quietly change figures that are correct. Activities records who removed
+// what, which is where the history of the removal itself lives.
+const REMOVE_OPERATIONS_REASON = 'Remove operations data (Settings)%';
+
+router.post('/reports/scan-history/remove', async (req: Request, res: Response) => {
+  try {
+    const user = req.user as any;
+    const role = String(user?.role ?? '').toLowerCase();
+    const isAdmin = role === 'admin' || role === 'super-admin';
+    let writable: string[] = [];
+    try { writable = JSON.parse(user?.pageWriteAccess || '[]'); } catch { /* default [] */ }
+    if (!isAdmin && !writable.includes('scan-history')) {
+      return res.status(403).json({ message: 'Write access to Scan History is required to remove an entry.' });
+    }
+
+    const id = Number(req.body?.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ message: 'A row id is required' });
+
+    // Same id offsets the combined source builds its ids with (see SCAN_HISTORY_COMBINED_SOURCE).
+    const target =
+      id >= 5_000_000_000 ? { table: 'stock_movements', rowId: id - 5_000_000_000, kind: 'stock' as const }
+      : id >= 4_000_000_000 ? { table: 'unload_scan_events', rowId: id - 4_000_000_000, kind: 'scan' as const }
+      : id >= 3_000_000_000 ? { table: 'loading_scan_events', rowId: id - 3_000_000_000, kind: 'scan' as const }
+      : id >= 2_000_000_000 ? { table: 'stock_movements', rowId: id - 2_000_000_000, kind: 'stock' as const }
+      : { table: 'order_scan_events', rowId: id, kind: 'scan' as const };
+
+    // The eligibility rule lives HERE, not only in the button that offers it: a scan must be
+    // voided, a stock line must be one of the removal's own.
+    const where = target.kind === 'scan'
+      ? `id = $1 AND COALESCE(voided, false) = true`
+      : `id = $1 AND reason LIKE '${REMOVE_OPERATIONS_REASON}'`;
+    const { rows } = await pool.query(
+      `UPDATE ${target.table} SET hidden_in_history = true
+       WHERE ${where} AND NOT COALESCE(hidden_in_history, false)
+       RETURNING barcode, plant`,
+      [target.rowId],
+    );
+    if (rows.length === 0) {
+      return res.status(409).json({
+        message: target.kind === 'scan'
+          ? 'Only a voided scan can be removed from history — void it first.'
+          : 'Only the stock lines written by Remove All Operations Data can be removed from history.',
+      });
+    }
+
+    // Written straight to the table — this router has no storage import, and an activity row is
+    // the whole point of "removed here, still on record there".
+    await pool.query(
+      `INSERT INTO activities (page_name, action, entity_type, entity_id, details, user_code, user_name, created_at)
+       VALUES ('Scan History','delete','scan_history_entry',$1,$2,$3,$4,NOW())`,
+      [
+        String(id),
+        `Removed a ${target.kind === 'scan' ? 'voided scan' : 'stock removal'} entry from Scan History`
+          + ` (${target.table} #${target.rowId}, ${rows[0].barcode ?? 'no barcode'}${rows[0].plant ? `, ${rows[0].plant}` : ''})`,
+        user?.userCode ?? null,
+        user?.name || user?.username || user?.userCode || null,
+      ],
+    );
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Error removing a scan-history entry:', error);
+    return res.status(500).json({ message: 'Failed to remove the entry' });
   }
 });
 

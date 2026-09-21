@@ -166,10 +166,12 @@ const Home = () => {
             </div>
           )}
 
-          {/* Load Button */}
-          {hasPageViewAccess("load-operations") && (
+          {/* Load Button — the current Load Operations page (/loading). It used to point at the
+              retired /load-operations page and was gated by that page's own grant, so it opened
+              the old screen for whoever still had that grant and was hidden from everyone else. */}
+          {hasPageViewAccess("loading") && (
             <div className="flex flex-col items-center">
-              <Link href="/load-operations" className="flex flex-col items-center">
+              <Link href="/loading" className="flex flex-col items-center">
                 <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
                   <Factory className="h-7 w-7 text-[#001d6e] fill-[#4d7eff]" />
                 </div>

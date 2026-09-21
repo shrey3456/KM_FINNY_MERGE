@@ -4,6 +4,10 @@ import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
+import {
+  getPooledStock, debitStatePool, reverseStockPullsForEvent, recordStockPulls,
+  type StockPullContribution,
+} from '../lib/statePool';
 import { pushOrderStatusToNotion, pushStoreKeeperInfoToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
 
 // Loading — two things happen here:
@@ -305,12 +309,11 @@ async function withProgress(slip: any, items: any[]) {
       // casing the source (e.g. Notion's "Plant :"/"Stk Plant :") used ("VALSAD"), which won't
       // exact-match product_plant_stock's canonical casing ("Valsad") otherwise, causing a false
       // "no stock" even though Stock Overview (which already matches case-insensitively — see
-      // server/routes/scan-sessions.ts) shows stock for the same plant.
-      const { rows } = await pool.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
-        [item.barcode, slip.plant],
-      );
-      stockAvailable = rows[0]?.inStock ?? 0;
+      // server/routes/scan-sessions.ts) shows stock for the same plant. Pooled across every
+      // plant in slip.plant's state (server/lib/statePool.ts) — matches what debitStatePool
+      // will actually allow a scan to draw on, so this figure and a real scan never disagree.
+      const { total } = await getPooledStock(pool, item.barcode, slip.plant ?? '');
+      stockAvailable = total;
     }
     return {
       ...item, expected, loaded, remaining: Math.max(0, expected - loaded),
@@ -864,14 +867,12 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     // Fast, UNLOCKED pre-check — just to fail obviously-bad requests (no stock at all) quickly
     // and cheaply, before touching a transaction. NOT authoritative: two concurrent scans of the
     // same barcode/plant could both read the same snapshot here and both pass. The real check
-    // (below, inside the transaction, against a FOR UPDATE-locked row) is what actually prevents
-    // stock from going negative when multiple scans happen at once.
-    const { rows: precheckRows } = await client.query(
-      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
-      [barcode, slip.plant],
-    );
-    const precheckInStock = precheckRows[0]?.inStock ?? 0;
-    if (precheckInStock <= 0) {
+    // (below, inside the transaction, against FOR UPDATE-locked rows) is what actually prevents
+    // stock from going negative when multiple scans happen at once. Pooled across every plant in
+    // slip.plant's state (see server/lib/statePool.ts) — e.g. loading at Valsad can draw on
+    // stock physically sitting at Vadodra too, since both are "Gj".
+    const { total: precheckPooled } = await getPooledStock(client, barcode, slip.plant ?? '');
+    if (precheckPooled <= 0) {
       return res.status(409).json({ message: `No stock available to load "${matchedItem?.itemName ?? product?.name ?? barcode}" at ${slip.plant} — current stock is 0.` });
     }
 
@@ -892,23 +893,16 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     let remainingBefore = 0;
     await client.query('BEGIN');
     try {
-      // Lock this barcode's plant-stock row FIRST, before re-checking or touching anything else
-      // that depends on the current stock/loaded totals — this is what actually serializes
-      // concurrent scans of the same barcode+plant (from this order or any other) so a second
+      // Lock every same-state plant's stock row for this barcode FIRST, before re-checking or
+      // touching anything else that depends on the current stock/loaded totals — this is what
+      // actually serializes concurrent scans of the same barcode across this whole state pool
+      // (from this order or any other, at slip.plant or a sibling same-state plant) so a second
       // request has to wait for the first to commit, then sees its real, post-commit numbers
       // instead of racing against a stale snapshot taken before either transaction started.
-      const { rows: lockedStockRows } = await client.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock
-         WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2)) FOR UPDATE`,
-        [barcode, slip.plant],
-      );
-      const inStock = lockedStockRows[0]?.inStock ?? 0;
-      if (inStock <= 0) {
-        throw Object.assign(new Error(`No stock available to load "${matchedItem?.itemName ?? product?.name ?? barcode}" at ${slip.plant} — current stock is 0.`), { status: 409 });
-      }
-      if (qty > inStock) {
-        throw Object.assign(new Error(`Only ${inStock} in stock at ${slip.plant} — cannot load ${qty}.`), { status: 409 });
-      }
+      // Debits the FULL qty here (own plant first, then other same-state plants — see
+      // debitStatePool) — the regular/extra split just below is a bookkeeping label on top of
+      // the same already-decremented physical stock, not a separate stock action.
+      const contributions = await debitStatePool(client, barcode, slip.plant ?? '', qty, product?.id);
 
       // Same "split into a regular portion (capped at expected) + an extra portion" rule Order
       // Scan uses (server/routes/order-scan.ts) — a single scan can legitimately be part
@@ -941,33 +935,66 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
           : `EXTRA_NOT_ALLOWED: "${barcode}" is not on this order. Use Add Extra to scan it.`), { status: 400 });
       }
 
-      const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
-        `INSERT INTO loading_scan_events
-           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        [
-          slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
-          itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
-          itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-          totalQty, isExtra, slip.plant, stv, userCode ?? null, userName ?? null,
-        ],
-      );
-      if (regularQty > 0) await insertEvent(regularQty, false);
-      if (extraQty > 0) await insertEvent(extraQty, true);
+      const insertEvent = async (totalQty: number, isExtra: boolean): Promise<number> => {
+        const { rows: insertedRows } = await client.query(
+          `INSERT INTO loading_scan_events
+             (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+          [
+            slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
+            itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
+            itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
+            totalQty, isExtra, slip.plant, stv, userCode ?? null, userName ?? null,
+          ],
+        );
+        return insertedRows[0].id as number;
+      };
+      // The regular/extra split above is a bookkeeping label on top of the single debit already
+      // taken from `contributions` — slice that same pool of per-plant amounts across whichever
+      // event(s) get inserted, in contribution order, so each event's own loading_stock_pulls
+      // rows sum to exactly its own total_qty (needed for an exact per-event void later).
+      let sliceRemaining = regularQty;
+      const regularContributions: StockPullContribution[] = [];
+      const extraContributions: StockPullContribution[] = [];
+      for (const c of contributions) {
+        if (sliceRemaining <= 0) { extraContributions.push(c); continue; }
+        if (c.qty <= sliceRemaining) { regularContributions.push(c); sliceRemaining -= c.qty; }
+        else {
+          regularContributions.push({ plant: c.plant, qty: sliceRemaining });
+          extraContributions.push({ plant: c.plant, qty: c.qty - sliceRemaining });
+          sliceRemaining = 0;
+        }
+      }
+      if (regularQty > 0) {
+        const id = await insertEvent(regularQty, false);
+        await recordStockPulls(client, id, regularContributions);
+      }
+      if (extraQty > 0) {
+        const id = await insertEvent(extraQty, true);
+        await recordStockPulls(client, id, extraContributions);
+      }
 
-      // If this product's barcode changed since stock was received under an old one (e.g. the
-      // Notion sync overwriting it), fold any stock still parked there onto this barcode first —
-      // see stockBarcodeReconcile.ts.
-      await reconcileProductPlantStockBarcode(client, product?.id, slip.plant, barcode);
-      await client.query(
-        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
-        [qty, barcode, slip.plant],
-      );
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
-         VALUES ($1,$2,$3,$4,$5,'dispatch',$6,$7,'loading')`,
-        [barcode, product?.id ?? null, slip.plant, -qty, extraQty, `Loaded onto vehicle for order ${slip.orderNumber}`, userCode ?? null],
-      );
+      // One stock_movements row per plant the stock actually came from (was always exactly one
+      // row, against slip.plant, before pooling — now it's one per contributing plant so the
+      // audit trail/Overall Stock history stays correct for whichever plant physically lost it).
+      // extra_qty is this plant's own share of extraContributions, not the scan's full extraQty
+      // — putting the whole extraQty on every row would double (or more) count it wherever
+      // stock_movements.extra_qty gets summed, once pooling spans more than one plant.
+      const extraQtyByPlant = new Map<string, number>();
+      for (const c of extraContributions) extraQtyByPlant.set(c.plant, (extraQtyByPlant.get(c.plant) ?? 0) + c.qty);
+      for (const c of contributions) {
+        await client.query(
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+           VALUES ($1,$2,$3,$4,$5,'dispatch',$6,$7,'loading')`,
+          [
+            barcode, product?.id ?? null, c.plant, -c.qty, extraQtyByPlant.get(c.plant) ?? 0,
+            c.plant === slip.plant
+              ? `Loaded onto vehicle for order ${slip.orderNumber}`
+              : `Loaded onto vehicle for order ${slip.orderNumber} (pooled from ${c.plant} for ${slip.plant})`,
+            userCode ?? null,
+          ],
+        );
+      }
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -1054,16 +1081,19 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('load
     let newLoadedTotal = 0;
     await client.query('BEGIN');
     try {
-      // Same lock /scan takes, for the same reason — serializes this against any concurrent
-      // scan or adjustment on the same barcode+plant so the checks below are never stale.
-      const { rows: lockedStockRows } = await client.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock
-         WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2)) FOR UPDATE`,
-        [barcode, slip.plant],
-      );
-      const inStock = lockedStockRows[0]?.inStock ?? 0;
-      if (delta > 0 && delta > inStock) {
-        throw Object.assign(new Error(`Only ${inStock} in stock at ${slip.plant} — cannot add ${delta}.`), { status: 409 });
+      // A positive delta is a fresh debit — pools across slip.plant's state the same way /scan
+      // does (see server/lib/statePool.ts). A negative delta corrects the running total down
+      // rather than reversing one specific earlier pull, so — unlike /scan, void and qty-edit
+      // above — it always credits back to slip.plant's own row, same as before pooling existed.
+      // A state-pool credit here would need to unwind pulls across possibly several earlier
+      // events, which this simple +/- correction tool deliberately doesn't attempt.
+      let positiveDeltaContributions: StockPullContribution[] = [];
+      if (delta > 0) {
+        try {
+          positiveDeltaContributions = await debitStatePool(client, barcode, slip.plant ?? '', delta, product?.id);
+        } catch (err: any) {
+          throw Object.assign(new Error(err?.message ?? `Cannot add ${delta}.`), { status: err?.status ?? 409 });
+        }
       }
 
       const { rows: loadedRows } = await client.query(
@@ -1082,30 +1112,47 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('load
       const looseQty = itemsPerPallet > 0 ? absDelta % itemsPerPallet : absDelta;
       const isExtra = newLoadedTotal > expected;
 
-      await client.query(
+      const { rows: adjustEventRows } = await client.query(
         `INSERT INTO loading_scan_events
            (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, plant, stv, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13) RETURNING id`,
         [
           slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
           delta > 0 ? pallets : -pallets, delta > 0 ? looseQty : -looseQty, delta, isExtra, slip.plant, null, userCode ?? null, userName ?? null,
         ],
       );
 
-      await reconcileProductPlantStockBarcode(client, product?.id, slip.plant, barcode);
-      await client.query(
-        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
-        [delta, barcode, slip.plant],
-      );
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
-        [
-          barcode, product?.id ?? null, slip.plant, -delta,
-          `Loaded quantity manually ${delta > 0 ? 'increased' : 'decreased'} by ${Math.abs(delta)} for order ${slip.orderNumber}`,
-          userCode ?? null,
-        ],
-      );
+      if (delta > 0) {
+        await recordStockPulls(client, adjustEventRows[0].id, positiveDeltaContributions);
+        for (const c of positiveDeltaContributions) {
+          await client.query(
+            `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+             VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
+            [
+              barcode, product?.id ?? null, c.plant, -c.qty,
+              c.plant === slip.plant
+                ? `Loaded quantity manually increased by ${delta} for order ${slip.orderNumber}`
+                : `Loaded quantity manually increased by ${delta} for order ${slip.orderNumber} (pooled from ${c.plant} for ${slip.plant})`,
+              userCode ?? null,
+            ],
+          );
+        }
+      } else {
+        await reconcileProductPlantStockBarcode(client, product?.id, slip.plant, barcode);
+        await client.query(
+          `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+          [delta, barcode, slip.plant],
+        );
+        await client.query(
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
+          [
+            barcode, product?.id ?? null, slip.plant, -delta,
+            `Loaded quantity manually decreased by ${Math.abs(delta)} for order ${slip.orderNumber}`,
+            userCode ?? null,
+          ],
+        );
+      }
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -1267,18 +1314,27 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
       const qty = Number(event.total_qty ?? 0);
       if (qty !== 0 && event.plant && event.barcode) {
         const product = await storage.getProductByBarcode(event.barcode, event.plant);
-        await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-        await client.query(
-          `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
-           WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
-          [qty, event.barcode, event.plant],
-        );
-        if (mode === 'void') {
+        // Credit back exactly whichever plant(s) this event's stock was pooled from (see
+        // server/lib/statePool.ts). Falls back to the old plant-only credit for an event that
+        // predates loading_stock_pulls (no rows there).
+        let contributions = await reverseStockPullsForEvent(client, event.id, event.barcode);
+        if (contributions.length === 0) {
+          await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
           await client.query(
-            `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
-             VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
-            [event.barcode, product?.id ?? null, event.plant, qty, `Loading slip ${slip.orderNumber} reset — deleted from landing table`, userCode ?? null],
+            `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
+             WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+            [qty, event.barcode, event.plant],
           );
+          contributions = [{ plant: event.plant, qty }];
+        }
+        if (mode === 'void') {
+          for (const c of contributions) {
+            await client.query(
+              `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+               VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
+              [event.barcode, product?.id ?? null, c.plant, c.qty, `Loading slip ${slip.orderNumber} reset — deleted from landing table`, userCode ?? null],
+            );
+          }
         }
       }
       if (mode === 'void') {
@@ -1387,17 +1443,26 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
     const qty = Number(event.total_qty ?? 0);
     if (qty > 0 && event.plant && event.barcode) {
       const product = await storage.getProductByBarcode(event.barcode, event.plant);
-      await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-      await client.query(
-        `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
-         WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
-        [qty, event.barcode, event.plant],
-      );
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
-        [event.barcode, product?.id ?? null, event.plant, qty, `Voided load scan for order ${event.order_number}`, userCode ?? null],
-      );
+      // Credit back exactly whichever plant(s) this event's stock was pooled from (see
+      // server/lib/statePool.ts) — falls back to the old plant-only credit for an event that
+      // predates loading_stock_pulls.
+      let contributions = await reverseStockPullsForEvent(client, event.id, event.barcode);
+      if (contributions.length === 0) {
+        await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+        await client.query(
+          `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
+           WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+          [qty, event.barcode, event.plant],
+        );
+        contributions = [{ plant: event.plant, qty }];
+      }
+      for (const c of contributions) {
+        await client.query(
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'loading')`,
+          [event.barcode, product?.id ?? null, c.plant, c.qty, `Voided load scan for order ${event.order_number}`, userCode ?? null],
+        );
+      }
     }
 
     const { rows: voidRows } = await client.query(
@@ -1472,22 +1537,28 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
 
     // Reverse the old qty's stock (Loading REMOVES stock, so reversing adds it back — same
     // direction the void handler above uses) before checking whether the new qty actually fits.
+    // Credits back exactly whichever plant(s) it was pooled from (server/lib/statePool.ts),
+    // falling back to the old plant-only credit for an event that predates loading_stock_pulls.
     const product = await storage.getProductByBarcode(event.barcode, event.plant);
-    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-    await client.query(
-      `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
-       WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
-      [oldQty, event.barcode, event.plant],
-    );
+    const reversedContributions = await reverseStockPullsForEvent(client, event.id, event.barcode);
+    if (reversedContributions.length === 0) {
+      await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+      await client.query(
+        `UPDATE product_plant_stock SET in_stock = in_stock + $1, updated_at = NOW()
+         WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
+        [oldQty, event.barcode, event.plant],
+      );
+    }
 
-    const { rows: stockRows } = await client.query(
-      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
-      [event.barcode, event.plant],
-    );
-    const inStock = stockRows[0]?.inStock ?? 0;
-    if (newQty > inStock) {
+    let newQtyContributions: StockPullContribution[];
+    try {
+      // Re-debits from the state pool (own plant first, then other same-state plants) — the
+      // old qty was just credited back into that same pool above, so this is a clean re-check
+      // against current, post-credit numbers.
+      newQtyContributions = await debitStatePool(client, event.barcode, event.plant, newQty, product?.id);
+    } catch (err: any) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ message: `Only ${inStock} in stock at ${event.plant} — cannot correct to ${newQty}.` });
+      return res.status(err?.status ?? 409).json({ message: err?.message ?? `Cannot correct to ${newQty}.` });
     }
 
     await client.query(
@@ -1512,29 +1583,53 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
 
     const state = await getPlantStateCode(client, event.plant ?? '');
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
-    const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
-      `INSERT INTO loading_scan_events
-         (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [
-        slip.orderNumber, slip.id, event.barcode, event.item_name, event.sap_code,
-        itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
-        itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-        totalQty, isExtra, event.plant, event.scanned_by_code, event.scanned_by_name,
-      ],
-    );
-    if (regularQty > 0) await insertEvent(regularQty, false);
-    if (extraQty > 0) await insertEvent(extraQty, true);
+    const insertEvent = async (totalQty: number, isExtra: boolean): Promise<number> => {
+      const { rows: insertedRows } = await client.query(
+        `INSERT INTO loading_scan_events
+           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        [
+          slip.orderNumber, slip.id, event.barcode, event.item_name, event.sap_code,
+          itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
+          itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
+          totalQty, isExtra, event.plant, event.scanned_by_code, event.scanned_by_name,
+        ],
+      );
+      return insertedRows[0].id as number;
+    };
+    // Same regular/extra bookkeeping split of a single debit as /scan (see its own comment) —
+    // slice newQtyContributions across whichever event(s) get inserted so each one's own
+    // loading_stock_pulls rows sum to exactly its own total_qty.
+    let sliceRemaining = regularQty;
+    const regularContributions: StockPullContribution[] = [];
+    const extraContributions: StockPullContribution[] = [];
+    for (const c of newQtyContributions) {
+      if (sliceRemaining <= 0) { extraContributions.push(c); continue; }
+      if (c.qty <= sliceRemaining) { regularContributions.push(c); sliceRemaining -= c.qty; }
+      else {
+        regularContributions.push({ plant: c.plant, qty: sliceRemaining });
+        extraContributions.push({ plant: c.plant, qty: c.qty - sliceRemaining });
+        sliceRemaining = 0;
+      }
+    }
+    if (regularQty > 0) {
+      const id = await insertEvent(regularQty, false);
+      await recordStockPulls(client, id, regularContributions);
+    }
+    if (extraQty > 0) {
+      const id = await insertEvent(extraQty, true);
+      await recordStockPulls(client, id, extraContributions);
+    }
 
-    await client.query(
-      `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
-      [newQty, event.barcode, event.plant],
-    );
-    await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
-       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'loading')`,
-      [event.barcode, product?.id ?? null, event.plant, -newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, userCode ?? null],
-    );
+    const extraQtyByPlant = new Map<string, number>();
+    for (const c of extraContributions) extraQtyByPlant.set(c.plant, (extraQtyByPlant.get(c.plant) ?? 0) + c.qty);
+    for (const c of newQtyContributions) {
+      await client.query(
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
+         VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'loading')`,
+        [event.barcode, product?.id ?? null, c.plant, -c.qty, extraQtyByPlant.get(c.plant) ?? 0, `Qty corrected (edited by ${editorLabel})`, userCode ?? null],
+      );
+    }
 
     await client.query('COMMIT');
 

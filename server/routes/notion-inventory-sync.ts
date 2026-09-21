@@ -12,11 +12,15 @@ import {
   PRODUCT_IMAGE_DIR,
 } from '../services/notionInventorySync';
 import { storage } from '../storage';
-import { requireAdminRole } from '../lib/pageAccess';
+import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
 
-router.use('/notion-inventory-sync', requireAdminRole);
+// Product Master is granted like any other page now (User Management > Allowed Pages / Write
+// Access) instead of being admin-only: reading needs the page, and every action that changes
+// products needs write on it. Admin and super-admin still pass both automatically.
+router.use('/notion-inventory-sync', requirePageAccess('notion-inventory'));
+const requireProductWrite = requirePageWrite('notion-inventory');
 
 function callerName(req: Request): string {
   const u = req.user as any;
@@ -28,7 +32,7 @@ function callerName(req: Request): string {
 // Photos" button is the only caller that passes true; Apply only ever touches images that a
 // syncImages:true run actually queued, so this default never risks Apply silently reverting
 // photos.
-router.post('/notion-inventory-sync/detect', async (req, res) => {
+router.post('/notion-inventory-sync/detect', requireProductWrite, async (req, res) => {
   try {
     const syncImages = req.body?.syncImages === true;
     const report = await detectChangesFromNotion(callerName(req), syncImages);
@@ -48,7 +52,7 @@ router.get('/notion-inventory-sync/pending', (_req, res) => {
 });
 
 // POST /api/notion-inventory-sync/apply
-router.post('/notion-inventory-sync/apply', async (_req, res) => {
+router.post('/notion-inventory-sync/apply', requireProductWrite, async (_req, res) => {
   try {
     const report = await applyPendingChanges();
     res.json({ success: true, ...report });
@@ -60,7 +64,7 @@ router.post('/notion-inventory-sync/apply', async (_req, res) => {
 });
 
 // POST /api/notion-inventory-sync/full-sync
-router.post('/notion-inventory-sync/full-sync', async (req, res) => {
+router.post('/notion-inventory-sync/full-sync', requireProductWrite, async (req, res) => {
   try {
     const report = await fullSyncFromNotion(callerName(req));
     res.json({ success: true, ...report });
@@ -78,8 +82,8 @@ router.get('/notion-inventory-sync/status', (_req, res) => {
 
 // GET /api/notion-inventory-sync/auto-apply-config
 // Whether the 24-hour scheduled sync is allowed to apply detected changes on its own.
-// Shared across everyone (single server-side setting), not a per-browser preference — mounted
-// under requireAdminRole above, so only admin/super-admin can read or change it.
+// Shared across everyone (single server-side setting), not a per-browser preference — readable by
+// anyone granted Product Master, changeable only with write access on it (see the router gates).
 router.get('/notion-inventory-sync/auto-apply-config', async (_req, res) => {
   try {
     res.json({ enabled: await getAutoApplyEnabled() });
@@ -88,7 +92,7 @@ router.get('/notion-inventory-sync/auto-apply-config', async (_req, res) => {
   }
 });
 
-router.post('/notion-inventory-sync/auto-apply-config', async (req, res) => {
+router.post('/notion-inventory-sync/auto-apply-config', requireProductWrite, async (req, res) => {
   try {
     const enabled = req.body?.enabled === true;
     await setAutoApplyEnabled(enabled, callerName(req));
@@ -244,7 +248,7 @@ router.get('/products/image-by-id', async (req: Request, res: Response) => {
 });
 
 // POST /api/products/csv-import
-router.post('/products/csv-import', requireAdminRole, async (req: Request, res: Response) => {
+router.post('/products/csv-import', requireProductWrite, async (req: Request, res: Response) => {
   try {
     const rows: Record<string, string>[] = req.body.rows;
     if (!Array.isArray(rows) || rows.length === 0)

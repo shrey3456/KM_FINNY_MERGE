@@ -270,8 +270,9 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           label: "Product Master",
           icon: <Database className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/notion-inventory",
+          // Page grant only — the old extra canAccessInventory role flag hid this from everyone
+          // whose role isn't admin, however much page access they had been given.
           pageKey: "notion-inventory",
-          permission: "canAccessInventory",
         },
         {
           label: "Plant Master",

@@ -225,6 +225,23 @@ app.use((req, res, next) => {
         ADD COLUMN IF NOT EXISTS voided_at TIMESTAMP,
         ADD COLUMN IF NOT EXISTS void_reason TEXT
     `);
+    // Per-plant breakdown of a loading_scan_events row's stock debit — see server/lib/statePool.ts.
+    // Loading now pools stock across every plant in the same state (plants.state), so a single
+    // scan can pull from more than one plant's product_plant_stock row; this is what lets a void
+    // or reset credit each contributing plant back exactly, instead of assuming it all came from
+    // the loading plant's own row.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS loading_stock_pulls (
+        id SERIAL PRIMARY KEY,
+        loading_scan_event_id INTEGER NOT NULL REFERENCES loading_scan_events(id) ON DELETE CASCADE,
+        source_plant TEXT NOT NULL,
+        qty INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_loading_stock_pulls_event_id ON loading_stock_pulls(loading_scan_event_id)
+    `);
     // Unloading (server/routes/unloading.ts) — vehicle-wise receiving. See unloadImportSessions'
     // comment in shared/schema.ts: FIFO grouping like order_import_sessions, but scoped one level
     // deeper by vehicleNumber (plant + vehicleNumber + orderDate), so one CSV upload can span
@@ -372,6 +389,15 @@ app.use((req, res, next) => {
     // so only edits made from now on are marked.
     await pool.query(`ALTER TABLE order_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
     await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
+    // hidden_in_history — "Remove entry" on the Scan History page, allowed only on a row that is
+    // already VOIDED or on a stock line written by Settings > Remove All Operations Data (see the
+    // endpoint, which re-checks that rule). The row itself is KEPT on purpose: Overall Stock sums
+    // its Opening/Purchase/Sale straight out of stock_movements, and a voided scan is what proves
+    // the void happened — deleting either would quietly change numbers that are already right.
+    // The flag only takes the line out of the Scan History list, and Activities records who did it.
+    for (const table of ['order_scan_events', 'loading_scan_events', 'unload_scan_events', 'stock_movements']) {
+      await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS hidden_in_history BOOLEAN DEFAULT false`);
+    }
     await pool.query(`
       UPDATE loading_scan_events lse SET is_adjust = true
       WHERE lse.is_adjust IS NOT TRUE AND (
