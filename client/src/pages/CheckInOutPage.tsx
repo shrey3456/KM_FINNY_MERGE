@@ -80,7 +80,7 @@ export function CheckInOutPage() {
 
   // Calendar view with check-in/out records
   return (
-    <div className="container py-4 max-w-7xl mx-auto">
+    <div className="container py-4 mx-auto w-full max-w-[1800px]">
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">

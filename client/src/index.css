@@ -20,6 +20,16 @@
   }
 }
 
+/* When the sidebar is hidden (Layout.tsx toggles the "sidebar-hidden" class on the main content
+   wrapper), pages built on the common "max-w-Nxl mx-auto" centering pattern get back the width
+   the sidebar used to occupy (its own w-64 / 16rem) instead of leaving it as blank gutters on
+   either side. Centrally scoped here so it applies to every page using that convention without
+   editing each one individually. */
+.sidebar-hidden .max-w-4xl { max-width: 72rem; }
+.sidebar-hidden .max-w-5xl { max-width: 80rem; }
+.sidebar-hidden .max-w-6xl { max-width: 88rem; }
+.sidebar-hidden .max-w-7xl { max-width: 96rem; }
+
 /* Hide spinner buttons for number inputs */
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
@@ -30,6 +40,118 @@ input[type="number"]::-webkit-outer-spin-button {
 input[type="number"] {
   -moz-appearance: textfield; /* Firefox */
 }
+
+/* Kiosk rotation — for a screen physically mounted in portrait while the browser
+   viewport itself stays landscape (or vice versa). Takes the element out of flow
+   (position: fixed escapes any parent's overflow/flex sizing) and swaps its box to
+   100vh x 100vw before rotating, so the rotated content exactly fills the real
+   viewport instead of being clipped or scaled. transform also makes this element the
+   containing block for any `position: fixed` descendant (e.g. the rotate toggle
+   button), so controls placed inside rotate along with the content and stay put in
+   a natural on-screen corner from the viewer's (rotated) perspective. */
+/* Portaled popups (dropdowns, selects, popovers, calendars) on a kiosk-rotated page. Radix places
+   these against the trigger's on-screen rectangle; rotating the popup to match then swings that
+   box away from where it was placed, so it lands partly clipped. Instead, while a page is rotated
+   (Layout sets data-portal-rotation on <body>) every portaled popup is centred on screen and
+   turned as a whole — the same treatment dialogs get. Scoped to wrappers OUTSIDE #root: tooltips
+   and dropdown sub-menus render in place inside the already-rotated page and must not turn twice.
+   !important is needed to beat the inline position/transform Radix writes on the wrapper. */
+body[data-portal-rotation] [data-radix-popper-content-wrapper]:not(#root [data-radix-popper-content-wrapper]) {
+  top: 50% !important;
+  left: 50% !important;
+}
+body[data-portal-rotation="90"] [data-radix-popper-content-wrapper]:not(#root [data-radix-popper-content-wrapper]) {
+  transform: translate(-50%, -50%) rotate(90deg) !important;
+}
+body[data-portal-rotation="180"] [data-radix-popper-content-wrapper]:not(#root [data-radix-popper-content-wrapper]) {
+  transform: translate(-50%, -50%) rotate(180deg) !important;
+}
+body[data-portal-rotation="270"] [data-radix-popper-content-wrapper]:not(#root [data-radix-popper-content-wrapper]) {
+  transform: translate(-50%, -50%) rotate(270deg) !important;
+}
+
+.kiosk-rotate-90,
+.kiosk-rotate-180,
+.kiosk-rotate-270 {
+  position: fixed;
+  top: 0;
+  left: 0;
+  overflow-x: auto;
+  overflow-y: auto;
+  z-index: 30;
+  transform-origin: top left;
+}
+
+/* Quarter turns swap the box (100vh x 100vw) so the rotated content still fills the real
+   viewport; the half turn keeps the viewport's own dimensions. Each translate then pulls the
+   rotated box back over the viewport, since rotating about the top-left corner moves it off. */
+.kiosk-rotate-90 {
+  width: 100vh;
+  height: 100vw;
+  transform: rotate(90deg) translateY(-100%);
+}
+
+.kiosk-rotate-180 {
+  width: 100vw;
+  height: 100vh;
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+
+.kiosk-rotate-270 {
+  width: 100vh;
+  height: 100vw;
+  transform: rotate(270deg) translateX(-100%);
+}
+
+/* Rotated kiosk mode is viewed from farther away on a wall-mounted portrait screen, so bump
+   the small text and tighten touch targets across the whole rotated subtree. Scoped to
+   .kiosk-rotate-90 so the normal (unrotated) layout is completely unchanged. Higher specificity
+   than the bare Tailwind utilities, so these win without needing !important. */
+.kiosk-rotate-90 .text-\[10px\], .kiosk-rotate-180 .text-\[10px\], .kiosk-rotate-270 .text-\[10px\] { font-size: 0.72rem; line-height: 1rem; }
+.kiosk-rotate-90 .text-\[11px\], .kiosk-rotate-180 .text-\[11px\], .kiosk-rotate-270 .text-\[11px\] { font-size: 0.8rem; line-height: 1.1rem; }
+.kiosk-rotate-90 .text-xs, .kiosk-rotate-180 .text-xs, .kiosk-rotate-270 .text-xs { font-size: 0.86rem; line-height: 1.2rem; }
+.kiosk-rotate-90 .text-sm, .kiosk-rotate-180 .text-sm, .kiosk-rotate-270 .text-sm { font-size: 1.02rem; line-height: 1.5rem; }
+.kiosk-rotate-90 .text-base, .kiosk-rotate-180 .text-base, .kiosk-rotate-270 .text-base { font-size: 1.15rem; line-height: 1.65rem; }
+
+/* Scroll areas in kiosk / portrait mode: a wide, always-visible bar instead of the thin overlay
+   one, which is easy to miss on a wall-mounted screen viewed from a distance. Inside
+   .kiosk-rotate-90 the whole subtree is turned 90°, so this bar lands along the physical bottom
+   edge rather than where a vertical scrollbar is normally looked for — the ▲▼ nudge buttons stay
+   the easier control there, but the bar makes it obvious the list scrolls at all. */
+.kiosk-scroll {
+  scrollbar-width: auto;
+  scrollbar-color: #001d6e #e5e7eb;
+}
+.kiosk-scroll::-webkit-scrollbar { width: 14px; height: 14px; }
+.kiosk-scroll::-webkit-scrollbar-track { background: #e5e7eb; border-radius: 999px; }
+.kiosk-scroll::-webkit-scrollbar-thumb {
+  background: #001d6e;
+  border: 3px solid #e5e7eb;
+  border-radius: 999px;
+}
+.kiosk-scroll::-webkit-scrollbar-thumb:hover { background: #00154b; }
+
+/* Same treatment for EVERY scroll area inside a rotated view, without each one having to opt in
+   — a rotated page's inner scrollers (the tables' own boxes) are exactly where the default thin
+   overlay bar is hardest to spot, since the turn puts it along an edge nobody thinks to look at. */
+.kiosk-rotate-90 *, .kiosk-rotate-180 *, .kiosk-rotate-270 * {
+  scrollbar-width: auto;
+  scrollbar-color: #001d6e #e5e7eb;
+}
+.kiosk-rotate-90 ::-webkit-scrollbar,
+.kiosk-rotate-180 ::-webkit-scrollbar,
+.kiosk-rotate-270 ::-webkit-scrollbar { width: 14px; height: 14px; }
+.kiosk-rotate-90 ::-webkit-scrollbar-track,
+.kiosk-rotate-180 ::-webkit-scrollbar-track,
+.kiosk-rotate-270 ::-webkit-scrollbar-track { background: #e5e7eb; border-radius: 999px; }
+.kiosk-rotate-90 ::-webkit-scrollbar-thumb,
+.kiosk-rotate-180 ::-webkit-scrollbar-thumb,
+.kiosk-rotate-270 ::-webkit-scrollbar-thumb {
+  background: #001d6e;
+  border: 3px solid #e5e7eb;
+  border-radius: 999px;
+}
+
   .scrollbar-none::-webkit-scrollbar {
     display: none;
   }
@@ -177,5 +299,40 @@ input[type="number"] {
   .inventory-table th:not(:first-child):not(:nth-child(2)),
   .inventory-table td:not(:first-child):not(:nth-child(2)) {
     border-left: 1px solid rgba(0, 0, 0, 0.05);
+  }
+}
+
+/* ── Loading skeletons ───────────────────────────────────────────────────────────────────────
+   A soft light sweep across grey placeholder shapes (components/ui/loading-skeletons.tsx and the
+   Skeleton component), instead of a spinner or an on/off blink. .skeleton-wave gives the same sweep
+   to the grey bars inside an older hand-built skeleton block. Motion is dropped for anyone who has
+   asked their system for reduced motion. */
+@keyframes skeleton-shimmer {
+  100% { transform: translateX(100%); }
+}
+.skeleton-shimmer,
+.skeleton-wave [class*="bg-gray-100"],
+.skeleton-wave [class*="bg-gray-200"] {
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-shimmer {
+  background-color: rgb(226 232 240);
+}
+.skeleton-shimmer::after,
+.skeleton-wave [class*="bg-gray-100"]::after,
+.skeleton-wave [class*="bg-gray-200"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.6) 50%, rgba(255, 255, 255, 0) 100%);
+  animation: skeleton-shimmer 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer::after,
+  .skeleton-wave [class*="bg-gray-100"]::after,
+  .skeleton-wave [class*="bg-gray-200"]::after {
+    animation: none;
   }
 }

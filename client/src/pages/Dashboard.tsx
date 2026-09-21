@@ -1,9 +1,10 @@
-import { Package, History, Upload, PieChart, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, Receipt, IndianRupee, Activity, Factory, PrinterCheck, Truck } from 'lucide-react';
+import { Package, History, Upload, FileUp, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, Receipt, IndianRupee, Activity, Factory, PrinterCheck, Truck } from 'lucide-react';
 import useEmblaCarousel from 'embla-carousel-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'wouter';
 import { apiRequest } from '@/lib/queryClient';
-import { isAdminOrSuperAdmin, getCurrentUserPermissions } from '@/lib/permissions';
+import { isAdminOrSuperAdmin, getCurrentUserPermissions, hasPageViewAccess } from '@/lib/permissions';
 
 // Import the requested images
 import ganpatiImg from '@assets/ganpati.png';
@@ -29,7 +30,11 @@ const Home = () => {
         // Check if user should see Sales page instead of Reports
         const userPermissions = getCurrentUserPermissions();
         setShowSalesPage(userPermissions.canAccessSalesPage);
-        setCanAccessExpenseVoucher(userPermissions.canAccessExpenseVoucher);
+
+        // Expense Voucher tile: admin-granted page access (Allowed Pages), not department.
+        let allowedPages: string[] = [];
+        try { allowedPages = JSON.parse(currentUser.allowedPages || '[]'); } catch { /* default [] */ }
+        setCanAccessExpenseVoucher(isAdminOrSuperAdmin(currentUser.role) || allowedPages.includes('expense-voucher'));
 
         // Non-admin/billing users are scanning dept users
         const role = (currentUser.role ?? '').toLowerCase().trim();
@@ -137,12 +142,12 @@ const Home = () => {
               <p className="text-xs text-amber-700 truncate">{scanNotif.session.csvFileName}</p>
               <p className="text-[11px] text-amber-600">{scanNotif.session.plant} · {scanNotif.session.rowCount} rows</p>
             </div>
-            <a
+            <Link
               href="/scan"
               className="shrink-0 rounded-lg bg-[#001d6e] px-3 py-2 text-xs font-semibold text-white shadow hover:bg-[#00154b] transition-colors"
             >
               Scan Now
-            </a>
+            </Link>
           </div>
         )}
 
@@ -150,87 +155,104 @@ const Home = () => {
         <div className="grid grid-cols-4 gap-4">
           {/* Row 1 */}
           {/* Print Operations Button */}
-          <div className="flex flex-col items-center">
-            <a href="/print-operations" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <PrinterCheck className="h-7 w-7 text-[#001d6e]" style={{fill: "#8766e3"}} />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Print</span>
-            </a>
-          </div>
-          
-          {/* Load Button */}
-          <div className="flex flex-col items-center">
-            <a href="/load-operations" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <Factory className="h-7 w-7 text-[#001d6e] fill-[#4d7eff]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Load</span>
-            </a>
-          </div>
-          
+          {hasPageViewAccess("print-operations") && (
+            <div className="flex flex-col items-center">
+              <Link href="/print-operations" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <PrinterCheck className="h-7 w-7 text-[#001d6e]" style={{fill: "#8766e3"}} />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Print</span>
+              </Link>
+            </div>
+          )}
+
+          {/* Load Button — the current Load Operations page (/loading). It used to point at the
+              retired /load-operations page and was gated by that page's own grant, so it opened
+              the old screen for whoever still had that grant and was hidden from everyone else. */}
+          {hasPageViewAccess("loading") && (
+            <div className="flex flex-col items-center">
+              <Link href="/loading" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <Factory className="h-7 w-7 text-[#001d6e] fill-[#4d7eff]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Load</span>
+              </Link>
+            </div>
+          )}
+
           {/* Dispatch Button */}
-          <div className="flex flex-col items-center">
-            <a href="/dispatch" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <Truck className="h-7 w-7 text-[#001d6e]" style={{fill: "#eab308"}} />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Dispatch</span>
-            </a>
-          </div>
+          {hasPageViewAccess("dispatch") && (
+            <div className="flex flex-col items-center">
+              <Link href="/dispatch" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <Truck className="h-7 w-7 text-[#001d6e]" style={{fill: "#eab308"}} />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Dispatch</span>
+              </Link>
+            </div>
+          )}
 
           {/* Expense Voucher Button - Only show if user has access */}
           {canAccessExpenseVoucher && (
             <div className="flex flex-col items-center">
-              <a href="/expense-voucher" className="flex flex-col items-center">
+              <Link href="/expense-voucher" className="flex flex-col items-center">
                 <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
                   <Receipt className="h-7 w-7 text-[#001d6e]" style={{fill: "#ea580c"}} />
                 </div>
                 <span className="text-gray-800 text-sm text-center">Expense</span>
-              </a>
+              </Link>
             </div>
           )}
-          
+
           {/* Row 2 */}
           {/* Scan Button */}
-          <div className="flex flex-col items-center mt-4">
-            <a href="/scan" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <ScanLine className="h-7 w-7 text-[#001d6e]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Scan</span>
-            </a>
-          </div>
-          
-          {/* History Button */}
-          <div className="flex flex-col items-center mt-4">
-            <a href="/scan-history" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <History className="h-7 w-7 text-[#001d6e]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">History</span>
-            </a>
-          </div>
-          
+          {hasPageViewAccess("scan-order") && (
+            <div className="flex flex-col items-center">
+              <Link href="/scan" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <ScanLine className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Scan</span>
+              </Link>
+            </div>
+          )}
+
+          {/* Scan History Button */}
+          {hasPageViewAccess("scan-history") && (
+            <div className="flex flex-col items-center">
+              <Link href="/scan-history" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <History className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Scan History</span>
+              </Link>
+            </div>
+          )}
+
           {/* Proforma Slips Button */}
-          <div className="flex flex-col items-center mt-4">
-            <a href="/proforma-slips" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <FileText className="h-7 w-7 text-[#001d6e]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Proforma Slips</span>
-            </a>
-          </div>
-          
-          {/* Reports Button */}
-          <div className="flex flex-col items-center mt-4">
-            <a href="/reports" className="flex flex-col items-center">
-              <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                <PieChart className="h-7 w-7 text-[#001d6e]" />
-              </div>
-              <span className="text-gray-800 text-sm text-center">Reports</span>
-            </a>
-          </div>
+          {hasPageViewAccess("proforma") && (
+            <div className="flex flex-col items-center">
+              <Link href="/proforma-slips" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <FileText className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Proforma Slips</span>
+              </Link>
+            </div>
+          )}
+
+          {/* Reports Button — order reports live inside Order Management now (per-row
+              Reports dialog), not a separate page, so this points there. */}
+          {hasPageViewAccess("order-import") && (
+            <div className="flex flex-col items-center">
+              <Link href="/order-import" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                  <FileUp className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Order Management</span>
+              </Link>
+            </div>
+          )}
         </div>
         
         {/* KRUPA MARKETING Credit */}

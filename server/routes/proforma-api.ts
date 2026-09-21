@@ -4,6 +4,7 @@ import { Client } from '@notionhq/client';
 import type { Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { plants, insertPlantSchema } from '../../shared/schema';
+import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -91,18 +92,25 @@ router.post('/proforma-slips/import-api', async (req, res) => {
           database_id: databaseId,
           page_size: 100,
           start_cursor: nextCursor,
+          // "Ord Date :" is a rollup (not a plain date property), so the filter must be wrapped
+          // in `rollup: { date: ... }` — a bare `date: {...}` filter is rejected by the Notion
+          // API with a type-mismatch error.
           filter: {
             and: [
               {
                 property: 'Ord Date :',
-                date: {
-                  on_or_after: startDate
+                rollup: {
+                  date: {
+                    on_or_after: startDate
+                  }
                 }
               },
               {
                 property: 'Ord Date :',
-                date: {
-                  on_or_before: endDate
+                rollup: {
+                  date: {
+                    on_or_before: endDate
+                  }
                 }
               }
             ]
@@ -619,7 +627,32 @@ router.delete('/plants/:id', async (req: Request, res: Response) => {
 });
 
 // Lock a proforma slip after print - CHECK IF PLANT ALLOWS LOCKING
-router.post('/proforma-slips/order/:orderNumber/lock', async (req: Request, res: Response) => {
+//
+// Two different callers need two different gates here:
+//   1. The Print Operations page's own auto-lock-right-after-printing (see
+//      client's createPrintContent flow) — locking there is just the natural
+//      consequence of an action the user is already allowed to take (printing).
+//      Requiring separate WRITE access on top of that was blocking users who can
+//      legitimately open both pages but were never granted edit rights on either
+//      (e.g. a user with view-only access to Print Operations and Proforma) —
+//      printing would succeed but the lock would silently 403 and fail. This path
+//      is flagged by the client sending `autoLockFromPrint: true` in the body, and
+//      only needs READ access (allowedPages) to EITHER page, not both.
+//   2. A deliberate Lock click on the Proforma Slips page itself (see
+//      ProformaSlips.tsx's lockSlip) — the default (no flag) path: admin/
+//      super-admin, or Write Access to EITHER "print-operations" OR "proforma"
+//      (not both — deliberately looser than Unlock below, so more people can lock
+//      a slip to protect it than can later reverse that).
+function requireLockAccess(req: Request, res: Response, next: () => void) {
+  if (req.body?.autoLockFromPrint === true) {
+    // A single call with an array is an OR across the keys (requirePageAccess treats
+    // it as "any one of these") — exactly what's wanted here, unlike the chained-call
+    // pattern that used to force an AND of both pages.
+    return requirePageAccess(['print-operations', 'proforma'])(req, res, next);
+  }
+  return requirePageWrite(['print-operations', 'proforma'])(req, res, next);
+}
+router.post('/proforma-slips/order/:orderNumber/lock', requireLockAccess, async (req: Request, res: Response) => {
   try {
     const orderNumber = String(req.params.orderNumber).trim();
     const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
@@ -664,29 +697,12 @@ router.post('/proforma-slips/order/:orderNumber/lock', async (req: Request, res:
   }
 });
 
-// Unlock a proforma slip (admin/super-admin OR Head-Billing)
-router.post('/proforma-slips/order/:orderNumber/unlock', async (req: Request, res: Response) => {
+// Unlock a proforma slip — admin/super-admin, or Write Access to BOTH "print-operations"
+// AND "proforma" on the Users page (department/designation special-casing removed — grant
+// Write Access on both of those page keys instead of relying on IT/Management/Billing-Head).
+router.post('/proforma-slips/order/:orderNumber/unlock', requirePageWrite('print-operations'), requirePageWrite('proforma'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user || (req as any).session?.user;
-    if (!user) {
-      return res.status(403).json({ success: false, message: 'Not authenticated' });
-    }
-
-    const role = String(user.role || '').toLowerCase();
-    const dept = String(user.department || '').toLowerCase();
-    const desig = String(user.designation || '').toLowerCase();
-
-    const isAdminOrSuper = ['admin', 'superadmin', 'super admin', 'super-admin'].includes(role);
-    // User requested "department is billing and designation is head"
-    const isHeadBilling = dept === 'billing' && desig === 'head';
-    const isITDep= ['IT', 'information technology', 'it'].includes(dept);
-    const ismanagment = ['management', 'manager', 'head', 'director'].includes(dept);
-
-    console.log(`🔐 Unlock request by ${user.name || user.username} (Role: ${role}, Dept: ${dept}, Desig: ${desig}) - Admin/Super: ${isAdminOrSuper}, Head-Billing: ${isHeadBilling}, IT: ${isITDep}, Management: ${ismanagment}`)  ;
-    if (!isAdminOrSuper && !isHeadBilling && !isITDep && !ismanagment) {
-      return res.status(403).json({ success: false, message: 'Access denied: Requires Admin or Billing-Head or IT or Management' });
-    }
-
     const orderNumber = String(req.params.orderNumber).trim();
     const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
     if (!slip) return res.status(404).json({ success: false, message: 'Proforma slip not found' });

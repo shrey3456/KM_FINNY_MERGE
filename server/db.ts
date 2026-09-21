@@ -1,9 +1,17 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import { Pool } from "pg";
+import { Pool, types } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
+
+// Date-only columns (proforma_slips.order_date, purchase dates, ...) come back as the plain
+// "YYYY-MM-DD" text stored in the database, never as a JS Date. node-postgres otherwise builds a
+// Date at LOCAL midnight — on a server running India time that is 18:30 the previous day in UTC,
+// so the JSON sent to the browser read "2026-08-31T18:30:00.000Z" for an order dated 1 Sep, and
+// every screen that took its first 10 characters showed 31 Aug. Drizzle queries already return
+// these as text; this makes raw pool.query() results match. Process-wide, set before any query.
+types.setTypeParser(types.builtins.DATE, (value: string) => value);
 
 const connectionString =
   process.env.DATABASE_URL ||

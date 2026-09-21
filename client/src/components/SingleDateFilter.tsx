@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { format, addDays, subDays, parse } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -31,17 +31,20 @@ interface SingleDateFilterProps {
   onDateChange?: (date: Date | null) => void;
   selectedDate?: Date | null;
   className?: string;
+  /** Extra classes merged onto the "Filter by date" / "Calendar" trigger buttons. */
+  buttonClassName?: string;
   size?: "sm" | "md" | "lg";
   children?: React.ReactNode;
   isLocked?: boolean; // Kept for backward compatibility but not used
   onLockChange?: (locked: boolean) => void; // Kept for backward compatibility but not used
 }
 
-export function SingleDateFilter({ 
+export function SingleDateFilter({
   pageKey,
-  onDateChange, 
-  selectedDate, 
+  onDateChange,
+  selectedDate,
   className,
+  buttonClassName,
   size = "md",
   children,
   isLocked: externalIsLocked, // Kept but ignored
@@ -50,30 +53,43 @@ export function SingleDateFilter({
   const { toast } = useToast();
   const { savedDate: date, saveDateFilter: setDate, clearSavedDateFilter: clearFilter } = useSingleDateFilter(pageKey);
   const [isOpen, setIsOpen] = useState(false);
+  const pushedSavedDateRef = useRef(false);
   
-  // Initialize the parent component with our persisted date on mount
+  // Same calendar day? Dates are compared by day, never by object identity or timestamp — two
+  // Date objects for the same day are different objects, and one of them may carry a time.
+  const sameDay = (a: Date | null | undefined, b: Date | null | undefined) => {
+    if (!a || !b) return !a && !b;
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  };
+
+  // Hand the restored date to the page once it has actually been read from storage. This used to
+  // run only on mount, where `date` was still null (storage is read in an effect of its own, one
+  // render later) — so the button showed the saved date while the page's list was never filtered
+  // by it, which is what "the date filter doesn't stick" looked like.
   useEffect(() => {
-    if (date && onDateChange) {
-      // Apply the stored filter to parent component
-      onDateChange(date);
-    }
-  }, []);
-  
-  // Keep the internal state in sync with external state when using direct date props
+    if (pushedSavedDateRef.current || !date) return;
+    pushedSavedDateRef.current = true;
+    if (!sameDay(date, selectedDate)) onDateChange?.(date);
+  }, [date]);
+
+  // Keep the internal state in sync when the page drives the date itself. Guarded by day, so a
+  // page that rebuilds its Date object on every render doesn't rewrite storage every render.
   useEffect(() => {
-    if (selectedDate) {
-      setDate(selectedDate);
-    }
+    if (selectedDate && !sameDay(selectedDate, date)) setDate(selectedDate);
   }, [selectedDate]);
 
-  const handleDateSelect = (selectedDate: Date | undefined) => {
-    const newDate = selectedDate || null;
+  const handleDateSelect = (picked: Date | undefined) => {
+    // react-day-picker reports undefined when the already-selected day is clicked again. Treat
+    // that as "keep it" — clearing is the Clear button — instead of silently dropping the filter,
+    // which made picking a date look like it hadn't worked at all.
+    if (!picked) {
+      setIsOpen(false);
+      return;
+    }
+    const newDate = new Date(picked.getFullYear(), picked.getMonth(), picked.getDate());
     setDate(newDate);
     setIsOpen(false);
-    
-    if (onDateChange) {
-      onDateChange(newDate);
-    }
+    onDateChange?.(newDate);
   };
 
   const setToday = () => {
@@ -131,6 +147,7 @@ export function SingleDateFilter({
 
   const handleClearFilter = () => {
     clearFilter();
+    pushedSavedDateRef.current = true;
     
     if (onDateChange) {
       onDateChange(null);
@@ -150,7 +167,8 @@ export function SingleDateFilter({
             variant="outline"
             className={cn(
               "justify-start text-left font-normal",
-              !date && "text-muted-foreground"
+              !date && "text-muted-foreground",
+              buttonClassName,
             )}
           >
             <CalendarIcon className="mr-2 h-4 w-4" />
@@ -184,7 +202,8 @@ export function SingleDateFilter({
             variant="outline"
             className={cn(
               "justify-start text-left font-normal",
-              !date && "text-muted-foreground"
+              !date && "text-muted-foreground",
+              buttonClassName,
             )}
           >
             <span>Calendar</span>

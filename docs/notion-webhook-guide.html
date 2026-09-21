@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KM Finny — Notion Webhook Setup Guide</title>
+<style>
+  :root {
+    --paper: #FFFFFF;
+    --tint: #F3F5F8;
+    --ink: #12141C;
+    --ink-soft: #4A4E5C;
+    --line: rgba(18, 20, 28, 0.14);
+    --line-soft: rgba(18, 20, 28, 0.07);
+    --accent: #001D6E;
+    --accent-soft: rgba(0, 29, 110, 0.07);
+    --good: #1E6B45;
+    --good-soft: rgba(30, 107, 69, 0.09);
+    --warn: #9A5C14;
+    --warn-soft: rgba(154, 92, 20, 0.09);
+    --crit: #A33A3A;
+    --crit-soft: rgba(163, 58, 58, 0.08);
+    --mono: "Cascadia Mono", Consolas, "Roboto Mono", Menlo, monospace;
+    --serif: Georgia, "Palatino Linotype", "Times New Roman", serif;
+    --sans: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  }
+  @page { size: A4; margin: 16mm 15mm 18mm 15mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--paper); color: var(--ink); }
+  body { font-family: var(--sans); font-size: 10.5pt; line-height: 1.55; }
+  .page { max-width: 760px; margin: 0 auto; padding: 24px 20px 40px; }
+  @media print { .page { padding: 0; max-width: none; } }
+
+  h1, h2, h3 { font-family: var(--serif); color: var(--accent); line-height: 1.2; }
+  h1 { font-size: 26pt; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h2 { font-size: 15pt; margin: 26px 0 8px; padding-bottom: 5px; border-bottom: 2px solid var(--accent); break-after: avoid; }
+  h3 { font-size: 11.5pt; margin: 16px 0 6px; break-after: avoid; }
+  p { margin: 6px 0; }
+  ul, ol { margin: 6px 0 6px 20px; padding: 0; }
+  li { margin: 3px 0; }
+  code, .mono { font-family: var(--mono); font-size: 9.2pt; background: var(--tint); padding: 1px 5px; border-radius: 3px; }
+  pre { font-family: var(--mono); font-size: 9pt; background: var(--tint); border: 1px solid var(--line-soft); border-radius: 4px; padding: 9px 11px; margin: 8px 0; white-space: pre-wrap; word-break: break-all; break-inside: avoid; }
+  strong { color: var(--ink); }
+
+  .cover { border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 8px; }
+  .eyebrow { font-size: 8.5pt; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 8px; }
+  .lede { font-size: 11.5pt; color: var(--ink-soft); max-width: 60ch; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; font-size: 9pt; color: var(--ink-soft); }
+  .meta b { color: var(--ink); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 10px; font-size: 9.6pt; break-inside: auto; }
+  th { text-align: left; background: var(--accent); color: #fff; font-weight: 600; padding: 6px 8px; font-size: 9pt; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  tr { break-inside: avoid; }
+  tbody tr:nth-child(even) td { background: #FAFBFC; }
+
+  .note { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 8px 12px; margin: 10px 0; border-radius: 0 4px 4px 0; break-inside: avoid; }
+  .note.good { border-color: var(--good); background: var(--good-soft); }
+  .note.warn { border-color: var(--warn); background: var(--warn-soft); }
+  .note.crit { border-color: var(--crit); background: var(--crit-soft); }
+  .note-title { font-weight: 700; font-size: 9pt; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 2px; }
+  .note.good .note-title { color: var(--good); }
+  .note.warn .note-title { color: var(--warn); }
+  .note.crit .note-title { color: var(--crit); }
+  .note .note-title { color: var(--accent); }
+
+  /* Flow diagram */
+  .flow { display: flex; align-items: stretch; gap: 0; margin: 12px 0 6px; break-inside: avoid; }
+  .flow .box { flex: 1; border: 1px solid var(--line); border-radius: 5px; padding: 8px 9px; background: var(--paper); font-size: 9pt; }
+  .flow .box b { display: block; color: var(--accent); font-size: 9.5pt; margin-bottom: 2px; }
+  .flow .arrow { width: 20px; display: flex; align-items: center; justify-content: center; color: var(--accent); font-weight: 700; }
+
+  /* Steps */
+  .step { display: grid; grid-template-columns: 34px 1fr; gap: 10px; margin: 12px 0; break-inside: avoid; }
+  .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 11pt; }
+  .step h3 { margin: 4px 0 4px; }
+
+  .check { list-style: none; margin-left: 0; }
+  .check li { padding-left: 22px; position: relative; }
+  .check li::before { content: ""; position: absolute; left: 0; top: 4px; width: 11px; height: 11px; border: 1.5px solid var(--accent); border-radius: 2px; }
+
+  .toc { columns: 2; column-gap: 28px; font-size: 9.6pt; margin: 8px 0 0; padding-left: 18px; }
+  .toc li { break-inside: avoid; }
+  .small { font-size: 8.8pt; color: var(--ink-soft); }
+  .pagebreak { break-before: page; }
+  footer { margin-top: 28px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 8.5pt; color: var(--ink-soft); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="cover">
+    <div class="eyebrow">KM Finny · Setup guide</div>
+    <h1>Notion Webhook</h1>
+    <p class="lede">How changes made in Notion reach the KM Finny app automatically — what it does, how to set it up step by step, and how to check it is working.</p>
+    <div class="meta">
+      <span><b>For:</b> admins and whoever sets up the server</span>
+      <span><b>Version:</b> 1.0</span>
+      <span><b>Date:</b> 17 September 2026</span>
+    </div>
+  </div>
+
+  <ol class="toc">
+    <li>What this does</li>
+    <li>How it works</li>
+    <li>Before you start</li>
+    <li>Setup, step by step</li>
+    <li>Server settings (.env)</li>
+    <li>Check that it works</li>
+    <li>Troubleshooting</li>
+    <li>Going live checklist</li>
+    <li>Good to know</li>
+    <li>For developers</li>
+  </ol>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>1. What this does</h2>
+  <p><strong>Before:</strong> when someone changed something in Notion, the app did not know. Someone had to press <em>Sync</em>, or wait for the daily sync.</p>
+  <p><strong>Now:</strong> when something changes in Notion, <strong>Notion sends a message to the app right away</strong>. The app updates only that one record. Nobody needs to press Sync for these changes.</p>
+
+  <table>
+    <thead><tr><th style="width:26%">Notion database</th><th>What the app updates</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Orders</strong></td><td><strong>Only the Finny Status</strong> of the matching proforma slip (matched by order number). No other slip field is changed.</td></tr>
+      <tr><td><strong>Vehicle Master</strong></td><td>That vehicle's details. A vehicle that is new in Notion is added to the app.</td></tr>
+      <tr><td><strong>Product Master</strong></td><td>That product's details, including its photo. A product that is new in Notion is added to the app.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <div class="note-title">In simple words</div>
+    It works like a doorbell. Instead of checking Notion every few minutes, Notion "rings" the app the moment something changes.
+  </div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>2. How it works</h2>
+  <div class="flow">
+    <div class="box"><b>1. Change in Notion</b>Someone edits an order, vehicle or product.</div>
+    <div class="arrow">→</div>
+    <div class="box"><b>2. Notion calls the app</b>"This page changed" is sent to the app's webhook address.</div>
+    <div class="arrow">→</div>
+    <div class="box"><b>3. Security check</b>The app checks the message really came from Notion.</div>
+    <div class="arrow">→</div>
+    <div class="box"><b>4. Update</b>The app reads that page from Notion and updates only that record.</div>
+  </div>
+
+  <h3>The details</h3>
+  <ul>
+    <li><strong>Only which page changed is sent.</strong> Notion's message does not include the new values, so the app reads that one page back from Notion and then updates its own record.</li>
+    <li><strong>Security:</strong> every message from Notion carries a signature made with a secret token. The app recalculates it and <strong>rejects anything that does not match</strong>, so nobody else can send fake changes.</li>
+    <li><strong>Quick edits are grouped:</strong> several edits to the same page within 3 seconds are handled as one update.</li>
+    <li><strong>No loops:</strong> when the app itself sends a status to Notion, Notion reports that change back. The app sees the value already matches and does nothing.</li>
+    <li><strong>Speed:</strong> changes usually arrive within a minute. Notion allows up to 5 minutes.</li>
+    <li><strong>If the server is down:</strong> Notion retries each message up to 8 times over about 24 hours, so a short outage does not lose changes.</li>
+  </ul>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2 class="pagebreak">3. Before you start</h2>
+  <ul class="check">
+    <li><strong>The app is reachable on the internet over https.</strong> Notion cannot reach <code>localhost</code>. For testing on a PC, use a tunnel (step A).</li>
+    <li><strong>Admin access in Notion</strong> to the connection (integration) the app already uses.</li>
+    <li><strong>Access to the server's <code>.env</code> file</strong> and permission to restart the server.</li>
+    <li><strong>An admin login to the KM Finny app</strong>, to open the status page.</li>
+  </ul>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>4. Setup, step by step</h2>
+
+  <div class="step"><div class="num">A</div><div>
+    <h3>Get a public https address for the app</h3>
+    <p><strong>Live server:</strong> use the real domain, for example <code>https://yourdomain.com</code>.</p>
+    <p><strong>Testing on a PC</strong> (the app runs on port <code>5000</code>), use one of:</p>
+    <ul>
+      <li><strong>VS Code:</strong> open the <em>Ports</em> panel → <em>Forward a Port</em> → enter <code>5000</code>. Then right-click the port → <em>Port Visibility</em> → <strong>Public</strong>. Copy the https address shown.</li>
+      <li><strong>ngrok:</strong> run <code>ngrok http 5000</code> and copy the https address.</li>
+    </ul>
+    <div class="note warn"><div class="note-title">Important</div>A VS Code port is <strong>Private</strong> by default — Notion cannot reach it until it is set to Public. A tunnel address also changes each time it restarts, so it is only for testing.</div>
+  </div></div>
+
+  <div class="step"><div class="num">B</div><div>
+    <h3>Give the connection access to the three databases</h3>
+    <p>Open each database in Notion: <strong>Orders</strong>, <strong>Vehicle Master</strong> and <strong>Product Master</strong>. Click <strong>•••</strong> (top right) → <strong>Connections</strong> and make sure the app's connection is listed. Notion only sends changes for pages the connection can see.</p>
+  </div></div>
+
+  <div class="step"><div class="num">C</div><div>
+    <h3>Create the webhook subscription</h3>
+    <ol>
+      <li>Go to <code>https://app.notion.com/developers/connections</code> and open the app's connection.</li>
+      <li>Open the <strong>Webhooks</strong> tab → <strong>+ Create a subscription</strong>.</li>
+      <li><strong>URL:</strong> the address from step A followed by <code>/api/webhooks/notion</code>
+        <pre>https://yourdomain.com/api/webhooks/notion</pre></li>
+      <li><strong>Events:</strong> select <code>page.created</code>, <code>page.properties_updated</code>, <code>page.content_updated</code>, <code>page.undeleted</code>, <code>page.moved</code> and <code>page.deleted</code>. Then create it.</li>
+    </ol>
+  </div></div>
+
+  <div class="step"><div class="num">D</div><div>
+    <h3>Verify the subscription</h3>
+    <ol>
+      <li>Right after creating it, Notion sends a one-time <strong>verification token</strong> to the app. It is printed in the <strong>server log</strong>, in a block starting with <code>Verification token received</code>. Copy the value that starts with <code>secret_</code>.</li>
+      <li>Back in Notion's Webhooks tab, click <strong>⚠️ Verify</strong> (bottom left), paste the token, and click <strong>Verify subscription</strong>.</li>
+    </ol>
+    <div class="note crit"><div class="note-title">Keep it secret</div>This token proves messages really come from Notion. Do not share it in chat, email or screenshots.</div>
+  </div></div>
+
+  <div class="step"><div class="num">E</div><div>
+    <h3>Save the token on the server</h3>
+    <p>Add this line to the server's <code>.env</code> file, then <strong>restart the server</strong>:</p>
+    <pre>NOTION_WEBHOOK_VERIFICATION_TOKEN=secret_xxxxxxxxxxxxxxxx</pre>
+    <p>Until this is set, the app receives Notion's messages but ignores them.</p>
+  </div></div>
+
+  <div class="step"><div class="num">F</div><div>
+    <h3>Test it</h3>
+    <ol>
+      <li>In Notion, change <strong>Finny Status</strong> on a test order.</li>
+      <li>Wait up to a minute (at most 5).</li>
+      <li>Open <strong>Proforma Slips</strong> in the app — the status should show the new value.</li>
+      <li>Change a field on a vehicle and on a product the same way, and check Vehicle Master and Product Master.</li>
+    </ol>
+    <p>You can also check the status page (section 6).</p>
+  </div></div>
+
+  <div class="step"><div class="num">G</div><div>
+    <h3>Move from testing to live</h3>
+    <p>If you tested with a tunnel: in Notion, <strong>edit the subscription URL</strong> to the live domain, then <strong>repeat steps D and E</strong> — the new URL gets its own token.</p>
+  </div></div>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2 class="pagebreak">5. Server settings (.env)</h2>
+  <p>These are the settings the webhook uses. The last two are new; the others already exist for the Notion syncs. Never put real secret values in shared documents.</p>
+  <table>
+    <thead><tr><th style="width:40%">Setting</th><th>What it is for</th></tr></thead>
+    <tbody>
+      <tr><td><code>NOTION_INTEGRATION_SECRET</code></td><td>Lets the app read pages from Notion (already in use).</td></tr>
+      <tr><td><code>ORDER_DATABASE_ID</code></td><td>Tells the app which Notion database is Orders (already in use).</td></tr>
+      <tr><td><code>NOTION_VEHICLE_DATABASE_ID</code></td><td>Which database is Vehicle Master (already in use).</td></tr>
+      <tr><td><code>NOTION_INVENTORY_DATABASE_ID</code></td><td>Which database is Product Master (already in use).</td></tr>
+      <tr><td><code>NOTION_WEBHOOK_VERIFICATION_TOKEN</code> <span class="small">(new)</span></td><td>The secret token from step D. Required — without it all messages are ignored.</td></tr>
+      <tr><td><code>NOTION_WEBHOOK_STATUS_URL</code> <span class="small">(new, optional)</span></td><td>Link opened by the <strong>Open status</strong> button in Settings. Example: <code>https://yourdomain.com/api/webhooks/notion/status</code></td></tr>
+    </tbody>
+  </table>
+  <p class="small">After changing <code>.env</code>, restart the server so it picks up the change.</p>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>6. Check that it works</h2>
+  <p>In the app, go to <strong>Settings</strong> → <strong>Notion Webhook Status</strong> → <strong>Open status</strong> (admins only). It opens a page listing the setup and the last 100 changes Notion sent.</p>
+
+  <table>
+    <thead><tr><th style="width:32%">Line</th><th>Meaning</th><th style="width:24%">You want to see</th></tr></thead>
+    <tbody>
+      <tr><td><code>tokenConfigured</code></td><td>Is the secret token saved on the server?</td><td><code>true</code></td></tr>
+      <tr><td><code>databasesConfigured</code></td><td>Does the server know the three database IDs?</td><td>all three <code>true</code></td></tr>
+      <tr><td><code>lastVerificationAt</code></td><td>When Notion last sent its verification (step D)</td><td>a date after setup</td></tr>
+      <tr><td><code>pendingPages</code></td><td>Changes waiting a few seconds before being applied</td><td>usually <code>0</code></td></tr>
+      <tr><td><code>recentActivity</code></td><td>The last 100 changes, newest first, and what happened to each</td><td>see below</td></tr>
+    </tbody>
+  </table>
+
+  <h3>What each result means</h3>
+  <table>
+    <thead><tr><th style="width:22%">Result</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><strong>updated</strong></td><td>The change was saved in the app. For orders it shows the order number and new status, e.g. <code>updated (#100459 → DISPATCHED)</code>.</td></tr>
+      <tr><td><strong>created</strong></td><td>A new vehicle or product was added.</td></tr>
+      <tr><td><strong>unchanged</strong></td><td>The app already had that value — nothing to do.</td></tr>
+      <tr><td><strong>ignored</strong></td><td>Nothing to do: a page from another database, a page moved to trash, or the token is not set.</td></tr>
+      <tr><td><strong>waiting</strong></td><td>A full manual sync was running; the change will be retried in 30 seconds.</td></tr>
+      <tr><td><strong>rejected</strong></td><td>The signature did not match — the message did not come from Notion, or the token is wrong.</td></tr>
+      <tr><td><strong>error</strong></td><td>Something went wrong; the reason is shown next to it.</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2 class="pagebreak">7. Troubleshooting</h2>
+  <table>
+    <thead><tr><th style="width:30%">Problem</th><th style="width:34%">Likely cause</th><th>What to do</th></tr></thead>
+    <tbody>
+      <tr><td>Notion cannot verify / never sends the token</td><td>Address not public, not https, or wrong path</td><td>Check the URL ends with <code>/api/webhooks/notion</code>. For VS Code tunnels, set the port to <strong>Public</strong>.</td></tr>
+      <tr><td>Nothing changes in the app</td><td>Token not set on the server</td><td>Status page shows <code>tokenConfigured: false</code> → do step E and restart.</td></tr>
+      <tr><td>Results show <strong>rejected</strong></td><td>Token on the server does not match this subscription</td><td>Copy the token again from the latest verification and update <code>.env</code>.</td></tr>
+      <tr><td>Results show <strong>ignored — not in the order, vehicle or product database</strong></td><td>Database ID in <code>.env</code> is wrong, or the page is from another database</td><td>Check the three database IDs in <code>.env</code>.</td></tr>
+      <tr><td>No results at all for a database</td><td>Connection has no access to that database</td><td>Do step B for that database.</td></tr>
+      <tr><td>Results show <strong>error — could not read page</strong></td><td>The app's Notion secret has no access or is wrong</td><td>Check <code>NOTION_INTEGRATION_SECRET</code> and step B.</td></tr>
+      <tr><td>Worked in testing, stopped after going live</td><td>Subscription still points to the old tunnel address</td><td>Do step G: change the URL, then repeat D and E.</td></tr>
+      <tr><td>The Open status button is greyed out</td><td>You are not logged in as an admin</td><td>Log in with an admin account.</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>8. Going live checklist</h2>
+  <ul class="check">
+    <li>Subscription URL is the live https domain + <code>/api/webhooks/notion</code></li>
+    <li>Subscription is verified in Notion</li>
+    <li><code>NOTION_WEBHOOK_VERIFICATION_TOKEN</code> is set on the live server, and the server was restarted</li>
+    <li>The connection has access to Orders, Vehicle Master and Product Master</li>
+    <li>A test status change appears in the app, and the status page shows <strong>updated</strong></li>
+    <li><code>NOTION_WEBHOOK_STATUS_URL</code> points to the live domain (optional)</li>
+  </ul>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>9. Good to know</h2>
+  <ul>
+    <li><strong>For orders, only Finny Status is updated.</strong> Other slip fields still come from Import / Sync from Notion.</li>
+    <li><strong>Deleting in Notion does not delete in the app.</strong> A page moved to trash is only noted on the status page.</li>
+    <li><strong>The Sync buttons and the daily sync still exist</strong> as a backup in case a change is ever missed. They can be turned off later, once the webhook has been confirmed working live.</li>
+    <li><strong>The status page keeps the last 100 changes in memory</strong> — it starts empty again after a server restart.</li>
+    <li><strong>Vehicles and products use exactly the same rules as the Sync buttons</strong>, so a webhook update and a manual sync always give the same result.</li>
+  </ul>
+
+  <!-- ─────────────────────────────────────────── -->
+  <h2>10. For developers</h2>
+  <table>
+    <thead><tr><th style="width:44%">File</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>server/routes/notion-webhook.ts</code></td><td>The webhook: verification, signature check, grouping of quick edits, routing by database, the Finny Status update, and the admin status endpoints.</td></tr>
+      <tr><td><code>server/services/notionVehicleSync.ts</code></td><td><code>applyVehiclePageFromNotionWebhook</code> — applies one Vehicle Master page using the existing sync mapping.</td></tr>
+      <tr><td><code>server/services/notionInventorySync.ts</code></td><td><code>applyProductPageFromNotionWebhook</code> — applies one Product Master page, including its photo.</td></tr>
+      <tr><td><code>server/index.ts</code></td><td>Keeps the raw request body for <code>/api/webhooks/notion</code> only (needed for the signature check).</td></tr>
+      <tr><td><code>server/routes.ts</code></td><td>Registers the webhook routes.</td></tr>
+      <tr><td><code>client/src/pages/Settings.tsx</code></td><td>The <strong>Notion Webhook Status</strong> card and <strong>Open status</strong> button.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Endpoints</h3>
+  <table>
+    <thead><tr><th style="width:44%">Endpoint</th><th>Who</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>POST /api/webhooks/notion</code></td><td>Notion (public, signature required)</td><td>Receives verification and change events</td></tr>
+      <tr><td><code>GET /api/webhooks/notion/status</code></td><td>Admins</td><td>Setup state and recent activity</td></tr>
+      <tr><td><code>GET /api/webhooks/notion/status-link</code></td><td>Admins</td><td>Link used by the Settings button</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Signature</h3>
+  <pre>X-Notion-Signature: sha256=&lt;HMAC-SHA256 of the raw request body, key = verification token&gt;</pre>
+
+  <footer>KM Finny · Notion Webhook Setup Guide · Version 1.0 · 17 September 2026</footer>
+</div>
+</body>
+</html>

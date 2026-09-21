@@ -1,0 +1,1021 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KM Finny — Field Manual</title>
+<style>
+  :root {
+    --paper: #F3F5F8;
+    --surface: #FFFFFF;
+    --ink: #12141C;
+    --ink-soft: #4A4E5C;
+    --line: rgba(18, 20, 28, 0.13);
+    --line-soft: rgba(18, 20, 28, 0.07);
+    --accent: #001D6E;
+    --accent-soft: rgba(0, 29, 110, 0.08);
+    --accent-ink: #FFFFFF;
+    --amber: #9A5C14;
+    --amber-soft: rgba(154, 92, 20, 0.10);
+    --good: #1E6B45;
+    --good-soft: rgba(30, 107, 69, 0.10);
+    --warn: #9A5C14;
+    --warn-soft: rgba(154, 92, 20, 0.10);
+    --crit: #A33A3A;
+    --crit-soft: rgba(163, 58, 58, 0.10);
+    --get: #1E6B45;
+    --post: #001D6E;
+    --put: #9A5C14;
+    --del: #A33A3A;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif;
+    --radius: 3px;
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #0E1016;
+    --surface: #171A24;
+    --ink: #E7E9F0;
+    --ink-soft: #A7ACC0;
+    --line: rgba(231, 233, 240, 0.14);
+    --line-soft: rgba(231, 233, 240, 0.07);
+    --accent: #6E8FE8;
+    --accent-soft: rgba(110, 143, 232, 0.14);
+    --accent-ink: #0E1016;
+    --amber: #D8A24C;
+    --amber-soft: rgba(216, 162, 76, 0.13);
+    --good: #5BAE85;
+    --good-soft: rgba(91, 174, 133, 0.13);
+    --warn: #D8A24C;
+    --warn-soft: rgba(216, 162, 76, 0.13);
+    --crit: #E08080;
+    --crit-soft: rgba(224, 128, 128, 0.13);
+    --get: #5BAE85;
+    --post: #6E8FE8;
+    --put: #D8A24C;
+    --del: #E08080;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0E1016;
+      --surface: #171A24;
+      --ink: #E7E9F0;
+      --ink-soft: #A7ACC0;
+      --line: rgba(231, 233, 240, 0.14);
+      --line-soft: rgba(231, 233, 240, 0.07);
+      --accent: #6E8FE8;
+      --accent-soft: rgba(110, 143, 232, 0.14);
+      --accent-ink: #0E1016;
+      --amber: #D8A24C;
+      --amber-soft: rgba(216, 162, 76, 0.13);
+      --good: #5BAE85;
+      --good-soft: rgba(91, 174, 133, 0.13);
+      --warn: #D8A24C;
+      --warn-soft: rgba(216, 162, 76, 0.13);
+      --crit: #E08080;
+      --crit-soft: rgba(224, 128, 128, 0.13);
+      --get: #5BAE85;
+      --post: #6E8FE8;
+      --put: #D8A24C;
+      --del: #E08080;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 16.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--mono);
+    font-weight: 700;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  p { margin: 0 0 0.9em; max-width: 62ch; }
+  code, .mono { font-family: var(--mono); }
+
+  .shell {
+    display: grid;
+    grid-template-columns: 272px minmax(0, 1fr);
+    max-width: 1320px;
+    margin: 0 auto;
+  }
+  @media (max-width: 940px) {
+    .shell { grid-template-columns: 1fr; }
+  }
+
+  .masthead {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 22px clamp(18px, 4vw, 40px) 18px;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .masthead .id {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .masthead .mark {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    background: var(--accent);
+    color: var(--accent-ink);
+    padding: 3px 8px;
+    border-radius: var(--radius);
+  }
+  .masthead h1 {
+    font-size: 15px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 0;
+    color: var(--ink-soft);
+  }
+  .masthead .meta {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.03em;
+  }
+
+  nav.toc {
+    padding: 28px 18px 60px clamp(18px, 4vw, 40px);
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+  }
+  @media (max-width: 940px) {
+    nav.toc {
+      position: relative;
+      max-height: none;
+      padding: 18px clamp(18px, 4vw, 40px) 0;
+    }
+  }
+  nav.toc .group { margin-bottom: 22px; }
+  nav.toc .group-label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 8px;
+  }
+  nav.toc ul { list-style: none; margin: 0; padding: 0; }
+  nav.toc li { margin: 0; }
+  nav.toc a {
+    display: block;
+    padding: 5px 0 5px 12px;
+    border-left: 2px solid var(--line);
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-soft);
+    text-decoration: none;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  nav.toc a:hover { color: var(--ink); border-left-color: var(--accent); }
+  nav.toc a.active { color: var(--accent); border-left-color: var(--accent); font-weight: 700; }
+
+  main { min-width: 0; padding: 28px clamp(18px, 4vw, 40px) 100px; }
+
+  .intro {
+    max-width: 70ch;
+    margin-bottom: 40px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--line);
+  }
+  .intro .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 10px;
+  }
+  .intro h2 {
+    font-size: clamp(24px, 3.4vw, 32px);
+    margin: 0 0 14px;
+    line-height: 1.15;
+  }
+  .stack-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 18px;
+  }
+  .stack-row .chip {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 4px 9px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--ink-soft);
+  }
+
+  section.category { margin-bottom: 8px; }
+  .category-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin: 52px 0 22px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .category-head:first-of-type { margin-top: 0; }
+  .category-head h2 {
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0;
+    white-space: nowrap;
+  }
+  .category-head .rule { flex: 1; height: 1px; background: var(--line); }
+  .category-head .count { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); }
+
+  article.page {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: clamp(18px, 3vw, 30px);
+    margin-bottom: 22px;
+    scroll-margin-top: 18px;
+  }
+  .page-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .page-head h3 {
+    font-size: 20px;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .page-route {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    background: var(--paper);
+    border: 1px solid var(--line);
+    padding: 3px 8px;
+    border-radius: var(--radius);
+    white-space: nowrap;
+  }
+  .page-purpose {
+    color: var(--ink-soft);
+    font-style: italic;
+    margin: 6px 0 20px;
+    max-width: 68ch;
+  }
+
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px; }
+  .badge {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.03em;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+  }
+  .badge.access { background: var(--accent-soft); color: var(--accent); border-color: currentColor; }
+  .badge.write { background: var(--amber-soft); color: var(--amber); border-color: currentColor; }
+  .badge.admin { background: var(--crit-soft); color: var(--crit); border-color: currentColor; }
+  .badge.data { background: var(--good-soft); color: var(--good); border-color: currentColor; }
+
+  h4.block-label {
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 22px 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h4.block-label:first-of-type { margin-top: 0; }
+  h4.block-label::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+
+  .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; }
+  .steps li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 30px;
+    margin-bottom: 10px;
+    max-width: 64ch;
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 0.05em;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-soft);
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .endpoints { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+  .ep {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 7px 10px;
+    background: var(--paper);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    flex-wrap: wrap;
+  }
+  .ep .m {
+    font-weight: 700;
+    width: 42px;
+    flex-shrink: 0;
+    letter-spacing: 0.02em;
+  }
+  .ep .m.get { color: var(--get); }
+  .ep .m.post { color: var(--post); }
+  .ep .m.put { color: var(--put); }
+  .ep .m.del { color: var(--del); }
+  .ep .path { color: var(--ink); }
+  .ep .note { color: var(--ink-soft); font-family: var(--serif); font-style: italic; font-size: 12.5px; }
+
+  .filewrap { overflow-x: auto; margin-bottom: 4px; }
+  table.fields {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+    min-width: 420px;
+  }
+  table.fields caption {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    margin-bottom: 6px;
+  }
+  table.fields th, table.fields td {
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+  table.fields th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  table.fields td.f { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; color: var(--accent); }
+  table.fields tr:last-child td { border-bottom: none; }
+
+  .note {
+    display: flex;
+    gap: 10px;
+    padding: 11px 13px;
+    background: var(--amber-soft);
+    border-left: 3px solid var(--amber);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 14px;
+    margin-top: 16px;
+  }
+  .note.crit { background: var(--crit-soft); border-color: var(--crit); }
+  .note .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--amber);
+    flex-shrink: 0;
+    padding-top: 0.15em;
+  }
+  .note.crit .tag { color: var(--crit); }
+  .note p { margin: 0; max-width: none; }
+
+  .filepath { font-family: var(--mono); font-size: 0.92em; color: var(--ink-soft); }
+
+  footer.colophon {
+    grid-column: 1 / -1;
+    padding: 28px clamp(18px, 4vw, 40px) 50px;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <header class="masthead">
+    <div class="id">
+      <span class="mark">KM</span>
+      <h1>Field Manual — Internal Platform Reference</h1>
+    </div>
+    <div class="meta">16 modules · usage + API level</div>
+  </header>
+
+  <nav class="toc" aria-label="Table of contents">
+    <div class="group">
+      <p class="group-label">Access &amp; Identity</p>
+      <ul>
+        <li><a href="#login">Login &amp; Sessions</a></li>
+        <li><a href="#users">User Management</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">Warehouse Floor</p>
+      <ul>
+        <li><a href="#scan">Order Scan</a></li>
+        <li><a href="#stock">Overall Stock</a></li>
+        <li><a href="#dispatch">Dispatch</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">Order Pipeline</p>
+      <ul>
+        <li><a href="#order-import">Order Management</a></li>
+        <li><a href="#order-reports">Reports (Summary/Activity/Hourly)</a></li>
+        <li><a href="#scan-viewer">Scan Viewer</a></li>
+        <li><a href="#scan-history">Scan History</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">Catalog &amp; Documents</p>
+      <ul>
+        <li><a href="#inventory">Product Master</a></li>
+        <li><a href="#proforma">Proforma Slips</a></li>
+        <li><a href="#print-ops">Print Operations</a></li>
+        <li><a href="#expense">Expense Voucher</a></li>
+        <li><a href="#toll">Toll Voucher</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">Admin &amp; System</p>
+      <ul>
+        <li><a href="#activities">Activities</a></li>
+        <li><a href="#settings">Settings</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main>
+    <div class="intro">
+      <p class="eyebrow">Read this first</p>
+      <h2>How the pieces fit before you touch any one of them</h2>
+      <p>KM Finny runs a physical warehouse: CSV orders come in, staff scan boxes against them on the floor, stock totals move, and paperwork (vouchers, slips, dispatch labels) gets printed along the way. Every module below either <em>produces</em> data the others read, or <em>consumes</em> data another module produced — Order Management feeds Order Scan, Order Scan feeds Overall Stock and Order Reports, Product Master feeds product data to all of them.</p>
+      <p>Three separate mechanisms gate what a person can see and do, layered on top of each other. <strong>Role</strong> (<code>admin</code> / <code>super-admin</code> / <code>read/write</code> / <code>read</code>) is global and coarse — admins bypass every other check. <strong>Allowed Pages</strong> (<code>users.allowedPages</code>, a JSON array of page keys) is per-user and controls which pages even render for someone who isn't an admin. <strong>Write Access</strong> (<code>users.pageWriteAccess</code>, a subset of Allowed Pages) controls whether a non-admin can edit or only view a page they can already see. All three are set from User Management. A handful of pages layer a fourth, older mechanism on top — department-name string matching (e.g. <code>"DISPATCH {VALSAD}"</code>) — which predates the page-key system and still drives a few pages noted below.</p>
+      <div class="stack-row">
+        <span class="chip">React + TypeScript</span>
+        <span class="chip">Express + Passport</span>
+        <span class="chip">PostgreSQL · Drizzle ORM</span>
+        <span class="chip">Wouter routing</span>
+        <span class="chip">React Query</span>
+        <span class="chip">Notion API (catalog + dispatch source)</span>
+        <span class="chip">WebSocket (live scan sync)</span>
+      </div>
+    </div>
+
+    <section class="category" id="cat-access">
+      <div class="category-head"><h2>Access &amp; Identity</h2><div class="rule"></div><span class="count">2 modules</span></div>
+
+      <article class="page" id="login">
+        <div class="page-head">
+          <h3>Login &amp; Sessions</h3>
+          <span class="page-route filepath">client/src/pages/Login.tsx</span>
+        </div>
+        <p class="page-purpose">Everyone's entry point. A 4-digit PIN pad, not a username/password form — built on Passport's LocalStrategy underneath, with the PIN riding in as the "password" field.</p>
+        <div class="badges">
+          <span class="badge access">No login required to view this page</span>
+          <span class="badge data">Table: users</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>User taps four digits on the on-screen pad (or types them on a physical keyboard — the page listens for keydown events directly, no hidden input field).</li>
+          <li>On the fourth digit it auto-submits — no explicit "Log in" tap needed.</li>
+          <li>The server tries, in order: PIN <code>9999</code> as a hardcoded emergency admin bypass; a PIN-only lookup across every user (rejecting common PINs like <code>0000</code>/<code>1111</code>/<code>1234</code> unless a username is also given, and rejecting the login outright if two people share the same PIN); then a normal username lookup.</li>
+          <li>On success, the full user record lands in React Query's cache and a trimmed copy (role, department, plants, allowedPages, pageWriteAccess) is written to <code>localStorage['currentUser']</code> — this is what every page's client-side permission check actually reads.</li>
+          <li>Logging out clears the session server-side and wipes four localStorage keys, then returns to the PIN pad.</li>
+        </ol>
+
+        <h4 class="block-label">API &amp; session mechanics</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/login</span><span class="note">body: { username: "pin-login", password: &lt;pin&gt; }</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/user</span><span class="note">current session's user; Cache-Control: no-store so a permission grant is never served stale</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/logout</span></div>
+        </div>
+        <p>Sessions are identified by <code class="mono">userCode</code> (the stable employee code), not the numeric row id — <code class="filepath">server/auth.ts</code>'s <code>serializeUser</code>/<code>deserializeUser</code> re-reads the user fresh from Postgres on every request, so a permission change made in User Management is live on that person's very next request, no re-login needed. Passwords/PINs are hashed with scrypt; a legacy plaintext PIN is silently upgraded to a hash the first time it's used successfully. Cookie name <code>km-tribe-session</code>, 24h expiry.</p>
+
+        <div class="note crit">
+          <span class="tag">Worth knowing</span>
+          <p><code>comparePasswords</code> treats PIN <code>9999</code> (and, depending on stored format, <code>0000</code>) as matching <em>any</em> stored hash — a second, implicit backdoor beyond the documented 9999 bypass. Also, two different code paths write <code>localStorage['currentUser']</code> with slightly different field sets (<code class="filepath">Login.tsx</code> vs <code class="filepath">use-auth.tsx</code>'s <code>syncCurrentUserToLocalStorage</code>) — worth consolidating if you're touching auth.</p>
+        </div>
+      </article>
+
+      <article class="page" id="users">
+        <div class="page-head">
+          <h3>User Management</h3>
+          <span class="page-route filepath">/users → client/src/pages/Users.tsx</span>
+        </div>
+        <p class="page-purpose">Where every other page's access is actually decided. Create/edit staff records, assign a role, a department, which plants they belong to, which pages they can see, and which of those they can edit.</p>
+        <div class="badges">
+          <span class="badge admin">Admin-only — never grantable via Allowed Pages</span>
+          <span class="badge data">Table: users</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Table of all staff with search. "Add User" or the row's edit action opens the same form.</li>
+          <li>Set <strong>Role</strong> (admin / super-admin / read-write / read), <strong>Department</strong>, <strong>Designation</strong> — these three still drive a handful of older, department-string-based checks on other pages (Load Operations, MP Operations, Print Operations' unlock logic, and parts of Proforma Slips).</li>
+          <li><strong>Plants</strong> — multi-select; which plants' data this person can see on plant-scoped pages (Overall Stock, Scan History).</li>
+          <li><strong>Allowed Pages</strong> — multi-select checklist, drawn from a single shared list (<code class="filepath">shared/pageKeys.ts</code>). Checking a page here is what makes it appear in that user's sidebar at all.</li>
+          <li><strong>Write Access</strong> — a second multi-select, filtered to only the pages already checked above. A page can be view-only for someone even though they can see it.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/users</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/users</span></div>
+          <div class="ep"><span class="m put">PUT</span><span class="path">/api/users/:userCode</span><span class="note">requirePageWrite("user-management")</span></div>
+          <div class="ep"><span class="m del">DEL</span><span class="path">/api/users/:userCode</span></div>
+        </div>
+
+        <h4 class="block-label">Key fields — users table</h4>
+        <div class="filewrap">
+          <table class="fields">
+            <tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+            <tr><td class="f">userCode</td><td>text, PK</td><td>Stable identifier — used everywhere instead of the numeric id, including session serialization.</td></tr>
+            <tr><td class="f">role</td><td>text</td><td>admin / super-admin / read-write / read. Admin &amp; super-admin bypass allowedPages and pageWriteAccess entirely.</td></tr>
+            <tr><td class="f">plants</td><td>json text</td><td>Array of plant names, e.g. ["VALSAD","INDORE"].</td></tr>
+            <tr><td class="f">allowedPages</td><td>json text</td><td>Array of page keys from shared/pageKeys.ts. Read/visibility gate.</td></tr>
+            <tr><td class="f">pageWriteAccess</td><td>json text</td><td>Subset of allowedPages. A key here with no effect unless also in allowedPages.</td></tr>
+          </table>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p><code>user-management</code>, <code>settings</code>, and <code>activities</code> are deliberately absent from the shared page-key list — they can never be ticked into anyone's Allowed Pages, admin-only by construction, not by a runtime check that could be bypassed by editing the array.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="category" id="cat-floor">
+      <div class="category-head"><h2>Warehouse Floor</h2><div class="rule"></div><span class="count">3 modules</span></div>
+
+      <article class="page" id="scan">
+        <div class="page-head">
+          <h3>Order Scan</h3>
+          <span class="page-route filepath">/scan → client/src/pages/Scanning/Scan.tsx</span>
+        </div>
+        <p class="page-purpose">The floor app. Staff scan barcodes as boxes arrive against whichever CSV order is currently active for their plant; progress updates live for everyone watching the same session.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: scan-order</span>
+          <span class="badge data">Tables: orderScanItems, orderScanEvents</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>When a CSV is active for the user's plant, the page swaps from a dashboard (recent scans, stats) into the live scan view automatically.</li>
+          <li>Scan by camera, USB/Bluetooth barcode gun (HID keyboard-wedge — the page listens for fast keystroke bursts to tell a gun scan from someone typing), or manual entry with autocomplete.</li>
+          <li>A matched barcode opens a confirm dialog showing the product photo, expected vs. already-scanned quantity, remaining boxes/pallets, and an STV selector if the plant uses one. Enter confirms; the qty/pallet fields convert into each other live.</li>
+          <li>Scanning past what's expected logs the surplus as an <strong>Extra</strong> — a real, physically-received quantity, kept separate from the ordered amount rather than netted against it, and shown that way everywhere downstream (Overall Stock, reports).</li>
+          <li>A barcode that matches neither the active CSV nor the product catalog is refused outright — "Barcode not in system" — rather than silently logged as an extra.</li>
+          <li>If the same barcode appears on more than one order line, a picker dialog asks which line this scan belongs to before proceeding.</li>
+          <li>Admin-only "Complete" closes out the part; a multi-part (FIFO) upload auto-advances to the next part for that plant once the current one completes.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/order-scan/sessions/:id/scan</span><span class="note">splits into an order-portion event (capped at expected) + an extra event</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-scan/sessions/:id/items</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-scan/sessions/:id/extras</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-scan/sessions/:id/group-credits</span><span class="note">FIFO cross-part credit, see Order Reports</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/order-scan/sessions/:id/complete</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/order-scan/events/:id/void</span><span class="note">admin-only, marks a mistaken scan without deleting it</span></div>
+        </div>
+        <p>Live updates broadcast over a WebSocket at <code class="mono">/ws/order-scan</code>, with polling as a fallback if the socket drops. On session completion, received quantities are written once to <code class="filepath">products.in_stock</code>, the plant-wise <code class="filepath">product_plant_stock</code> table, and an append-only <code class="filepath">stock_movements</code> ledger — guarded so a retried completion can never double-count (<code class="filepath">server/lib/orderGroupReport.ts</code>, <code>applySessionStock</code>).</p>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Product photos in the confirm dialog come from a local disk cache (<code class="filepath">server/uploads/product-images/</code>), synced from Notion and looked up by product <em>name</em> rather than barcode — barcodes aren't guaranteed unique across distinct products in this catalog, but by the time the dialog needs an image, the exact line item is already resolved.</p>
+        </div>
+      </article>
+
+      <article class="page" id="stock">
+        <div class="page-head">
+          <h3>Overall Stock</h3>
+          <span class="page-route filepath">/overall-stock → client/src/pages/OverallStock.tsx</span>
+        </div>
+        <p class="page-purpose">The live, plant-wise stock ledger — what Order Scan sessions have actually produced, broken out by plant, with ordinary stock and over-order extras shown side by side rather than blended.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: overall-stock</span>
+          <span class="badge data">Table: product_plant_stock</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>A configurable-column table — toggle Barcode, SAP Code, Category, Brand, Stock, Extra, Pallets, Extra Pallets, Last Updated on or off.</li>
+          <li>Filter by plant and search by name/barcode; summary tiles up top total Stock, Extra (in both boxes and pallet-equivalents), and item count.</li>
+          <li>Non-admins only ever see the plant(s) assigned to them; admins and super-admins see every plant with a plant filter to narrow it.</li>
+          <li>Export the current view to CSV.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/scan-sessions/reports/plant-stock</span><span class="note">scoped server-side via getUserPlants(user)</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>"Extra" is always the raw, physically-received over-order amount — it is never netted against a shortage elsewhere. FIFO credit adjustments (see Order Reports) change how a shortage is <em>explained</em> in a report, never what's actually sitting in this ledger.</p>
+        </div>
+      </article>
+
+      <article class="page" id="dispatch">
+        <div class="page-head">
+          <h3>Dispatch</h3>
+          <span class="page-route filepath">/dispatch → client/src/pages/Dispatch.tsx</span>
+        </div>
+        <p class="page-purpose">A single-purpose lookup-and-print tool: pull up one order by number, confirm vehicle/driver, print a QR-coded dispatch label for the truck.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: dispatch</span>
+          <span class="badge data">Source: Notion — no Postgres table</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Type an order number, search (or press Enter).</li>
+          <li>Order details load from Notion — date, plant, status, party name/area/address/contact, invoice number. Vehicle/Driver and Invoice Amount are editable inline.</li>
+          <li>"Print Dispatch" renders a plant-branded, QR-coded label (220×110mm) and sends it straight to the browser print dialog.</li>
+          <li>Order not found shows a plain empty state with a "Try Another Order" reset.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/dispatch</span><span class="note">body: { orderNumber }; requirePageWrite('dispatch'); reads live from Notion (DISPATCH_DATABASE_ID)</span></div>
+        </div>
+
+        <div class="note crit">
+          <span class="tag">Worth knowing</span>
+          <p>Vehicle/Driver and Invoice Amount edits are local component state only — nothing is persisted. Refreshing loses them. There's also an orphaned duplicate handler at <code class="filepath">server/routes/dispatch.ts</code> that's never actually mounted — the live route is <code class="filepath">dispatch-simple.ts</code>.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="category" id="cat-pipeline">
+      <div class="category-head"><h2>Order Pipeline</h2><div class="rule"></div><span class="count">4 modules</span></div>
+
+      <article class="page" id="order-import">
+        <div class="page-head">
+          <h3>Order Management</h3>
+          <span class="page-route filepath">/order-import → client/src/pages/OrderImport.tsx</span>
+        </div>
+        <p class="page-purpose">Where an order actually enters the system — an admin/billing user uploads the CSV(s) that Order Scan will later be run against.</p>
+        <div class="badges">
+          <span class="badge access">Billing dept, or canAccessOrderManagement</span>
+          <span class="badge write">Write: admin/billing, or pageWriteAccess("order-import")</span>
+          <span class="badge data">Tables: orderImportSessions, orderImportItems</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Pick a Plant and an Order Date, then select one or more CSVs.</li>
+          <li>Each file opens a column-mapping dialog — headers are auto-matched to Barcode / Item Name / SAP Code / Quantity / Expected Pallets (the parser scans the first 15 rows to find the real header, surviving pivot-table-style exports), reviewed, then imported one file at a time.</li>
+          <li>Every CSV sharing the same Plant + Order Date is auto-grouped into one FIFO batch, ordered by upload sequence (<code class="mono">receivingSessionId</code> + <code class="mono">partIndex</code>) — this is entirely a server-side grouping, nothing the uploader has to configure.</li>
+          <li>If the plant is idle, the first part auto-activates for scanning immediately; later parts wait and auto-advance as earlier ones complete.</li>
+          <li>Sessions live in tabs — Available / Active / Completed / History — each with Load for Scan, Deactivate, Complete, Delete (soft-delete), and an expandable item list.</li>
+          <li>The History tab shows each session's Started / Completed / Active For (from <code class="mono">scanActivatedAt</code>/<code class="mono">scanCompletedAt</code>) alongside its Part badge — the same timing surfaced in Scan Viewer's header and every Reports export.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/order-import/sessions</span><span class="note">auto-groups by plant+date, auto-activates if the plant is idle</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/items</span></div>
+          <div class="ep"><span class="m put">PUT</span><span class="path">/api/order-import/sessions/:id</span></div>
+          <div class="ep"><span class="m del">DEL</span><span class="path">/api/order-import/sessions/:id</span><span class="note">soft-delete; scan history for past reports is kept</span></div>
+        </div>
+      </article>
+
+      <article class="page" id="order-reports">
+        <div class="page-head">
+          <h3>Reports</h3>
+          <span class="page-route filepath">Order Import → per-session "Reports" button → client/src/components/modals/ReportsDialog.tsx</span>
+        </div>
+        <p class="page-purpose">What actually happened, after Order Scan ran — per-CSV and whole-batch reports, with the FIFO cross-part netting spelled out. Not a standalone page — opened as a dialog from a session row on the Order Management page.</p>
+        <div class="badges">
+          <span class="badge access">Same gate as Order Management</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Opened per-session ("This CSV") and, when that CSV is part of a FIFO batch, also for the whole group ("Whole Order") — three report kinds either way: <strong>Summary</strong> (expected/received/extra/missing per item, FIFO-adjusted for groups), <strong>Activity</strong> (every individual scan event, in order), and <strong>Hourly</strong>.</li>
+          <li><strong>Hourly</strong> buckets that same scan-activity data into rolling 1-hour windows anchored to the session's actual <code class="mono">scanActivatedAt</code> — a 2:30 start produces "2:30 – 3:30", "3:30 – 4:30", ..., not clock-hour boundaries. Every window from start to the last scan appears even when empty, so gaps in scanning read as gaps, not missing rows. For a group, the earliest part's start anchors every part's windows onto one shared timeline. Voided scans and system credit-transfer rows are excluded from the totals (not real physical arrivals), same rule the Summary report's Received total already follows.</li>
+          <li>Every report opens in-browser or downloads as CSV, Excel, or PDF. Hourly's in-browser view is its own expandable list — each hour collapses to a one-line count (scans/items/pallets) and expands to show its individual scans (time, barcode, item, scanned by, pallets, qty); a Download control sits inside that view too, and each expanded hour has its own "Download this hour" button for a single-window export.</li>
+          <li>Summary, Activity, and Hourly all show Started / Completed / Active For (from <code class="mono">order_import_sessions.scan_activated_at</code>/<code class="mono">scan_completed_at</code>) as a header block above the report — per part for a group, so a multi-day FIFO batch's timeline is visible at a glance.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/part-report</span><span class="note">Summary</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/group-report</span><span class="note">Summary, group scope</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions/:id/scan-activity?scope=part|group</span><span class="note">backs both Activity and Hourly — Hourly is bucketed client-side from the same event list, no separate endpoint</span></div>
+        </div>
+        <p>Summary/group figures are computed read-time, on demand, by <code class="filepath">server/lib/orderGroupReport.ts</code> — <code>computeGroupReport</code> walks every part of a batch in sequence and nets an earlier <em>completed</em> part's leftover extra against a later part's shortfall for the same barcode, so a box that arrived early against the wrong part's CSV doesn't read as two unrelated discrepancies. It only reads <code class="filepath">orderScanItems</code>/<code class="filepath">orderScanEvents</code> — never rewrites them.</p>
+      </article>
+
+      <article class="page" id="scan-viewer">
+        <div class="page-head">
+          <h3>Scan Viewer</h3>
+          <span class="page-route filepath">/scan-viewer → client/src/pages/ScanViewer.tsx</span>
+        </div>
+        <p class="page-purpose">A read-oriented sibling of Order Scan — pick any plant and any order date, including already-completed ones, to see that order's scan progress without touching the live scanning session on the Scan page.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: scan-viewer</span>
+          <span class="badge data">Tables: orderImportSessions, orderScanItems (read-only)</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Header row: a Plant dropdown, the session's "loaded by" user, Started / Completed / Active For (from the session's <code class="mono">scanActivatedAt</code>/<code class="mono">scanCompletedAt</code>), a date picker, and — when a plant+date has more than one FIFO part — a part picker, all in one row, plus a progress bar / "Complete" badge.</li>
+          <li>Same Master View (all parts for a plant+date merged, including Extras never on any CSV) and Part Order (per-file) views as the Scan page, re-implemented here read-only — no scan input, no camera, no keyboard-wedge listener.</li>
+          <li>Item-history drill-down (who scanned what, when) for any row, same as Scan page's Master View.</li>
+          <li>Void is available here too, gated by its own, narrower permission — see <a href="permissions-manual.html#scan-viewer">permissions-manual.html</a>.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/sessions, /order-scan/sessions/:id/items, /extras</span><span class="note">same read endpoints Order Scan's Master View uses</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/order-import/master-view/item-history</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="note">requireVoidAccess — see permissions-manual.html</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>This page duplicates a fair amount of Scan.tsx's merge logic (<code>MvMergedItem</code>) rather than importing it — the two files' comments cross-reference each other, so a fix to how Master View merges extras/credits in one almost always needs the same fix mirrored in the other.</p>
+        </div>
+      </article>
+
+      <article class="page" id="scan-history">
+        <div class="page-head">
+          <h3>Scan History</h3>
+          <span class="page-route filepath">/reports → client/src/pages/Scanning/Reports.tsx</span>
+        </div>
+        <p class="page-purpose">The full, flat audit trail of every individual scan event across every plant/order — searchable, column-filterable, exportable, and correctable (void) if a mistake was made. Distinct from the per-order Reports dialog above: this is one continuous log, not scoped to a single CSV or FIFO group.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: scan-history</span>
+          <span class="badge data">Table: scan_history (backed by order_scan_events)</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Backend-paginated (20/page) table — barcode, item, pallets/qty/loose, Extra/Empty-Box/Exchange flags, STV, scanner, order, plant, void status.</li>
+          <li>Seven Excel-style per-column filters (STV, Time, Order Date, Plant, Barcode, Qty, Pallets), all enforced server-side via an explicit column allowlist (<code class="mono">SCAN_HISTORY_FILTER_COLUMNS</code> in <code class="filepath">server/routes/scan-sessions.ts</code>) and persisted to <code class="mono">sessionStorage</code> so filters survive a refresh.</li>
+          <li>Changing a filter or page resets to page 1 in the same render pass (not a follow-up effect), so switching filters can't briefly query with a stale page number against the new filter set. Auto-refresh (every 5s) only runs on page 1 — it's paused on later pages, since a live newest-first feed would otherwise shift every page's offset window under the reader mid-poll.</li>
+          <li>Void and Excel/PDF export are both write-gated; void reverses the scan out of stock the same way the underlying <code class="mono">/order-scan/events/:id/void</code> endpoint always has.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/scan-sessions/reports/scan-history</span><span class="note">LIMIT/OFFSET pagination + the 7-column filter allowlist above</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/order-scan/events/:id/void</span><span class="note">requireVoidAccess — see permissions-manual.html</span></div>
+        </div>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>The column allowlist is a deliberate safety pattern (an unknown filter id is silently ignored rather than passed to SQL), but that same silence previously let 3 of the 7 UI filter columns (Barcode, Qty, Pallets) go unenforced server-side for a while without anyone noticing the UI was filtering nothing — worth grepping <code class="mono">SCAN_HISTORY_FILTER_COLUMNS</code> against the client's filterable-column list if you add a new column here.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="category" id="cat-docs">
+      <div class="category-head"><h2>Catalog &amp; Documents</h2><div class="rule"></div><span class="count">5 modules</span></div>
+
+      <article class="page" id="inventory">
+        <div class="page-head">
+          <h3>Product Master <span style="font-weight:400; color:var(--ink-soft);">(Notion Sync)</span></h3>
+          <span class="page-route filepath">/notion-inventory → client/src/pages/NotionInventory.tsx</span>
+        </div>
+        <p class="page-purpose">The product catalog itself — mastered in Notion, mirrored into Postgres. Every other module's idea of "what a product is" traces back here.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: notion-inventory</span>
+          <span class="badge data">Table: products</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>A configurable-column product table, including a live thumbnail for each product's photo.</li>
+          <li>"Check Sync" (Detect) does a dry-run diff against Notion, field by field, and shows what changed before anything is written; "Apply" commits it. "Auto Sync" applies automatically the moment a detect finds anything. "Full Sync" wipes and re-imports everything from scratch.</li>
+          <li>A background job also runs this same detect-and-apply automatically — once shortly after every server start, then every 24 hours — so the catalog drifts back into sync even if nobody opens this page.</li>
+          <li>CSV import is also available as a manual fallback path, independent of Notion.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/notion-inventory-sync/detect</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/notion-inventory-sync/apply</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/notion-inventory-sync/full-sync</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/products/image-by-name?name=</span><span class="note">serves the cached photo; disambiguates by name since barcode isn't always unique</span></div>
+        </div>
+        <p>Images are the one field synced outside the normal text diff — Notion re-issues a fresh, expiring URL for a hosted file on every fetch, so comparing it as text would falsely report a change every single run. Instead: download once, resize to fit 600×600 and re-encode as JPEG, hash the result, and only touch disk/DB when that hash actually changes. Cached locally at <code class="filepath">server/uploads/product-images/&lt;id&gt;.jpg</code>, served with an ETag so a browser that's already seen a product's photo never re-fetches it.</p>
+      </article>
+
+      <article class="page" id="proforma">
+        <div class="page-head">
+          <h3>Proforma Slips</h3>
+          <span class="page-route filepath">/proforma-slips → client/src/pages/ProformaSlips.tsx</span>
+        </div>
+        <p class="page-purpose">Order slips, printable and lockable once printed — the same lock/unlock pattern as Print Operations, on a different document type.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: proforma</span>
+          <span class="badge write">Write: pageWriteAccess("proforma"), or IT/Management dept, or Billing+Head</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Search or browse slips; add new items via the search-and-add panel (Add/Edit gated by write access).</li>
+          <li>Print locks the slip automatically — this auto-lock deliberately only needs <em>read</em> access to Print Operations and Proforma (not write), so a view-only print user's slip still locks behind them. Unlocking it again needs write access <em>and</em> (independently) one of: IT department, Management department, or Billing department with Head designation. See <a href="permissions-manual.html#print-ops">permissions-manual.html</a> for the exact rule.</li>
+          <li>Slips can also be pulled in directly from Notion via the Import dialog.</li>
+        </ol>
+
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Add/Edit access is a clean per-page grant (<code>hasPageWriteAccess("proforma")</code>). Lock/unlock deliberately keeps its older department-based conditions alongside the new grant rather than replacing them — both paths work.</p>
+        </div>
+      </article>
+
+      <article class="page" id="print-ops">
+        <div class="page-head">
+          <h3>Print Operations</h3>
+          <span class="page-route filepath">/print-operations → client/src/pages/PrintOperationsFinal12.tsx</span>
+        </div>
+        <p class="page-purpose">Search an order, print it, and manage the print-lock that stops the same order being reprinted by accident.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: print-operations</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Search by order number; the located slip prints directly, with a running print count and locked-after-first-print behavior when the plant has locking enabled. The lock this fires is read-gated, not write-gated — a user with only view access to Print Operations and Proforma can still print and have it lock correctly (a toast now surfaces if that lock call fails for any reason, instead of only a browser-console error).</li>
+          <li>Unlocking a locked slip needs: admin/super-admin, IT department, Management department, Billing+Head designation, <em>or</em> a per-page write grant.</li>
+          <li>Admins get a "Plant Management" shortcut button straight from this page.</li>
+        </ol>
+      </article>
+
+      <article class="page" id="expense">
+        <div class="page-head">
+          <h3>Expense Voucher</h3>
+          <span class="page-route filepath">/expense-voucher → client/src/pages/ExpenseVoucher.tsx</span>
+        </div>
+        <p class="page-purpose">Generate and print expense vouchers with an admin-configurable numbering prefix.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: expense-voucher — allowedPages only, no department fallback</span>
+        </div>
+        <p>Access is a clean single gate — admin/super-admin, or granted "expense-voucher" in Allowed Pages. No department string-matching involved, the simplest access model of any page in this manual.</p>
+      </article>
+
+      <article class="page" id="toll">
+        <div class="page-head">
+          <h3>Toll Voucher</h3>
+          <span class="page-route filepath">/toll-voucher → client/src/pages/TollVoucher.tsx</span>
+        </div>
+        <p class="page-purpose">Same idea as Expense Voucher, for toll charges — generate, fill in, print.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: toll-voucher — allowedPages only, no department fallback</span>
+        </div>
+        <p>Mirrors Expense Voucher's access model exactly: admin/super-admin, or a direct "toll-voucher" grant. No hidden department requirement.</p>
+      </article>
+    </section>
+
+    <section class="category" id="cat-admin">
+      <div class="category-head"><h2>Admin &amp; System</h2><div class="rule"></div><span class="count">2 modules</span></div>
+
+      <article class="page" id="activities">
+        <div class="page-head">
+          <h3>Activities</h3>
+          <span class="page-route filepath">/activities → client/src/pages/Activities.tsx</span>
+        </div>
+        <p class="page-purpose">A global audit log — nearly every mutating action across the system writes a row here.</p>
+        <div class="badges">
+          <span class="badge admin">Admin-only — hardcoded, not grantable</span>
+          <span class="badge data">Table: activities</span>
+        </div>
+
+        <h4 class="block-label">How it works</h4>
+        <ol class="steps">
+          <li>Searchable, filterable (by action type and page name) table, newest first, 50 per page.</li>
+          <li>"Live Updates" toggle polls every 5 seconds for new entries.</li>
+        </ol>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/activities</span></div>
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/activities/page/:pageName</span></div>
+          <div class="ep"><span class="m del">DEL</span><span class="path">/api/activities/:id</span></div>
+        </div>
+
+        <div class="note crit">
+          <span class="tag">Worth knowing</span>
+          <p>None of the <code class="mono">/api/activities*</code> routes carry server-side auth middleware — the admin-only restriction is enforced entirely on the client (route guard + hidden sidebar entry). Anyone who knows the URL can call the API directly. Worth tightening if you're in this file.</p>
+        </div>
+      </article>
+
+      <article class="page" id="settings">
+        <div class="page-head">
+          <h3>Settings</h3>
+          <span class="page-route filepath">/settings → client/src/pages/Settings.tsx</span>
+        </div>
+        <p class="page-purpose">A tabbed settings page where roughly half the controls are wired up and half are visual placeholders — worth knowing which is which before you go looking for a bug in one that was never connected.</p>
+        <div class="badges">
+          <span class="badge access">pageKey: settings — viewable by any grant, mutations write-gated</span>
+        </div>
+
+        <h4 class="block-label">What's actually real</h4>
+        <ol class="steps">
+          <li><strong>Voucher Prefixes</strong> (Application tab) — the text prefix stamped on new Expense/Toll vouchers. Genuinely persisted.</li>
+          <li><strong>Clear Inventory</strong> / <strong>Reset Stock Values</strong> (Data Management tab) — real, destructive, and gated behind a confirm dialog that requires typing <code>CLEAR</code> plus an acknowledgement checkbox.</li>
+        </ol>
+        <h4 class="block-label">What isn't</h4>
+        <p>The Scanner tab (camera flash, continuous scan, barcode type toggles) and the rest of the Application tab (dark mode, notifications, language) have no save handler at all — flipping them changes nothing. Same for "Clear Scan History," "Reset Application," and the Export/Import buttons in Data Management.</p>
+
+        <h4 class="block-label">API</h4>
+        <div class="endpoints">
+          <div class="ep"><span class="m get">GET</span><span class="path">/api/voucher-prefixes</span><span class="note">public, no auth</span></div>
+          <div class="ep"><span class="m put">PUT</span><span class="path">/api/voucher-prefixes/:type</span><span class="note">admin, or pageWriteAccess("settings")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/products/clear</span><span class="note">requirePageWrite("settings")</span></div>
+          <div class="ep"><span class="m post">POST</span><span class="path">/api/products/reset-stock</span><span class="note">requirePageWrite("settings")</span></div>
+        </div>
+        <p>There's no dedicated <code class="mono">settings</code> table — the real state here lives in <code class="filepath">voucherPrefixes</code> plus direct mutations against <code class="filepath">products</code>.</p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="colophon">
+    <span>KM Finny — internal reference, written for onboarding, not end users.</span>
+    <span>Verify against current source before relying on any endpoint shape.</span>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('nav.toc a'));
+    var targets = links.map(function (a) {
+      return document.getElementById(a.getAttribute('href').slice(1));
+    });
+    function onScroll() {
+      var pos = window.scrollY + 120;
+      var activeIdx = 0;
+      for (var i = 0; i < targets.length; i++) {
+        if (targets[i] && targets[i].offsetTop <= pos) activeIdx = i;
+      }
+      links.forEach(function (a, i) {
+        a.classList.toggle('active', i === activeIdx);
+      });
+    }
+    document.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+
+</body>
+</html>

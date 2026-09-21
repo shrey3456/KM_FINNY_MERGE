@@ -30,7 +30,11 @@ router.put("/voucher-prefixes/:type", async (req: Request, res: Response) => {
 
     const user: any = (req as any).user;
     const role = (user?.role || "").toString().toLowerCase();
-    if (!["admin", "super-admin", "superadmin", "super_admin"].includes(role)) {
+    // Additive: admin/super-admin unchanged; OR admin has explicitly granted this user
+    // write access to Settings via pageWriteAccess on the Users page.
+    let settingsWritable: string[] = [];
+    try { settingsWritable = JSON.parse(user?.pageWriteAccess || "[]"); } catch { /* default [] */ }
+    if (!["admin", "super-admin", "superadmin", "super_admin"].includes(role) && !settingsWritable.includes("settings")) {
       return res.status(403).json({ success: false, message: "Forbidden: admin only" });
     }
 

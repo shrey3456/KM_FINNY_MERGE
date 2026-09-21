@@ -13,6 +13,7 @@ import { asc, eq, desc, ilike, inArray, or } from 'drizzle-orm';
 import { z } from 'zod';
 import multer from 'multer';
 import * as XLSX from 'xlsx';
+import { requirePageWrite } from './lib/pageAccess';
 
 // Keep uploads in memory for small CSVs, but enforce a conservative file size limit
 // so production instances don't OOM when someone accidentally uploads a very large file.
@@ -607,7 +608,7 @@ export function registerOrderRoutes(apiRouter: Router) {
   });
 
   // Create new order
-  apiRouter.post('/orders', async (req: Request, res: Response) => {
+  apiRouter.post('/orders', requirePageWrite('order-management'), async (req: Request, res: Response) => {
     try {
       // Validate the request body
       const validatedData = createOrderSchema.parse(req.body);
@@ -655,7 +656,7 @@ export function registerOrderRoutes(apiRouter: Router) {
   });
 
   // Update an order
-  apiRouter.patch('/orders/:id', async (req: Request, res: Response) => {
+  apiRouter.patch('/orders/:id', requirePageWrite('order-management'), async (req: Request, res: Response) => {
     const orderId = parseInt(req.params.id);
     if (isNaN(orderId)) {
       return res.status(400).json({ error: 'Invalid order ID' });
@@ -712,7 +713,7 @@ export function registerOrderRoutes(apiRouter: Router) {
   });
 
   // Delete an order
-  apiRouter.delete('/orders/:id', async (req: Request, res: Response) => {
+  apiRouter.delete('/orders/:id', requirePageWrite('order-management'), async (req: Request, res: Response) => {
     const orderId = parseInt(req.params.id);
     if (isNaN(orderId)) {
       return res.status(400).json({ error: 'Invalid order ID' });
@@ -737,7 +738,7 @@ export function registerOrderRoutes(apiRouter: Router) {
   });
 
   // Bulk delete orders by CSV noteKey (precise) or filename (all batches for that name)
-  apiRouter.post('/orders/batch-delete-by-filename', async (req: Request, res: Response) => {
+  apiRouter.post('/orders/batch-delete-by-filename', requirePageWrite('order-management'), async (req: Request, res: Response) => {
     try {
       let { filename, noteKey } = req.body;
 
@@ -766,7 +767,7 @@ export function registerOrderRoutes(apiRouter: Router) {
   });
 
   // Convert an order to a proforma slip
-  apiRouter.post('/orders/:id/to-proforma', async (req: Request, res: Response) => {
+  apiRouter.post('/orders/:id/to-proforma', requirePageWrite('order-management'), async (req: Request, res: Response) => {
     const orderId = parseInt(req.params.id);
     if (isNaN(orderId)) {
       return res.status(400).json({ error: 'Invalid order ID' });
@@ -845,7 +846,7 @@ export function registerOrderRoutes(apiRouter: Router) {
   });
 
   // CSV / Excel Import endpoint
-  apiRouter.post('/orders/import-csv', upload.single('file'), async (req: Request, res: Response) => {
+  apiRouter.post('/orders/import-csv', requirePageWrite('order-management'), upload.single('file'), async (req: Request, res: Response) => {
     try {
       if (!req.file) {
         return res.status(400).json({ message: 'A CSV or Excel file is required' });
@@ -956,7 +957,7 @@ export function registerOrderRoutes(apiRouter: Router) {
     }
   });
 
-  apiRouter.post('/import/orders', async (req: Request, res: Response) => {
+  apiRouter.post('/import/orders', requirePageWrite('order-management'), async (req: Request, res: Response) => {
     try {
       const { items, orderHeader } = req.body;
       

@@ -29,9 +29,11 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from 'react-hook-form';
 import { useEffect, useState } from 'react';
-import { Smartphone, Radio, QrCode, Zap, Shield, Database } from 'lucide-react';
+import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, Download, CalendarDays, RefreshCw, Webhook, ExternalLink } from 'lucide-react';
+import Papa from 'papaparse';
 import { apiRequest } from '@/lib/queryClient';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { hasPageWriteAccess } from '@/lib/permissions';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,15 +44,50 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+// ─── Opening Stock CSV column auto-detection — required: Barcode, Quantity ────────────────────
+const osNormHeader = (h: string) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+const OS_COLUMN_CANDIDATES: Record<"barcode" | "itemName" | "quantity", string[]> = {
+  barcode: ["barcode", "itemcode", "sku", "ean", "productbarcode", "code"],
+  itemName: ["itemname", "description", "productname", "item", "name", "material"],
+  quantity: ["quantity", "qty", "openingstock", "openingqty", "stock", "instock"],
+};
+function osMatchColumn(headers: string[], key: keyof typeof OS_COLUMN_CANDIDATES): string | null {
+  const normalized = headers.map((h) => ({ raw: h, norm: osNormHeader(h) }));
+  for (const c of OS_COLUMN_CANDIDATES[key]) {
+    const exact = normalized.find((h) => h.norm === c);
+    if (exact) return exact.raw;
+  }
+  for (const c of OS_COLUMN_CANDIDATES[key]) {
+    const partial = normalized.find((h) => h.norm.includes(c));
+    if (partial) return partial.raw;
+  }
+  return null;
+}
 
 const Settings = () => {
   const [location] = useLocation();
   const form = useForm();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  // Where "Open status" (Notion Webhook Status card) goes — NOTION_WEBHOOK_STATUS_URL in the server's
+  // .env, or this app's own status page if that isn't set.
+  const webhookStatusLinkQuery = useQuery<{ url: string; fromEnv: boolean }>({
+    queryKey: ['/api/webhooks/notion/status-link'],
+    queryFn: () => apiRequest('GET', '/api/webhooks/notion/status-link', undefined, false, true),
+    staleTime: 5 * 60 * 1000,
+  });
   const [isClearing, setIsClearing] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [showClearDialog, setShowClearDialog] = useState(false);
+  const canWrite = hasPageWriteAccess('settings');
 
   // Voucher prefixes state
   const [prefixes, setPrefixes] = useState<{ expense?: string; toll?: string } | null>(null);
@@ -100,6 +137,349 @@ const Settings = () => {
     const d = queryClient.getQueryData(['/api/scans']) as any;
     return Array.isArray(d) ? d.length : 0;
   })();
+
+  // Clear Stock dialog state — stock-only (see server/routes/settings-admin.ts's header comment);
+  // it never touches Order Import/Loading/Unloading scan history, so there's no void-vs-remove
+  // choice to make here anymore.
+  const [showClearStockDialog, setShowClearStockDialog] = useState(false);
+  const [isClearingStock, setIsClearingStock] = useState(false);
+  const [csPlant, setCsPlant] = useState<string>('');
+  const [csConfirmText, setCsConfirmText] = useState('');
+  // Optional — leave blank and this clears everything for the plant, exactly like before. Set it
+  // and only orders/vehicles/deliveries dated on or before it clear (Order Import, Unloading, and
+  // Loading via its proforma slip's own order date).
+  const [csOrderDateUpTo, setCsOrderDateUpTo] = useState('');
+
+  // Backup CSV — writes one <table>.csv per table into backups/<database>-csv-<date>_<time>/ on the
+  // server, the same folder scripts/restore-database-csv.ps1 reads back.
+  const [isBackingUpCsv, setIsBackingUpCsv] = useState(false);
+  const [csvBackupResult, setCsvBackupResult] = useState<{ folder: string; tables: number; rows: number; megabytes: number } | null>(null);
+
+  const runCsvBackup = async () => {
+    setIsBackingUpCsv(true);
+    try {
+      const data = await apiRequest('POST', '/api/settings/backup-csv', {}, false, true);
+      setCsvBackupResult({
+        folder: data.folder,
+        tables: data.tables?.length ?? 0,
+        rows: data.totalRows ?? 0,
+        megabytes: data.megabytes ?? 0,
+      });
+      toast({
+        title: 'Backup saved',
+        description: `${data.tables?.length ?? 0} table(s), ${data.totalRows ?? 0} row(s) written to ${data.folder}`,
+      });
+    } catch (error: any) {
+      console.error('Error running CSV backup:', error);
+      toast({ title: 'Backup failed', description: error?.message || 'Could not write the CSV backup', variant: 'destructive' });
+    } finally {
+      setIsBackingUpCsv(false);
+    }
+  };
+
+  // Reset Operations Data — deletes the day-to-day work (scan history, stock, loading,
+  // unloading, order imports) from the database for good, for one plant or for all of them.
+  // Product Master, Vehicle Master, proforma slips, users and plants are kept. Same
+  // preview + type-to-confirm gate as Clear Stock, because this one cannot be undone at all.
+  type ResetCounts = {
+    orderSessions: number; orderItems: number; orderScanItems: number; orderScanEvents: number;
+    unloadSessions: number; unloadItems: number; unloadScanEvents: number;
+    loadingRecords: number; loadingScanEvents: number; loadingHandoffs: number;
+    loadOperations: number; loadOperationItems: number;
+    stockRows: number; stockMovements: number;
+    scanHistory: number; legacyScanSessions: number;
+    slipsLoadingReset: number; activities: number;
+  };
+  const [showResetDialog, setShowResetDialog] = useState(false);
+  const [isResettingOps, setIsResettingOps] = useState(false);
+  const [rdPlant, setRdPlant] = useState<string>('');
+  const [rdConfirmText, setRdConfirmText] = useState('');
+  // Optional cut-off. Blank removes everything for the plant; set, it removes only what belongs to
+  // orders DATED on or before it — the CSV's / proforma slip's own order date, never the day
+  // someone scanned. See the header comment in server/routes/settings-admin.ts.
+  const [rdOrderDateUpTo, setRdOrderDateUpTo] = useState('');
+  const [resetError, setResetError] = useState<string | null>(null);
+
+  // Recalculate Stock — Check (read-only) shows every stored stock total that doesn't match the
+  // history; Apply corrects them. See server/lib/stockRecalc.ts.
+  type RecalcPlantRow = {
+    barcode: string; plant: string; itemName: string | null;
+    storedStock: number; storedExtra: number; correctStock: number; correctExtra: number; storedRows: number;
+  };
+  type RecalcProductRow = { productId: number; barcode: string; itemName: string | null; storedTotal: number; correctTotal: number };
+  type RecalcPreview = { plantCount: number; productCount: number; plantRows: RecalcPlantRow[]; productRows: RecalcProductRow[] };
+  const [recalcOpen, setRecalcOpen] = useState(false);
+  const [recalcPreview, setRecalcPreview] = useState<RecalcPreview | null>(null);
+  const [recalcChecking, setRecalcChecking] = useState(false);
+  const [recalcApplying, setRecalcApplying] = useState(false);
+  const [recalcConfirm, setRecalcConfirm] = useState('');
+  const runStockCheck = async () => {
+    setRecalcChecking(true);
+    try {
+      const data = await apiRequest('GET', '/api/settings/recalculate-stock/preview', undefined, false, true);
+      setRecalcPreview(data as RecalcPreview);
+      setRecalcConfirm('');
+      setRecalcOpen(true);
+    } catch (error: any) {
+      toast({ title: 'Check failed', description: error?.message || 'Could not check stock', variant: 'destructive' });
+    } finally {
+      setRecalcChecking(false);
+    }
+  };
+  const applyStockRecalc = async () => {
+    setRecalcApplying(true);
+    try {
+      const result: any = await apiRequest('POST', '/api/settings/recalculate-stock', {}, false, true);
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
+      toast({
+        title: 'Stock recalculated',
+        description: `${result.plantRowsFixed} item total(s) and ${result.productTotalsFixed} product total(s) corrected.`,
+      });
+      setRecalcOpen(false);
+      setRecalcPreview(null);
+    } catch (error: any) {
+      toast({ title: 'Recalculate failed', description: error?.message || 'Could not recalculate stock', variant: 'destructive' });
+    } finally {
+      setRecalcApplying(false);
+    }
+  };
+
+  const { data: allPlants } = useQuery<any[]>({
+    queryKey: ['/api/plants'],
+    queryFn: () => apiRequest('GET', '/api/plants').then((r) => r.json()),
+    staleTime: 60000,
+  });
+
+  // Sales tracking start date — Overall Stock's ledger's "all dates" Sale Qty sums from here
+  // onward (proforma data before it isn't reliable). Was a hardcoded constant; now editable here.
+  const { data: salesTrackingData } = useQuery<{ salesTrackingStartDate: string }>({
+    queryKey: ['/api/settings/sales-tracking-start'],
+    queryFn: () => apiRequest('GET', '/api/settings/sales-tracking-start').then((r) => r.json()),
+  });
+  const [salesTrackingStartDraft, setSalesTrackingStartDraft] = useState('');
+  useEffect(() => {
+    if (salesTrackingData?.salesTrackingStartDate) setSalesTrackingStartDraft(salesTrackingData.salesTrackingStartDate);
+  }, [salesTrackingData?.salesTrackingStartDate]);
+  const [isSavingSalesTrackingStart, setIsSavingSalesTrackingStart] = useState(false);
+  const saveSalesTrackingStart = async () => {
+    if (!salesTrackingStartDraft) return;
+    setIsSavingSalesTrackingStart(true);
+    try {
+      await apiRequest('PUT', '/api/settings/sales-tracking-start', { date: salesTrackingStartDraft }, false, true);
+      queryClient.invalidateQueries({ queryKey: ['/api/settings/sales-tracking-start'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
+      toast({ title: 'Saved', description: `Sales tracking now starts from ${salesTrackingStartDraft}.` });
+    } catch (error: any) {
+      toast({ title: 'Error', description: error?.message || 'Failed to save', variant: 'destructive' });
+    } finally {
+      setIsSavingSalesTrackingStart(false);
+    }
+  };
+
+  const { data: csPreview, isFetching: csPreviewLoading } = useQuery<{
+    productsWithStock: number;
+    dateScoped: boolean;
+    activeBlockers: { source: string; plant: string; orderDate: string | null; label: string }[];
+    canClear: boolean;
+  }>({
+    queryKey: ['/api/settings/clear-stock/preview', csPlant, csOrderDateUpTo],
+    queryFn: () =>
+      apiRequest(
+        'GET',
+        `/api/settings/clear-stock/preview?plant=${encodeURIComponent(csPlant)}${csOrderDateUpTo ? `&orderDateUpTo=${encodeURIComponent(csOrderDateUpTo)}` : ''}`,
+      ).then((r) => r.json()),
+    enabled: showClearStockDialog && !!csPlant,
+  });
+
+  const handleClearStockDialogOpenChange = (open: boolean) => {
+    setShowClearStockDialog(open);
+    if (!open) {
+      setCsPlant('');
+      setCsConfirmText('');
+      setCsOrderDateUpTo('');
+    }
+  };
+
+  const expectedCsConfirmText = csPlant === 'all' ? 'CLEAR ALL' : `CLEAR ${csPlant}`.toUpperCase();
+
+  const clearStock = async () => {
+    if (!csPlant) return;
+    setIsClearingStock(true);
+    try {
+      const data = await apiRequest(
+        'POST', '/api/settings/clear-stock',
+        { plant: csPlant, ...(csOrderDateUpTo ? { orderDateUpTo: csOrderDateUpTo } : {}) },
+        false, true,
+      );
+      toast({
+        title: 'Success',
+        description: `Stock cleared for ${csPlant === 'all' ? 'all plants' : csPlant}${csOrderDateUpTo ? ` (orders up to ${csOrderDateUpTo})` : ''}. `
+          + `${data.stockRowsCleared} stock row(s) adjusted.`,
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/scans'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
+    } catch (error: any) {
+      console.error('Error clearing stock:', error);
+      toast({ title: 'Error', description: error?.message || 'Failed to clear stock', variant: 'destructive' });
+    } finally {
+      setIsClearingStock(false);
+      handleClearStockDialogOpenChange(false);
+    }
+  };
+
+  const { data: rdPreview, isFetching: rdPreviewLoading } = useQuery<{
+    counts: ResetCounts; totalRows: number; dateScoped: boolean;
+    activeBlockers: { source: string; plant: string; orderDate: string | null; label: string }[];
+    canReset: boolean; confirmPhrase: string;
+  }>({
+    queryKey: ['/api/settings/reset-operations/preview', rdPlant, rdOrderDateUpTo],
+    queryFn: () =>
+      apiRequest(
+        'GET',
+        `/api/settings/reset-operations/preview?plant=${encodeURIComponent(rdPlant)}`
+          + `${rdOrderDateUpTo ? `&orderDateUpTo=${encodeURIComponent(rdOrderDateUpTo)}` : ''}`,
+      ).then((r) => r.json()),
+    enabled: showResetDialog && !!rdPlant,
+  });
+
+  const handleResetDialogOpenChange = (open: boolean) => {
+    setShowResetDialog(open);
+    if (!open) { setRdPlant(''); setRdConfirmText(''); setRdOrderDateUpTo(''); setResetError(null); }
+  };
+
+  const expectedRdConfirmText = rdPlant === 'all' ? 'DELETE ALL' : `DELETE ${rdPlant}`.toUpperCase();
+
+  const resetOperationsData = async () => {
+    if (!rdPlant) return;
+    setResetError(null);
+    setIsResettingOps(true);
+    try {
+      const data = await apiRequest(
+        'POST', '/api/settings/reset-operations',
+        {
+          plant: rdPlant,
+          ...(rdOrderDateUpTo ? { orderDateUpTo: rdOrderDateUpTo } : {}),
+          confirm: rdConfirmText.trim().toUpperCase(),
+        },
+        false, true,
+      );
+      toast({
+        title: data.warning ? 'Data removed (with a note)' : 'Data removed',
+        description: (data.warning ? `${data.warning} ` : '')
+          + `${data.totalRows} row(s) deleted for ${rdPlant === 'all' ? 'all plants' : rdPlant}`
+          + `${rdOrderDateUpTo ? ` (orders up to ${rdOrderDateUpTo})` : ''}. `
+          + `${data.dateScoped ? `${data.counts.stockRows} stock row(s) adjusted back` : `${data.counts.stockRows} stock row(s) deleted`}, `
+          + `${data.counts.slipsLoadingReset} proforma slip(s) can be loaded again from the start.`,
+      });
+      // Everything on screen was just built from data that no longer exists.
+      queryClient.invalidateQueries();
+      // Closed only once the removal actually succeeded.
+      handleResetDialogOpenChange(false);
+    } catch (error: any) {
+      console.error('Error resetting operations data:', error);
+      // The dialog deliberately STAYS OPEN on a failure: closing it used to hide the reason and
+      // leave the person unsure whether anything was deleted (nothing is — the whole removal runs
+      // in one transaction that rolls back). The message is shown in the dialog as well as in a
+      // toast, so it can be read and retried without reopening and re-typing the phrase.
+      setResetError(error?.message || 'Failed to remove the data');
+      toast({ title: 'Nothing was removed', description: error?.message || 'Failed to remove the data', variant: 'destructive' });
+    } finally {
+      setIsResettingOps(false);
+    }
+  };
+
+  // ── Opening Stock: bulk-SETS (overwrites) a plant's baseline stock from a CSV — distinct from
+  // Order Scan/Unloading (which ADD via scan events) and Clear Stock (which zeroes). Admin-only,
+  // same severity class as Clear Stock, so it gets the same impact-preview + type-to-confirm gate.
+  const [showOpeningStockDialog, setShowOpeningStockDialog] = useState(false);
+  const [osPlant, setOsPlant] = useState('');
+  const [osFile, setOsFile] = useState<File | null>(null);
+  const [osRows, setOsRows] = useState<{ barcode: string; itemName: string | null; quantity: number }[] | null>(null);
+  const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number } | null>(null);
+  const [osPreviewLoading, setOsPreviewLoading] = useState(false);
+  const [osImporting, setOsImporting] = useState(false);
+  const [osConfirmText, setOsConfirmText] = useState('');
+
+  const handleOpeningStockDialogOpenChange = (open: boolean) => {
+    setShowOpeningStockDialog(open);
+    if (!open) {
+      setOsPlant(''); setOsFile(null); setOsRows(null); setOsPreview(null); setOsConfirmText('');
+    }
+  };
+
+  async function handleOpeningStockFile(file: File) {
+    setOsFile(file);
+    setOsRows(null);
+    setOsPreview(null);
+    const parsed = await new Promise<Record<string, string>[]>((resolve, reject) => {
+      Papa.parse<Record<string, string>>(file, {
+        header: true, skipEmptyLines: true,
+        complete: (result) => resolve(result.data),
+        error: (err) => reject(err),
+      });
+    }).catch((err) => {
+      toast({ title: 'Could not parse CSV', description: err?.message, variant: 'destructive' });
+      return null;
+    });
+    if (!parsed || parsed.length === 0) {
+      toast({ title: 'Empty file', description: 'This CSV has no rows.', variant: 'destructive' });
+      return;
+    }
+    const headers = Object.keys(parsed[0]);
+    const barcodeCol = osMatchColumn(headers, 'barcode');
+    const itemNameCol = osMatchColumn(headers, 'itemName');
+    const qtyCol = osMatchColumn(headers, 'quantity');
+    if (!barcodeCol) { toast({ title: 'Could not find a "Barcode" column in this CSV.', variant: 'destructive' }); return; }
+    if (!qtyCol) { toast({ title: 'Could not find a "Quantity" column in this CSV.', variant: 'destructive' }); return; }
+
+    // parseFloat (not a strip-non-digits-then-parseInt) — stripping every non-digit character
+    // would remove the decimal point too, so a cell written as "200.00" (a common Excel export
+    // format for a whole-number column) would become "20000", 100x too large. Commas are still
+    // stripped first since those are a thousands separator, not part of the number.
+    const parseQty = (raw: string) => {
+      const n = parseFloat((raw ?? '0').replace(/,/g, '').trim());
+      return Number.isFinite(n) ? Math.round(n) : 0;
+    };
+    const rows = parsed.map((row) => ({
+      barcode: (row[barcodeCol] ?? '').trim(),
+      itemName: itemNameCol ? (row[itemNameCol] ?? '').trim() || null : null,
+      quantity: parseQty(row[qtyCol] ?? '0'),
+    })).filter((r) => r.barcode);
+    if (rows.length === 0) {
+      toast({ title: 'No valid barcodes found in this CSV.', variant: 'destructive' });
+      return;
+    }
+    setOsRows(rows);
+  }
+
+  useEffect(() => {
+    if (!osPlant || !osRows) { setOsPreview(null); return; }
+    setOsPreviewLoading(true);
+    apiRequest('POST', '/api/opening-stock/preview', { plant: osPlant, items: osRows }, false, true)
+      .then((data) => setOsPreview(data))
+      .catch((err: any) => toast({ title: 'Failed to load preview', description: err?.message, variant: 'destructive' }))
+      .finally(() => setOsPreviewLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [osPlant, osRows]);
+
+  const osExpectedConfirmText = `SET ${osPlant}`.toUpperCase();
+
+  const importOpeningStock = async () => {
+    if (!osPlant || !osRows) return;
+    setOsImporting(true);
+    try {
+      const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows }, false, true);
+      toast({ title: 'Opening stock imported', description: `${data.rowsSet} barcode(s) set for ${osPlant}.` });
+      queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      handleOpeningStockDialogOpenChange(false);
+    } catch (error: any) {
+      console.error('Error importing opening stock:', error);
+      toast({ title: 'Error', description: error?.message || 'Failed to import opening stock', variant: 'destructive' });
+    } finally {
+      setOsImporting(false);
+    }
+  };
 
   // NEW: reset dialog when closed
   const handleClearDialogOpenChange = (open: boolean) => {
@@ -368,7 +748,7 @@ const Settings = () => {
                       <Input
                         value={prefixes?.expense || ''}
                         onChange={(e) => setPrefixes((p: any) => ({ ...(p||{}), expense: e.target.value }))}
-                        disabled={!isAdminUser}
+                        disabled={!isAdminUser && !canWrite}
                         placeholder="e.g. KM2526-EV-"
                       />
                     </div>
@@ -377,7 +757,7 @@ const Settings = () => {
                       <Input
                         value={prefixes?.toll || ''}
                         onChange={(e) => setPrefixes((p: any) => ({ ...(p||{}), toll: e.target.value }))}
-                        disabled={!isAdminUser}
+                        disabled={!isAdminUser && !canWrite}
                         placeholder="e.g. KM2526-TV-"
                       />
                     </div>
@@ -437,7 +817,7 @@ const Settings = () => {
                           setSaving(false);
                         }
                       }}
-                      disabled={!isAdminUser || saving}
+                      disabled={(!isAdminUser && !canWrite) || saving}
                     >
                       {saving ? 'Saving...' : 'Save Prefixes'}
                     </Button>
@@ -464,34 +844,143 @@ const Settings = () => {
                     </div>
                     
                     <div className="p-4 border rounded-lg bg-gray-50">
-                      <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Data Import</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">Import inventory data from CSV</p>
-                      <Button variant="outline" size="sm">Import Data</Button>
+                      <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Opening Stock</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">Bulk-set a plant's baseline stock from a CSV (Barcode + Quantity) — overwrites whatever's currently there, admin only.</p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => setShowOpeningStockDialog(true)}
+                        disabled={!isAdminUser}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        Import Opening Stock
+                      </Button>
                     </div>
-                    
+
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Stock Tracking Start</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        When no date is picked on Overall Stock, its Purchase, Expected, Expected Sale and Sale columns count from this date onward. Everything before it is still included, as the Opening stock.
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          type="date"
+                          value={salesTrackingStartDraft}
+                          onChange={(e) => setSalesTrackingStartDraft(e.target.value)}
+                          disabled={!isAdminUser}
+                          className="w-auto"
+                        />
+                        <Button
+                          size="sm"
+                          onClick={saveSalesTrackingStart}
+                          disabled={!isAdminUser || isSavingSalesTrackingStart || !salesTrackingStartDraft || salesTrackingStartDraft === salesTrackingData?.salesTrackingStartDate}
+                        >
+                          {isSavingSalesTrackingStart ? 'Saving...' : 'Save'}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Recalculate Stock</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Adds up every item's stock again from its full history (every scan, unloading, loading and adjustment)
+                        and fixes any stock total that doesn't match. Check first to see what would change — nothing is changed until you apply.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={runStockCheck}
+                        disabled={!isAdminUser || recalcChecking}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        {recalcChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check stock'}
+                      </Button>
+                    </div>
+
+                    {/* Notion webhook check — opens the admin-only status page in a new tab: is the token set,
+                        and what did the last changes from Notion do (updated / unchanged / error). */}
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><Webhook className="h-4 w-4 mr-2" /> Notion Webhook Status</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Check that changes made in Notion (order status, vehicles, products) are reaching the app, and see what
+                        happened to the most recent ones.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => window.open(webhookStatusLinkQuery.data?.url ?? '/api/webhooks/notion/status', '_blank', 'noopener')}
+                        disabled={!isAdminUser}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> Open status
+                      </Button>
+                      {isAdminUser && webhookStatusLinkQuery.data && (
+                        <p className="mt-2 break-all text-xs text-gray-400">
+                          Opens {webhookStatusLinkQuery.data.url}
+                          {!webhookStatusLinkQuery.data.fromEnv && ' (set NOTION_WEBHOOK_STATUS_URL in .env to change it)'}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="p-4 border rounded-lg">
+                      <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Backup CSV</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Saves every table as its own .csv file on the server, under
+                        <span className="font-mono"> backups/&lt;database&gt;-csv-&lt;date&gt;_&lt;time&gt;/</span> — the same
+                        folder the restore script reads back. Nothing is changed or deleted.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={runCsvBackup}
+                        disabled={isBackingUpCsv || !isAdminUser}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        {isBackingUpCsv
+                          ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Backing up…</>
+                          : <><Download className="mr-1.5 h-3.5 w-3.5" /> Backup CSV</>}
+                      </Button>
+                      {csvBackupResult && (
+                        <p className="mt-2 break-all text-xs text-gray-500">
+                          Last backup: {csvBackupResult.tables} table(s), {csvBackupResult.rows.toLocaleString()} row(s),
+                          {' '}{csvBackupResult.megabytes.toFixed(1)} MB → <span className="font-mono">{csvBackupResult.folder}</span>
+                        </p>
+                      )}
+                    </div>
+
                     <div className="p-4 border border-red-200 rounded-lg bg-red-50">
                       <h4 className="font-medium text-[#001d6e] flex items-center"><Shield className="h-4 w-4 mr-2" /> Danger Zone</h4>
                       <p className="text-sm text-[#001d6e] mt-1 mb-3">These actions are irreversible</p>
                       <div className="flex flex-wrap gap-2">
-                        <Button 
-                          variant="destructive" 
+                        <Button
+                          variant="destructive"
                           size="sm"
+                          onClick={() => setShowClearStockDialog(true)}
+                          disabled={!isAdminUser}
+                          title={!isAdminUser ? "Admin access required" : undefined}
                         >
-                          Clear Scan History
+                          Clear Stock
                         </Button>
-                        <Button 
-                          variant="destructive" 
-                          size="sm" 
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => setShowResetDialog(true)}
+                          disabled={!isAdminUser}
+                          title={!isAdminUser ? "Admin access required" : undefined}
+                        >
+                          Remove All Operations Data
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
                           onClick={() => setShowClearDialog(true)}
-                          disabled={isClearing}
+                          disabled={isClearing || !canWrite}
+                          title={!canWrite ? "You have read-only access to Settings" : undefined}
                         >
-                          {isClearing ? "Clearing..." : "Clear Inventory"}
+                          {isClearing ? "Clearing..." : "Clear Product Master"}
                         </Button>
-                        <Button 
-                          variant="destructive" 
+                        <Button
+                          variant="destructive"
                           size="sm"
                           onClick={resetStock}
-                          disabled={isResetting}
+                          disabled={isResetting || !canWrite}
+                          title={!canWrite ? "You have read-only access to Settings" : undefined}
                         >
                           {isResetting ? "Resetting..." : "Reset Stock Values"}
                         </Button>
@@ -511,10 +1000,112 @@ const Settings = () => {
         </div>
       </div>
 
+      {/* Recalculate Stock — the Check result, and Apply. */}
+      <AlertDialog open={recalcOpen} onOpenChange={(open) => { if (!recalcApplying) setRecalcOpen(open); }}>
+        <AlertDialogContent className="max-w-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Recalculate Stock</AlertDialogTitle>
+            <AlertDialogDescription>
+              {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount === 0
+                ? 'Every stock total matches its history. Nothing to fix.'
+                : `${recalcPreview?.plantCount ?? 0} item total(s) and ${recalcPreview?.productCount ?? 0} product total(s) don't match their history. Apply sets them to the correct numbers below. History, scans, CSVs and proforma slips are not changed.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount > 0 && (
+            <div className="max-h-[55vh] space-y-4 overflow-y-auto">
+              {recalcPreview.plantRows.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Stock at a plant</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Item</th>
+                          <th className="px-2 py-1.5">Plant</th>
+                          <th className="px-2 py-1.5 text-right">Now</th>
+                          <th className="px-2 py-1.5 text-right">Correct</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recalcPreview.plantRows.map((r) => (
+                          <tr key={`${r.barcode}::${r.plant}`} className="border-t">
+                            <td className="px-2 py-1.5">
+                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
+                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}{r.storedRows > 1 ? ` · saved ${r.storedRows} times` : ''}</div>
+                            </td>
+                            <td className="px-2 py-1.5">{r.plant}</td>
+                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedStock}{r.storedExtra > 0 ? ` (extra ${r.storedExtra})` : ''}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctStock}{r.correctExtra > 0 ? ` (extra ${r.correctExtra})` : ''}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {recalcPreview.plantCount > recalcPreview.plantRows.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {recalcPreview.plantRows.length} of {recalcPreview.plantCount} — Apply fixes all of them.</p>
+                  )}
+                </div>
+              )}
+
+              {recalcPreview.productRows.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Total of all plants</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Item</th>
+                          <th className="px-2 py-1.5 text-right">Now</th>
+                          <th className="px-2 py-1.5 text-right">Correct</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recalcPreview.productRows.map((r) => (
+                          <tr key={r.productId} className="border-t">
+                            <td className="px-2 py-1.5">
+                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
+                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}</div>
+                            </td>
+                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedTotal}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctTotal}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {recalcPreview.productCount > recalcPreview.productRows.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {recalcPreview.productRows.length} of {recalcPreview.productCount} — Apply fixes all of them.</p>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <Label htmlFor="recalcConfirm">Type FIX to apply</Label>
+                <Input id="recalcConfirm" value={recalcConfirm} onChange={(e) => setRecalcConfirm(e.target.value)} placeholder="FIX" />
+              </div>
+            </div>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={recalcApplying}>Close</AlertDialogCancel>
+            {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount > 0 && (
+              <Button
+                onClick={applyStockRecalc}
+                disabled={recalcApplying || recalcConfirm.trim().toUpperCase() !== 'FIX'}
+                className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90"
+              >
+                {recalcApplying ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Applying…</> : 'Apply'}
+              </Button>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog open={showClearDialog} onOpenChange={handleClearDialogOpenChange}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Clear Inventory?</AlertDialogTitle>
+            <AlertDialogTitle>Clear Product Master?</AlertDialogTitle>
             <AlertDialogDescription>
               This will permanently delete all products and related data. This action cannot be undone.
             </AlertDialogDescription>
@@ -567,7 +1158,349 @@ const Settings = () => {
               className="bg-red-600 hover:bg-red-700"
               disabled={isClearing || confirmText !== 'CLEAR' || !acknowledge}
             >
-              {isClearing ? "Clearing..." : "Clear Inventory"}
+              {isClearing ? "Clearing..." : "Clear Product Master"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showClearStockDialog} onOpenChange={handleClearStockDialogOpenChange}>
+        <AlertDialogContent className="max-h-[90vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clear Stock?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This resets stock numbers for the selected plant — either everything, or (if you set an Order Date
+              below) only what orders/vehicles/deliveries dated on or before it contributed. It does not touch
+              Order Import, Loading, or Unloading scan history — that stays exactly as-is. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label htmlFor="csPlant">Plant</Label>
+              <Select value={csPlant} onValueChange={(v) => { setCsPlant(v); setCsConfirmText(''); }}>
+                <SelectTrigger id="csPlant">
+                  <SelectValue placeholder="Select a plant" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Plants</SelectItem>
+                  {(allPlants ?? []).map((p: any) => (
+                    <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="csOrderDateUpTo">Order Date up to (optional)</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="csOrderDateUpTo"
+                  type="date"
+                  value={csOrderDateUpTo}
+                  onChange={(e) => { setCsOrderDateUpTo(e.target.value); setCsConfirmText(''); }}
+                  className="w-auto"
+                />
+                {csOrderDateUpTo && (
+                  <Button variant="ghost" size="sm" onClick={() => { setCsOrderDateUpTo(''); setCsConfirmText(''); }}>
+                    Clear date
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-gray-500">
+                Leave blank to clear everything for this plant, like before. Set a date to only clear what orders/
+                vehicles/deliveries dated on or before it (checked across Order Import, Unloading, and Loading's
+                own proforma order date) contributed to stock — stock is adjusted by exactly that amount, not
+                zeroed out. Either way, no scan history is touched.
+              </p>
+            </div>
+
+            {csPlant && (
+              <>
+                <div className="p-2 rounded border bg-white text-sm">
+                  <div className="font-medium">Products w/ stock</div>
+                  <div className="text-muted-foreground">{csPreviewLoading ? '…' : csPreview?.productsWithStock ?? 0}</div>
+                </div>
+
+                {csOrderDateUpTo && !csPreviewLoading && (csPreview?.activeBlockers?.length ?? 0) > 0 && (
+                  <div className="p-3 rounded border border-red-200 bg-red-50 text-sm">
+                    <div className="font-medium text-red-700 mb-1">Can't clear — still-open session(s) in scope:</div>
+                    <ul className="list-disc pl-5 text-red-700 space-y-0.5">
+                      {csPreview!.activeBlockers.slice(0, 5).map((b, i) => (
+                        <li key={i}>{b.source} — {b.label} ({b.plant}{b.orderDate ? `, ${b.orderDate}` : ''})</li>
+                      ))}
+                      {csPreview!.activeBlockers.length > 5 && <li>and {csPreview!.activeBlockers.length - 5} more</li>}
+                    </ul>
+                    <p className="mt-1.5 text-red-600 text-xs">
+                      A date-scoped clear can only reverse what's already been scanned — an open session's numbers
+                      aren't final yet. Finish or complete these first, or clear without a date instead.
+                    </p>
+                  </div>
+                )}
+
+                <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
+                  {csOrderDateUpTo
+                    ? <>Stock for {csPlant === 'all' ? 'every plant' : csPlant} will be adjusted by what orders up to {csOrderDateUpTo} contributed — not zeroed out, since orders after that date aren't being cleared. </>
+                    : <>Stock for {csPlant === 'all' ? 'every plant' : csPlant} will be set to 0. </>}
+                  Order Import, Loading, and Unloading scan history, proforma slips, product master, and vehicle
+                  master are not affected.
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="csConfirmText">Type {expectedCsConfirmText} to confirm</Label>
+                  <Input
+                    id="csConfirmText"
+                    value={csConfirmText}
+                    onChange={(e) => setCsConfirmText(e.target.value)}
+                    placeholder={expectedCsConfirmText}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isClearingStock}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={clearStock}
+              className="bg-red-600 hover:bg-red-700"
+              disabled={
+                isClearingStock || !csPlant || csConfirmText.toUpperCase() !== expectedCsConfirmText
+                || (!!csOrderDateUpTo && csPreview != null && !csPreview.canClear)
+              }
+            >
+              {isClearingStock ? "Clearing..." : "Clear Stock"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Remove All Operations Data — permanent deletion, so: pick the scope, see exactly how many
+          rows go, then type the phrase. */}
+      <AlertDialog open={showResetDialog} onOpenChange={handleResetDialogOpenChange}>
+        <AlertDialogContent className="max-h-[90vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove all operations data?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This <strong>deletes</strong> the day-to-day work from the database — scan history, stock, loading,
+              unloading and imported order CSVs. It is not a void and not a backup: the rows are gone and cannot
+              be brought back. Product Master, Vehicle Master, proforma slips, users and plants are kept.
+              Set an Order Date below to remove only the orders dated on or before it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label htmlFor="rdPlant">Plant</Label>
+              <Select value={rdPlant} onValueChange={(v) => { setRdPlant(v); setRdConfirmText(''); }}>
+                <SelectTrigger id="rdPlant">
+                  <SelectValue placeholder="Select a plant" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Plants</SelectItem>
+                  {(allPlants ?? []).map((p: any) => (
+                    <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="rdOrderDateUpTo">Order date up to (optional)</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="rdOrderDateUpTo"
+                  type="date"
+                  value={rdOrderDateUpTo}
+                  onChange={(e) => { setRdOrderDateUpTo(e.target.value); setRdConfirmText(''); }}
+                  className="w-auto"
+                />
+                {rdOrderDateUpTo && (
+                  <Button variant="ghost" size="sm" onClick={() => { setRdOrderDateUpTo(''); setRdConfirmText(''); }}>
+                    Clear date
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-gray-500">
+                Leave blank to remove everything for this plant. Set a date and only orders dated on or before it
+                are removed — the order date on the CSV, and for loading the proforma slip's own order date, never
+                the day someone scanned. Stock is then adjusted back by exactly what those orders added or took
+                out, instead of being deleted.
+              </p>
+            </div>
+
+            {rdPlant && (
+              <>
+                {!rdPreviewLoading && (rdPreview?.activeBlockers?.length ?? 0) > 0 && (
+                  <div className="rounded border border-red-200 bg-red-50 p-3 text-sm">
+                    <div className="mb-1 font-medium text-red-700">Can't remove — still-open session(s) in scope:</div>
+                    <ul className="list-disc space-y-0.5 pl-5 text-red-700">
+                      {rdPreview!.activeBlockers.slice(0, 5).map((b, i) => (
+                        <li key={i}>{b.source} — {b.label} ({b.plant}{b.orderDate ? `, ${b.orderDate}` : ''})</li>
+                      ))}
+                      {rdPreview!.activeBlockers.length > 5 && <li>and {rdPreview!.activeBlockers.length - 5} more</li>}
+                    </ul>
+                    <p className="mt-1.5 text-xs text-red-600">
+                      A date-scoped removal has to reverse stock, and an open session's numbers aren't final yet.
+                      Finish or complete these first, or remove without a date.
+                    </p>
+                  </div>
+                )}
+
+                <div className="rounded border bg-white p-3 text-sm">
+                  <div className="mb-2 font-medium">
+                    {rdPreviewLoading ? 'Counting…' : `${rdPreview?.totalRows ?? 0} row(s) will be deleted`}
+                  </div>
+                  {rdPreview && (
+                    <ul className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+                      <li>Order scan history: <strong>{rdPreview.counts.orderScanEvents}</strong></li>
+                      <li>Order CSVs / items: <strong>{rdPreview.counts.orderSessions} / {rdPreview.counts.orderItems}</strong></li>
+                      <li>Unloading scans: <strong>{rdPreview.counts.unloadScanEvents}</strong></li>
+                      <li>Unloading batches / items: <strong>{rdPreview.counts.unloadSessions} / {rdPreview.counts.unloadItems}</strong></li>
+                      <li>Loading scans: <strong>{rdPreview.counts.loadingScanEvents}</strong></li>
+                      <li>Loading records: <strong>{rdPreview.counts.loadingRecords}</strong></li>
+                      <li>
+                        {rdPreview.dateScoped ? 'Stock rows adjusted: ' : 'Stock rows deleted: '}
+                        <strong>{rdPreview.counts.stockRows}</strong>
+                      </li>
+                      <li>Stock movements: <strong>{rdPreview.counts.stockMovements}</strong></li>
+                      {rdPreview.counts.activities > 0 && (
+                        <li>Activity log: <strong>{rdPreview.counts.activities}</strong></li>
+                      )}
+                      <li>Slips reset for loading: <strong>{rdPreview.counts.slipsLoadingReset}</strong></li>
+                    </ul>
+                  )}
+                </div>
+
+                <div className="rounded border border-yellow-200 bg-yellow-50 p-3 text-sm">
+                  Everything listed above for {rdPlant === 'all' ? 'every plant' : rdPlant}
+                  {rdOrderDateUpTo ? ` dated on or before ${rdOrderDateUpTo}` : ''} is removed from the database
+                  permanently. Proforma slips stay, but the loading progress of the orders in scope is wiped so
+                  they can be loaded again from the start.
+                  {rdOrderDateUpTo
+                    ? ' Stock is not deleted here — it is adjusted by exactly what those orders added or took out,'
+                      + ' with one audit line per item. An Opening Stock or manual adjustment inside that range is'
+                      + ' not reversed (it belongs to no order) — run Recalculate Stock afterwards to check.'
+                    : ' Stock rows are deleted outright.'}
+                  {(rdPlant !== 'all' || !!rdOrderDateUpTo) && ' The activity log has no plant and no order date, so it is only cleared by a full all-plants removal with no date.'}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="rdConfirmText">Type {expectedRdConfirmText} to confirm</Label>
+                  <Input
+                    id="rdConfirmText"
+                    value={rdConfirmText}
+                    onChange={(e) => setRdConfirmText(e.target.value)}
+                    placeholder={expectedRdConfirmText}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          {resetError && (
+            <div className="mt-3 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <div className="font-medium">Nothing was removed.</div>
+              <p className="mt-1 break-words">{resetError}</p>
+            </div>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isResettingOps}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={resetOperationsData}
+              className="bg-red-600 hover:bg-red-700"
+              disabled={
+                isResettingOps || !rdPlant || rdConfirmText.trim().toUpperCase() !== expectedRdConfirmText
+                || (rdPreview != null && !rdPreview.canReset)
+              }
+            >
+              {isResettingOps ? 'Removing…' : 'Remove data'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showOpeningStockDialog} onOpenChange={handleOpeningStockDialogOpenChange}>
+        <AlertDialogContent className="max-h-[90vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Import Opening Stock</AlertDialogTitle>
+            <AlertDialogDescription>
+              Sets the selected plant's stock to exactly what this CSV says for each barcode — overwrites
+              whatever's currently there. Every change is still logged to the stock ledger.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label htmlFor="osPlant">Plant</Label>
+              <Select value={osPlant} onValueChange={setOsPlant}>
+                <SelectTrigger id="osPlant"><SelectValue placeholder="Select a plant" /></SelectTrigger>
+                <SelectContent>
+                  {(allPlants ?? []).map((p: any) => (
+                    <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="osFile">CSV File (Barcode + Quantity required)</Label>
+              <Input
+                id="osFile" type="file" accept=".csv"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleOpeningStockFile(f); }}
+              />
+              {osFile && <div className="text-xs text-gray-500">{osFile.name}{osRows ? ` — ${osRows.length} row(s)` : ''}</div>}
+            </div>
+
+            {osPlant && osRows && (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Rows</div>
+                    <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.totalRows ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Distinct barcodes</div>
+                    <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.distinctBarcodes ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Already have stock</div>
+                    <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.barcodesWithExistingStock ?? 0}</div>
+                  </div>
+                  <div className="p-2 rounded border bg-white">
+                    <div className="font-medium">Total qty to set</div>
+                    <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.totalQtyToSet ?? 0}</div>
+                  </div>
+                </div>
+
+                {(osPreview?.barcodesWithExistingStock ?? 0) > 0 && (
+                  <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
+                    {osPreview?.barcodesWithExistingStock} barcode(s) already have stock at {osPlant} — this will overwrite it, not add to it.
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label htmlFor="osConfirmText">Type {osExpectedConfirmText} to confirm</Label>
+                  <Input
+                    id="osConfirmText"
+                    value={osConfirmText}
+                    onChange={(e) => setOsConfirmText(e.target.value)}
+                    placeholder={osExpectedConfirmText}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={osImporting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={importOpeningStock}
+              className="bg-red-600 hover:bg-red-700"
+              disabled={osImporting || !osPlant || !osRows || osConfirmText.toUpperCase() !== osExpectedConfirmText}
+            >
+              {osImporting ? (<><Loader2 className="mr-1.5 h-4 w-4 animate-spin inline" />Importing...</>) : (<><Upload className="mr-1.5 h-4 w-4 inline" />Import</>)}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

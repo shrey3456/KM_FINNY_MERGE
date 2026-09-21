@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Card, CardContent } from '../components/ui/card';
 import { CardHeader } from '../components/ui/card';
 import { Input } from '../components/ui/input';
@@ -9,7 +9,33 @@ import { Search, PrinterCheck, FileDown, Factory } from 'lucide-react';
 import axios from 'axios';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
+import JsBarcode from 'jsbarcode';
 import { useLocation } from 'wouter';
+import { hasPageWriteAccess } from '../lib/permissions';
+
+// Renders a Code128 barcode (readable by virtually every 1D scanner gun, unlike a QR code which
+// needs a 2D imager) for the given text into an offscreen canvas and returns it as a PNG data
+// URL — a plain string that works both as a live <img> in the on-screen preview and, embedded
+// directly into the print template's HTML string, in the printed slip itself. Neither consumer
+// needs to load jsbarcode itself; they just display an already-rendered image.
+function generateBarcodeDataUrl(text: string): string {
+  const canvas = document.createElement('canvas');
+  JsBarcode(canvas, text, { format: 'CODE128', displayValue: false, margin: 4, height: 40 });
+  return canvas.toDataURL('image/png');
+}
+
+// Order-number barcode on the proforma slip (under #orderNumber, in both the on-screen preview and
+// every printed copy), 7mm tall. Kept behind this switch so it can be turned off again by setting it
+// to false, without touching any of the code that draws it.
+const SHOW_ORDER_BARCODE = true;
+
+// The vehicle circle is a fixed 45px. At the old fixed 16pt, a longer code ("T-01", "MH-46") spilled
+// out of it and wrapped onto two lines; the font now steps down with the code's length so it always
+// sits on one line inside the circle. Short codes keep the original 16pt.
+function vehicleCircleFontPt(text: string | null | undefined): number {
+  const len = String(text ?? '').trim().length;
+  return len <= 2 ? 16 : len === 3 ? 12 : len === 4 ? 10 : 8;
+}
 
 // Product/order interfaces
 interface ProformaSlipItem {
@@ -90,17 +116,18 @@ const PrintOperations: React.FC = () => {
     }
   })();
   const currentUserRole = String(currentUser?.role || '').toLowerCase();
-  const isread = ['read-only', 'readonly', 'read', 'r'].includes(currentUserRole);
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
+  // Write access to Print Operations is granted per-page by admin (Allowed Pages /
+  // Write Access on the User Management page) rather than the old global role string.
+  const isread = !hasPageWriteAccess("print-operations") && !isAdminOrSuper;
 
   const rawDepartment = String(currentUser?.department || '').trim().toLowerCase();
   const rawDesignation = String(currentUser?.designation || '').trim().toLowerCase();
-  
-  const isITDep= ['IT', 'information technology', 'it'].includes(rawDepartment);
-  const ismanagment = ['management', 'manager', 'head', 'director'].includes(rawDepartment);
-  // Department: Billing, Designation: Head
-  console.log(isITDep,ismanagment)
-  const canUnlockSlips = !isread && (isAdminOrSuper || isITDep || ismanagment || (rawDepartment === 'billing' && rawDesignation === 'head'));
+
+  // Matches the server's actual rule (proforma-api.ts's unlock route: requirePageWrite both
+  // 'print-operations' AND 'proforma') — a user with only one of the two would otherwise see
+  // a fully clickable Unlock button that 403s on click.
+  const canUnlockSlips = isAdminOrSuper || (hasPageWriteAccess("print-operations") && hasPageWriteAccess("proforma"));
 
   // NEW: Get current user info and time for use in both print function and preview
   // CHANGED: Use Name instead of Role
@@ -129,11 +156,27 @@ const PrintOperations: React.FC = () => {
       if (!activeOrderNumber.trim()) {
         return null as any;
       }
-      const response = await axios.get(`/api/proforma-slips/order/${activeOrderNumber.trim()}`);
+      // encodeURIComponent: order numbers can contain "/" (e.g. "958/8"). Unencoded, that split the
+      // address into extra path segments, matched no API route, and the app's own HTML page came back
+      // instead of slip data — which the preview then tried to read `.slip.plant` from and crashed.
+      const response = await axios.get(`/api/proforma-slips/order/${encodeURIComponent(activeOrderNumber.trim())}`);
+      // Anything that isn't a real slip (not found, an HTML page, an error body) is an error here, so
+      // the page shows "not found" instead of rendering a preview with no slip in it.
+      if (!response.data || typeof response.data !== 'object' || !response.data.slip) {
+        throw new Error(`No proforma slip found for order "${activeOrderNumber.trim()}"`);
+      }
       return response.data;
     },
     enabled: false, // Don't run the query automatically
   });
+
+  // Computed once per order number, then reused as-is by both the on-screen preview (as an
+  // <img>) and handlePrint's own HTML-string template (embedded the same way) — so scanning
+  // either the preview or the printed slip with a gun reads the exact same order number back.
+  const barcodeDataUrl = useMemo(
+    () => (SHOW_ORDER_BARCODE && proformaData?.slip?.orderNumber ? generateBarcodeDataUrl(proformaData.slip.orderNumber) : ''),
+    [proformaData?.slip?.orderNumber],
+  );
   
   // Reset local print tracker when data changes
   useEffect(() => {
@@ -141,7 +184,7 @@ const PrintOperations: React.FC = () => {
       setHasPrintedCurrentSlip(false);
     }
   }, [proformaData?.slip?.orderNumber]);
-  
+
   // Fetch plant config for current slip
   const { data: plantConfig, refetch: refetchPlantConfig } = useQuery<any>({
     queryKey: ['plant', proformaData?.slip?.plant],
@@ -217,19 +260,24 @@ const PrintOperations: React.FC = () => {
     return null;
   };
   
-  // Format product name to display in a single line with "wafers" shortened to "WAF"
+  // Product name as printed: the word WAFER / WAFERS is left out entirely (it used to be shortened
+  // to "WAF"). Print only — the slip, Product Master and every other page keep the full name.
+  // Whole word only, so a longer word that merely contains "wafer" is never cut, and the space it
+  // leaves behind is collapsed so the name doesn't print with a double gap.
   const formatProductName = (itemName: string | null): string[] => {
     if (!itemName) return [''];
-    
-    // Replace "wafers" with "WAF" (uppercase)
-    let formattedName = itemName.replace(/wafers/gi, 'WAF');
-    
+
+    const formattedName = itemName
+      .replace(/\bwafers?\b/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
     return [formattedName]; // Return as a single line
   };
   
   // Create print content for direct printing in iframe
   const createPrintContent = (pageNumber?: number) => {
-    if (!proformaData) return '';
+    if (!proformaData?.slip) return '';
     
     // IMPORTANT: Get split pages setting directly from plantConfig at render time
     const shouldSplitPages = Boolean(plantConfig?.isSplitPagesEnabled);
@@ -287,12 +335,10 @@ const PrintOperations: React.FC = () => {
       <div style="text-align: center; font-weight: bold; font-size: 10pt; background-color: ${bgColor}; color: ${textColor}; padding: 2px 0; margin-bottom: 1mm; border-radius: 0; border-bottom: 1px solid ${borderColor};">
         KRUPA MARKETING - ${proformaData.slip.plant?.toUpperCase() || ''}
       </div>
-      
+
       <div style="margin-bottom: 0.5mm;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5mm;">
-          <div style="display: flex; width: 45px; height: 45px; border-radius: 50%; border: 2px solid #000000; background-color: transparent; color: #000000; font-size: 16pt; font-weight: bold; align-items: center; justify-content: center; flex-shrink: 0;">
-            ${proformaData.slip.vehicleNumber || ''}
-          </div>
+          <div style="display: flex; width: 45px; height: 45px; border-radius: 50%; border: 2px solid #000000; background-color: transparent; color: #000000; font-size: ${vehicleCircleFontPt(proformaData.slip.vehicleNumber)}pt; font-weight: bold; line-height: 1; white-space: nowrap; overflow: hidden; text-align: center; align-items: center; justify-content: center; flex-shrink: 0;">${proformaData.slip.vehicleNumber || ''}</div>
           <div style="text-align: center; font-size: 10pt; font-weight: bold; flex: 1; padding: 0 5mm;">
             ${proformaData.slip.partyName}
             <!-- Time box for load start & end time -->
@@ -310,7 +356,11 @@ const PrintOperations: React.FC = () => {
             </div>
           </div>
           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1mm;">
-            <div style="font-size: 14pt; font-weight: bold; text-align: right; color: #a10808;">#${proformaData.slip.orderNumber}</div>
+            <!-- Slip number with its scannable barcode directly beneath it, then the date. -->
+            <div style="display: flex; flex-direction: column; align-items: flex-end;">
+              <div style="font-size: 14pt; font-weight: bold; text-align: right; color: #a10808; line-height: 1.1;">#${proformaData.slip.orderNumber}</div>
+              ${barcodeDataUrl ? `<img src="${barcodeDataUrl}" style="height: 7mm; width: auto; display: block; margin-top: 0.5mm;" alt="Order barcode" />` : ''}
+            </div>
             <div style="font-size: 10pt; font-weight: bold; line-height: 1.2; text-align: right;">${formatDate(proformaData.slip.orderDate)}</div>
           </div>
         </div>
@@ -376,7 +426,7 @@ const PrintOperations: React.FC = () => {
         }
       }
       
-      // Format product name for printing - single line with wafers -> waf
+      // Format product name for printing - single line, the word WAFER/WAFERS left out
       const formattedNameHTML = formatProductName(item.itemName || '')[0];
       
       return `
@@ -389,7 +439,7 @@ const PrintOperations: React.FC = () => {
               ${formattedNameHTML}
             </span>
           </td>
-          <td class="qty-col" style="font-weight: bold; font-size: 13pt; background-color: ${itemBgColor}; color: ${itemTextColor}; text-align: right; padding: 0px 1px; border-bottom: 1px dotted #888;">${item.quantity}.</td>
+          <td class="qty-col" style="font-weight: bold; font-size: 13pt; background-color: ${itemBgColor}; color: ${itemTextColor}; text-align: right; padding: 0px 4px 0px 1px; white-space: nowrap; border-bottom: 1px dotted #888;">${item.quantity}.</td>
         </tr>
       `;
     };
@@ -758,7 +808,7 @@ const PrintOperations: React.FC = () => {
   
   // Handle direct print - Simplified to avoid double dialogs
   const handlePrint = async (pageNumber?: number) => {
-    if (!proformaData) return;
+    if (!proformaData?.slip) return;
 
     // Refetch plant config before printing to ensure we have the latest locking setting
     await refetchPlantConfig();
@@ -833,9 +883,9 @@ const PrintOperations: React.FC = () => {
   
   // Unlock handler (admin/super only)
   const handleUnlock = async () => {
-    if (!proformaData) return;
+    if (!proformaData?.slip) return;
     try {
-      await axios.post(`/api/proforma-slips/order/${proformaData.slip.orderNumber}/unlock`);
+      await axios.post(`/api/proforma-slips/order/${encodeURIComponent(proformaData.slip.orderNumber)}/unlock`);
       await refetch();
       setHasPrintedCurrentSlip(false); // Reset tracking when unlocked
       toast({ title: "Unlocked", description: "Slip unlocked." });
@@ -856,7 +906,7 @@ const PrintOperations: React.FC = () => {
     }
 
     // Step 1: Check if the *currently loaded* slip needs locking (only if locking is enabled for that plant)
-    if (proformaData && hasPrintedCurrentSlip && !proformaData.slip.isPrintLocked) {
+    if (proformaData?.slip && hasPrintedCurrentSlip && !proformaData.slip.isPrintLocked) {
       // Refetch plant config to get the latest locking setting before deciding to lock
       await refetchPlantConfig();
       const currentIsLockingEnabled = plantConfig?.isLockingEnabled ?? true;
@@ -864,11 +914,23 @@ const PrintOperations: React.FC = () => {
       if (currentIsLockingEnabled) {
         try {
           console.log(`Locking previous slip #${proformaData.slip.orderNumber} before searching new one...`);
-          await axios.post(`/api/proforma-slips/order/${proformaData.slip.orderNumber}/lock`, {
+          await axios.post(`/api/proforma-slips/order/${encodeURIComponent(proformaData.slip.orderNumber)}/lock`, {
             printedByCode: currentUser?.userCode,
+            // Tells the server this is the automatic post-print lock, not a deliberate
+            // Lock-button click from the Proforma Slips page — that path only needs read
+            // access to both pages, not write (see requireLockAccess server-side).
+            autoLockFromPrint: true,
           });
           toast({ title: "Locked", description: `Previous slip #${proformaData.slip.orderNumber} locked.` });
-        } catch (err) {
+        } catch (err: any) {
+          // Previously silent (console.error only) — a permission or network failure here
+          // meant the slip just never locked with no indication why. Now surfaced so it's
+          // never an invisible failure again.
+          toast({
+            title: "Failed to lock previous slip",
+            description: err?.response?.data?.message || err?.message || `Could not lock slip #${proformaData.slip.orderNumber} — it may still be printable by others.`,
+            variant: "destructive",
+          });
           console.error('Failed to auto-lock previous slip:', err);
         }
       }
@@ -880,15 +942,24 @@ const PrintOperations: React.FC = () => {
 
     try {
       setTimeout(async () => {
-        // Fetch the slip data
-        await refetch();
+        // Fetch the slip data — and stop here with a clear message when there's no such slip.
+        const result = await refetch();
+        if (result.isError || !result.data?.slip) {
+          const err: any = result.error;
+          toast({
+            title: "Slip not found",
+            description: err?.response?.data?.message || err?.message || `No proforma slip found for order "${newOrderNumber}".`,
+            variant: "destructive",
+          });
+          return;
+        }
         
         // NEW: Immediately check the latest lock status after fetching
         const currentData = proformaData;
         if (currentData) {
           try {
             // Fetch fresh slip data to check latest lock status
-            const latestSlipResponse = await axios.get(`/api/proforma-slips/order/${newOrderNumber}`);
+            const latestSlipResponse = await axios.get(`/api/proforma-slips/order/${encodeURIComponent(newOrderNumber)}`);
             const latestSlip = latestSlipResponse.data?.slip;
             
             // Refetch plant config to get latest locking settings
@@ -952,7 +1023,7 @@ const PrintOperations: React.FC = () => {
       <div className="flex flex-col md:flex-row gap-6">
         {/* Left side - Preview section */}
         <div className="flex-1">
-          {showPreview && proformaData ? (
+          {showPreview && proformaData?.slip ? (
             <Card className="overflow-hidden h-full">
               <CardHeader className="pb-0">
                 <h3 className="text-lg font-bold">Print Preview</h3>
@@ -982,7 +1053,7 @@ const PrintOperations: React.FC = () => {
                         </div>
                       );
                     })()}
-                    
+
                     <div style={{ marginBottom: '0.5mm' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5mm' }}>
                         <div style={{ 
@@ -993,11 +1064,15 @@ const PrintOperations: React.FC = () => {
                           border: '2px solid #000000',
                           backgroundColor: 'transparent', 
                           color: '#000000', 
-                          fontSize: '16pt', 
+                          fontSize: `${vehicleCircleFontPt(proformaData.slip.vehicleNumber)}pt`, 
                           fontWeight: 'bold',
                           alignItems: 'center',
                           justifyContent: 'center',
-                          flexShrink: 0
+                          flexShrink: 0,
+                          lineHeight: 1,
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textAlign: 'center'
                         }}>
                           {proformaData.slip.vehicleNumber || ''}
                         </div>
@@ -1018,7 +1093,13 @@ const PrintOperations: React.FC = () => {
                           </div>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1mm' }}>
-                          <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808' }}>#{proformaData.slip.orderNumber}</div>
+                          {/* Slip number with its scannable barcode directly beneath it, then the date — same as the printed slip. */}
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                            <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808', lineHeight: '1.1' }}>#{proformaData.slip.orderNumber}</div>
+                            {barcodeDataUrl && (
+                              <img src={barcodeDataUrl} alt="Order barcode" style={{ height: '7mm', width: 'auto', display: 'block', marginTop: '0.5mm' }} />
+                            )}
+                          </div>
                           <div style={{ fontSize: '10pt', fontWeight: 'bold', lineHeight: '1.2', textAlign: 'right' }}>{formatDate(proformaData.slip.orderDate)}</div>
                         </div>
                       </div>
@@ -1138,7 +1219,8 @@ const PrintOperations: React.FC = () => {
                                 WebkitPrintColorAdjust: 'exact',
                                 textAlign: 'right',
                                 fontSize: '13pt',
-                                padding: '0px 1px',
+                                padding: '0px 4px 0px 1px',
+                                whiteSpace: 'nowrap',
                                 borderBottom: '0.5px dotted #888'
                               }}>{item.quantity}.</td>
                             </tr>

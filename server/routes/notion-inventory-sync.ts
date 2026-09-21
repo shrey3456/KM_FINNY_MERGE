@@ -1,4 +1,5 @@
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router, Request, Response } from 'express';
+import path from 'path';
 import {
   detectChangesFromNotion,
   applyPendingChanges,
@@ -6,34 +7,35 @@ import {
   getPendingReport,
   getSyncStatus,
   getSyncHistory,
+  getAutoApplyEnabled,
+  setAutoApplyEnabled,
+  PRODUCT_IMAGE_DIR,
 } from '../services/notionInventorySync';
 import { storage } from '../storage';
+import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
 
-function requireAdminRole(req: Request, res: Response, next: NextFunction) {
-  if (!req.isAuthenticated()) {
-    return res.status(401).json({ success: false, message: 'Not authenticated' });
-  }
-  const user = req.user as any;
-  const role = (user?.role ?? '').toLowerCase();
-  if (role !== 'admin' && role !== 'super-admin') {
-    return res.status(403).json({ success: false, message: 'Admin access required' });
-  }
-  next();
-}
-
-router.use('/notion-inventory-sync', requireAdminRole);
+// Product Master is granted like any other page now (User Management > Allowed Pages / Write
+// Access) instead of being admin-only: reading needs the page, and every action that changes
+// products needs write on it. Admin and super-admin still pass both automatically.
+router.use('/notion-inventory-sync', requirePageAccess('notion-inventory'));
+const requireProductWrite = requirePageWrite('notion-inventory');
 
 function callerName(req: Request): string {
   const u = req.user as any;
   return u?.name || u?.username || u?.userCode || 'unknown';
 }
 
-// POST /api/notion-inventory-sync/detect
-router.post('/notion-inventory-sync/detect', async (req, res) => {
+// POST /api/notion-inventory-sync/detect  — body: { syncImages?: boolean }
+// syncImages defaults to false ("Sync Notion" — fast, data fields only). The client's "Sync
+// Photos" button is the only caller that passes true; Apply only ever touches images that a
+// syncImages:true run actually queued, so this default never risks Apply silently reverting
+// photos.
+router.post('/notion-inventory-sync/detect', requireProductWrite, async (req, res) => {
   try {
-    const report = await detectChangesFromNotion(callerName(req));
+    const syncImages = req.body?.syncImages === true;
+    const report = await detectChangesFromNotion(callerName(req), syncImages);
     res.json({ success: true, ...report });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -50,7 +52,7 @@ router.get('/notion-inventory-sync/pending', (_req, res) => {
 });
 
 // POST /api/notion-inventory-sync/apply
-router.post('/notion-inventory-sync/apply', async (_req, res) => {
+router.post('/notion-inventory-sync/apply', requireProductWrite, async (_req, res) => {
   try {
     const report = await applyPendingChanges();
     res.json({ success: true, ...report });
@@ -62,7 +64,7 @@ router.post('/notion-inventory-sync/apply', async (_req, res) => {
 });
 
 // POST /api/notion-inventory-sync/full-sync
-router.post('/notion-inventory-sync/full-sync', async (req, res) => {
+router.post('/notion-inventory-sync/full-sync', requireProductWrite, async (req, res) => {
   try {
     const report = await fullSyncFromNotion(callerName(req));
     res.json({ success: true, ...report });
@@ -76,6 +78,28 @@ router.post('/notion-inventory-sync/full-sync', async (req, res) => {
 // GET /api/notion-inventory-sync/status
 router.get('/notion-inventory-sync/status', (_req, res) => {
   res.json(getSyncStatus());
+});
+
+// GET /api/notion-inventory-sync/auto-apply-config
+// Whether the 24-hour scheduled sync is allowed to apply detected changes on its own.
+// Shared across everyone (single server-side setting), not a per-browser preference — readable by
+// anyone granted Product Master, changeable only with write access on it (see the router gates).
+router.get('/notion-inventory-sync/auto-apply-config', async (_req, res) => {
+  try {
+    res.json({ enabled: await getAutoApplyEnabled() });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to read auto-apply setting' });
+  }
+});
+
+router.post('/notion-inventory-sync/auto-apply-config', requireProductWrite, async (req, res) => {
+  try {
+    const enabled = req.body?.enabled === true;
+    await setAutoApplyEnabled(enabled, callerName(req));
+    res.json({ enabled });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to save auto-apply setting' });
+  }
 });
 
 // GET /api/notion-inventory-sync/inspect-properties
@@ -133,7 +157,9 @@ const CSV_HEADER_MAP: Record<string, string> = {
   "Notion Wise Name": "notionWiseName", "Brand": "brand", "Category": "category",
   "Sale Category": "saleCategory", "Plant": "plant", "Type": "type",
   "Product Image": "productImage", "Vol Master": "volumeInCuFt", "Packets": "itemsPerPallet",
-  "IND PLT": "indPlt", "VAL PLT": "valPlt",
+  // CSV header text stays as-is (matches historical exports/imports) — only where the value
+  // lands changed, since pallet size is a per-state fact now (products.mpPlt/gjPlt).
+  "IND PLT": "mpPlt", "VAL PLT": "gjPlt",
   "GJ Sr": "gjSr", "GJ HSN": "gjHsn", "GJ SAP": "gjSap",
   "GJ Sale Rate": "gjSaleRate", "GJ IGST": "gjIgst",
   "GJ-GA PUR": "gjGaPur", "GJ-MH PUR": "gjMhPur", "GJ-NAGAR PUR": "gjNagarPur",
@@ -149,10 +175,80 @@ const CSV_HEADER_MAP: Record<string, string> = {
   "UP Sr": "upSr", "UP HSN": "upHsn", "UP SAP": "upSap",
   "UP Rate": "upRate", "UP IGST": "upIgst", "For UP Order Form": "forUpOrderForm",
 };
-const INTEGER_FIELDS = new Set(["itemsPerPallet", "indPlt", "valPlt"]);
+const INTEGER_FIELDS = new Set(["itemsPerPallet", "mpPlt", "gjPlt"]);
+
+// GET /api/products/image-by-name?name=...
+// Serves a product's locally-cached image (never the raw Notion URL — see
+// notionInventorySync.ts for why). Looked up by name rather than barcode because the
+// same barcode can be shared by multiple distinct products; the Scan page already
+// resolves scans down to one exact item name before it needs the picture.
+router.get('/products/image-by-name', async (req: Request, res: Response) => {
+  try {
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+    const name = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+    if (!name) return res.status(400).json({ message: 'name is required' });
+
+    const product = await storage.getProductByName(name);
+    if (!product?.productImage || !product.productImageHash) {
+      return res.status(404).json({ message: 'No image for this product' });
+    }
+
+    res.set({
+      'Cache-Control': 'public, max-age=3600',
+      'ETag': product.productImageHash,
+    });
+    if (req.headers['if-none-match'] === product.productImageHash) {
+      return res.status(304).end();
+    }
+
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), (err) => {
+      if (err && !res.headersSent) res.status(404).json({ message: 'Image file missing' });
+    });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve product image' });
+  }
+});
+
+// GET /api/products/image-by-id?id=...
+// Same as image-by-name above, but keyed on the product's own (stable, unique) primary key
+// instead of its name — immune to a product being renamed (a Notion resync, a typo fix), which
+// silently broke image-by-name's lookup even though the cached file itself never moved. Prefer
+// this everywhere a full Product row is already in hand; image-by-name stays as-is for the
+// scan-feedback popups that currently only have a bare item name (see notionPageId/productId
+// follow-up in server/routes/loading.ts's own /scan response for those).
+router.get('/products/image-by-id', async (req: Request, res: Response) => {
+  try {
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+    const id = parseInt(String(req.query.id ?? ''), 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id is required' });
+
+    const product = await storage.getProduct(id);
+    if (!product?.productImage || !product.productImageHash) {
+      return res.status(404).json({ message: 'No image for this product' });
+    }
+
+    res.set({
+      'Cache-Control': 'public, max-age=3600',
+      'ETag': product.productImageHash,
+    });
+    if (req.headers['if-none-match'] === product.productImageHash) {
+      return res.status(304).end();
+    }
+
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), (err) => {
+      if (err && !res.headersSent) res.status(404).json({ message: 'Image file missing' });
+    });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve product image' });
+  }
+});
 
 // POST /api/products/csv-import
-router.post('/products/csv-import', requireAdminRole, async (req: Request, res: Response) => {
+router.post('/products/csv-import', requireProductWrite, async (req: Request, res: Response) => {
   try {
     const rows: Record<string, string>[] = req.body.rows;
     if (!Array.isArray(rows) || rows.length === 0)

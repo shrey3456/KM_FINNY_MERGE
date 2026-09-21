@@ -12,6 +12,8 @@ import logoPath from '@assets/logo_wo_bg_1757152661130.png';
 import { borderBottomLeftRadius } from 'html2canvas/dist/types/css/property-descriptors/border-radius';
 import { text } from 'stream/consumers';
 import { TruckLoadingAnimation } from '@/components/TruckLoadingAnimation';
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
 interface TollVoucherData {
   orderNumber: string;
@@ -48,15 +50,18 @@ function useAccessControl() {
 
         const user = JSON.parse(userString);
         const userRole = user.role?.toLowerCase();
-        const userDepartment = user.department?.toLowerCase();
 
         const allowedRoles = ['admin', 'super-admin', 'superadmin', 'super_admin'];
-        const allowedDepartments = ['steer', 'management', 'it'];
-
         const isAdmin = allowedRoles.includes(userRole);
-        const hasAllowedDepartment = allowedDepartments.includes(userDepartment);
 
-        setHasAccess(isAdmin || hasAllowedDepartment);
+        // Access is controlled by admin via User Management's Allowed Pages —
+        // route-level access is already enforced by ProtectedRoute before this
+        // component ever renders; this just mirrors that for the page's own state.
+        let allowedPages: string[] = [];
+        try { allowedPages = JSON.parse(user.allowedPages || "[]"); } catch { /* default [] */ }
+        const hasPageGrant = allowedPages.includes("toll-voucher");
+
+        setHasAccess(isAdmin || hasPageGrant);
         setIsLoading(false);
       } catch (error) {
         console.error('Error checking access:', error);
@@ -84,7 +89,7 @@ const getFontSize = (text: string) => {
 };
 
 export default function TollVoucher() {
-  const [selectedPlant, setSelectedPlant] = useState('valsad');
+  const [selectedPlant, setSelectedPlant] = usePersistentFilter('tollVoucher:plant', 'valsad');
   //const [voucherPrefix, setVoucherPrefix] = useState('KM2526-EV-');
   const [voucherNumber, setVoucherNumber] = useState('');
   const [selectedOrder, setSelectedOrder] = useState('');
@@ -448,12 +453,7 @@ console.log(length, partyFontPt);
   // Access control
   if (accessLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
+      <PageSkeleton />
     );
   }
 
@@ -485,7 +485,7 @@ console.log(length, partyFontPt);
   return (
     <div className="min-h-screen bg-white p-4 md:p-8">
       {/* Header Section */}
-      <div className="max-w-7xl mx-auto mb-6">
+      <div className="mx-auto w-full max-w-[1800px] mb-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             <Receipt className="h-8 w-8 text-[#001d6e]" style={{fill: "#16a34a"}} />
@@ -515,7 +515,7 @@ console.log(length, partyFontPt);
       </div>
 
       {/* Search Section */}
-      <div className="max-w-7xl mx-auto mb-6">
+      <div className="mx-auto w-full max-w-[1800px] mb-6">
         <Card className="shadow-lg">
           <CardContent className="pt-6">
             <div className="space-y-4">
@@ -584,7 +584,7 @@ console.log(length, partyFontPt);
 
       {/* Error / Not Found State */}
       {((tollVoucherData && !tollVoucherData.success) || isError) && (
-        <div className="max-w-7xl mx-auto mt-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <div className="mx-auto w-full max-w-[1800px] mt-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <Card className="border-red-200 shadow-lg bg-white overflow-hidden">
             <div className="h-2 bg-red-500 w-full"></div>
             <CardContent className="p-12 flex flex-col items-center justify-center text-center">
@@ -628,7 +628,7 @@ console.log(length, partyFontPt);
 
       {/* Voucher Display - Landscape */}
       {tollVoucherData && tollVoucherData.success && tollVoucherData.data && (
-        <div className="max-w-7xl mx-auto">
+        <div className="mx-auto w-full max-w-[1800px]">
           {/* Print Button */}
           <div className="mb-4 flex justify-end">
             <Button onClick={handlePrint} data-testid="button-print">

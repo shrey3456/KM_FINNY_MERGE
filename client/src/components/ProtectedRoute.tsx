@@ -1,8 +1,10 @@
 import React from 'react';
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 import { Route } from 'wouter';
 import { getCurrentUserPermissions } from '../lib/permissions';
 import { useAuth } from '../hooks/use-auth';
 import NotFound from '@/pages/not-found';
+import type { PageKey } from '@shared/pageKeys';
 
 interface ProtectedRouteProps {
   path: string;
@@ -10,7 +12,7 @@ interface ProtectedRouteProps {
   requireInventoryAccess?: boolean;
   requireAdmin?: boolean;
   requireOrderManagement?: boolean;
-  requiredPage?: string;
+  requiredPage?: PageKey | (string & {});
 }
 
 const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
@@ -25,11 +27,11 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   const { user, isLoading } = useAuth();
 
   return (
-    <Route
-      path={path}
-      component={(props) => {
-        // While session user is loading, don't block access yet
-        if (isLoading) return null;
+    <Route path={path}>
+      {(params) => {
+        // While the session user is loading (every page refresh), show the page skeleton — this used
+        // to return nothing, which is the blank white area right after a manual refresh.
+        if (isLoading) return <PageSkeleton />;
 
         if (requireAdmin && !userPermissions.canManageUsers) {
           return <NotFound />;
@@ -39,11 +41,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
           return <NotFound />;
         }
 
-        if (requireOrderManagement && !userPermissions.canAccessOrderManagement) {
-          return <NotFound />;
-        }
-
         // Page-based access control for non-admin users
+        let hasPageGrant = true;
         if (requiredPage) {
           const role = (user as any)?.role ?? '';
           const isAdmin = role === 'admin' || role === 'super-admin';
@@ -54,15 +53,25 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
             } catch {
               allowedPages = [];
             }
-            if (!allowedPages.includes(requiredPage)) {
-              return <NotFound />;
-            }
+            hasPageGrant = allowedPages.includes(requiredPage);
           }
         }
 
-        return <Component {...props} />;
+        // requireOrderManagement is an older, department-only gate. When combined with
+        // requiredPage on the same route, either one passing is enough (OR, not AND) —
+        // otherwise a page granted via User Management's Allowed Pages would still be
+        // blocked by this legacy check.
+        if (requireOrderManagement && !userPermissions.canAccessOrderManagement && !hasPageGrant) {
+          return <NotFound />;
+        }
+
+        if (requiredPage && !hasPageGrant) {
+          return <NotFound />;
+        }
+
+        return <Component {...params} />;
       }}
-    />
+    </Route>
   );
 };
 

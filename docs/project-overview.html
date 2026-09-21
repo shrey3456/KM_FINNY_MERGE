@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KM Finny — Project Overview</title>
+<style>
+  :root {
+    --paper: #F3F5F8;
+    --surface: #FFFFFF;
+    --ink: #12141C;
+    --ink-soft: #4A4E5C;
+    --line: rgba(18, 20, 28, 0.13);
+    --line-soft: rgba(18, 20, 28, 0.07);
+    --accent: #001D6E;
+    --accent-soft: rgba(0, 29, 110, 0.08);
+    --accent-ink: #FFFFFF;
+    --amber: #9A5C14;
+    --amber-soft: rgba(154, 92, 20, 0.10);
+    --good: #1E6B45;
+    --good-soft: rgba(30, 107, 69, 0.10);
+    --warn: #9A5C14;
+    --warn-soft: rgba(154, 92, 20, 0.10);
+    --crit: #A33A3A;
+    --crit-soft: rgba(163, 58, 58, 0.10);
+    --get: #1E6B45;
+    --post: #001D6E;
+    --put: #9A5C14;
+    --del: #A33A3A;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif;
+    --radius: 3px;
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #0E1016;
+    --surface: #171A24;
+    --ink: #E7E9F0;
+    --ink-soft: #A7ACC0;
+    --line: rgba(231, 233, 240, 0.14);
+    --line-soft: rgba(231, 233, 240, 0.07);
+    --accent: #6E8FE8;
+    --accent-soft: rgba(110, 143, 232, 0.14);
+    --accent-ink: #0E1016;
+    --amber: #D8A24C;
+    --amber-soft: rgba(216, 162, 76, 0.13);
+    --good: #5BAE85;
+    --good-soft: rgba(91, 174, 133, 0.13);
+    --warn: #D8A24C;
+    --warn-soft: rgba(216, 162, 76, 0.13);
+    --crit: #E08080;
+    --crit-soft: rgba(224, 128, 128, 0.13);
+    --get: #5BAE85;
+    --post: #6E8FE8;
+    --put: #D8A24C;
+    --del: #E08080;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0E1016;
+      --surface: #171A24;
+      --ink: #E7E9F0;
+      --ink-soft: #A7ACC0;
+      --line: rgba(231, 233, 240, 0.14);
+      --line-soft: rgba(231, 233, 240, 0.07);
+      --accent: #6E8FE8;
+      --accent-soft: rgba(110, 143, 232, 0.14);
+      --accent-ink: #0E1016;
+      --amber: #D8A24C;
+      --amber-soft: rgba(216, 162, 76, 0.13);
+      --good: #5BAE85;
+      --good-soft: rgba(91, 174, 133, 0.13);
+      --warn: #D8A24C;
+      --warn-soft: rgba(216, 162, 76, 0.13);
+      --crit: #E08080;
+      --crit-soft: rgba(224, 128, 128, 0.13);
+      --get: #5BAE85;
+      --post: #6E8FE8;
+      --put: #D8A24C;
+      --del: #E08080;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 16.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--mono);
+    font-weight: 700;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  p { margin: 0 0 0.9em; max-width: 68ch; }
+  code, .mono { font-family: var(--mono); }
+
+  .shell {
+    display: grid;
+    grid-template-columns: 272px minmax(0, 1fr);
+    max-width: 1320px;
+    margin: 0 auto;
+  }
+  @media (max-width: 940px) {
+    .shell { grid-template-columns: 1fr; }
+  }
+
+  .masthead {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 22px clamp(18px, 4vw, 40px) 18px;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .masthead .id {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .masthead .mark {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    background: var(--accent);
+    color: var(--accent-ink);
+    padding: 3px 8px;
+    border-radius: var(--radius);
+  }
+  .masthead h1 {
+    font-size: 15px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 0;
+    color: var(--ink-soft);
+  }
+  .masthead .meta {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.03em;
+  }
+
+  nav.toc {
+    padding: 28px 18px 60px clamp(18px, 4vw, 40px);
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+  }
+  @media (max-width: 940px) {
+    nav.toc {
+      position: relative;
+      max-height: none;
+      padding: 18px clamp(18px, 4vw, 40px) 0;
+    }
+  }
+  nav.toc .group { margin-bottom: 22px; }
+  nav.toc .group-label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 8px;
+  }
+  nav.toc ul { list-style: none; margin: 0; padding: 0; }
+  nav.toc li { margin: 0; }
+  nav.toc a {
+    display: block;
+    padding: 5px 0 5px 12px;
+    border-left: 2px solid var(--line);
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-soft);
+    text-decoration: none;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  nav.toc a:hover { color: var(--ink); border-left-color: var(--accent); }
+
+  main { min-width: 0; padding: 28px clamp(18px, 4vw, 40px) 100px; }
+
+  .intro {
+    max-width: 74ch;
+    margin-bottom: 40px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--line);
+  }
+  .intro .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 10px;
+  }
+  .intro h2 {
+    font-size: clamp(24px, 3.4vw, 32px);
+    margin: 0 0 14px;
+    line-height: 1.15;
+  }
+  .stack-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 18px;
+  }
+  .stack-row .chip {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 4px 9px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--ink-soft);
+  }
+
+  section.category { margin-bottom: 8px; }
+  .category-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin: 52px 0 22px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .category-head:first-of-type { margin-top: 0; }
+  .category-head h2 {
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0;
+    white-space: nowrap;
+  }
+  .category-head .rule { flex: 1; height: 1px; background: var(--line); }
+
+  article.page {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: clamp(18px, 3vw, 30px);
+    margin-bottom: 22px;
+    scroll-margin-top: 18px;
+  }
+  .page-head { margin-bottom: 6px; }
+  .page-head h3 {
+    font-size: 20px;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .page-purpose {
+    color: var(--ink-soft);
+    font-style: italic;
+    margin: 6px 0 20px;
+    max-width: 68ch;
+  }
+
+  h4.block-label {
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 22px 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h4.block-label:first-of-type { margin-top: 0; }
+  h4.block-label::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+
+  .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; }
+  .steps li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 30px;
+    margin-bottom: 10px;
+    max-width: 66ch;
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 0.05em;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-soft);
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0 18px;
+  }
+  .flow .step {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 7px 12px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .flow .arrow { color: var(--ink-soft); font-size: 14px; }
+
+  .filewrap { overflow-x: auto; margin-bottom: 4px; }
+  table.fields {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+    min-width: 420px;
+  }
+  table.fields th, table.fields td {
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+  table.fields th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  table.fields td.f { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; color: var(--accent); }
+  table.fields tr:last-child td { border-bottom: none; }
+
+  .note {
+    display: flex;
+    gap: 10px;
+    padding: 11px 13px;
+    background: var(--amber-soft);
+    border-left: 3px solid var(--amber);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 14px;
+    margin-top: 16px;
+  }
+  .note.crit { background: var(--crit-soft); border-color: var(--crit); }
+  .note .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--amber);
+    flex-shrink: 0;
+    padding-top: 0.15em;
+  }
+  .note.crit .tag { color: var(--crit); }
+  .note p { margin: 0; max-width: none; }
+
+  .filepath { font-family: var(--mono); font-size: 0.92em; color: var(--ink-soft); }
+
+  pre.tree {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.55;
+    background: var(--paper);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    overflow-x: auto;
+    color: var(--ink-soft);
+  }
+  pre.tree strong { color: var(--ink); font-weight: 700; }
+
+  .doclink {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 9px 12px;
+    background: var(--paper);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+  }
+  .doclink a { font-weight: 700; }
+  .doclink .desc { color: var(--ink-soft); font-family: var(--serif); font-style: italic; font-size: 13px; }
+
+  footer.colophon {
+    grid-column: 1 / -1;
+    padding: 28px clamp(18px, 4vw, 40px) 50px;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <header class="masthead">
+    <div class="id">
+      <span class="mark">KM</span>
+      <h1>Project Overview — Start Here</h1>
+    </div>
+    <div class="meta">architecture · domain · setup</div>
+  </header>
+
+  <nav class="toc" aria-label="Table of contents">
+    <div class="group">
+      <p class="group-label">Orientation</p>
+      <ul>
+        <li><a href="#what-it-is">What this is</a></li>
+        <li><a href="#stack">Tech stack</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">The Domain</p>
+      <ul>
+        <li><a href="#pipeline">The core pipeline</a></li>
+        <li><a href="#model">Plants, states &amp; products</a></li>
+        <li><a href="#stock-reporting">Stock reporting</a></li>
+        <li><a href="#permissions">Users &amp; permissions</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <p class="group-label">Working In The Repo</p>
+      <ul>
+        <li><a href="#structure">Folder structure</a></li>
+        <li><a href="#running">Running it locally</a></li>
+        <li><a href="#further">Further reading</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main>
+    <div class="intro">
+      <p class="eyebrow">Read this first — everything else in docs/ goes deeper on one piece of this</p>
+      <h2>KM Finny is a warehouse &amp; dispatch operations system for a multi-plant FMCG distributor.</h2>
+      <p>It runs the whole physical flow of a delivery: a CSV order comes in, warehouse staff scan boxes against it as they arrive, stock totals update live per plant, and the paperwork that goes with a shipment (proforma slips, dispatch labels, vouchers) gets generated and printed along the way. Everything is scoped by <strong>plant</strong> (a physical warehouse location — Indore, Valsad, Rajkot, …) and, as of the most recent addition, by the <strong>Indian state</strong> each plant is in, since pricing and pallet configuration are really state-level facts, not plant-level ones.</p>
+      <div class="stack-row">
+        <span class="chip">React + Vite</span>
+        <span class="chip">Express + Node</span>
+        <span class="chip">PostgreSQL + Drizzle ORM</span>
+        <span class="chip">WebSockets</span>
+        <span class="chip">Notion (product catalog source)</span>
+      </div>
+    </div>
+
+    <section class="category" id="what-it-is-cat">
+      <article class="page" id="what-it-is">
+        <div class="page-head"><h3>What this is</h3></div>
+        <p class="page-purpose">One system covering the whole path from "an order lands" to "the truck is dispatched with the right paperwork."</p>
+        <ol class="steps">
+          <li>A CSV order (one file per part of a delivery) gets uploaded on the <strong>Order Management</strong> page. Each session's own Reports dialog (Summary / Activity / Hourly) becomes available as soon as scanning starts producing data — Hourly buckets scans into rolling 1-hour windows from the session's real start time, expandable per hour and downloadable whole or one hour at a time.</li>
+          <li>Warehouse staff scan barcodes against it on the <strong>Scan Order</strong> page as boxes physically arrive — the system tracks Expected vs. Received vs. Extra per item, in real time, across every device scanning against the same order.</li>
+          <li><strong>Scan Viewer</strong> is a read-only sibling of Scan Order — pick any plant and any order date, including already-completed ones, to see that order's scan progress without touching live scanning. Void is available there too, but only under its own, separately-granted permission.</li>
+          <li><strong>Overall Stock</strong> shows the live, per-plant running stock total that every scan feeds into, alongside what was ordered (Expected) and what's actually been sold (Sale, from Proforma Slips) for the same barcode.</li>
+          <li><strong>Proforma Slips</strong> and <strong>Print Operations</strong> generate and lock the dispatch paperwork for a completed order.</li>
+          <li><strong>Scan History</strong> is the full audit trail of every individual scan — searchable, exportable, and correctable (void) if a mistake was made.</li>
+          <li><strong>Product Master</strong> is the catalog everything else reads from — mirrored from Notion, the actual source of truth for product data.</li>
+        </ol>
+        <p style="margin-top:14px;">See <a href="field-manual.html">field-manual.html</a> for a full page-by-page reference of all of this, including every API route each page calls.</p>
+      </article>
+    </section>
+
+    <section class="category" id="stack">
+      <div class="category-head"><h2>Tech Stack</h2><div class="rule"></div></div>
+      <article class="page">
+        <div class="filewrap">
+        <table class="fields">
+          <thead><tr><th>Layer</th><th>What's used</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="f">Frontend</td><td>React 18, Vite, Wouter (routing), TanStack Query, Tailwind + shadcn/Radix components</td><td>SPA, PWA-capable</td></tr>
+            <tr><td class="f">Backend</td><td>Node.js, Express, TypeScript (tsx in dev)</td><td>Single server process serves both the API and the built frontend</td></tr>
+            <tr><td class="f">Database</td><td>PostgreSQL via Drizzle ORM</td><td>Schema lives in <span class="filepath">shared/schema.ts</span>, shared between client and server for typed API payloads</td></tr>
+            <tr><td class="f">Auth</td><td>Passport (Local strategy) + express-session</td><td>Username + PIN login, not email/password — see <span class="filepath">server/auth.ts</span></td></tr>
+            <tr><td class="f">Live sync</td><td>Raw <span class="mono">ws</span> WebSocket server, session-authenticated</td><td>Powers real-time scan updates across devices on Scan Order/Order Management</td></tr>
+            <tr><td class="f">External integration</td><td>Notion API (<span class="mono">@notionhq/client</span>)</td><td>Product Master's real source of truth — synced in, not edited primarily in this app</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="category" id="architecture-cat">
+      <article class="page" id="architecture">
+        <div class="page-head"><h3>Architecture</h3></div>
+        <p class="page-purpose">One server process, one Postgres database, one WebSocket channel layered on the same HTTP server — no separate services to deploy.</p>
+        <ol class="steps">
+          <li>The Express app (<span class="filepath">server/index.ts</span> → <span class="filepath">server/routes.ts</span> + <span class="filepath">server/routes/*.ts</span>) serves the JSON API under <span class="mono">/api</span> and, in production, the built React app for everything else.</li>
+          <li>Every request that needs to know "who's asking" goes through the same Passport session — including the WebSocket upgrade handshake, which manually replays the session/passport middleware chain (see <span class="filepath">server/routes/order-scan.ts</span>'s <span class="mono">initOrderScanWs</span>) since the <span class="mono">ws</span> library doesn't run Express middleware on its own.</li>
+          <li>Drizzle ORM defines the schema once (<span class="filepath">shared/schema.ts</span>) and is used both for typed query building and for inferring the Zod validation schemas API routes use.</li>
+          <li>Schema migrations are mostly applied as idempotent <span class="mono">ALTER TABLE ... IF NOT EXISTS</span> statements run automatically on server startup (see the top of <span class="filepath">server/index.ts</span>), rather than a strict migration-file-per-change workflow — pragmatic for a single-environment deployment, worth knowing before assuming a missing migration file means a missing column.</li>
+          <li>Product data doesn't originate in this app — <span class="filepath">server/services/notionInventorySync.ts</span> pulls it from Notion (Detect → review → Apply, plus an automatic 24h background sync), with a manual CSV import as a fallback path.</li>
+        </ol>
+      </article>
+    </section>
+
+    <section class="category" id="pipeline-cat">
+      <div class="category-head"><h2>The Domain</h2><div class="rule"></div></div>
+
+      <article class="page" id="pipeline">
+        <div class="page-head"><h3>The core pipeline</h3></div>
+        <p class="page-purpose">Everything in this app hangs off one linear flow, with one important twist: an order can arrive as several CSVs ("parts") over time, and they all need to reconcile against each other.</p>
+        <div class="flow">
+          <span class="step">Order Import (CSV)</span><span class="arrow">→</span>
+          <span class="step">Order Scan (barcode receiving)</span><span class="arrow">→</span>
+          <span class="step">Overall Stock (live totals)</span><span class="arrow">→</span>
+          <span class="step">Proforma / Print (dispatch docs)</span>
+        </div>
+        <h4 class="block-label">FIFO parts &amp; groups</h4>
+        <ol class="steps">
+          <li>A single physical order can be split across several CSV uploads over multiple days (a "multi-part delivery") — each upload is a <strong>part</strong>, numbered in upload order, sharing one <strong>group</strong> (same plant + order date).</li>
+          <li>Every part in a group is scannable simultaneously — a scan searches the whole group in part order to find which part a barcode actually belongs to, not just whichever part happens to be "active."</li>
+          <li>When a part is marked Complete, any leftover over-scanned ("Extra") boxes on it automatically credit forward to a later part's shortfall for the same barcode — see <span class="mono">reconcileCredits</span> in <span class="filepath">server/lib/orderGroupReport.ts</span>. Voiding a mistaken scan can similarly backfill a shortfall from leftover Extra on the same item.</li>
+        </ol>
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>"Extra" means over-received relative to what the CSV expected, not a separate product concept — the same barcode can have both a Regular (order-matched) total and an Extra total, tracked and displayed separately throughout Scan Order, Scan History, and Overall Stock.</p>
+        </div>
+      </article>
+
+      <article class="page" id="model">
+        <div class="page-head"><h3>Plants, states &amp; products</h3></div>
+        <p class="page-purpose">The newest layer of the domain model — worth understanding since it changed how several pages resolve data.</p>
+        <ol class="steps">
+          <li><strong>Plants</strong> (Plant Management page) are physical warehouse locations. Each one now also carries an Indian <strong>state</strong> code (e.g. <span class="mono">GJ</span>, <span class="mono">MP</span>) — set on the Plant Management form.</li>
+          <li><strong>Products</strong> (Product Master, mirrored from Notion) carry state-specific data: pallet size (<span class="mono">gjPlt</span>/<span class="mono">mpPlt</span>) and a block of GJ/MP/UP pricing and tax reference fields — both keyed by state, not by plant.</li>
+          <li>Any page that needs a product's pallet size for a given plant resolves it in two steps: <strong>plant → its state</strong> (via the Plants table), then <strong>state → the product's value for that state</strong>. This replaced an earlier version that guessed the state by string-matching the plant's name (e.g. checking if the name contained "valsad") — fragile once more than two plants/states are in play.</li>
+        </ol>
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Two plants in the same state intentionally share the same pallet-size and pricing data — that's the model working as designed, not a limitation to route around.</p>
+        </div>
+      </article>
+
+      <article class="page" id="stock-reporting">
+        <div class="page-head"><h3>Stock reporting: Total, Expected, Received &amp; Sale</h3></div>
+        <p class="page-purpose">Overall Stock now reads from three different sources of truth at once, not just the live running stock table.</p>
+        <ol class="steps">
+          <li>The page's top-level tabs switch on <strong>state</strong>, not plant — a state with more than one plant under it (e.g. GJ: Rajkot, Valsad, Baroda) shows their stock combined by default, with a second, nested pill row to narrow down to one specific plant. A single-plant state (MP: Indore) has no nested row, since the state view already <em>is</em> that one plant's view.</li>
+          <li><strong>Expected Qty</strong> sums ordered quantity from <span class="filepath">order_import_items</span>/<span class="filepath">order_import_sessions</span> (the CSV import pipeline) — an all-time sum by default, or scoped to one order date when a date filter is picked.</li>
+          <li><strong>Received Qty</strong>/<strong>Extra</strong> come from the live per-plant running totals (<span class="filepath">product_plant_stock</span>) that every scan feeds into — Received is every physical box counted (extras included), Extra is just the over-order portion of that, shown separately.</li>
+          <li><strong>Sale Qty</strong> is new: a sum of Proforma Slip quantities for the same barcode+plant, matched by the slip's own order date the same way Expected Qty is. Unlike Expected Qty's true all-time default, "all dates" here floors at a fixed start date (sales tracking isn't considered reliable before then) — see <span class="mono">SALES_TRACKING_START</span> in <span class="filepath">server/routes/scan-sessions.ts</span>.</li>
+          <li><strong>Total Stock</strong> (the first data column, right after Plant) is a derived reconciliation figure: Extra + Received − Sale, with its own pallet-equivalent shown inline in the same cell rather than as a separate column.</li>
+        </ol>
+        <div class="note">
+          <span class="tag">Worth knowing</span>
+          <p>Every pallet figure on this page (Expected/Received/Sale/Extra/Total Pallets) is computed per-row, using that row's own item-per-pallet size — never one blended pallet size applied across every row, same rule used everywhere else in the app.</p>
+        </div>
+      </article>
+
+      <article class="page" id="permissions">
+        <div class="page-head"><h3>Users &amp; permissions</h3></div>
+        <p class="page-purpose">Two-tier per-page grants, plus a couple of narrower rules layered on top for specific actions.</p>
+        <ol class="steps">
+          <li>Every user has a <strong>View Access</strong> and <strong>Write Access</strong> list (page keys), set on the Users page. Admin/super-admin bypass both, everywhere, unconditionally.</li>
+          <li>A handful of actions use different rules entirely — a designation blocklist for who can mark an order Complete, and a dual-page-AND rule (write access to two different pages at once) for a couple of sensitive actions like Print Operations' Unlock and Void.</li>
+          <li>Scan Viewer's own Void action takes this further with an OR-of-ANDs rule: admin, <em>or</em> Write Access to both Scan Order and Scan History (the existing combination), <em>or</em> Write Access to Scan Viewer alone — so someone can be trusted to look up and correct a mistake there without getting full access to the real Scan Order page. See <span class="mono">requireVoidAccess</span> in <span class="filepath">server/routes/order-scan.ts</span>.</li>
+          <li>Plant scoping is a separate, independent check layered on top for Order Management and Scan Order — a page-level grant says nothing about which plant(s) it applies to.</li>
+        </ol>
+        <p style="margin-top:14px;">Full button-by-button and route-by-route detail: <a href="permissions-manual.html">permissions-manual.html</a>.</p>
+      </article>
+    </section>
+
+    <section class="category" id="structure-cat">
+      <div class="category-head"><h2>Working In The Repo</h2><div class="rule"></div></div>
+
+      <article class="page" id="structure">
+        <div class="page-head"><h3>Folder structure</h3></div>
+        <pre class="tree"><strong>client/src/</strong>
+  pages/            One file per page (Scan.tsx, OrderImport.tsx, NotionInventory.tsx, ...)
+  components/       Shared UI — shadcn/Radix-based primitives, plus feature dialogs/modals
+  lib/               permissions.ts, queryClient.ts, and other client-side helpers
+  hooks/             use-auth.tsx (session state), use-toast.tsx, etc.
+
+<strong>server/</strong>
+  routes.ts          The largest route file — most core API endpoints
+  routes/            Feature-scoped route files (order-scan.ts, order-import.ts, scan-sessions.ts, ...)
+  lib/                Server-side helpers (pageAccess.ts, orderGroupReport.ts, plantAccess.ts)
+  services/           External integrations (notionInventorySync.ts, notionService.ts)
+  auth.ts             Passport + session setup
+  storage.ts          The Drizzle-backed data access layer
+  index.ts            App entrypoint — also runs the startup schema migrations
+
+<strong>shared/</strong>
+  schema.ts           Every table, in one place — the single source of truth for the DB shape
+  pageKeys.ts          The list of grantable page permissions (CONTROLLABLE_PAGES)
+
+<strong>docs/</strong>
+  project-overview.html   This document
+  field-manual.html        Page-by-page usage + API reference
+  permissions-manual.html  Button-by-button, route-by-route permission reference</pre>
+      </article>
+
+      <article class="page" id="running">
+        <div class="page-head"><h3>Running it locally</h3></div>
+        <p class="page-purpose">Short version — full step-by-step (including PostgreSQL setup and default login) is in <span class="filepath">LOCAL_SETUP.md</span> at the repo root.</p>
+        <ol class="steps">
+          <li><span class="mono">npm install</span></li>
+          <li>Set <span class="mono">DATABASE_URL</span> and <span class="mono">SESSION_SECRET</span> in a <span class="mono">.env</span> file (see <span class="filepath">LOCAL_SETUP.md</span> for the exact format).</li>
+          <li><span class="mono">npm run db:push</span> — applies the Drizzle schema to your database. (Most of the day-to-day incremental changes since then run automatically as startup migrations in <span class="filepath">server/index.ts</span>, not through this command.)</li>
+          <li><span class="mono">npm run dev</span> — starts the server with hot reload at <span class="mono">http://localhost:5000</span> (or your configured <span class="mono">PORT</span>).</li>
+          <li>Emergency admin login: PIN <span class="mono">9999</span>.</li>
+        </ol>
+      </article>
+
+      <article class="page" id="further">
+        <div class="page-head"><h3>Further reading</h3></div>
+        <div class="doclink"><a href="field-manual.html">field-manual.html</a><span class="desc">— every page, how it works, and the API routes underneath it</span></div>
+        <div class="doclink"><a href="permissions-manual.html">permissions-manual.html</a><span class="desc">— every button and API route's exact permission rule</span></div>
+        <div class="doclink"><span class="filepath">LOCAL_SETUP.md</span><span class="desc">— full local dev environment setup, step by step</span></div>
+        <div class="doclink"><span class="filepath">DATABASE_MIGRATION_GUIDE.md</span><span class="desc">— schema migration workflow and troubleshooting</span></div>
+        <div class="doclink"><span class="filepath">BACKEND_TROUBLESHOOTING.md</span><span class="desc">— common backend issues and fixes</span></div>
+      </article>
+    </section>
+
+  </main>
+
+  <footer class="colophon">
+    <span>KM Finny — internal reference, not user-facing</span>
+    <span>Start here, then go deep in field-manual.html or permissions-manual.html</span>
+  </footer>
+</div>
+
+</body>
+</html>

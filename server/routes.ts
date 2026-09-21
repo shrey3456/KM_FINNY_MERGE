@@ -21,7 +21,6 @@ import { registerBatchRoutes } from "./batch-routes";
 import { registerOrderRoutes } from "./order-routes";
 import proformaApiRoutes from "./routes/proforma-api";
 import {
-  insertProductSchema,
   insertScanHistorySchema,
   scanEntrySchema,
   insertLoadingOperationSchema,
@@ -33,13 +32,11 @@ import {
   insertProformaSlipSchema,
   insertProformaSlipItemSchema,
   insertMessageSchema,
-  insertVehicleInfoSchema,
   insertLoadingOpItemSchema as insertMpOperationItemSchema,
   Product,
   ProformaSlip,
   ProformaSlipItem,
   Message,
-  VehicleInfo,
   InsertProformaSlipItem,
   MpOperation,
   MpOperationItem,
@@ -99,6 +96,8 @@ function parseOrderDate(dateString: string): Date | null {
 
 import { setupAuth } from "./auth";
 import fastNotionImportRoutes from "./routes/fast-notion-import";
+import proformaNotionSyncRoutes from "./routes/proforma-notion-sync";
+import notionWebhookRoutes from "./routes/notion-webhook";
 import dispatchRoutes from "./routes/dispatch-simple";
 import dispatchOrdersRoutes from "./routes/dispatch-orders";
 import expenseVoucherRoutes from "./routes/expense-voucher";
@@ -107,10 +106,97 @@ import voucherPrefixRoutes from "./routes/voucher-prefix";
 import checkinoutRoutes from "./routes/checkinout";
 import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
+import vehicleInfoRoutes from "./routes/vehicle-info";
+import loadingRoutes from "./routes/loading";
 import orderImportRoutes from "./routes/order-import";
+import orderImportEditRoutes from "./routes/order-import-edit";
+import unloadingEditRoutes from "./routes/unloading-edit";
 import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
-import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges } from "./services/notionInventorySync";
+import settingsAdminRoutes from "./routes/settings-admin";
+import unloadingRoutes from "./routes/unloading";
+import openingStockRoutes from "./routes/opening-stock";
+import plantStockAdminRoutes from "./routes/plant-stock-admin";
+import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
+import { requirePageWrite, requirePageAccess } from "./lib/pageAccess";
+
+// Builds the proforma-slips CSV export (one row per line item, snapshot fields only — never
+// re-fetches product data, so the export stays correct even if a product was later edited or
+// deleted) for whatever set of slips the caller has already selected/filtered. Shared by the
+// GET (query-param filters) and POST (arbitrary id list, for a client-side-filtered view too
+// large to fit in a query string) export routes so both produce identical output.
+async function buildProformaSlipsCsv(
+  filteredSlips: ProformaSlip[],
+  summaryText: string,
+  filenameSuffix: string,
+): Promise<{ csv: string; filename: string }> {
+  const csvRows: any[] = [];
+  let totalVolumeSum = 0;
+
+  for (const slip of filteredSlips) {
+    if (slip.totalVolume && !isNaN(parseFloat(slip.totalVolume))) {
+      totalVolumeSum += parseFloat(slip.totalVolume);
+    }
+
+    const slipItems = await storage.getProformaSlipItems(slip.id);
+
+    if (!slipItems || slipItems.length === 0) {
+      csvRows.push({
+        orderNumber: slip.orderNumber,
+        orderDate: slip.orderDate || "",
+        partyName: slip.partyName,
+        plant: slip.plant,
+        totalQuantity: slip.totalQuantity,
+        totalVolume: slip.totalVolume,
+        vehicleNumber: slip.vehicleNumber,
+        driverName: slip.driverName,
+        notes: slip.notes,
+        productId: "",
+        productSrNo: "",
+        productBarcode: "",
+        productName: "",
+        quantity: "",
+      });
+    } else {
+      // IMPORTANT: Use ONLY snapshot data from item to ensure immutability — DO NOT fetch
+      // product data, proforma slips must remain unchanged even if inventory is edited/deleted.
+      for (const item of slipItems) {
+        csvRows.push({
+          orderNumber: slip.orderNumber,
+          orderDate: slip.orderDate ? new Date(slip.orderDate).toISOString().split("T")[0] : "",
+          partyName: slip.partyName,
+          plant: slip.plant,
+          totalQuantity: slip.totalQuantity,
+          totalVolume: slip.totalVolume,
+          vehicleNumber: slip.vehicleNumber,
+          driverName: slip.driverName,
+          notes: slip.notes,
+          productId: item.sapCode || item.productId || "",
+          productSrNo: item.srNo || "",
+          productBarcode: item.barcode || "",
+          productName: item.itemName || "",
+          quantity: item.quantity,
+        });
+      }
+    }
+  }
+
+  let csv = `"${summaryText}","${totalVolumeSum.toFixed(2)}"\n\n`;
+
+  if (csvRows.length > 0) {
+    const headers = Object.keys(csvRows[0]);
+    csv += headers.join(",") + "\n";
+    csvRows.forEach((row) => {
+      const values = headers.map((header) => {
+        const value = row[header]?.toString().replace(/,/g, ";") || "";
+        return `"${value}"`;
+      });
+      csv += values.join(",") + "\n";
+    });
+  }
+
+  return { csv, filename: `proforma-slips-${filenameSuffix}` };
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
@@ -221,6 +307,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Product endpoints
   apiRouter.get("/products", async (req: Request, res: Response) => {
     try {
+      // Shared across many pages/roles (Scan's Edit CSV search, Overall Stock's Exchange
+      // Product tool, Product Master's admin-only table) — a plain login check, not an
+      // admin/page-specific one, since it's genuinely needed by non-admin users too.
+      if (!req.isAuthenticated || !req.isAuthenticated()) {
+        return res.status(401).json({ message: "Not authenticated" });
+      }
       console.log("Received request for products list");
 
       // Check if "all" parameter is present to return all products
@@ -254,7 +346,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/products/barcode/:barcode",
     async (req: Request, res: Response) => {
       const barcode = req.params.barcode;
-      let product = await storage.getProductByBarcode(barcode);
+      // Optional — only matters when this barcode has more than one Product Master row (see
+      // getProductByBarcode's own comment). Without it, a shared barcode falls back to
+      // whichever row the query happens to return first, which is how Order Scan/Loading/
+      // Unloading's own barcode lookups kept picking the wrong row's pallet size even after the
+      // main /scan endpoints were fixed to pass plant through.
+      const plant = typeof req.query.plant === 'string' ? req.query.plant : undefined;
+      let product = await storage.getProductByBarcode(barcode, plant);
 
       // If not found by barcode, try to find by SKU (itemNo).
       if (!product) {
@@ -272,117 +370,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  apiRouter.get("/products/:id", async (req: Request, res: Response) => {
+  // :id constrained to digits so non-numeric product sub-routes (e.g. /products/image-by-name)
+  // registered elsewhere don't get shadowed by this generic handler and crash on parseInt(NaN).
+  apiRouter.get("/products/:id(\\d+)", async (req: Request, res: Response) => {
     const product = await storage.getProduct(parseInt(req.params.id));
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
     res.json(product);
-  });
-
-  apiRouter.post("/products", async (req: Request, res: Response) => {
-    try {
-      const productData = insertProductSchema.parse(req.body);
-      const product = await storage.createProduct(productData);
-      res.status(201).json(product);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        const validationError = fromZodError(error);
-        return res.status(400).json({ message: validationError.message });
-      }
-      res.status(400).json({ message: "Invalid product data" });
-    }
-  });
-
-  apiRouter.put("/products/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-
-      // Get the raw data from request body
-      const rawData = { ...req.body };
-
-      // Pre-process the data to ensure proper types
-      const processedData: Record<string, any> = {};
-
-      // Handle each field with appropriate type conversion
-      for (const [key, value] of Object.entries(rawData)) {
-        // Skip undefined values
-        if (value === undefined) continue;
-
-        switch (key) {
-          // Convert numeric string fields to numbers
-          case "purchased":
-          case "sold":
-          case "inStock":
-          case "itemsPerPallet":
-          case "pallets":
-            processedData[key] =
-              typeof value === "string" ? parseInt(value, 10) : value;
-            break;
-
-          // Handle price fields (convert from string if needed)
-          case "purchasePrice":
-          case "sellingPrice":
-            processedData[key] =
-              typeof value === "string" ? value : String(value);
-            break;
-
-          // Convert date fields to ISO strings
-          case "lastUpdated":
-            if (value instanceof Date) {
-              processedData[key] = value.toISOString();
-            } else if (typeof value === "string") {
-              try {
-                processedData[key] = new Date(value).toISOString();
-              } catch (e) {
-                processedData[key] = new Date().toISOString();
-              }
-            } else {
-              processedData[key] = new Date().toISOString();
-            }
-            break;
-
-          // For all other fields, pass through as is
-          default:
-            processedData[key] = value;
-        }
-      }
-
-      // Ensure lastUpdated is present with a current timestamp
-      if (!processedData.lastUpdated) {
-        processedData.lastUpdated = new Date().toISOString();
-      }
-
-      console.log("Processed product data for update:", processedData);
-
-      // Parse the processed data with the schema
-      const productData = insertProductSchema.partial().parse(processedData);
-
-      const updatedProduct = await storage.updateProduct(id, productData);
-
-      if (!updatedProduct) {
-        return res.status(404).json({ message: "Product not found" });
-      }
-
-      res.json(updatedProduct);
-    } catch (error) {
-      console.error("Error updating product:", error);
-      if (error instanceof ZodError) {
-        console.error(
-          "ZodError details:",
-          JSON.stringify(error.format(), null, 2),
-        );
-        const validationError = fromZodError(error);
-        return res.status(400).json({ message: validationError.message });
-      }
-      res
-        .status(400)
-        .json({
-          message:
-            "Invalid product data: " +
-            (error instanceof Error ? error.message : "Unknown error"),
-        });
-    }
   });
 
   // PATCH endpoint to update individual product inStock value
@@ -443,31 +438,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         message: "Failed to update product inStock",
         error: error instanceof Error ? error.message : String(error),
       });
-    }
-  });
-
-  // Delete a specific product by ID
-  apiRouter.delete("/products/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-      const product = await storage.getProduct(id);
-
-      if (!product) {
-        return res.status(404).json({ message: "Product not found" });
-      }
-
-      const success = await storage.deleteProduct(id);
-
-      if (success) {
-        res.json({ message: "Product deleted successfully" });
-      } else {
-        res.status(500).json({ message: "Failed to delete product" });
-      }
-    } catch (error) {
-      console.error("Error deleting product:", error);
-      res
-        .status(500)
-        .json({ message: "An error occurred while deleting the product" });
     }
   });
 
@@ -769,7 +739,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  apiRouter.post("/scans", async (req: Request, res: Response) => {
+  apiRouter.post("/scans", requirePageWrite("scan-order"), async (req: Request, res: Response) => {
     try {
       const scanData = scanEntrySchema.parse(req.body);
 
@@ -1231,7 +1201,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  apiRouter.post("/loading-operations", async (req: Request, res: Response) => {
+  apiRouter.post("/loading-operations", requirePageWrite("load-operations"), async (req: Request, res: Response) => {
     try {
       const operationData = insertLoadingOperationSchema.parse(req.body);
 
@@ -1574,6 +1544,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Endpoint to update a loading operation (vehicle number, driver name, etc.)
   apiRouter.put(
     "/loading-operations/:id",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         // Import the cache utility in a try/catch to handle errors
@@ -1908,6 +1879,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Endpoint to update a specific loading operation item
   apiRouter.put(
     "/loading-operations/items/:id",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         // Import the cache utility for cache invalidation
@@ -2013,6 +1985,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Add items to a loading operation
   apiRouter.post(
     "/loading-operations/:id/items",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -2758,7 +2731,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  apiRouter.post("/loading-operations", async (req: Request, res: Response) => {
+  apiRouter.post("/loading-operations", requirePageWrite("load-operations"), async (req: Request, res: Response) => {
     try {
       const operationData = req.body;
       const operation = await storage.createLoadingOperation(operationData);
@@ -2792,6 +2765,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.put(
     "/loading-operations/:id",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -2862,6 +2836,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Add a loading operation item
   apiRouter.post(
     "/loading-operations/:id/items",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -3065,6 +3040,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Delete a loading operation
   apiRouter.delete(
     "/loading-operations/:id",
+    requirePageWrite("load-operations"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -3167,6 +3143,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Clear all inventory data
   apiRouter.delete(
     "/products/clear-all",
+    requirePageWrite("settings"),
     async (req: Request, res: Response) => {
       try {
         await storage.clearInventory();
@@ -3184,7 +3161,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   );
 
   // Alternative route with POST method for browsers that don't support DELETE
-  apiRouter.post("/products/clear", async (req: Request, res: Response) => {
+  apiRouter.post("/products/clear", requirePageWrite("settings"), async (req: Request, res: Response) => {
     try {
       console.log("Clearing inventory via POST method...");
       await storage.clearInventory();
@@ -3267,6 +3244,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Reset only the sold counts to zero
   apiRouter.post(
     "/products/reset-sold",
+    requirePageWrite("settings"),
     async (req: Request, res: Response) => {
       try {
         const updatedCount = await storage.resetSoldCounts();
@@ -3284,6 +3262,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Reset all inStock values to zero
   apiRouter.post(
     "/products/reset-stock",
+    requirePageWrite("settings"),
     async (req: Request, res: Response) => {
       try {
         const updatedCount = await storage.resetInventoryStock();
@@ -3300,134 +3279,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  // CSV Import for products
   const upload = multer({ storage: multer.memoryStorage() });
-
-  apiRouter.post(
-    "/products/import-csv",
-    upload.single("file"),
-    async (req: Request, res: Response) => {
-      try {
-        if (!req.file) {
-          return res.status(400).json({ message: "No file uploaded" });
-        }
-
-        const fileBuffer = req.file.buffer;
-        const results: any[] = [];
-
-        // Parse CSV
-        const stream = Readable.from(fileBuffer.toString());
-        stream
-          .pipe(csv())
-          .on("data", (data) => results.push(data))
-          .on("end", async () => {
-            try {
-              console.log("CSV data:", results);
-
-              // Track imported products and errors
-              let successCount = 0;
-              let errorCount = 0;
-              const errorRows: any[] = [];
-              const barcodeMap: Record<string, number> = {}; // To track duplicates
-
-              // Process each row
-              for (const row of results) {
-                try {
-                  // Convert numeric fields
-                  const purchased = row.Purchased
-                    ? parseInt(row.Purchased, 10) || 0
-                    : 0;
-                  const sold = row.Sold ? parseInt(row.Sold, 10) || 0 : 0;
-                  const inStock = row.InStock
-                    ? parseInt(row.InStock, 10) || 0
-                    : 0;
-                  // Try multiple header variants for items-per-pallet and coerce to a positive integer
-                  const rawItemsPerPallet = row.ItemsPerPallet ?? row.ItemsPer_Pallet ?? row['Items Per Pallet'] ?? row.itemsperpallet ?? row.items_per_pallet ?? row['items per pallet'];
-                  let itemsPerPallet = 0;
-                  if (rawItemsPerPallet != null && String(rawItemsPerPallet).trim() !== '') {
-                    const cleaned = String(rawItemsPerPallet).replace(/[^0-9.-]/g, '');
-                    const parsed = Number(cleaned);
-                    itemsPerPallet = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
-                  }
-                  const pallets = row.Pallets
-                    ? parseInt(row.Pallets, 10) || 0
-                    : 0;
-
-                  // Handle duplicate barcodes by adding a unique suffix
-                  let barcode = row.SKU || "";
-                  if (barcode) {
-                    if (barcode in barcodeMap) {
-                      barcodeMap[barcode]++;
-                      barcode = `${barcode}_${barcodeMap[barcode]}`;
-                    } else {
-                      barcodeMap[barcode] = 1;
-                    }
-                  } else {
-                    // For empty barcodes, use the Sr.No. as the barcode
-                    barcode = row["Sr.No."] || `unknown_${Date.now()}`;
-                  }
-
-                  // Create product entry
-                  await storage.createProduct({
-                    name: row.ItemName || "Unnamed Product",
-                    barcode: barcode,
-                    srNo: row["Sr.No."] || "",
-                    itemNo:
-                      row.ItemNo || row["Item No"] || row["Item No."] || "",
-                    category: row.Category || "",
-                    volumeInCuFt:
-                      row.VolumeInCuFt ||
-                      row["Volume In Cu.Ft"] ||
-                      row["Cu.Ft"] ||
-                      row["Volume"] ||
-                      row["Volume (cu ft)"] ||
-                      row["Volume (cu. ft.)"] ||
-                      row["Volume (cu ft.)"] ||
-                      "",
-                    hsnCode: row.HSNCode || "",
-                    sapCode: row.SAPCode || "",
-                    purchased: purchased,
-                    sold: sold,
-                    inStock: inStock,
-                    itemsPerPallet: itemsPerPallet,
-                    pallets: pallets,
-                    purchasePrice: row.PurchasePrice || "",
-                    sellingPrice: row.SellingPrice || "",
-                    description: row.Description || "",
-                    status: "in stock",
-                  });
-
-                  successCount++;
-                } catch (rowError: any) {
-                  console.error("Error processing row:", row, rowError);
-                  errorCount++;
-                  errorRows.push({
-                    row: row,
-                    error: rowError.message || "Unknown error during import",
-                  });
-                }
-              }
-
-              res.status(200).json({
-                message: `Products imported: ${successCount} successful, ${errorCount} failed`,
-                totalCount: results.length,
-                successCount,
-                errorCount,
-                errors: errorRows.slice(0, 10), // Limit error details to first 10
-              });
-            } catch (parseError) {
-              console.error("Error processing CSV:", parseError);
-              res.status(500).json({ message: "Error processing CSV file" });
-            }
-          });
-      } catch (error) {
-        console.error("CSV import error:", error);
-        res
-          .status(500)
-          .json({ message: "An error occurred during CSV import" });
-      }
-    },
-  );
 
   // Admin endpoint: attempt to fix itemsPerPallet for existing products by parsing numbers
   // Call with ?confirm=true to perform updates; otherwise it returns a dry-run report.
@@ -3767,6 +3619,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const filterDate = req.query.date as string;
         const startDate = req.query.startDate as string;
         const endDate = req.query.endDate as string;
+        // ids: comma-separated proforma_slips.id list — sent by the client when the table has
+        // an active search / plant tab / date range / column filter applied, so the export
+        // matches exactly what's on screen instead of always dumping every slip in the table
+        // regardless of what's currently filtered.
+        const idsParam = req.query.ids as string | undefined;
+        const idsFilter = idsParam
+          ? new Set(idsParam.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n)))
+          : null;
 
         // Get all proforma slips with very high limit for no practical limitation
         const slips = await storage.listProformaSlips(100000, 0);
@@ -3776,10 +3636,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
 
         // Filter slips by date if provided
-        let filteredSlips = slips;
+        let filteredSlips = idsFilter ? slips.filter((slip) => idsFilter.has(slip.id)) : slips;
         let dateFilter = "";
 
-        if (startDate && endDate) {
+        if (idsFilter) {
+          dateFilter = "filtered-view";
+          console.log(`Exporting ${filteredSlips.length} slips matching the current on-screen filter (${idsFilter.size} ids requested)`);
+        } else if (startDate && endDate) {
           // Filter by date range if both start and end dates are provided
           console.log(
             `Filtering slips by date range: ${startDate} to ${endDate}`,
@@ -3828,105 +3691,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
           );
         }
 
-        // Fetch items for each slip and products for each item
-        const csvRows: any[] = [];
-
-        // Calculate total volume sum for all matched slips
-        let totalVolumeSum = 0;
-
-        for (const slip of filteredSlips) {
-          // Add to total volume if it's a valid number
-          if (slip.totalVolume && !isNaN(parseFloat(slip.totalVolume))) {
-            totalVolumeSum += parseFloat(slip.totalVolume);
-          }
-
-          // Fetch items for this slip
-          const slipItems = await storage.getProformaSlipItems(slip.id);
-
-          // If slip has no items, still add one row for the slip header
-          if (!slipItems || slipItems.length === 0) {
-            csvRows.push({
-              orderNumber: slip.orderNumber,
-              orderDate: slip.orderDate || "",
-              partyName: slip.partyName,
-              plant: slip.plant,
-              totalQuantity: slip.totalQuantity,
-              totalVolume: slip.totalVolume,
-              vehicleNumber: slip.vehicleNumber,
-              driverName: slip.driverName,
-              notes: slip.notes,
-              productId: "",
-              productSrNo: "",
-              productBarcode: "",
-              productName: "",
-              quantity: "",
-            });
-          } else {
-            // Add a row for each item in the slip
-            // IMPORTANT: Use ONLY snapshot data from item to ensure immutability
-            // DO NOT fetch product data - proforma slips must remain unchanged even if inventory is edited/deleted
-            for (const item of slipItems) {
-              csvRows.push({
-                orderNumber: slip.orderNumber,
-                orderDate: slip.orderDate
-                  ? new Date(slip.orderDate).toISOString().split("T")[0]
-                  : "",
-                partyName: slip.partyName,
-                plant: slip.plant,
-                totalQuantity: slip.totalQuantity,
-                totalVolume: slip.totalVolume,
-                vehicleNumber: slip.vehicleNumber,
-                driverName: slip.driverName,
-                notes: slip.notes,
-                productId: item.sapCode || item.productId || "",
-                productSrNo: item.srNo || "",
-                productBarcode: item.barcode || "",
-                productName: item.itemName || "",
-                quantity: item.quantity,
-              });
-            }
-          }
-        }
-
-        // Convert to CSV
-        let csv = "";
-
-        // Add total volume summary at the beginning
-        let summaryText = "";
-        if (startDate && endDate) {
+        // Total volume summary label + filename suffix, covering the ids-filter case too.
+        let summaryText: string;
+        let filenameSuffix: string;
+        if (idsFilter) {
+          summaryText = "Total Volume Sum for the current filtered view";
+          filenameSuffix = "filtered-view";
+        } else if (startDate && endDate) {
           summaryText = `Total Volume Sum for date range ${startDate} to ${endDate}`;
+          filenameSuffix = `${startDate}-to-${endDate}`;
         } else if (filterDate) {
           summaryText = `Total Volume Sum for ${dateFilter}`;
+          filenameSuffix = dateFilter;
         } else {
           summaryText = "Total Volume Sum for all dates";
+          filenameSuffix = "all-dates";
         }
 
-        csv += `"${summaryText}","${totalVolumeSum.toFixed(2)}"\n\n`;
-
-        // Add headers
-        if (csvRows.length > 0) {
-          const headers = Object.keys(csvRows[0]);
-          csv += headers.join(",") + "\n";
-
-          // Add rows
-          csvRows.forEach((row) => {
-            const values = headers.map((header) => {
-              const value = row[header]?.toString().replace(/,/g, ";") || "";
-              return `"${value}"`;
-            });
-            csv += values.join(",") + "\n";
-          });
-        }
-
-        // Generate appropriate filename
-        let filename = "proforma-slips";
-        if (startDate && endDate) {
-          filename += `-${startDate}-to-${endDate}`;
-        } else if (dateFilter) {
-          filename += `-${dateFilter}`;
-        } else {
-          filename += "-all-dates";
-        }
+        const { csv, filename } = await buildProformaSlipsCsv(filteredSlips, summaryText, filenameSuffix);
 
         // Set headers and send response
         res.setHeader("Content-Type", "text/csv");
@@ -4451,7 +4233,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  apiRouter.post("/proforma-slips", async (req: Request, res: Response) => {
+  apiRouter.post("/proforma-slips", requirePageWrite("proforma"), async (req: Request, res: Response) => {
     try {
       const slipData = insertProformaSlipSchema.parse(req.body);
 
@@ -4474,7 +4256,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   apiRouter.get(
     "/proforma-slips/order/:orderNumber",
     async (req: Request, res: Response) => {
+      // Never let a reverse proxy (IIS ARR) or browser cache this — Print Operations refetches
+      // it right after Lock/Unlock to reflect the new state immediately; without this, a GET to
+      // the exact same URL moments later can be served a stale cached response instead of
+      // hitting the server again, so the button never updates until a hard page reload bypasses
+      // the cache by chance. Same fix already applied to order-import.ts/order-scan.ts.
+      res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.set("Pragma", "no-cache");
       try {
+        if (!req.isAuthenticated || !req.isAuthenticated()) {
+          return res.status(401).json({ message: "Not authenticated" });
+        }
         const orderNumber = req.params.orderNumber;
         if (!orderNumber) {
           return res.status(400).json({ message: "Order number is required" });
@@ -4492,37 +4284,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Get all items for this slip
         const items = await storage.getProformaSlipItems(slip.id);
 
-        // Retrieve full product details for each item to get names, SKU, and Sr.No
-        const enhancedItems = await Promise.all(
-          items.map(async (item) => {
-            // Try to find the product details using productId
-            if (item.productId) {
-              try {
-                const product = await storage.getProduct(item.productId);
-                if (product) {
-                  return {
-                    ...item,
-                    itemName: product.name,
-                    sku: product.barcode,
-                    srNo: product.newSr,
-                    itemsPerPallet: product.itemsPerPallet,
-                  };
-                }
-              } catch (error) {
-                console.error(
-                  `Error fetching product ${item.productId}:`,
-                  error,
-                );
-              }
-            }
-            return item;
-          }),
-        );
+        // The slip's own rows, exactly as stored — Print Operations prints the proforma slip as it
+        // was imported, not a re-read of Product Master. This used to overwrite each item's name
+        // and Sr. No. with the product's CURRENT values whenever the item had a productId, so a
+        // product renamed or renumbered later in Notion changed old slips when they were printed,
+        // and items with no productId came out different again. proforma_slip_items already
+        // stores a snapshot of every printed field for exactly this reason (see its schema
+        // comment: "display always uses snapshot fields"). `sku` is kept for older callers and is
+        // the slip's own barcode.
+        const snapshotItems = items.map((item) => ({ ...item, sku: item.barcode }));
 
-        // Return slip with enhanced items
         res.json({
           slip,
-          items: enhancedItems,
+          items: snapshotItems,
         });
       } catch (error) {
         console.error("Error fetching proforma slip by order number:", error);
@@ -4627,7 +4401,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  apiRouter.put("/proforma-slips/:id", async (req: Request, res: Response) => {
+  apiRouter.put("/proforma-slips/:id", requirePageWrite("proforma"), async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       console.log(`PUT /api/proforma-slips/${id} - Request body:`, req.body);
@@ -4714,6 +4488,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.delete(
     "/proforma-slips/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         const id = parseInt(req.params.id);
@@ -4783,6 +4558,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Proforma Slip Items endpoints
   apiRouter.post(
     "/proforma-slips/:slipId/items",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         const slipId = parseInt(req.params.slipId);
@@ -4883,6 +4659,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.put(
     "/proforma-slip-items/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         console.time("updateProformaSlipItem");
@@ -4903,6 +4680,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         // Update the item
         const itemData = insertProformaSlipItemSchema.partial().parse(req.body);
+
+        // Editing the SKU — an explicit "this line is actually a different product" swap, sent
+        // as a new productId. Unlike creation (which only fills snapshot fields left blank),
+        // this OVERWRITES every snapshot field from the new product, since the whole point is to
+        // correct a wrong SKU everywhere the slip reads it (printing, Loading's barcode matching,
+        // reports) — not just the productId pointer. Quantity is untouched; it's set independently.
+        if (itemData.productId && itemData.productId !== existingItem.productId) {
+          const newProduct = await storage.getProduct(itemData.productId);
+          if (!newProduct) {
+            return res.status(400).json({ message: "Referenced product does not exist" });
+          }
+          itemData.itemName = newProduct.name ?? null;
+          itemData.barcode = newProduct.barcode ?? null;
+          itemData.srNo = newProduct.newSr ?? null;
+          itemData.itemNo = newProduct.itemNo ?? null;
+          itemData.category = newProduct.category ?? null;
+          itemData.volumeInCuFt = newProduct.volumeInCuFt ?? null;
+          itemData.hsnCode = newProduct.hsnCode ?? null;
+          itemData.sapCode = newProduct.sapCode ?? null;
+          itemData.description = newProduct.description ?? null;
+          itemData.purchasePrice = newProduct.purchasePrice ?? null;
+          itemData.sellingPrice = newProduct.sellingPrice ?? null;
+        }
+
         const updatedItem = await storage.updateProformaSlipItem(id, itemData);
 
         if (!updatedItem) {
@@ -4948,6 +4749,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.delete(
     "/proforma-slip-items/:id",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       try {
         console.time("deleteProformaSlipItem");
@@ -5010,6 +4812,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Optimized batch update endpoint for proforma slip items
   apiRouter.post(
     "/proforma-slip-items/batch-update",
+    requirePageWrite("proforma"),
     async (req: Request, res: Response) => {
       console.log(
         `Batch update request received for ${req.body.items?.length || 0} items`,
@@ -6986,231 +6789,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  // Vehicle Info endpoints
-  apiRouter.get("/vehicle-info", async (req: Request, res: Response) => {
-    try {
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
-      const offset = req.query.offset
-        ? parseInt(req.query.offset as string)
-        : 0;
-
-      const vehicles = await storage.listVehicleInfo(limit, offset);
-
-      // Fetch user info for each vehicle to include lastEditedBy info
-      const enrichedVehicles = await Promise.all(
-        vehicles.map(async (vehicle) => {
-          let lastEditedBy = null;
-          let createdBy = null;
-
-          if (vehicle.lastEditedById) {
-            const editor = await storage.getUser(vehicle.lastEditedById);
-            if (editor) {
-              lastEditedBy = editor.name || editor.username;
-            }
-          }
-
-          if (vehicle.createdById) {
-            const creator = await storage.getUser(vehicle.createdById);
-            if (creator) {
-              createdBy = creator.name || creator.username;
-            }
-          }
-
-          return {
-            ...vehicle,
-            lastEditedBy,
-            createdBy,
-          };
-        }),
-      );
-
-      res.json(enrichedVehicles);
-    } catch (error) {
-      console.error("Error fetching vehicle info:", error);
-      res.status(500).json({ message: "Failed to fetch vehicle info" });
-    }
-  });
-
-  apiRouter.get("/vehicle-info/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-      const vehicle = await storage.getVehicleInfo(id);
-
-      if (!vehicle) {
-        return res.status(404).json({ message: "Vehicle info not found" });
-      }
-
-      // Get user who last edited
-      let lastEditedBy = null;
-      if (vehicle.lastEditedById) {
-        const editor = await storage.getUser(vehicle.lastEditedById);
-        if (editor) {
-          lastEditedBy = editor.name || editor.username;
-        }
-      }
-
-      res.json({ ...vehicle, lastEditedBy });
-    } catch (error) {
-      console.error("Error fetching vehicle info:", error);
-      res.status(500).json({ message: "Failed to fetch vehicle info" });
-    }
-  });
-
-  apiRouter.get(
-    "/vehicle-info/number/:vehicleNumber",
-    async (req: Request, res: Response) => {
-      try {
-        const vehicle = await storage.getVehicleInfoByVehicleNumber(
-          req.params.vehicleNumber,
-        );
-
-        if (!vehicle) {
-          return res.status(404).json({ message: "Vehicle info not found" });
-        }
-
-        // Get user who last edited
-        let lastEditedBy = null;
-        if (vehicle.lastEditedById) {
-          const editor = await storage.getUser(vehicle.lastEditedById);
-          if (editor) {
-            lastEditedBy = editor.name || editor.username;
-          }
-        }
-
-        res.json({ ...vehicle, lastEditedBy });
-      } catch (error) {
-        console.error("Error fetching vehicle info by number:", error);
-        res.status(500).json({ message: "Failed to fetch vehicle info" });
-      }
-    },
-  );
-
-  apiRouter.post("/vehicle-info", async (req: Request, res: Response) => {
-    try {
-      // Validate and parse the request body
-      const vehicleData = insertVehicleInfoSchema.parse(req.body);
-
-      // Create the vehicle info
-      const vehicle = await storage.createVehicleInfo(vehicleData);
-
-      // Add activity log
-      const userId = vehicleData.createdById || vehicleData.lastEditedById;
-      if (userId) {
-        const user = await storage.getUser(userId);
-        await storage.createActivity({
-          userId,
-          action: "create",
-          entityType: "vehicle",
-          entityId: vehicle.id,
-          details: `Vehicle ${vehicle.vehicleNumber} added by ${user?.name || user?.username || "Unknown user"}`,
-          pageName: "VehicleInfo",
-        });
-      }
-
-      res.status(201).json(vehicle);
-    } catch (error) {
-      console.error("Error creating vehicle info:", error);
-
-      if (error instanceof ZodError) {
-        return res.status(400).json({
-          message: "Invalid vehicle data",
-          errors: error.format(),
-        });
-      }
-
-      res.status(500).json({ message: "Failed to create vehicle info" });
-    }
-  });
-
-  apiRouter.put("/vehicle-info/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-
-      // Get the existing vehicle
-      const existingVehicle = await storage.getVehicleInfo(id);
-      if (!existingVehicle) {
-        return res.status(404).json({ message: "Vehicle info not found" });
-      }
-
-      // Validate and parse the request body
-      const vehicleData = insertVehicleInfoSchema.partial().parse(req.body);
-
-      // Update the vehicle info
-      const updatedVehicle = await storage.updateVehicleInfo(id, vehicleData);
-
-      if (!updatedVehicle) {
-        return res
-          .status(404)
-          .json({ message: "Vehicle info could not be updated" });
-      }
-
-      // Add activity log
-      const userId = vehicleData.lastEditedById;
-      if (userId) {
-        const user = await storage.getUser(userId);
-        await storage.logActivity({
-          userId,
-          action: "update",
-          entityType: "vehicle",
-          entityId: id,
-          details: `Vehicle ${updatedVehicle.vehicleNumber} updated by ${user?.name || user?.username || "Unknown user"}`,
-          pageName: "VehicleInfo",
-        });
-      }
-
-      res.json(updatedVehicle);
-    } catch (error) {
-      console.error("Error updating vehicle info:", error);
-
-      if (error instanceof ZodError) {
-        return res.status(400).json({
-          message: "Invalid vehicle data",
-          errors: error.format(),
-        });
-      }
-
-      res.status(500).json({ message: "Failed to update vehicle info" });
-    }
-  });
-
-  apiRouter.delete("/vehicle-info/:id", async (req: Request, res: Response) => {
-    try {
-      const id = parseInt(req.params.id);
-
-      // Get the vehicle before deleting
-      const vehicle = await storage.getVehicleInfo(id);
-      if (!vehicle) {
-        return res.status(404).json({ message: "Vehicle info not found" });
-      }
-
-      // Delete the vehicle
-      const success = await storage.deleteVehicleInfo(id);
-
-      if (!success) {
-        return res
-          .status(500)
-          .json({ message: "Failed to delete vehicle info" });
-      }
-
-      // Add activity log for deletion
-      const sessionUser = (req as any).session?.user;
-      if (sessionUser?.id) {
-        await storage.logActivity({
-          userId: sessionUser.id,
-          action: "delete",
-          entityType: "vehicle",
-          entityId: id,
-          details: `Vehicle ${vehicle.vehicleNumber} deleted by ${sessionUser.name || sessionUser.username || "Unknown user"}`,
-          pageName: "VehicleInfo",
-        });
-      }
-
-      res.status(204).send(); // 204 No Content
-    } catch (error) {
-      console.error("Error deleting vehicle info:", error);
-      res.status(500).json({ message: "Failed to delete vehicle info" });
-    }
-  });
+  // Vehicle Info / Vehicle Master endpoints moved to server/routes/vehicle-info.ts (mounted
+  // below via apiRouter.use(vehicleInfoRoutes)) — was previously six unauthenticated handlers
+  // inline here, now a protected, self-contained router.
 
   // ==================== Purchase Orders API ====================
 
@@ -7809,6 +7390,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // POST /api/dealer-purchase-orders/from-excel - Create dealer purchase order from Excel data
   apiRouter.post(
     "/dealer-purchase-orders/from-excel",
+    requirePageWrite("purchases"),
     upload.single("file"),
     async (req: Request, res: Response) => {
       try {
@@ -8229,8 +7811,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
+  // Shared across many pages/roles (Proforma Slips' plant picker, Overall Stock, Scan, Order
+  // Import, the PlantBadge display component) — not exclusive to the Plant Management page,
+  // so this is a plain login check, not a "plant-management" page-access check. Locking it to
+  // that specific page (as an earlier pass did) broke every other page's plant dropdown for
+  // any user without that specific grant.
   app.get("/api/plants", async (req, res) => {
     try {
+      if (!req.isAuthenticated || !req.isAuthenticated()) {
+        return res.status(401).json({ message: "Not authenticated" });
+      }
       const allPlants = await storage.getAllPlants(); // You need to ensure this method exists in storage.ts
       res.json(allPlants);
     } catch (error) {
@@ -8239,14 +7829,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Create a new plant
-  app.post("/api/plants", async (req, res) => {
+  app.post("/api/plants", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const data = insertPlantSchema.parse(req.body);
       const newPlant = await storage.createPlant(data); // Ensure this method exists in storage.ts
       res.status(201).json(newPlant);
@@ -8256,14 +7840,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Update a plant
-  app.put("/api/plants/:id", async (req, res) => {
+  app.put("/api/plants/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       const data = insertPlantSchema.parse(req.body);
       const updatedPlant = await storage.updatePlant(id, data); // Ensure this method exists
@@ -8274,14 +7852,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Delete a plant
-  app.delete("/api/plants/:id", async (req, res) => {
+  app.delete("/api/plants/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       await storage.deletePlant(id); // Ensure this method exists
       res.json({ success: true });
@@ -8290,7 +7862,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/plants/:id/stvs", async (req, res) => {
+  app.get("/api/plants/:id/stvs", requirePageAccess("plant-management"), async (req, res) => {
     try {
       const plantId = parseInt(req.params.id);
       if (Number.isNaN(plantId)) {
@@ -8303,14 +7875,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/plants/:id/stvs", async (req, res) => {
+  app.post("/api/plants/:id/stvs", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const plantId = parseInt(req.params.id);
       if (Number.isNaN(plantId)) {
         return res.status(400).json({ message: "Invalid plant id" });
@@ -8332,14 +7898,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.put("/api/plant-stvs/:id", async (req, res) => {
+  app.put("/api/plant-stvs/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       if (Number.isNaN(id)) {
         return res.status(400).json({ message: "Invalid STV id" });
@@ -8358,14 +7918,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.delete("/api/plant-stvs/:id", async (req, res) => {
+  app.delete("/api/plant-stvs/:id", requirePageWrite("plant-management"), async (req, res) => {
     try {
-      const role = String((req as any)?.user?.role ?? "").toLowerCase();
-      const allowedRoles = ["admin", "superadmin", "super admin", "super_admin", "super-admin"];
-      if (!allowedRoles.includes(role)) {
-        return res.status(403).json({ message: "Access denied" });
-      }
-
       const id = parseInt(req.params.id);
       if (Number.isNaN(id)) {
         return res.status(400).json({ message: "Invalid STV id" });
@@ -8552,6 +8106,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount fast import routes
   apiRouter.use(fastNotionImportRoutes);
+  apiRouter.use(proformaNotionSyncRoutes);
+  // Notion calls this when a page changes (status, vehicles, products) — see routes/notion-webhook.ts.
+  apiRouter.use(notionWebhookRoutes);
 
   // Mount dispatch routes
   apiRouter.use(dispatchRoutes);
@@ -8577,33 +8134,66 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount Notion inventory sync routes
   apiRouter.use(notionInventorySyncRoutes);
 
+  // Mount Vehicle Master (vehicle_info CRUD + Notion vehicle sync) routes
+  apiRouter.use(vehicleInfoRoutes);
+
+  // Mount Loading routes (link a Vehicle Master vehicle onto a Proforma Slip) — new feature,
+  // own file, no dependency on the legacy Load Operations routes.
+  apiRouter.use(loadingRoutes);
+
   // Mount order import routes
   apiRouter.use(orderImportRoutes);
 
+  // Mount order import edit routes (fix a mistake in an already-uploaded, not-yet-completed CSV)
+  apiRouter.use(orderImportEditRoutes);
+
+  // Mount unloading edit routes (same idea, for an unloading vehicle's CSV)
+  apiRouter.use(unloadingEditRoutes);
+
   // Mount order scan routes
   apiRouter.use(orderScanRoutes);
+
+  // Mount Settings > Clear Stock admin routes
+  apiRouter.use(settingsAdminRoutes);
+
+  // Mount Overall Stock > per-row Edit/Delete admin routes
+  apiRouter.use(plantStockAdminRoutes);
+
+  // Mount Unloading routes (vehicle-wise receiving)
+  apiRouter.use(unloadingRoutes);
+
+  // Mount Settings > Opening Stock import routes
+  apiRouter.use(openingStockRoutes);
 
   // Mount the API router
   app.use("/api", apiRouter);
 
   // Every 24 hours: if DB has no products → full import from Notion;
-  // otherwise detect changes AND automatically apply them to the database.
+  // otherwise detect changes, and apply them automatically only if an admin has turned on
+  // the auto-apply toggle (notion_inventory_sync_config) — otherwise leave them pending for review.
   if (process.env.NOTION_INVENTORY_DATABASE_ID) {
     const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
-    const runScheduledSync = async () => {
+    // syncImages is always false here — neither the boot-time run nor the recurring 24-hour
+    // run ever downloads/checks product images. Photos are only ever synced when an admin
+    // clicks "Sync Photos" on the Notion Inventory page; "Sync Notion" there and this scheduler
+    // both run the fast, data-fields-only path.
+    const runScheduledSync = async (syncImages: boolean) => {
       try {
         const allProducts = await storage.getAllProducts();
         if (allProducts.length === 0) {
           console.log('[Notion Inventory Sync] DB is empty — running full import from Notion...');
           await fullSyncFromNotion();
         } else {
-          console.log('[Notion Inventory Sync] Running scheduled 24-hour detect + apply...');
-          const detectReport = await detectChangesFromNotion();
+          const autoApplyEnabled = await getAutoApplyEnabled();
+          console.log(`[Notion Inventory Sync] Running scheduled detect${autoApplyEnabled ? ' + apply' : ' (auto-apply is off — review required)'} (images: ${syncImages ? 'on' : 'off'})...`);
+          const detectReport = await detectChangesFromNotion('system', syncImages);
           const hasChanges = (detectReport.created ?? 0) + (detectReport.updated ?? 0) > 0;
-          if (hasChanges) {
+          if (hasChanges && autoApplyEnabled) {
             console.log(`[Notion Inventory Sync] ${detectReport.created} new, ${detectReport.updated} changed — applying now...`);
             await applyPendingChanges();
             console.log('[Notion Inventory Sync] Auto-apply complete.');
+          } else if (hasChanges) {
+            console.log(`[Notion Inventory Sync] ${detectReport.created} new, ${detectReport.updated} changed — left pending for review (auto-apply is off).`);
           } else {
             console.log('[Notion Inventory Sync] No changes found, nothing to apply.');
           }
@@ -8612,10 +8202,50 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.error('[Notion Inventory Sync] Scheduled sync failed:', err);
       }
     };
-    setInterval(runScheduledSync, SYNC_INTERVAL_MS);
-    // Also run once on startup after a short delay to handle empty-DB on first boot
-    setTimeout(runScheduledSync, 10000);
+    // Both the recurring run and the boot-time run are data-fields-only now — photos are
+    // never checked automatically. An admin syncs photos on demand from the Product Master
+    // page's "Sync Photos" button; Apply only ever touches images that a photo sync actually
+    // queued, so staying data-only here never risks silently reverting/losing photo changes.
+    setInterval(() => runScheduledSync(false), SYNC_INTERVAL_MS);
+    setTimeout(() => runScheduledSync(false), 10000);
     console.log('[Notion Inventory Sync] 24-hour auto sync+apply scheduler registered');
+  }
+
+  // Same 24-hour detect(+apply-if-enabled) scheduler as Product Master above, for Vehicle
+  // Master. No image work here (vehicle_info has no photo column), so there's no syncImages
+  // split — every run is the same shape.
+  if (process.env.NOTION_VEHICLE_DATABASE_ID) {
+    const { detectVehicleChangesFromNotion, applyPendingVehicleChanges, fullSyncVehiclesFromNotion, getAutoApplyEnabled: getVehicleAutoApplyEnabled } =
+      await import('./services/notionVehicleSync');
+    const VEHICLE_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    const runScheduledVehicleSync = async () => {
+      try {
+        const allVehicles = await storage.getAllVehicleInfo();
+        if (allVehicles.length === 0) {
+          console.log('[Notion Vehicle Sync] DB is empty — running full import from Notion...');
+          await fullSyncVehiclesFromNotion('system', null);
+        } else {
+          const autoApplyEnabled = await getVehicleAutoApplyEnabled();
+          console.log(`[Notion Vehicle Sync] Running scheduled detect${autoApplyEnabled ? ' + apply' : ' (auto-apply is off — review required)'}...`);
+          const detectReport = await detectVehicleChangesFromNotion('system');
+          const hasChanges = (detectReport.created ?? 0) + (detectReport.updated ?? 0) > 0;
+          if (hasChanges && autoApplyEnabled) {
+            console.log(`[Notion Vehicle Sync] ${detectReport.created} new, ${detectReport.updated} changed — applying now...`);
+            await applyPendingVehicleChanges(null);
+            console.log('[Notion Vehicle Sync] Auto-apply complete.');
+          } else if (hasChanges) {
+            console.log(`[Notion Vehicle Sync] ${detectReport.created} new, ${detectReport.updated} changed — left pending for review (auto-apply is off).`);
+          } else {
+            console.log('[Notion Vehicle Sync] No changes found, nothing to apply.');
+          }
+        }
+      } catch (err) {
+        console.error('[Notion Vehicle Sync] Scheduled sync failed:', err);
+      }
+    };
+    setInterval(() => runScheduledVehicleSync(), VEHICLE_SYNC_INTERVAL_MS);
+    setTimeout(() => runScheduledVehicleSync(), 15000);
+    console.log('[Notion Vehicle Sync] 24-hour auto sync+apply scheduler registered');
   }
 
   // Return the HTTP server with WebSocket support

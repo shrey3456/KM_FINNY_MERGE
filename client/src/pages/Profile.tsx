@@ -13,6 +13,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useRef } from 'react';
 import QRCode from 'qrcode';
 import finnyLogo from '@assets/finny-logo.png';
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
 const Profile = () => {
   // Get the current user code from local storage (if available)
@@ -263,7 +264,7 @@ const Profile = () => {
   if (isLoading) {
     return (
       <div className="p-6 flex justify-center items-center min-h-[50vh]">
-        <div className="animate-pulse text-primary">Loading profile...</div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -370,7 +371,7 @@ const Profile = () => {
       <div className="hidden lg:block bg-white rounded-2xl shadow-sm">
         <div className="p-4">
           <div className="mb-4">
-            <h2 className="text-lg font-semibold text-gray-900">Personal info</h2>
+            <h2 className="text-lg font-semibold text-gray-900">Personall info</h2>
           </div>
           
           <div className="space-y-4">

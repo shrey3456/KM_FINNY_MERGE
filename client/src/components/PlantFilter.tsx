@@ -22,6 +22,11 @@ import { cn } from "@/lib/utils";
 interface PlantOption {
   value: string;
   label: string;
+  // Optional per-plant colors from Plant Management (hex). When present, the option renders as a
+  // colored badge matching how the plant is styled elsewhere.
+  bgColor?: string;
+  textColor?: string;
+  borderColor?: string;
 }
 
 // Default plant options (fallback if none provided)
@@ -37,24 +42,28 @@ interface PlantFilterProps {
   onPlantChange: (plants: string[]) => void;
   plantOptions?: PlantOption[];
   size?: "sm" | "md" | "lg";
+  /** Extra classes merged onto the "Plant" trigger button. */
+  buttonClassName?: string;
 }
 
-export function PlantFilter({ 
-  selectedPlants, 
-  onPlantChange, 
+export function PlantFilter({
+  selectedPlants,
+  onPlantChange,
   plantOptions = DEFAULT_PLANT_OPTIONS,
-  size = "md" 
+  size = "md",
+  buttonClassName,
 }: PlantFilterProps) {
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button 
-          variant="outline" 
+        <Button
+          variant="outline"
           size={size === "lg" ? "default" : "sm"}
           className={cn(
             "border-dashed flex items-center gap-1.5",
             size === "sm" ? "h-8" : size === "lg" ? "h-10" : "h-9",
-            selectedPlants.length > 0 && "border-primary"
+            selectedPlants.length > 0 && "border-primary",
+            buttonClassName,
           )}
         >
           <Filter className={size === "sm" ? "h-3 w-3" : size === "lg" ? "h-4 w-4" : "h-3.5 w-3.5"} />
@@ -88,11 +97,20 @@ export function PlantFilter({
                     }
                   }}
                 />
-                <label 
+                <label
                   htmlFor={`plant-${option.value}`}
                   className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer flex-1"
                 >
-                  {option.label}
+                  {option.bgColor ? (
+                    <span
+                      className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
+                      style={{ backgroundColor: option.bgColor, color: option.textColor, borderColor: option.borderColor }}
+                    >
+                      {option.label}
+                    </span>
+                  ) : (
+                    option.label
+                  )}
                 </label>
               </div>
             ))}

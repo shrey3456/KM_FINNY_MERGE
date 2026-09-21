@@ -16,16 +16,13 @@ export const SingleDateFilterStorage = {
     
     if (date) {
       try {
-        // Store with date objects converted to ISO strings for better serialization
-        const newDate = new Date(date);
-        
-        // Ensure we have valid date by forcing midnight time
-        newDate.setHours(0, 0, 0, 0);
-        
-        const saveData = newDate.toISOString();
-        
-        localStorage.setItem(dateFilterKey, saveData);
-        console.log(`Date filter for ${pageId} saved:`, date, "Storage data:", saveData);
+        // Stored as a plain "YYYY-MM-DD" day, not an ISO timestamp: an ISO string is a moment
+        // in UTC, so the saved day shifted by one whenever it was read back in another timezone
+        // (or after a DST change) — the filter then quietly pointed at the wrong day.
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        localStorage.setItem(dateFilterKey, `${y}-${m}-${d}`);
         return true;
       } catch (error) {
         console.error(`Error saving date filter for ${pageId}:`, error);
@@ -34,7 +31,6 @@ export const SingleDateFilterStorage = {
     } else {
       // Remove the date filter data
       localStorage.removeItem(dateFilterKey);
-      console.log(`Date filter for ${pageId} cleared`);
       return false;
     }
   },
@@ -45,16 +41,20 @@ export const SingleDateFilterStorage = {
     
     try {
       const savedFilterString = localStorage.getItem(dateFilterKey);
-      console.log(`Getting saved date filter for ${pageId}:`, savedFilterString);
-      
+
       if (savedFilterString) {
-        // Convert string date back to Date object with clean date value
-        const date = new Date(savedFilterString);
-        
-        // Set time to midnight to ensure consistent behavior
+        // "YYYY-MM-DD" (current format) is built as a LOCAL date — `new Date("2026-09-15")` parses
+        // as UTC midnight and comes back as the 14th in any timezone behind UTC. Older entries are
+        // full ISO timestamps, which Date handles correctly on its own.
+        const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(savedFilterString);
+        const date = parts
+          ? new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]))
+          : new Date(savedFilterString);
+        if (isNaN(date.getTime())) {
+          localStorage.removeItem(dateFilterKey);
+          return null;
+        }
         date.setHours(0, 0, 0, 0);
-        
-        console.log(`Retrieved date filter for ${pageId}:`, date);
         return date;
       }
     } catch (error) {
@@ -70,7 +70,6 @@ export const SingleDateFilterStorage = {
   clearDateFilter: (pageId: string) => {
     const { dateFilterKey } = getStorageKeys(pageId);
     localStorage.removeItem(dateFilterKey);
-    console.log(`Date filter for ${pageId} cleared`);
   }
 };
 
@@ -100,36 +99,35 @@ export function useSingleDateFilter(pageId: string = 'default', initialDate?: Da
     };
   }, []);
   
+  // initialDate is only a starting value, so it is read through a ref: a caller that builds it
+  // inline (`new Date()`) hands over a different object on every render, and depending on it made
+  // this effect re-run and reset the date the user had just picked.
+  const initialDateRef = useRef(initialDate);
+  initialDateRef.current = initialDate;
+
   // Load saved date filter on initial mount or when pageId changes
   useEffect(() => {
-    // Check if there's a saved filter
     const loadedDate = SingleDateFilterStorage.getSavedDateFilter(pageId);
     if (loadedDate) {
-      console.log(`Found saved filter for ${pageId}:`, loadedDate);
       setSavedDate(loadedDate);
-    } else if (initialDate) {
-      // Use initial date if provided and no saved filter exists
-      setSavedDate(initialDate);
+    } else if (initialDateRef.current) {
+      setSavedDate(initialDateRef.current);
     }
-    
+
     setIsInitialized(true);
-  }, [pageId, initialDate]);
+  }, [pageId]);
 
   // Save the current date filter
   const saveDateFilter = (date: Date | null) => {
     if (isUnmounted.current) return;
     
-    console.log(`Attempting to save date filter for ${pageIdRef.current}:`, date);
     const saved = SingleDateFilterStorage.saveDateFilter(pageIdRef.current, date);
-    
+
     if (saved && date) {
-      // Create a fresh copy of the date object to ensure React state updates
-      const freshDate = new Date(date.getTime());
-      freshDate.setHours(0, 0, 0, 0);
-      console.log(`Successfully saved date filter for ${pageIdRef.current}:`, freshDate);
+      // A fresh object so React always sees a state change, pinned to local midnight.
+      const freshDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
       setSavedDate(freshDate);
     } else {
-      console.log(`Cleared date filter for ${pageIdRef.current}`);
       setSavedDate(null);
     }
   };

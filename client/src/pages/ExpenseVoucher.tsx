@@ -45,6 +45,8 @@ import { useSingleDateFilter } from "@/hooks/useSingleDateFilter";
 import { TruckLoadingAnimation } from "@/components/TruckLoadingAnimation";
 import * as QRCode from "qrcode";
 import logoPath from "@assets/logo_wo_bg_1757152661130.png";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
 interface ExpenseVoucherItem {
   productCode: string;
@@ -91,7 +93,6 @@ function useAccessControl() {
 
         const user = JSON.parse(userString);
         const userRole = user.role?.toLowerCase();
-        const userDepartment = user.department?.toLowerCase();
 
         const allowedRoles = [
           "admin",
@@ -99,13 +100,17 @@ function useAccessControl() {
           "superadmin",
           "super_admin",
         ];
-        const allowedDepartments = ["steer", "management", "it"];
 
         const isAdmin = allowedRoles.includes(userRole);
-        const hasAllowedDepartment =
-          allowedDepartments.includes(userDepartment);
 
-        setHasAccess(isAdmin || hasAllowedDepartment);
+        // Access is controlled by admin via User Management's Allowed Pages —
+        // route-level access is already enforced by ProtectedRoute before this
+        // component ever renders; this just mirrors that for the page's own state.
+        let allowedPages: string[] = [];
+        try { allowedPages = JSON.parse(user.allowedPages || "[]"); } catch { /* default [] */ }
+        const hasPageGrant = allowedPages.includes("expense-voucher");
+
+        setHasAccess(isAdmin || hasPageGrant);
         setIsLoading(false);
       } catch (error) {
         console.error("Error checking access:", error);
@@ -166,12 +171,12 @@ const getPartyTextFromVoucherInfo = (info?: Record<string, string>) => {
 };
 
 export default function ExpenseVoucher() {
-  const [selectedPlant, setSelectedPlant] = useState("valsad");
+  const [selectedPlant, setSelectedPlant] = usePersistentFilter("expenseVoucher:plant", "valsad");
   // const [voucherPrefix, setVoucherPrefix] = useState("KM2526-EV-");
   const [voucherNumber, setVoucherNumber] = useState("");
   const [selectedOrder, setSelectedOrder] = useState("");
   // Whether the current search term is a voucher number or a driver name
-  const [searchMode, setSearchMode] = useState<"voucher" | "driver">("voucher");
+  const [searchMode, setSearchMode] = usePersistentFilter<"voucher" | "driver">("expenseVoucher:searchMode", "voucher");
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchStage, setSearchStage] = useState("");
   // null = not chosen yet; when a search returns multiple vehicles, the
@@ -202,8 +207,11 @@ export default function ExpenseVoucher() {
   const { savedDate: selectedDate, saveDateFilter: setSelectedDate } =
     useSingleDateFilter("expense-voucher", todayMidnight);
   const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
-  const effectiveDate = selectedDate || todayMidnight;
-  const selectedDateStr = format(effectiveDate, "yyyy-MM-dd");
+  // Date is optional. When no date is selected the search spans ALL dates
+  // (the server drops its date filter for an empty voucherDate). The calendar
+  // still opens on today when nothing is picked.
+  const calendarMonth = selectedDate || todayMidnight;
+  const selectedDateStr = selectedDate ? format(selectedDate, "yyyy-MM-dd") : "";
 
   // Driver-name autocomplete for the search bar.
   const [driverSuggestions, setDriverSuggestions] = useState<string[]>([]);
@@ -1164,12 +1172,7 @@ export default function ExpenseVoucher() {
 
   if (accessLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#001d6e] mx-auto"></div>
-          <p className="mt-2 text-gray-600">Checking access permissions...</p>
-        </div>
-      </div>
+      <PageSkeleton />
     );
   }
 
@@ -1180,8 +1183,8 @@ export default function ExpenseVoucher() {
           <CardHeader className="text-center">
             <CardTitle className="text-red-600">Access Denied</CardTitle>
             <CardDescription>
-              This page is restricted to users from the Steer department and
-              administrators only.
+              This page is restricted to administrators and users granted access
+              via User Management.
             </CardDescription>
           </CardHeader>
           <CardContent className="text-center">
@@ -1255,14 +1258,14 @@ export default function ExpenseVoucher() {
                   className="w-full sm:w-[220px] justify-start text-left font-normal"
                 >
                   <CalendarIcon className="mr-2 h-4 w-4" />
-                  {format(effectiveDate, "dd/MM/yyyy")}
+                  {selectedDate ? format(selectedDate, "dd/MM/yyyy") : "All dates"}
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="w-auto p-0" align="start">
                 <DatePickerCalendar
                   mode="single"
-                  selected={effectiveDate}
-                  defaultMonth={effectiveDate}
+                  selected={selectedDate ?? undefined}
+                  defaultMonth={calendarMonth}
                   onSelect={(date) => {
                     if (date) {
                       setSelectedDate(date);
@@ -1273,6 +1276,18 @@ export default function ExpenseVoucher() {
                 />
               </PopoverContent>
             </Popover>
+            {selectedDate && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-gray-500 hover:text-gray-700"
+                onClick={() => setSelectedDate(null)}
+                title="Clear date — search across all dates"
+              >
+                <X className="h-4 w-4 mr-1" />
+                Clear
+              </Button>
+            )}
           </div>
           <div className="flex gap-4 items-end">
             <div className="flex-1 relative">
@@ -1747,7 +1762,7 @@ export default function ExpenseVoucher() {
               </h3>
 
               <p className="text-gray-600 max-w-md mb-8 text-lg">
-                We couldn't locate an expense voucher with number <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedOrder}</span> on <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{format(effectiveDate, "dd/MM/yyyy")}</span>
+                We couldn't locate an expense voucher with number <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedOrder}</span> on <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedDate ? format(selectedDate, "dd/MM/yyyy") : "the selected date"}</span>
               </p>
               
               <div className="grid gap-4 w-full max-w-lg">

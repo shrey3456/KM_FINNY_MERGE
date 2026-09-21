@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { Client } from '@notionhq/client';
-import { authenticateToken } from '../middleware/authMiddleware'; // Import middleware
+import { requirePageAccess } from '../lib/pageAccess';
 
 const router = Router();
 
@@ -75,28 +75,44 @@ function getTodayDateStr(): string {
   return `${year}-${month}-${day}`;
 }
 
-// Accepts only a strict YYYY-MM-DD string from the client; anything else
-// (missing, malformed) falls back to today so a search always has a date scope.
-function normalizeVoucherDate(input: any): string {
+// Accepts only a strict YYYY-MM-DD string from the client. The date is
+// OPTIONAL: anything else (missing, empty, malformed) returns null, meaning
+// "search across all dates" -- no date scope is applied.
+function normalizeVoucherDate(input: any): string | null {
   if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input)) {
     return input;
   }
-  return getTodayDateStr();
+  return null;
 }
 
 // Notion filter fragment that scopes a query to vouchers whose "Voucher Date :"
-// property equals the given day. Every voucher search is scoped by date, so
-// this is combined (via `and`) into every Notion query below.
-function buildDateFilter(voucherDate: string) {
+// property equals the given day. Returns null when no date is given, so callers
+// can omit the date scope entirely and search across all dates.
+function buildDateFilter(voucherDate: string | null) {
+  if (!voucherDate) return null;
   return { property: 'Voucher Date :', date: { equals: voucherDate } };
+}
+
+// Human-readable label for log/response messages when the date may be absent.
+function dateScopeLabel(voucherDate: string | null): string {
+  return voucherDate ?? 'all dates';
 }
 
 // The AEV expense-voucher database stores some fields under different property
 // names than the regular EV database (which the print template / merge read).
 // Map each canonical key (the print reads) to the AEV alias(es) that hold the
 // same value, so both schemas produce identical output.
+//
+// "KM's BKUP" and "CA BKUP" are the AEV database's real, reliably-populated numbers
+// (confirmed live: e.g. KM's BKUP 2150/404/738, CA BKUP 2419/1010/1845 on real Approved
+// vouchers) — "Overall KM's :" and "Conveyance Allowance:" are FORMULA properties on that
+// database that evaluate to 0 on every voucher checked, which is why Route KM's / Conveyance
+// Allowance (and anything derived from them — Average, ECS Payment) came out as 0 even for
+// Approved vouchers. Listed first so they win over the broken formula fields whenever present.
+// Note: "Conveyance Allowance:" itself is handled separately below (CA_BKUP_OVERRIDE), not
+// through this alias list — see that comment for why.
 const FIELD_ALIASES: Record<string, string[]> = {
-  "KM's SUM": ["KM's:", "Overall KM's :"],
+  "KM's SUM": ["KM's BKUP", "KM's:", "Overall KM's :"],
   'Toll Tax :': ['Toll:'],
   'OnRoad Work :': ['On Road Arrangement:'],
   'For Diesel Bill No. :': ['⛽️ Bill No. :'],
@@ -114,7 +130,11 @@ function buildVoucherInfo(properties: Record<string, any>): Record<string, strin
     switch (prop.type) {
       case 'title':
       case 'rich_text':
-        displayValue = prop[prop.type]?.[0]?.plain_text || '';
+        // Notion splits a single text value into multiple rich_text "runs"
+        // whenever part of it is styled differently (colour, bold, a link).
+        // Reading only run [0] truncates values like "228 {GJ-15-AX-7255}"
+        // to "228 {", so concatenate every run's plain_text.
+        displayValue = (prop[prop.type] as any[] | undefined)?.map((t) => t.plain_text).join('') || '';
         break;
       case 'date':
         if (prop.date?.start) {
@@ -132,19 +152,22 @@ function buildVoucherInfo(properties: Record<string, any>): Record<string, strin
         displayValue = prop.number?.toString() || '';
         break;
       case 'formula':
-        if (prop.formula?.string) {
+        // Truthy checks here would silently drop a genuine 0 result (e.g. a formula whose
+        // number really is 0) — check the formula's own declared type instead, and `!= null`
+        // rather than truthiness, so a real 0 still comes through as "0".
+        if (prop.formula?.type === 'string' && prop.formula.string) {
           displayValue = prop.formula.string;
-        } else if (prop.formula?.number) {
+        } else if (prop.formula?.type === 'number' && prop.formula.number != null) {
           displayValue = prop.formula.number.toString();
         }
         break;
       case 'rollup':
         if (prop.rollup?.array && prop.rollup.array.length > 0) {
           const firstItem = prop.rollup.array[0];
-          if (firstItem?.rich_text?.[0]?.plain_text) {
-            displayValue = firstItem.rich_text[0].plain_text;
-          } else if (firstItem?.title?.[0]?.plain_text) {
-            displayValue = firstItem.title[0].plain_text;
+          if (firstItem?.rich_text?.length) {
+            displayValue = (firstItem.rich_text as any[]).map((t) => t.plain_text).join('');
+          } else if (firstItem?.title?.length) {
+            displayValue = (firstItem.title as any[]).map((t) => t.plain_text).join('');
           } else if (firstItem?.phone_number) {
             displayValue = firstItem.phone_number;
           }
@@ -170,6 +193,16 @@ function buildVoucherInfo(properties: Record<string, any>): Record<string, strin
         break;
       }
     }
+  }
+
+  // CA_BKUP_OVERRIDE: "Conveyance Allowance:" can't use the plain FIELD_ALIASES fallback above,
+  // because its own formula property DOES exist and evaluates to 0 on every AEV voucher checked
+  // — a real, present "0", not a missing value — so the "only fill in when canonical is
+  // absent/empty" rule above would never reach CA BKUP. CA BKUP is confirmed the reliable source
+  // (live: 2419/1010/1845 vs. the formula's 0 on the same Approved vouchers), so it always wins
+  // here whenever it's present, overriding whatever the formula produced.
+  if (info['CA BKUP'] !== undefined && info['CA BKUP'] !== '') {
+    info['Conveyance Allowance:'] = info['CA BKUP'];
   }
 
   return info;
@@ -240,6 +273,18 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
     return isNaN(n) ? 0 : n;
   };
 
+  // Authorisation is "Approved" — the gate for KM's SUM, Conveyance Allowance, and Deduction
+  // (both here and in the multi-voucher merge below). Declared up front so the single-voucher
+  // path can use it too.
+  const isApproved = (info: Record<string, string>) =>
+    (info['Authorisation :'] || '').trim().toLowerCase() === 'approved';
+  const extraKmFromRemark = (info: Record<string, string>): number => {
+    const remark = info['Remark :'] || '';
+    let extra = 0;
+    for (const m of remark.matchAll(/EXTRA\s*KM\.?\s*(\d+(?:\.\d+)?)/gi)) extra += parseNum(m[1]);
+    return extra;
+  };
+
   const merged: Record<string, string> = { ...infos[0] };
 
   // Order Details party name (voucher number prefixed) is only shown when
@@ -251,7 +296,31 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
     delete merged['For Party x Ord Date'];
   }
 
-  if (infos.length === 1) return merged;
+  if (infos.length === 1) {
+    // A single (unmerged) voucher used to pass its KM's SUM / Conveyance Allowance / Deduction /
+    // ECS Payment straight through from Notion, regardless of Authorisation status — so a
+    // not-yet-approved voucher showed its raw figures instead of being zeroed out the way it
+    // would be if merged alongside others. Apply the same approval gate here for consistency.
+    const info = infos[0];
+    const approved = isApproved(info);
+    merged["KM's SUM"] = String((approved ? parseNum(info["KM's SUM"]) : 0) + extraKmFromRemark(info));
+    merged['Conveyance Allowance:'] = String(approved ? parseNum(info['Conveyance Allowance:']) : 0);
+    merged['Deduction :'] = String(approved ? parseNum(info['Deduction :']) : 0);
+    merged['ECS Payment :'] = String(
+      parseNum(merged['Toll Tax :']) +
+        parseNum(merged['OnRoad Work :']) +
+        parseNum(merged['Conveyance Allowance:']) -
+        parseNum(merged['Deduction :'])
+    );
+    // Average = Route KM / Diesel litres — recomputed from the just-corrected KM total rather
+    // than left as whatever raw "Average :" (if any) came through from Notion, so it stays
+    // consistent with an unapproved voucher's KM being zeroed out above.
+    const singleLtr = parseNum(merged["Diesel {Ltr's} :"]);
+    if (singleLtr > 0) {
+      merged['Average :'] = (parseNum(merged["KM's SUM"]) / singleLtr).toFixed(2);
+    }
+    return merged;
+  }
 
   // Sum expense amounts across every voucher
   const SUM_FIELDS = [
@@ -272,10 +341,8 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
   }
 
   // Conveyance Allowance and Deduction are summed ONLY over vouchers whose
-  // Authorisation status is "Approved". Final Payment (ECS Payment) is then
-  // displayed as (approved Conveyance Allowance) - (approved Deduction).
-  const isApproved = (info: Record<string, string>) =>
-    (info['Authorisation :'] || '').trim().toLowerCase() === 'approved';
+  // Authorisation status is "Approved" (isApproved declared above). Final Payment (ECS Payment)
+  // is then displayed as (approved Conveyance Allowance) - (approved Deduction).
   let convTotal = 0;
   let dedTotal = 0;
   for (const info of infos) {
@@ -328,10 +395,7 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
     if (isApproved(info)) {
       kmTotal += parseNum(info["KM's SUM"]);
     }
-    const remark = info['Remark :'] || '';
-    for (const m of remark.matchAll(/EXTRA\s*KM\.?\s*(\d+(?:\.\d+)?)/gi)) {
-      kmTotal += parseNum(m[1]);
-    }
+    kmTotal += extraKmFromRemark(info);
   }
   merged["KM's SUM"] = String(kmTotal);
   // Average = Route KM / Diesel litres
@@ -349,24 +413,50 @@ function mergeVoucherInfos(infos: Record<string, string>[]): Record<string, stri
   }
 
   // Merge remarks from every voucher that has one, tagged with the voucher's
-  // trailing number so it's clear which voucher the remark belongs to.
-  const remarkLines: string[] = [];
+  // trailing number so it's clear which voucher the remark belongs to. When all
+  // remarks share the same leading label (the text up to and including the last
+  // "}", e.g. "KHARCHI { ECS }"), the label is printed once at the front and only
+  // the per-voucher remainder is tagged:
+  //   "KHARCHI { ECS } 95661: 2500/- 26/04/26/ | 95506: 2500/- 23/04/26/"
+  const remarkEntries: { suffix: string; remark: string }[] = [];
   const seenRemarks = new Set<string>();
   for (const info of infos) {
     const remark = (info['Remark :'] || '').trim();
     if (!remark) continue;
     const vno = (info['Voucher No. :'] || '').trim();
     const suffix = vno.lastIndexOf('-') >= 0 ? vno.slice(vno.lastIndexOf('-') + 1) : vno;
-    const line = suffix ? `${suffix}: ${remark}` : remark;
-    if (!seenRemarks.has(line)) {
-      seenRemarks.add(line);
-      remarkLines.push(line);
-    }
+    const dedupeKey = `${suffix}: ${remark}`;
+    if (seenRemarks.has(dedupeKey)) continue;
+    seenRemarks.add(dedupeKey);
+    remarkEntries.push({ suffix, remark });
   }
-  if (remarkLines.length > 0) {
-    merged['Remark :'] = remarkLines.join(' | ');
-  } else {
+
+  if (remarkEntries.length === 0) {
     delete merged['Remark :'];
+  } else {
+    // Split each remark into a leading label ending in "}" and the remainder.
+    const split = remarkEntries.map((e) => {
+      const m = e.remark.match(/^(.*\})\s*(.*)$/s);
+      return m
+        ? { ...e, label: m[1].trim(), rest: m[2].trim() }
+        : { ...e, label: '', rest: e.remark };
+    });
+    const commonLabel = split[0].label;
+    const shareLabel =
+      remarkEntries.length > 1 &&
+      commonLabel !== '' &&
+      split.every((s) => s.label === commonLabel);
+
+    if (shareLabel) {
+      const body = split
+        .map((s) => (s.suffix ? `${s.suffix}: ${s.rest}` : s.rest))
+        .join(' | ');
+      merged['Remark :'] = `${commonLabel} ${body}`;
+    } else {
+      merged['Remark :'] = remarkEntries
+        .map((e) => (e.suffix ? `${e.suffix}: ${e.remark}` : e.remark))
+        .join(' | ');
+    }
   }
 
   // List EVERY merged voucher's number in the Voucher No field, but keep it short:
@@ -490,7 +580,7 @@ async function queryByVoucherNumber(
   notion: Client,
   databaseId: string,
   voucherNumber: string,
-  voucherDate: string
+  voucherDate: string | null
 ): Promise<any[]> {
   const searchValues = Array.from(new Set([voucherNumber.trim(), normalizeVoucherValue(voucherNumber)]));
   const dateFilter = buildDateFilter(voucherDate);
@@ -502,7 +592,7 @@ async function queryByVoucherNumber(
     { property: 'Voucher No. :', title: { contains: value } },
     { property: 'Voucher No. :', formula: { string: { equals: value } } },
     { property: 'Voucher No. :', formula: { string: { contains: value } } }
-  ]).map((filter) => ({ and: [filter, dateFilter] }));
+  ]).map((filter) => (dateFilter ? { and: [filter, dateFilter] } : filter));
 
   const resultsByFilter = await Promise.all(
     filtersInPriorityOrder.map((filter) =>
@@ -526,8 +616,8 @@ async function queryByVoucherNumber(
 // test whether a page matches a free-text lookup value (diesel bill no.,
 // order no., driver name) -- shared by findMatchingPage below.
 function extractLookupFieldValue(prop: any): string {
-  if (prop?.rich_text?.[0]?.plain_text) return prop.rich_text[0].plain_text;
-  if (prop?.title?.[0]?.plain_text) return prop.title[0].plain_text;
+  if (prop?.rich_text?.length) return (prop.rich_text as any[]).map((t) => t.plain_text).join('');
+  if (prop?.title?.length) return (prop.title as any[]).map((t) => t.plain_text).join('');
   if (prop?.formula?.string) return prop.formula.string;
   if (prop?.formula?.number) return prop.formula.number.toString();
   if (prop?.number) return prop.number.toString();
@@ -583,7 +673,11 @@ function extractDisplayProperties(properties: Record<string, any>): Record<strin
     switch (prop.type) {
       case 'title':
       case 'rich_text':
-        displayValue = prop[prop.type]?.[0]?.plain_text || '';
+        // Notion splits a single text value into multiple rich_text "runs"
+        // whenever part of it is styled differently (colour, bold, a link).
+        // Reading only run [0] truncates values like "228 {GJ-15-AX-7255}"
+        // to "228 {", so concatenate every run's plain_text.
+        displayValue = (prop[prop.type] as any[] | undefined)?.map((t) => t.plain_text).join('') || '';
         break;
       case 'date':
         if (prop.date?.start) {
@@ -622,7 +716,7 @@ async function findDriverVouchers(
   notion: Client,
   databaseId: string,
   query: string,
-  voucherDate: string,
+  voucherDate: string | null,
   maxBatches: number
 ): Promise<{ infos: Record<string, string>[]; firstPlant?: string; firstStatus?: string }> {
   const infos: Record<string, string>[] = [];
@@ -638,7 +732,7 @@ async function findDriverVouchers(
       database_id: databaseId,
       page_size: 100,
       start_cursor: cursor,
-      filter: dateFilter,
+      ...(dateFilter ? { filter: dateFilter } : {}),
       sorts: [{ timestamp: 'created_time', direction: 'descending' }]
     });
     batches++;
@@ -663,7 +757,7 @@ async function findDriverVouchers(
 
   if (hasMore && batches >= maxBatches) {
     console.warn(
-      `⚠️ Driver search hit batch cap (${maxBatches}) for db ${databaseId}; some vouchers for "${query}" on ${voucherDate} may not have been included.`
+      `⚠️ Driver search hit batch cap (${maxBatches}) for db ${databaseId}; some vouchers for "${query}" on ${dateScopeLabel(voucherDate)} may not have been included.`
     );
   }
 
@@ -677,7 +771,7 @@ async function findMergeSiblings(
   notion: Client,
   databaseId: string,
   baseDriverKey: string,
-  voucherDate: string,
+  voucherDate: string | null,
   excludeId: string,
   maxBatches: number
 ): Promise<Record<string, string>[]> {
@@ -692,7 +786,7 @@ async function findMergeSiblings(
       database_id: databaseId,
       page_size: 100,
       start_cursor: cursor,
-      filter: dateFilter,
+      ...(dateFilter ? { filter: dateFilter } : {}),
       sorts: [{ timestamp: 'created_time', direction: 'descending' }]
     });
     batches++;
@@ -848,11 +942,11 @@ router.get('/expense-voucher/driver-suggestions', async (req, res) => {
 });
 
 // Expense voucher API - Protected
-router.post('/expense-voucher', async (req, res) => {
+router.post('/expense-voucher', requirePageAccess('expense-voucher'), async (req, res) => {
   try {
     const { orderNumber, driverName } = req.body;
-    // Every search is scoped to a single day; falls back to today if the
-    // client didn't send a valid YYYY-MM-DD date.
+    // The date is optional: a valid YYYY-MM-DD scopes the search to that day,
+    // otherwise voucherDate is null and the search spans all dates.
     const voucherDate = normalizeVoucherDate(req.body?.voucherDate);
 
     if (!orderNumber && !driverName) {
@@ -864,8 +958,8 @@ router.post('/expense-voucher', async (req, res) => {
 
     // Check cache first (date is part of the key since results are scoped to it)
     const cacheKey = driverName
-      ? `expense_voucher_driver_${String(driverName).trim().toUpperCase()}_${voucherDate}`
-      : `expense_voucher_${orderNumber}_${voucherDate}`;
+      ? `expense_voucher_driver_${String(driverName).trim().toUpperCase()}_${voucherDate ?? 'ALL'}`
+      : `expense_voucher_${orderNumber}_${voucherDate ?? 'ALL'}`;
     const cached = searchCache.get(cacheKey);
     if (cached && (Date.now() - cached.timestamp) < CACHE_DURATION) {
       // Cache hit
@@ -969,7 +1063,7 @@ router.post('/expense-voucher', async (req, res) => {
       if (infos.length === 0) {
         return res.status(404).json({
           success: false,
-          message: `No vouchers found for driver "${driverName}" on ${voucherDate}`
+          message: `No vouchers found for driver "${driverName}" on ${dateScopeLabel(voucherDate)}`
         });
       }
 
@@ -1011,7 +1105,7 @@ router.post('/expense-voucher', async (req, res) => {
 
       const driverResult = {
         success: true,
-        message: `${infos.length} voucher(s) merged for driver ${driverName} on ${voucherDate}`,
+        message: `${infos.length} voucher(s) merged for driver ${driverName} on ${dateScopeLabel(voucherDate)}`,
         data: driverData,
         itemCount: 0
       };
@@ -1061,7 +1155,7 @@ router.post('/expense-voucher', async (req, res) => {
               database_id: expenseVoucherDatabaseId,
               page_size: 50,
               start_cursor: cursor,
-              filter: dateFilter,
+              ...(dateFilter ? { filter: dateFilter } : {}),
               sorts: [
                 {
                   timestamp: 'created_time',
@@ -1132,7 +1226,7 @@ router.post('/expense-voucher', async (req, res) => {
         console.log(`No voucher match for input raw="${orderNumber}", normalized="${normalizedOrderNumber}" on ${voucherDate}`);
         return res.status(404).json({
           success: false,
-          message: `Voucher ${orderNumber} not found in expense voucher database on ${voucherDate}`
+          message: `Voucher ${orderNumber} not found in expense voucher database on ${dateScopeLabel(voucherDate)}`
         });
       }
 

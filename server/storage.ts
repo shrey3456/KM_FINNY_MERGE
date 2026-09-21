@@ -22,7 +22,8 @@ import {
   activities, type Activity, type InsertActivity,
   plants, type Plant, type InsertPlant,
   plantStvs, type PlantStv, type InsertPlantStv,
-  vehicleInfo, type VehicleInfo, type InsertVehicleInfo
+  vehicleInfo, type VehicleInfo, type InsertVehicleInfo,
+  loadingRecords, type LoadingRecord, type InsertLoadingRecord
 } from "@shared/schema";
 import { and, gte, lte, lt, eq, asc, desc, sql, like, ilike, or, isNull, isNotNull, inArray, not } from "drizzle-orm";
 import nodePersist from 'node-persist';
@@ -70,7 +71,10 @@ export interface IStorage {
 
   // Product operations
   getProduct(id: number): Promise<Product | undefined>;
-  getProductByBarcode(barcode: string): Promise<Product | undefined>;
+  // plant is optional — only used to disambiguate when the same barcode exists under more than
+  // one Product Master row (see DBStorage's own implementation comment for why that happens).
+  getProductByBarcode(barcode: string, plant?: string | null): Promise<Product | undefined>;
+  getProductByName(name: string): Promise<Product | undefined>;
   getProductsByIds(ids: number[]): Promise<Product[]>; // Batch get products by IDs
   createProduct(product: InsertProduct): Promise<Product>;
   updateProduct(id: number, product: Partial<InsertProduct>): Promise<Product | undefined>;
@@ -209,9 +213,19 @@ export interface IStorage {
   createVehicleInfo(vehicle: InsertVehicleInfo): Promise<VehicleInfo>;
   getVehicleInfo(id: number): Promise<VehicleInfo | undefined>;
   getVehicleInfoByVehicleNumber(vehicleNumber: string): Promise<VehicleInfo | undefined>;
+  getVehicleInfoByVehicleNumberOrRto(value: string): Promise<VehicleInfo | undefined>;
+  getVehicleInfoFromNotionText(raw: string): Promise<VehicleInfo | undefined>;
   updateVehicleInfo(id: number, vehicle: Partial<InsertVehicleInfo>): Promise<VehicleInfo | undefined>;
   deleteVehicleInfo(id: number): Promise<boolean>;
   listVehicleInfo(limit?: number, offset?: number): Promise<VehicleInfo[]>;
+  getAllVehicleInfo(): Promise<VehicleInfo[]>;
+  clearVehicleInfo(): Promise<void>;
+
+  // Loading records — history of vehicle-link actions from the Loading page.
+  createLoadingRecord(record: InsertLoadingRecord): Promise<LoadingRecord>;
+  // createdByCode: when set, scopes to just that user's own records (non-admin view);
+  // omitted returns everything, newest first (admin view).
+  listLoadingRecords(createdByCode?: string): Promise<LoadingRecord[]>;
 
   // Purchase Order operations
   createPurchaseOrder(purchaseOrder: InsertPurchaseOrder): Promise<PurchaseOrder>;
@@ -762,9 +776,16 @@ export class MemStorage implements IStorage {
     return this.products.get(id);
   }
 
-  async getProductByBarcode(barcode: string): Promise<Product | undefined> {
+  async getProductByBarcode(barcode: string, _plant?: string | null): Promise<Product | undefined> {
     return Array.from(this.products.values()).find(
       (product) => product.barcode === barcode,
+    );
+  }
+
+  async getProductByName(name: string): Promise<Product | undefined> {
+    const normalized = name.trim().toLowerCase();
+    return Array.from(this.products.values()).find(
+      (product) => product.name?.trim().toLowerCase() === normalized,
     );
   }
 
@@ -2226,10 +2247,17 @@ export class DBStorage implements IStorage {
       createTableIfMissing: true,
       tableName: 'session',
       // Add error handling for deployment
-      errorLog: (err: Error) => {
+      // connect-pg-simple calls this as errorLog('some prefix:', err) — a STRING first, the
+      // actual Error second (see pruneSessions/pool.on('error') in its own source) — not a
+      // single Error argument. Treating the first arg as the Error and reading .message off it
+      // crashed the whole process (TypeError: Cannot read properties of undefined) the moment
+      // session pruning hit any failure, since a string has no .message property.
+      errorLog: (...args: unknown[]) => {
+        const err = args.find((a): a is Error => a instanceof Error);
+        const message = err?.message ?? '';
         // Only log unexpected errors (not relation already exists)
-        if (!err.message.includes('already exists') && !err.message.includes('session_pkey')) {
-          console.error('Session store error:', err.message);
+        if (!message.includes('already exists') && !message.includes('session_pkey')) {
+          console.error('Session store error:', ...args);
         }
       }
     });
@@ -2348,8 +2376,50 @@ export class DBStorage implements IStorage {
     return result.length ? result[0] : undefined;
   }
 
-  async getProductByBarcode(barcode: string): Promise<Product | undefined> {
-    const result = await db.select().from(products).where(eq(products.barcode, barcode)).limit(1);
+  // plant is optional and only matters when a barcode is shared by more than one Product Master
+  // row (a real, intentional case — the same barcode can mean a different pack/product per
+  // plant). Without it, or when there's only one match, this behaves exactly as before. With it,
+  // prefer the row whose OWN plant is in the SAME STATE as the plant given — the same state-level
+  // resolution already used for pallet size (products.gjPlt/mpPlt) — so scanning at Valsad never
+  // silently pulls back Indore's name/SAP code for a barcode both plants happen to share. Falls
+  // back to the first match if none share that state, so nothing changes for a single-row barcode.
+  async getProductByBarcode(barcode: string, plant?: string | null): Promise<Product | undefined> {
+    const matches = await db.select().from(products).where(eq(products.barcode, barcode.trim()));
+    if (matches.length <= 1 || !plant) return matches[0];
+
+    // products.plant isn't always a single real plant name — 136 rows use the combined label
+    // "VAL & IND" (this data applies to both Valsad AND Indore together), and some rows have no
+    // plant at all. Split on any non-letter separator and resolve each piece to a real plant
+    // (exact name match, or a prefix match for an abbreviation like "VAL"/"IND") so a combined
+    // label resolves to EVERY state it covers, not zero — a plain plants-table lookup on the raw
+    // "VAL & IND" string finds nothing and would otherwise always fall through to the wrong row.
+    const allPlants = await this.getAllPlants();
+    const resolveStates = (label: string | null | undefined): Set<string> => {
+      const states = new Set<string>();
+      if (!label) return states;
+      const tokens = label.split(/[^a-zA-Z]+/).map((t) => t.trim().toUpperCase()).filter(Boolean);
+      for (const token of tokens) {
+        const found = allPlants.find((p) => String(p.name).toUpperCase() === token)
+          ?? allPlants.find((p) => String(p.name).toUpperCase().startsWith(token));
+        if (found?.state) states.add(String(found.state).trim().toUpperCase());
+      }
+      return states;
+    };
+
+    const targetStates = resolveStates(plant);
+    if (targetStates.size === 0) return matches[0];
+
+    for (const candidate of matches) {
+      const candidateStates = resolveStates(candidate.plant);
+      for (const s of candidateStates) {
+        if (targetStates.has(s)) return candidate;
+      }
+    }
+    return matches[0];
+  }
+
+  async getProductByName(name: string): Promise<Product | undefined> {
+    const result = await db.select().from(products).where(ilike(products.name, name.trim())).limit(1);
     return result.length ? result[0] : undefined;
   }
 
@@ -2362,6 +2432,12 @@ export class DBStorage implements IStorage {
 
   async createProduct(product: InsertProduct): Promise<Product> {
     const productData: Record<string, any> = { ...product };
+
+    // Trimmed at the single low-level function every product write passes through (Notion sync,
+    // Product Master edits, CSV imports) — product_plant_stock/stock_movements key on the literal
+    // barcode string, so an untrimmed value here becomes a permanently different barcode as far
+    // as stock is concerned, silently orphaning quantity under a stray-whitespace variant.
+    if (typeof productData.barcode === 'string') productData.barcode = productData.barcode.trim();
 
     for (const key of ["lastUpdated", "createdAt", "updatedAt"]) {
       const value = productData[key];
@@ -2390,6 +2466,10 @@ export class DBStorage implements IStorage {
         if (key === 'volumeInCuFt') {
           // Make sure it's stored as string, even if empty
           updateData[key] = value === null ? '' : String(value);
+        } else if (key === 'barcode' && typeof value === 'string') {
+          // Trimmed here, before the change-detection below — see createProduct's comment for
+          // why (this is the single low-level function every barcode edit passes through).
+          updateData[key] = value.trim();
         } else {
           updateData[key] = value;
         }
@@ -2417,10 +2497,39 @@ export class DBStorage implements IStorage {
       // If no lastUpdated provided, use current date
       updateData.updatedAt = new Date();
     }
-
-    console.log("Updating product with processed data:", JSON.stringify(updateData, null, 2));
+    // Detect a barcode change BEFORE writing it, so the reconciliation below (which runs after)
+    // knows whether it actually needs to do anything — this is the single low-level place every
+    // barcode edit passes through (Notion sync, manual Product Master edits, anything else),
+    // so hooking in here catches all of them rather than each caller needing to remember to.
+    let barcodeChanged = false;
+    if (typeof updateData.barcode === 'string') {
+      const { rows: beforeRows } = await pool.query(`SELECT barcode FROM products WHERE id = $1`, [id]);
+      const oldBarcode = beforeRows[0]?.barcode ?? null;
+      barcodeChanged = oldBarcode != null && oldBarcode !== updateData.barcode;
+    }
 
     const result = await db.update(products).set(updateData).where(eq(products.id, id)).returning();
+
+    // Eagerly fold any plant-stock rows still parked under the OLD barcode onto the new one, for
+    // every plant this product has stock in — instead of waiting for the next scan to trigger
+    // the same lazy reconciliation (see stockBarcodeReconcile.ts's comment for the full
+    // rationale). Best-effort: a failure here must never fail the product update itself — the
+    // lazy path on the next scan is the fallback.
+    if (barcodeChanged && result.length && updateData.barcode) {
+      try {
+        const { reconcileProductPlantStockBarcode } = await import('./lib/stockBarcodeReconcile');
+        const { rows: plantRows } = await pool.query(
+          `SELECT DISTINCT plant FROM product_plant_stock WHERE product_id = $1`,
+          [id],
+        );
+        for (const p of plantRows) {
+          await reconcileProductPlantStockBarcode(pool, id, p.plant, updateData.barcode);
+        }
+      } catch (err) {
+        console.error(`Failed to reconcile product_plant_stock after barcode change for product ${id}:`, (err as Error)?.message);
+      }
+    }
+
     return result.length ? result[0] : undefined;
   }
 
@@ -4207,6 +4316,55 @@ eq(loadingOperations.status, status),
     }
   }
 
+  // Notion's dispatch DB "Vehi No:" rollup isn't reliably formatted — depending on how that row
+  // was filled in, the sync (see extractVehicleCode in proformaNotionSync.ts) can end up storing
+  // the bare vehicle code ("112"), the RTO plate number alone ("GJ-15-AV-8225"), or occasionally
+  // something else, onto proforma_slips.vehicleNumber — not always the vehicle_number value a
+  // plain getVehicleInfoByVehicleNumber lookup expects. This tries both columns, case-
+  // insensitively, so Loading's vehicle-confirm step still finds the right Vehicle Master row
+  // whichever piece Notion happened to write.
+  async getVehicleInfoByVehicleNumberOrRto(value: string): Promise<VehicleInfo | undefined> {
+    try {
+      const [result] = await db.select().from(vehicleInfo)
+        .where(or(ilike(vehicleInfo.vehicleNumber, value), ilike(vehicleInfo.rtoNumber, value)))
+        .limit(1);
+      return result;
+    } catch (error) {
+      console.error("Error getting vehicle info by vehicle number or RTO:", error);
+      return undefined;
+    }
+  }
+
+  // Resolves Notion's raw "Vehi No:" text (e.g. "112 {GJ-15-AV-8225}", or occasionally just the
+  // bare code or just the RTO plate alone) down to the ONE specific Vehicle Master row it means,
+  // so an order can be linked by that row's stable id instead of by this text — the id survives
+  // even if the vehicle's own number/RTO text is later edited in Vehicle Master, whereas a fresh
+  // text match could silently land on a different (or no) row after such an edit. When the text
+  // has both pieces, requires them to match the SAME row (higher confidence than either alone);
+  // falls back to matching either column alone when only one piece is present, or the combined
+  // match found nothing.
+  async getVehicleInfoFromNotionText(raw: string): Promise<VehicleInfo | undefined> {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    const idx = trimmed.indexOf(' {');
+    if (idx >= 0) {
+      const code = trimmed.slice(0, idx).trim();
+      const rto = trimmed.slice(idx + 2).replace(/\}\s*$/, '').trim();
+      if (code && rto) {
+        try {
+          const [combined] = await db.select().from(vehicleInfo)
+            .where(and(ilike(vehicleInfo.vehicleNumber, code), ilike(vehicleInfo.rtoNumber, rto)))
+            .limit(1);
+          if (combined) return combined;
+        } catch (error) {
+          console.error("Error getting vehicle info by combined vehicle number + RTO:", error);
+        }
+      }
+      return this.getVehicleInfoByVehicleNumberOrRto(code || trimmed);
+    }
+    return this.getVehicleInfoByVehicleNumberOrRto(trimmed);
+  }
+
   async updateVehicleInfo(id: number, vehicle: Partial<InsertVehicleInfo>): Promise<VehicleInfo | undefined> {
     try {
       // Update the last edited timestamp
@@ -4250,6 +4408,37 @@ eq(loadingOperations.status, status),
       console.error("Error listing vehicle info:", error);
       return [];
     }
+  }
+
+  // Unpaginated — for Notion sync's own byNotionPageId comparison, not the page's own list view.
+  async getAllVehicleInfo(): Promise<VehicleInfo[]> {
+    try {
+      return await db.select().from(vehicleInfo).orderBy(asc(vehicleInfo.srNo));
+    } catch (error) {
+      console.error("Error in getAllVehicleInfo:", error);
+      return [];
+    }
+  }
+
+  async clearVehicleInfo(): Promise<void> {
+    try {
+      await db.delete(vehicleInfo);
+      console.log("All vehicle info deleted successfully");
+    } catch (error) {
+      console.error("Error in clearVehicleInfo:", error);
+      throw error;
+    }
+  }
+
+  async createLoadingRecord(record: InsertLoadingRecord): Promise<LoadingRecord> {
+    const [result] = await db.insert(loadingRecords).values(record).returning();
+    return result;
+  }
+
+  async listLoadingRecords(createdByCode?: string): Promise<LoadingRecord[]> {
+    const query = db.select().from(loadingRecords).orderBy(desc(loadingRecords.createdAt));
+    if (createdByCode) return query.where(eq(loadingRecords.createdByCode, createdByCode));
+    return query;
   }
 
   // Stock data operations for Stock Sheets

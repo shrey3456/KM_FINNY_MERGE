@@ -37,6 +37,7 @@ import { useToast } from '@/hooks/use-toast';
 import { apiRequest, queryClient } from '@/lib/queryClient';
 import { DealerPurchaseOrder, DealerPurchaseOrderItem } from '@shared/schema';
 import { cn } from '@/lib/utils';
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 
 // Purchase Orders Import Component
 function PurchaseOrdersImport({ onImportSuccess }: { onImportSuccess: () => void }) {
@@ -210,7 +211,7 @@ function PurchaseOrdersImport({ onImportSuccess }: { onImportSuccess: () => void
 
 const Purchases = () => {
   const [location] = useLocation();
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = usePersistentFilter('purchases:search', '');
   const [selectedDate, setSelectedDate] = useState<Date | null>(new Date());
   const [showImport, setShowImport] = useState(false);
   const { toast } = useToast();
@@ -363,7 +364,7 @@ const Purchases = () => {
       </header>
       
       <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-        <div className="max-w-6xl mx-auto">
+        <div className="mx-auto w-full max-w-[1800px]">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-6">
             <div>
               <h2 className="text-2xl font-bold" data-testid="heading-purchases">Dealer Purchase Orders</h2>

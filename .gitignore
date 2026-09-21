@@ -2,6 +2,7 @@ node_modules
 dist
 .DS_Store
 server/public
+server/uploads
 vite.config.ts.*
 *.tar.gz
 .env
@@ -11,5 +12,10 @@ vite.config.ts.*
 *.tmp
 *.swp   
 deploy.bat
-migrations/
+server/migrations/
 web.config
+.claude/
+tsconfig.check.json     
+migrations/
+.claudeignore
+backups/

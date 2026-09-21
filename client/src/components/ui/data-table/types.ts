@@ -1,0 +1,60 @@
+import type { ReactNode, ComponentType } from "react";
+
+export interface DataTableColumn<TData> {
+  id: string;
+  header: ReactNode;
+  accessor?: (row: TData) => unknown;
+  /** rowIndex is the row's 0-based position in the full sorted/filtered dataset (not just the current page). */
+  render?: (row: TData, rowIndex: number) => ReactNode;
+  sortable?: boolean;
+  width?: number;
+  minWidth?: number;
+  /**
+   * Keep this column at exactly `width` pixels. Normally every column is stretched in proportion to
+   * fill the table, which turns a small column (a progress ring, an icon) into a wide empty one on
+   * a wide screen. Fixed columns keep their size; the other columns share the rest.
+   */
+  fixedWidth?: boolean;
+  isSticky?: boolean;
+  isHiddenByDefault?: boolean;
+  /** Set false to exclude this column from the column-visibility toggle (always shown). */
+  hideable?: boolean;
+  align?: "left" | "center" | "right";
+  headerClassName?: string;
+  cellClassName?: string;
+  /** Stops the row's onClick (e.g. expansion toggle) from firing when this cell is clicked. */
+  preventRowClick?: boolean;
+  /**
+   * Totals row (enable with DataTable's `enableTotalsRow`). Receives every filtered row, not just
+   * the current page. Omit and the column auto-sums when its accessor yields numbers; return null
+   * from a custom total to leave the cell blank.
+   */
+  total?: (rows: TData[]) => ReactNode;
+  /** Set false to leave this column's totals cell blank even when its accessor is numeric. */
+  totalable?: boolean;
+}
+
+export interface DataTableEmptyState {
+  icon?: ComponentType<{ className?: string }>;
+  title: string;
+  description?: ReactNode;
+  action?: ReactNode;
+}
+
+export type DataTableSortDirection = "asc" | "desc";
+
+export interface DataTableSortState {
+  columnId: string;
+  direction: DataTableSortDirection;
+}
+
+export interface DataTableFooterContext {
+  pageIndex: number;
+  pageCount: number;
+  pageSize: number;
+  totalRows: number;
+  /** Number of currently rendered <td> columns (visible columns + selection column, if any) — use as colSpan. */
+  columnCount: number;
+  setPageIndex: (index: number) => void;
+  setPageSize: (size: number) => void;
+}
