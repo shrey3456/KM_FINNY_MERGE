@@ -22,6 +22,7 @@ import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -839,7 +840,16 @@ export default function LoadOperation() {
       // Straight into the new load's own view — Back still returns to the landing list. Without
       // this, starting a load from the list left the user sitting on the list they started from.
       setView("create");
-      toast({ title: "Load operation created", description: `${data.slip.orderNumber} — ${data.slip.partyName}` });
+      // The server re-checks the vehicle's capacity too; if it is short, say so again here — the
+      // dialog that warned about it has just closed.
+      const capacityWarning = (data as any)?.capacityWarning as string | null | undefined;
+      toast({
+        title: capacityWarning ? "Load created — over capacity" : "Load operation created",
+        description: capacityWarning
+          ? `${data.slip.orderNumber} — ${capacityWarning}`
+          : `${data.slip.orderNumber} — ${data.slip.partyName}`,
+        variant: capacityWarning ? "destructive" : undefined,
+      });
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
     onError: (err: any) => toast({ title: "Could not start load", description: parseApiErrorMessage(err), variant: "destructive" }),
@@ -1019,6 +1029,17 @@ export default function LoadOperation() {
   // True when the previewed order was already started elsewhere — the server refuses a second
   // Create Operation for it too; this just lets the dialog warn and disable the button up front.
   const pendingSlipAlreadyLoading = isAlreadyLoading(pendingSlip?.slip?.notionStatus);
+  // Does the order even fit on the vehicle it is going out on? The order's own required volume
+  // (Product Master's per-item volume, summed at import) against the vehicle's capacity from
+  // Vehicle Master. Checked HERE, at Create Operation, rather than only once scanning has begun
+  // — that is the moment the vehicle can still be swapped for a bigger one at no cost.
+  const pendingOrderVolume = parseFloat(pendingSlip?.slip?.totalVolume ?? "");
+  const pendingVehicleVolume = pendingSlip?.slip?.vehicleVolume ?? null;
+  const pendingOverCapacity =
+    Number.isFinite(pendingOrderVolume) && pendingVehicleVolume != null && pendingOrderVolume > pendingVehicleVolume;
+  // Over capacity doesn't block the load outright (a part-load onto a smaller vehicle is a real
+  // thing to do) — it has to be ticked deliberately, so nobody starts one by habit.
+  const [capacityAck, setCapacityAck] = useState(false);
 
   const vehicleSuggestionsQuery = useQuery<{ results: VehicleSuggestion[] }>({
     queryKey: ["/api/loading/vehicles/search", debouncedVehicleSearch],
@@ -3659,7 +3680,7 @@ export default function LoadOperation() {
       {/* "Create Load Operation from Proforma" — the same confirmation step Load Operations shows
           between finding a slip and starting work on it: full slip details, every item on it, and
           an explicit Create Operation before the scanning view opens. */}
-      <Dialog open={!!pendingSlip} onOpenChange={(open) => { if (!open) { setPendingSlip(null); setPendingStv(""); } }}>
+      <Dialog open={!!pendingSlip} onOpenChange={(open) => { if (!open) { setPendingSlip(null); setPendingStv(""); setCapacityAck(false); } }}>
         <DialogContent className="sm:max-w-[700px] w-full overflow-y-auto max-h-[90vh]">
           <DialogHeader>
             <DialogTitle>Create Load Operation from Proforma</DialogTitle>
@@ -3732,10 +3753,38 @@ export default function LoadOperation() {
                     <span className="text-muted-foreground">Total Items:</span>
                     <span className="font-medium">{pendingSlip?.items?.length || 0}</span>
                   </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Order Volume:</span>
+                    <span className="font-medium">
+                      {Number.isFinite(pendingOrderVolume) ? `${pendingOrderVolume} cu ft` : "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Vehicle Capacity:</span>
+                    <span className={`font-medium ${pendingOverCapacity ? "text-red-600" : ""}`}>
+                      {pendingVehicleVolume != null ? `${pendingVehicleVolume} cu ft` : "—"}
+                    </span>
+                  </div>
                 </div>
                 {pendingSlipAlreadyLoading && (
                   <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                     Status is already Loading — not able to load.
+                  </div>
+                )}
+                {pendingOverCapacity && !pendingSlipAlreadyLoading && (
+                  <div className="mt-3 space-y-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    <p>
+                      <span className="font-semibold">This order does not fit on this vehicle.</span>{" "}
+                      It needs <span className="font-semibold">{pendingOrderVolume} cu ft</span> but{" "}
+                      {pendingSlip?.slip?.vehicleNumber ?? "the vehicle"} holds only{" "}
+                      <span className="font-semibold">{pendingVehicleVolume} cu ft</span>
+                      {" "}({(pendingOrderVolume - (pendingVehicleVolume ?? 0)).toFixed(2)} cu ft over).
+                      Link a bigger vehicle, or carry on knowing part of the order will be left behind.
+                    </p>
+                    <label className="flex cursor-pointer items-center gap-2 font-medium">
+                      <Checkbox checked={capacityAck} onCheckedChange={(v) => setCapacityAck(v === true)} />
+                      Create it anyway
+                    </label>
                   </div>
                 )}
               </div>
@@ -3886,7 +3935,7 @@ export default function LoadOperation() {
                 <Button
                   variant="default"
                   className="w-full bg-[#001d6e] hover:bg-[#001d6e]/90"
-                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading || !pendingStv}
+                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading || !pendingStv || (pendingOverCapacity && !capacityAck)}
                   onClick={() => { if (pendingSlip && pendingStv) startLoadMutation.mutate({ orderNumber: pendingSlip.slip.orderNumber, stv: pendingStv }); }}
                 >
                   {startLoadMutation.isPending ? (
