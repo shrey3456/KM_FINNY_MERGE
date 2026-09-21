@@ -476,7 +476,26 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete, loadedVolume } = await withProgress(slip, rawItems);
-    res.json({ slip: await withRto(slip), items, allComplete, loadedVolume });
+    const withVehicle: any = await withRto(slip);
+    // Does the order fit on the vehicle it is going out on? The dialog checks the same pair and
+    // makes the operator tick it before creating, but the answer is computed here too so a load
+    // started any other way still says so, and so the fact is recorded against the order rather
+    // than living only on one screen. Informational — it never refuses the start.
+    const orderVolume = parseFloat(slip.totalVolume ?? '');
+    const vehicleCapacity = withVehicle?.vehicleVolume != null ? Number(withVehicle.vehicleVolume) : null;
+    const capacityWarning =
+      Number.isFinite(orderVolume) && vehicleCapacity != null && orderVolume > vehicleCapacity
+        ? `This order needs ${orderVolume} cu ft but ${withVehicle.vehicleNumber ?? 'this vehicle'} holds only ${vehicleCapacity} cu ft.`
+        : null;
+    if (capacityWarning) {
+      const { userCode, userName } = actor(req);
+      await storage.logActivity({
+        pageName: 'Loading', action: 'update', entityType: 'proforma_slip', entityId: slip.id,
+        details: `Load started over vehicle capacity for order ${slip.orderNumber} by ${userName ?? userCode} — ${capacityWarning}`,
+        userCode, userName,
+      });
+    }
+    res.json({ slip: withVehicle, items, allComplete, loadedVolume, capacityWarning });
   } catch (error) {
     console.error('Error starting load:', error);
     res.status(500).json({ message: 'Failed to start load' });
