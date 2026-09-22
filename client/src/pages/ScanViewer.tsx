@@ -1150,7 +1150,11 @@ export default function ScanViewer() {
                     ) : ev.isExtra ? (
                       <span className="font-semibold uppercase text-amber-700">Extra</span>
                     ) : (
-                      <span className="text-gray-400">—</span>
+                      // A plain, still-valid scan — every row landed here before (the only two
+                      // states this column ever distinguished were Voided and Extra), which is
+                      // indistinguishable from missing data at a glance. Label the normal case
+                      // instead of leaving it blank.
+                      <span className="font-medium text-emerald-600">Received</span>
                     )}
                   </td>
                   {canVoidScan && (

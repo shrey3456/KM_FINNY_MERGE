@@ -1947,7 +1947,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       ) : ev.isExtra ? (
                         <span className="font-semibold uppercase text-amber-700">Extra</span>
                       ) : (
-                        <span className="text-gray-400">—</span>
+                        // Same fix as ScanViewer.tsx's identical panel: label the normal,
+                        // still-valid case instead of leaving the column blank for it.
+                        <span className="font-medium text-emerald-600">Received</span>
                       )}
                     </td>
                     {canVoidScan && (
