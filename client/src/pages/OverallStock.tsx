@@ -73,9 +73,18 @@ type PlantStockRow = {
   expectedSalePallets?: number | null;
   // The stock ledger for the period (see /reports/plant-stock): openingStock = on hand at the start,
   // inStock above = Purchase during it, saleQty = actually loaded (dated by the proforma slip's
-  // order date), closingStock = Opening + Purchase − Sale. With no date picked the period runs from
+  // order date), closingStock = Opening + Purchase + Adjust − Sale (Settings-wide clears sit in
+  // systemQty and are deliberately outside it). With no date picked the period runs from
   // Settings > Stock Tracking Start, so Closing is the live warehouse count.
   saleQty?: number | null;
+  // Signed corrections in the period — Clear Stock, a voided scan's or a deleted CSV's rollback,
+  // a manual Adjust, an exchange. Kept out of Purchase (which is what physically came in) and
+  // counted towards Closing: Closing = Opening + Purchase + Adjust − Sale.
+  adjustQty?: number | null;
+  // Settings-wide corrections (Clear Stock) for this item in the period. Its own figure so one
+  // clear across the whole catalogue can't bury the corrections an operator actually made — and
+  // its own column, hidden until asked for.
+  systemQty?: number | null;
   salePallets?: number | null;
   openingStock?: number | null;
   openingPallets?: number | null;
@@ -224,10 +233,13 @@ const ALL_COLUMNS = [
   { key: "opening",      label: "Opening" },
   { key: "purchase",     label: "Purchase (includes Extra)" },
   { key: "extra",        label: "Extra" },
+  { key: "adjust",       label: "Adjust" },
+  { key: "totalIn",      label: "Total In (Purchase + Adjust)" },
   { key: "expectedSale", label: "Expected Sale (proforma)" },
   { key: "sale",         label: "Sale (loaded)" },
   { key: "closing",      label: "Closing" },
 ] as const;
+
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -396,6 +408,8 @@ export default function OverallStock() {
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
   // Date control: "single" shows one editable date input, "range" shows editable From + To.
+  // The item whose corrections are being read, if any — set by clicking an Adjust figure.
+  const [adjustHistoryTarget, setAdjustHistoryTarget] = useState<{ barcode: string; plant: string; itemName: string } | null>(null);
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
   const [dateOpen, setDateOpen] = useState(false);
   // The calendar half opens separately from the quick-ranges half — two buttons, two
@@ -405,6 +419,8 @@ export default function OverallStock() {
   // localStorage (not sessionStorage) so choosing which columns to see survives closing the
   // browser/logging out, and only changes again when the user actually touches it here.
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(() => {
+    // "system" (Settings-wide clears) is deliberately NOT in here: the Columns menu offers it,
+    // but a bulk clear isn't day-to-day reading and Closing counts it either way.
     const defaults = new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]);
     try {
       const raw = localStorage.getItem("overallStock:visibleColumnIds");
@@ -415,6 +431,9 @@ export default function OverallStock() {
       // them hidden. Expected Sale shows wherever Sale did; Closing replaces Remain.
       if (saved.has("sale")) saved.add("expectedSale");
       if (saved.has("remain")) { saved.add("closing"); saved.add("opening"); }
+      // Adjust and Total In belong beside Purchase for everyone, including people whose saved
+      // layout predates them — without this they are built but never shown.
+      if (saved.has("purchase")) { saved.add("adjust"); saved.add("totalIn"); }
       return saved;
     } catch {
       return defaults;
@@ -698,6 +717,26 @@ export default function OverallStock() {
   // Plant-wise stock. Server enforces access: admins get every plant, others only theirs. A
   // specific plant always wins over a state — never send both (state is redundant once a plant
   // is picked, and the server would ignore it anyway).
+  type StockAdjustment = {
+    id: number; barcode: string; plant: string; qty: number; extraQty: number | null;
+    reason: string | null; at: string; byCode: string | null; byName: string | null;
+    origin: "page" | "operation" | "settings";
+  };
+  const adjustHistoryQuery = useQuery<{ items: StockAdjustment[] }>({
+    queryKey: ["/api/scan-sessions/reports/stock-adjustments", adjustHistoryTarget?.barcode, adjustHistoryTarget?.plant, fromDate, toDate],
+    queryFn: () => apiRequest(
+      "GET",
+      buildUrl("/api/scan-sessions/reports/stock-adjustments", {
+        barcode: adjustHistoryTarget?.barcode,
+        plant: adjustHistoryTarget?.plant || undefined,
+        from: fromDate || undefined,
+        to: toDate || undefined,
+      }),
+      undefined, false, true,
+    ),
+    enabled: !!adjustHistoryTarget?.barcode,
+  });
+
   const stockUrl = buildUrl("/api/scan-sessions/reports/plant-stock", {
     plant: activePlant || undefined,
     state: (!activePlant && activeState) || undefined,
@@ -869,6 +908,9 @@ export default function OverallStock() {
       { id: "opening", label: "Opening", filterType: "number", options: numberOptions((r) => r.openingStock), accessor: (r) => r.openingStock ?? null },
       { id: "purchase", label: "Purchase", filterType: "number", options: numberOptions((r) => r.inStock), accessor: (r) => r.inStock },
       { id: "extra", label: "Extra", filterType: "number", options: numberOptions((r) => r.extraQty), accessor: (r) => r.extraQty },
+      { id: "adjust", label: "Adjust", filterType: "number", options: numberOptions((r) => r.adjustQty), accessor: (r) => r.adjustQty ?? null },
+      { id: "system", label: "System (Clear Stock)", filterType: "number", options: numberOptions((r) => r.systemQty), accessor: (r) => r.systemQty ?? null },
+      { id: "totalIn", label: "Total In", filterType: "number", options: numberOptions((r) => r.inStock + (r.adjustQty ?? 0)), accessor: (r) => r.inStock + (r.adjustQty ?? 0) },
       { id: "expectedSale", label: "Expected Sale", filterType: "number", options: numberOptions((r) => r.expectedSaleQty), accessor: (r) => r.expectedSaleQty ?? null },
       { id: "sale", label: "Sale", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
       { id: "closing", label: "Closing", filterType: "number", options: numberOptions((r) => r.closingStock), accessor: (r) => r.closingStock ?? null },
@@ -1154,6 +1196,7 @@ export default function OverallStock() {
   const totalOpening = filtered.reduce((s, r) => s + (r.openingStock ?? 0), 0);
   const totalOpeningPallets = filtered.reduce((s, r) => s + (r.openingPallets ?? 0), 0);
   const totalSale = filtered.reduce((s, r) => s + (r.saleQty ?? 0), 0);
+  const totalAdjust = filtered.reduce((s, r) => s + (r.adjustQty ?? 0), 0);
   const totalSalePallets = filtered.reduce((s, r) => s + (r.salePallets ?? 0), 0);
   const totalClosing = filtered.reduce((s, r) => s + (r.closingStock ?? 0), 0);
   const totalClosingPallets = filtered.reduce((s, r) => s + (r.closingPallets ?? 0), 0);
@@ -1182,6 +1225,8 @@ export default function OverallStock() {
         continue;
       }
       existing.inStock += r.inStock;
+      existing.adjustQty = (existing.adjustQty ?? 0) + (r.adjustQty ?? 0);
+      existing.systemQty = (existing.systemQty ?? 0) + (r.systemQty ?? 0);
       existing.extraQty += r.extraQty;
       existing.pallets = (existing.pallets ?? 0) + (r.pallets ?? 0);
       existing.extraPallets = (existing.extraPallets ?? 0) + (r.extraPallets ?? 0);
@@ -1253,6 +1298,7 @@ export default function OverallStock() {
       "Expected Qty", "Expected Pallets",
       "Opening Stock", "Opening Pallets",
       "Purchase Qty", "Purchase Pallets", "Extra Qty (within Purchase)", "Extra Pallets",
+      "Adjust Qty", "Total In (Purchase + Adjust)", "System (Clear Stock)",
       "Expected Sale Qty", "Expected Sale Pallets",
       "Sale Qty (loaded)", "Sale Pallets",
       "Closing Stock", "Closing Pallets",
@@ -1270,6 +1316,7 @@ export default function OverallStock() {
         r.expectedQty ?? "", plt(r.expectedPallets),
         r.openingStock ?? "", plt(r.openingPallets),
         purchaseQty, plt(purchasePallets), r.extraQty, plt(r.extraPallets),
+        r.adjustQty ?? 0, purchaseQty + (r.adjustQty ?? 0), r.systemQty ?? 0,
         r.expectedSaleQty ?? "", plt(r.expectedSalePallets),
         r.saleQty ?? "", plt(r.salePallets),
         r.closingStock ?? "", plt(r.closingPallets),
@@ -1550,6 +1597,84 @@ export default function OverallStock() {
       cellClassName: cellBorder,
       render: (row) =>
         row.isEmptyBox || !(row.extraQty > 0) ? dash : stackedCell(row.extraQty, row.extraPallets, "text-amber-600"),
+    },
+    {
+      // Corrections, signed: a clear or a rollback reads as a minus here instead of dragging
+      // Purchase below zero, and an added correction reads as a plus. Counted in Closing.
+      id: "adjust",
+      header: columnHeader("adjust", "Adjust"),
+      width: 100,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.adjustQty ?? 0,
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + (r.adjustQty ?? 0), 0);
+        return qty !== 0 ? stackedCell(qty, null, qty < 0 ? "text-red-600" : "text-emerald-600") : null;
+      },
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) => {
+        const qty = row.adjustQty ?? 0;
+        if (row.isEmptyBox || qty === 0) return dash;
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        // Clickable: one number per item says nothing about who changed what — this opens the
+        // corrections it is made of.
+        return (
+          <button
+            type="button"
+            className="w-full text-right hover:underline"
+            title="Show every correction behind this figure"
+            onClick={(e) => { e.stopPropagation(); setAdjustHistoryTarget({ barcode: row.barcode ?? "", plant: row.plant, itemName: row.itemName ?? row.barcode ?? "" }); }}
+          >
+            {stackedCell(qty, ipp > 0 ? qty / ipp : null, qty < 0 ? "text-red-600" : "text-emerald-600")}
+          </button>
+        );
+      },
+    },
+    {
+      // Settings-wide corrections — Clear Stock. Hidden unless turned on in Columns; Closing
+      // counts it either way, so the row adds up whether it is on screen or not.
+      id: "system",
+      header: columnHeader("system", "System"),
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.systemQty ?? 0,
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + (r.systemQty ?? 0), 0);
+        return qty !== 0 ? stackedCell(qty, null, qty < 0 ? "text-red-600" : "text-emerald-600") : null;
+      },
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) => {
+        const qty = row.systemQty ?? 0;
+        if (row.isEmptyBox || qty === 0) return dash;
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        return stackedCell(qty, ipp > 0 ? qty / ipp : null, qty < 0 ? "text-red-600" : "text-emerald-600");
+      },
+    },
+    {
+      // Purchase + Adjust — what the period actually added to stock once corrections are counted.
+      // Editing an item's stock by hand lands in Adjust, so Purchase alone (40) no longer looks
+      // like the whole story when the edit made it 80; this column is the figure that does.
+      id: "totalIn",
+      header: columnHeader("totalIn", "Total In"),
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.inStock + (row.adjustQty ?? 0),
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + r.inStock + (r.adjustQty ?? 0), 0);
+        return stackedCell(qty, null, "text-[#001d6e]");
+      },
+      headerClassName: headerBorder,
+      cellClassName: `font-semibold tabular-nums ${cellBorder}`,
+      render: (row) => {
+        if (row.isEmptyBox) return dash;
+        const qty = row.inStock + (row.adjustQty ?? 0);
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        return stackedCell(qty, ipp > 0 ? qty / ipp : null, qty < 0 ? "text-red-600" : "text-[#001d6e]");
+      },
     },
     // Expected Sale — what the proforma slips PLAN to send out in this period (not what was loaded).
     {
@@ -2075,7 +2200,7 @@ export default function OverallStock() {
         <PageHeader
           icon={LayoutList}
           title="Stock Overview"
-          description="Plant-wise stock ledger — Opening, Purchase, Sale (loaded) and Closing for the date you pick, or since Stock Tracking Start."
+          description="Plant-wise stock ledger — Opening, Purchase, Adjust, Sale (loaded) and Closing for the date you pick, or since Stock Tracking Start."
         />
 
         {/* Summary tiles — the figure, its name, then ONE detail line (period · pallets). The
@@ -2702,6 +2827,70 @@ export default function OverallStock() {
       {/* Adjust — pick a plant, see its live stock, then add, remove or set it. The server applies
           the change against that same live number (refusing if it moved meanwhile) and logs one
           'adjust' row, shown as "Adjusted" in the history drill-down and "Adjust" in Scan History. */}
+      {/* Every correction behind one item's Adjust figure — opened by clicking that figure. */}
+      <Dialog open={!!adjustHistoryTarget} onOpenChange={(open) => { if (!open) setAdjustHistoryTarget(null); }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Adjustments</DialogTitle>
+            <DialogDescription className="space-y-0.5 pt-1">
+              <span className="block font-semibold text-gray-900">{adjustHistoryTarget?.itemName}</span>
+              <span className="block font-mono text-xs text-gray-400">
+                {adjustHistoryTarget?.barcode}{adjustHistoryTarget?.plant ? ` · ${adjustHistoryTarget.plant}` : ""}
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+
+          {adjustHistoryQuery.isLoading ? (
+            <p className="py-8 text-center text-sm text-gray-400">Loading…</p>
+          ) : (adjustHistoryQuery.data?.items?.length ?? 0) === 0 ? (
+            <p className="py-8 text-center text-sm text-gray-400">No corrections for this item in this period.</p>
+          ) : (
+            <div className="max-h-[60vh] overflow-y-auto border border-gray-200">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr className="sticky top-0 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">Date &amp; Time</th>
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">By</th>
+                    <th className="border-r border-gray-200 px-3 py-2 text-right font-semibold">Qty</th>
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">From</th>
+                    <th className="px-3 py-2 font-semibold">Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {adjustHistoryQuery.data!.items.map((a) => (
+                    <tr key={a.id} className="border-b border-gray-100 bg-white">
+                      <td className="whitespace-nowrap border-r border-gray-100 px-3 py-2 text-gray-700">
+                        {new Date(a.at).toLocaleString("en-IN", {
+                          timeZone: "Asia/Kolkata", day: "numeric", month: "short",
+                          hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
+                        })}
+                      </td>
+                      <td className="border-r border-gray-100 px-3 py-2 text-gray-600">{a.byName ?? a.byCode ?? "—"}</td>
+                      <td className={`border-r border-gray-100 px-3 py-2 text-right font-semibold tabular-nums ${a.qty < 0 ? "text-red-600" : "text-emerald-600"}`}>
+                        {a.qty > 0 ? `+${a.qty.toLocaleString()}` : a.qty.toLocaleString()}
+                      </td>
+                      <td className="border-r border-gray-100 px-3 py-2">
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                          a.origin === "settings" ? "bg-slate-200 text-slate-700"
+                          : a.origin === "page" ? "bg-[#001d6e]/10 text-[#001d6e]"
+                          : "bg-amber-100 text-amber-700"}`}>
+                          {a.origin === "settings" ? "Settings" : a.origin === "page" ? "Stock page" : "Operation"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-gray-600">{a.reason ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAdjustHistoryTarget(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!editTarget} onOpenChange={(open) => { if (!open) setEditTarget(null); }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>

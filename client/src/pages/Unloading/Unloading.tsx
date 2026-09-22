@@ -10,7 +10,7 @@ import {
 import { useSidebarContext } from "@/lib/sidebarContext";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
-import { type FilterableColumn, type FilterCondition, type FilterOption, matchAllConditions } from "@/lib/columnFilters";
+import { type FilterableColumn, type FilterCondition, type FilterOption, isConditionEmpty } from "@/lib/columnFilters";
 import { format as formatDay } from "date-fns";
 import PageHeader from "@/components/PageHeader";
 import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
@@ -222,11 +222,19 @@ export default function Unloading() {
   const sessionFilterParams =
     (debouncedVehicleFilter.trim() ? `&vehicleNumber=${encodeURIComponent(debouncedVehicleFilter.trim())}` : "")
     + (sessionDateFilter ? `&orderDate=${encodeURIComponent(sessionDateFilter)}` : "");
+  // The column filters go to the SERVER now, alongside vehicle/date/status, so every one of them
+  // narrows the whole list and they all apply together. Matching them in the browser only ever
+  // filtered the rows already fetched, leaving the pages behind them unfiltered.
+  const sessionFiltersJson = (() => {
+    const list = Object.values(sessionColumnConditions).filter((c) => c && !isConditionEmpty(c));
+    return list.length ? JSON.stringify(list) : "";
+  })();
   const sessionsQuery = useQuery<{ sessions: SessionListItem[]; total: number }>({
-    queryKey: ["/api/unloading/sessions", offset, limit, debouncedVehicleFilter, sessionDateFilter, statusTab],
+    queryKey: ["/api/unloading/sessions", offset, limit, debouncedVehicleFilter, sessionDateFilter, statusTab, sessionFiltersJson],
     queryFn: () => apiRequest(
       "GET",
-      `/api/unloading/sessions?limit=${limit}&offset=${offset}${sessionFilterParams}&status=${statusTab}`,
+      `/api/unloading/sessions?limit=${limit}&offset=${offset}${sessionFilterParams}&status=${statusTab}`
+      + `${sessionFiltersJson ? `&filters=${encodeURIComponent(sessionFiltersJson)}` : ""}`,
     ).then((r) => r.json()),
     enabled: statusTab !== "recent-complete",
   });
@@ -259,8 +267,9 @@ export default function Unloading() {
     { id: "scannedQty", label: "Received Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.scannedQty },
     { id: "extraQty", label: "Extra Qty", filterType: "number", disableValues: true, options: [], accessor: (s) => s.extraQty },
   ];
-  const sessionConditionList = Object.values(sessionColumnConditions);
-  const sessions = allSessions.filter((s) => matchAllConditions(s, sessionConditionList, sessionFilterColumns));
+  // The server already applied these (see sessionFiltersJson) — the rows that arrive are the
+  // filtered ones, and re-filtering here would only risk the two disagreeing.
+  const sessions = allSessions;
   const setSessionCondition = (id: string, condition: FilterCondition) =>
     setSessionColumnConditions((prev) => ({ ...prev, [id]: condition }));
   const clearSessionCondition = (id: string) =>

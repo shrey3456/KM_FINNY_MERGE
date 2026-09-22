@@ -1604,14 +1604,17 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     const insertEvent = async (totalQty: number, isExtra: boolean): Promise<number> => {
       const { rows: insertedRows } = await client.query(
+        // Keeps the ORIGINAL scan's time — this row stands in for that scan — and records when
+        // the correction was made in adjusted_at, so the history shows both.
         `INSERT INTO loading_scan_events
-           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name, scanned_at, adjusted_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13::timestamp, NOW()),NOW()) RETURNING id`,
         [
           slip.orderNumber, slip.id, event.barcode, event.item_name, event.sap_code,
           itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
           itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
           totalQty, isExtra, event.plant, event.scanned_by_code, event.scanned_by_name,
+          event.scanned_at,
         ],
       );
       return insertedRows[0].id as number;

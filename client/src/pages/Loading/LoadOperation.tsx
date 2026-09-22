@@ -428,45 +428,6 @@ export default function LoadOperation() {
   const inProgressCount = recordsItems.filter((r) => !r.loadingCompletedAt).length;
   const readyDespCount = recordsItems.filter((r) => r.loadingCompletedAt).length;
 
-  // Whichever row's history panel is currently open — click-to-expand, same idea as the Scan
-  // History page's own drill-down (only one open at a time).
-  const [expandedRecordOrder, setExpandedRecordOrder] = useState<string | null>(null);
-  // Which tab the expand panel is showing — "History" (individual scans) or "Owners" (the
-  // owner+contribution breakdown). Shared across rows since only one row is ever expanded at a
-  // time; reset to "history" whenever a different row is expanded (see setExpandedRecordOrder
-  // call sites below).
-  const [historyPanelTab, setHistoryPanelTab] = useState<"history" | "owners">("history");
-  function toggleExpandedRecord(orderNumber: string) {
-    setExpandedRecordOrder((cur) => (cur === orderNumber ? null : orderNumber));
-    setHistoryPanelTab("history");
-  }
-  const recordHistoryQuery = useQuery<{ items: LoadHistoryEvent[] }>({
-    queryKey: ["/api/scan-sessions/reports/scan-history", "loading-panel", expandedRecordOrder],
-    queryFn: async () =>
-      (await apiRequest(
-        "GET",
-        `/api/scan-sessions/reports/scan-history?source=dispatch&order=${encodeURIComponent(expandedRecordOrder ?? "")}&limit=100`,
-      )).json(),
-    enabled: !!expandedRecordOrder,
-  });
-
-  // Same owner+contribution breakdown as the scan view's OwnerTimelineSummary, but for whichever
-  // order is currently expanded on the landing list — its own scan history panel is exactly
-  // where "how much did each owner load" is most useful to see at a glance.
-  const expandedRecordHandoffsQuery = useQuery<LoadHandoffsResponse>({
-    queryKey: ["/api/loading/proforma", expandedRecordOrder, "handoffs"],
-    queryFn: async () =>
-      (await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(expandedRecordOrder ?? "")}/handoffs`)).json(),
-    enabled: !!expandedRecordOrder,
-    // Also picks up changes made by someone else on another screen.
-    refetchInterval: 15000,
-  });
-
-  // Owner history is worked out on the server from the load's current state — who holds it, when it
-  // was completed (the last owner's "to" time), and how much each owner loaded. It was loaded once and
-  // never told to reload, so after Complete it kept showing "to current" until the page was
-  // refreshed, and Reopen didn't bring "current" back. Every action that changes any of that calls
-  // this for its order.
   function refreshOwnerHistory(orderNumber: string | null | undefined) {
     if (!orderNumber) return;
     queryClient.invalidateQueries({ queryKey: ["/api/loading/proforma", orderNumber, "handoffs"] });
@@ -506,7 +467,6 @@ export default function LoadOperation() {
           : `${data?.reversedEvents ?? 0} scan(s) voided and stock returned. Status back to ${data?.restoredStatus ?? "before loading"}.`,
       });
       setResetTarget(null);
-      setExpandedRecordOrder(null);
       recordsQuery.refetch();
     },
     onError: (err: any) => toast({ title: "Delete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
@@ -526,7 +486,6 @@ export default function LoadOperation() {
     },
     onSuccess: () => {
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
-      refreshOwnerHistory(expandedRecordOrder);
       refreshOwnerHistory(slip?.orderNumber);
       setVoidTarget(null);
       setVoidReason("");
@@ -2107,93 +2066,7 @@ export default function LoadOperation() {
   // Vehicle Capacity once it resolves in Vehicle Master — drives the stat grid's column count.
   const statColumnCount = 3 + (slip?.vehicleNumber ? 1 : 0) + (slip?.vehicleVolume != null ? 1 : 0);
 
-  // That order's scan history, rendered under whichever row/card is expanded. One shared node
-  // rather than two copies: only one record can be expanded at a time, and the desktop table and
-  // the mobile card list are never both visible. A real tab switch — "History" (individual
-  // scans) vs "Owners" (the owner+contribution breakdown) — one shown at a time, not both
-  // stacked in the same box.
-  const historyPanel = (
-    <div className="border rounded-md bg-white overflow-hidden">
-      <Tabs value={historyPanelTab} onValueChange={(v) => setHistoryPanelTab(v as "history" | "owners")}>
-        <TabsList className="w-full justify-start rounded-none border-b bg-gray-50">
-          <TabsTrigger value="history">History</TabsTrigger>
-          <TabsTrigger value="owners">Owners</TabsTrigger>
-        </TabsList>
-      </Tabs>
-      {historyPanelTab === "owners" ? (
-        (expandedRecordHandoffsQuery.data?.timeline?.length ?? 0) === 0 ? (
-          <p className="py-4 text-center text-xs text-gray-400">No owner history for this order yet.</p>
-        ) : (
-          <OwnerTimelineSummary timeline={expandedRecordHandoffsQuery.data!.timeline} />
-        )
-      ) : recordHistoryQuery.isLoading ? (
-        <SectionSkeleton lines={3} />
-      ) : (recordHistoryQuery.data?.items.length ?? 0) === 0 ? (
-        <p className="py-4 text-center text-xs text-gray-400">No scan history for this order yet.</p>
-      ) : (
-        <div className="max-h-72 overflow-y-auto overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>SKU</TableHead>
-                <TableHead>Item</TableHead>
-                <TableHead>Date &amp; Time</TableHead>
-                <TableHead>Scanned By</TableHead>
-                <TableHead className="text-right">Qty</TableHead>
-                <TableHead>Status</TableHead>
-                {canResetLoad && <TableHead className="text-right">Void</TableHead>}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {(recordHistoryQuery.data?.items ?? []).map((ev) => (
-                <TableRow key={ev.id} className={ev.voided ? "opacity-60" : ""}>
-                  <TableCell className="font-mono text-gray-500">{ev.barcode ?? "-"}</TableCell>
-                  <TableCell>{ev.itemName ?? "-"}</TableCell>
-                  <TableCell className="whitespace-nowrap text-muted-foreground">
-                    {new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">{ev.scannedByName ?? "-"}</TableCell>
-                  <TableCell className="text-right">
-                    <Badge className={ev.isExtra ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-purple-100 text-purple-800 hover:bg-purple-200"}>
-                      {(ev.isExtra || ev.isAdjust) && ev.totalQty > 0 ? "+" : ""}{ev.totalQty}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {ev.voided ? (
-                      <span className="font-medium text-red-500">Voided</span>
-                    ) : ev.isAdjust ? (
-                      <span className="whitespace-nowrap font-semibold uppercase text-blue-700">Loading Adjust</span>
-                    ) : ev.isExtra ? (
-                      <span className="font-semibold uppercase text-amber-700">Extra</span>
-                    ) : (
-                      <span className="text-muted-foreground">-</span>
-                    )}
-                  </TableCell>
-                  {canResetLoad && (
-                    <TableCell className="text-right">
-                      {!ev.voided && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
-                          onClick={() => setVoidTarget(ev)}
-                          title="Void this scan"
-                        >
-                          <Trash2 className="h-4 w-4 text-red-500" />
-                        </Button>
-                      )}
-                    </TableCell>
-                  )}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-    </div>
-  );
-
-  // Same page shell Load Operations uses — full width, px-2 py-6, space-y-6 between blocks (its
+  // Same page shell Load Operations uses  // Same page shell Load Operations uses — full width, px-2 py-6, space-y-6 between blocks (its
   // own wrapper is a container-fluid, which is a no-op here) — kept inside this page's scroll
   // container so the app shell still scrolls it the same way.
   return (
@@ -2577,16 +2450,11 @@ export default function LoadOperation() {
                     </TableHeader>
                     <TableBody>
                       {filteredRecords.map((r) => {
-                        const isExpanded = expandedRecordOrder === r.orderNumber;
                         return (
                           <Fragment key={r.id}>
-                            {/* No arrow column — clicking anywhere on the row opens or closes its
-                                details. The open row is tinted so it's clear which one is expanded. */}
-                            <TableRow
-                              className={`cursor-pointer ${isExpanded ? "bg-[#001d6e]/[0.04] hover:bg-[#001d6e]/[0.06]" : ""}`}
-                              title={isExpanded ? "Click to close details" : "Click to open details"}
-                              onClick={() => toggleExpandedRecord(r.orderNumber)}
-                            >
+                            {/* A plain row: the click-to-open History / Owners panel was removed on
+                                request. The row's own action buttons are still the way in. */}
+                            <TableRow>
                               <TableCell>
                                 <div className="flex flex-col">
                                   <span>
@@ -2704,13 +2572,6 @@ export default function LoadOperation() {
                                 </div>
                               </TableCell>
                             </TableRow>
-                            {isExpanded && (
-                              <TableRow>
-                                <TableCell colSpan={12} className="bg-gray-50 p-3">
-                                  {historyPanel}
-                                </TableCell>
-                              </TableRow>
-                            )}
                           </Fragment>
                         );
                       })}
@@ -2721,13 +2582,9 @@ export default function LoadOperation() {
                 {/* Mobile View - card list */}
                 <div className={`space-y-2 ${bigView ? "" : "xl:hidden"}`}>
                   {filteredRecords.map((r) => {
-                    const isExpanded = expandedRecordOrder === r.orderNumber;
                     return (
                       <Card key={r.id} className={`overflow-hidden ${recordAccentBorderClass(r)}`}>
-                        <CardHeader
-                          className="pb-1.5 pt-2.5 cursor-pointer"
-                          onClick={() => toggleExpandedRecord(r.orderNumber)}
-                        >
+                        <CardHeader className="pb-1.5 pt-2.5">
                           <div className="flex justify-between items-start gap-2">
                             <div className="min-w-0">
                               <div className="font-medium text-md flex items-center gap-2">
@@ -2823,11 +2680,6 @@ export default function LoadOperation() {
                             </span>
                           </div>
 
-                          {isExpanded && (
-                            <div className="mt-2 border-t border-gray-100 pt-2">
-                              {historyPanel}
-                            </div>
-                          )}
                         </CardContent>
                       </Card>
                     );

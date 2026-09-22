@@ -7,6 +7,7 @@ import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
 import { computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId } from '../lib/unloadGroupReport';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
+import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilterSql';
 
 // Unloading — vehicle-wise receiving. See unloadImportSessions' comment in shared/schema.ts:
 // same "import a CSV, scan against it to receive stock" idea as Order Import/Scan Order, but
@@ -376,6 +377,28 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
 
 // GET /api/unloading/sessions — the landing table: one row per part, newest first. Non-admins
 // are limited to their assigned plants (same rule every other page's plant scoping uses).
+// The landing list's "+ Filter" columns, as SQL over the list query's own output (see
+// UNLOAD_SESSION_LIST_SELECT below). Status / Progress / Batch are worded exactly as the page
+// words them, so ticking "Ready" or "Partial" in the filter means the same thing the badge says.
+// These used to be matched in the browser over the page already fetched, which filtered the 20
+// rows on screen and left every later page unfiltered.
+const UNLOAD_SESSION_FILTER_COLUMNS: Record<string, SqlFilterColumn> = {
+  vehicle:     { sql: '"vehicleNumber"', type: 'text' },
+  orderDate:   { sql: '"orderDate"', type: 'date' },
+  plant:       { sql: 'plant', type: 'text' },
+  csvFile:     { sql: '"csvFileName"', type: 'text' },
+  completedBy: { sql: `CASE WHEN "scanCompletedAt" IS NULL THEN '' ELSE COALESCE("scanCompletedByName", '') END`, type: 'text' },
+  expectedQty: { sql: '"expectedQty"', type: 'number' },
+  scannedQty:  { sql: '"scannedQty"', type: 'number' },
+  extraQty:    { sql: 'GREATEST(0, "scannedQty" - "receivedQty")', type: 'number' },
+  batch:       { sql: `CASE WHEN "partsCount" > 1 THEN 'Batch ' || "partIndex" || ' of ' || "partsCount" ELSE 'Single' END`, type: 'text' },
+  status:      { sql: `CASE WHEN "scanStatus" = 'completed' THEN 'Completed'
+                            WHEN "scanStatus" = 'active' THEN 'Active'
+                            WHEN "canActivate" THEN 'Ready' ELSE 'Locked (queued)' END`, type: 'text' },
+  progress:    { sql: `CASE WHEN "scannedQty" <= 0 THEN 'Not started'
+                            WHEN "receivedQty" >= "expectedQty" THEN 'Complete' ELSE 'Partial' END`, type: 'text' },
+};
+
 router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Request, res: Response) => {
   try {
     const limit = Math.max(1, Math.min(100, parseInt(String(req.query.limit ?? '20'), 10) || 20));
@@ -414,8 +437,17 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
     }
     const where = `WHERE ${conditions.join(' AND ')}`;
 
-    const [dataRes, countRes] = await Promise.all([
-      pool.query(
+    // Column filters from the page's "+ Filter" / header icons, applied in SQL over the list's own
+    // computed columns so they narrow the WHOLE list — and combine with the plant, vehicle, date
+    // and status conditions above rather than fighting them.
+    const listConditions: string[] = [];
+    applyColumnFiltersToSql(
+      typeof req.query.filters === 'string' ? req.query.filters : undefined,
+      UNLOAD_SESSION_FILTER_COLUMNS, listConditions, params,
+    );
+    const listWhere = listConditions.length ? `WHERE ${listConditions.join(' AND ')}` : '';
+
+    const listSelect =
         `SELECT s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
                 (SELECT vi.rto_number FROM vehicle_info vi
                   WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
@@ -431,14 +463,21 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
                 ${RECEIVED_QTY_SQL} AS "receivedQty",
                 ((SELECT g.id FROM unload_import_sessions g
                   WHERE g.group_id = s.group_id AND g.is_deleted = false AND g.scan_status <> 'completed'
-                  ORDER BY g.part_index ASC, g.id ASC LIMIT 1) = s.id) AS "canActivate"
+                  ORDER BY g.part_index ASC, g.id ASC LIMIT 1) = s.id) AS "canActivate",
+                s.created_at AS "sortCreatedAt"
          FROM unload_import_sessions s
-         ${where}
-         ORDER BY s.created_at DESC
+         ${where}`;
+
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(
+        `SELECT * FROM (${listSelect}) list
+         ${listWhere}
+         ORDER BY "sortCreatedAt" DESC
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         [...params, limit, offset],
       ),
-      pool.query(`SELECT COUNT(*) AS total FROM unload_import_sessions s ${where}`, params),
+      // Counted through the same filters, or the pager would offer pages that turn out empty.
+      pool.query(`SELECT COUNT(*) AS total FROM (${listSelect}) list ${listWhere}`, params),
     ]);
 
     res.json({ sessions: dataRes.rows.map(withExtraQty), total: parseInt(countRes.rows[0]?.total ?? '0', 10), limit, offset });
@@ -532,7 +571,7 @@ router.get('/unloading/csv-history', requirePageAccess(['unloading', 'order-impo
       GROUP BY s.csv_file_name, s.plant, s.order_date, s.imported_by_code, date_trunc('minute', s.created_at)
     `;
 
-    const [dataRes, countRes] = await Promise.all([
+    const [dataRes, countRes, totalsRes] = await Promise.all([
       pool.query(
         `SELECT
            s.csv_file_name AS "csvFileName",
@@ -543,6 +582,9 @@ router.get('/unloading/csv-history', requirePageAccess(['unloading', 'order-impo
            MIN(s.created_at) AS "uploadedAt",
            COUNT(DISTINCT s.vehicle_number)::int AS "vehicleCount",
            SUM(s.row_count)::int AS "totalRows",
+           -- The ordered QUANTITY across this upload's rows. row_count is only how many lines the
+           -- file has, which is not what "how big is this delivery" means.
+           COALESCE(SUM((SELECT SUM(i.quantity) FROM unload_import_items i WHERE i.session_id = s.id)), 0)::int AS "totalQty",
            array_agg(DISTINCT s.vehicle_number ORDER BY s.vehicle_number) AS "vehicleNumbers",
            array_agg(s.id ORDER BY s.id) AS "sessionIds",
            -- Paired vehicle->session mapping (each vehicle has exactly one session row per
@@ -559,9 +601,24 @@ router.get('/unloading/csv-history', requirePageAccess(['unloading', 'order-impo
         `SELECT COUNT(*)::int AS total FROM (SELECT 1 ${groupedFrom}) grouped`,
         params,
       ),
+      // Totals over EVERY upload the filters match, not just the page on screen — the table's
+      // footer says "all pages" and one page of 20 would otherwise understate it.
+      pool.query(
+        `SELECT
+           COALESCE(SUM(s.row_count), 0)::int AS "rows",
+           COALESCE(SUM((SELECT SUM(i.quantity) FROM unload_import_items i WHERE i.session_id = s.id)), 0)::int AS "qty",
+           COUNT(DISTINCT s.vehicle_number)::int AS "vehicles"
+         FROM unload_import_sessions s ${where}`,
+        params,
+      ),
     ]);
 
-    res.json({ uploads: dataRes.rows, total: countRes.rows[0]?.total ?? 0, limit, offset });
+    res.json({
+      uploads: dataRes.rows,
+      total: countRes.rows[0]?.total ?? 0,
+      grandTotals: totalsRes.rows[0] ?? { rows: 0, qty: 0, vehicles: 0 },
+      limit, offset,
+    });
   } catch (error) {
     console.error('Error fetching unloading CSV history:', error);
     res.status(500).json({ message: 'Failed to fetch CSV history' });
@@ -1362,15 +1419,16 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
       // is_adjust: this is a qty correction, not a fresh scan — shown as "Unload Adjust".
+      // Original scan time kept, correction time recorded — same as Order Scan and Loading.
       `INSERT INTO unload_scan_events
-         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, stv, plant, vehicle_number, scanned_by_code, scanned_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,$13)`,
+         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at, adjusted_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),NOW())`,
       [
         event.session_id, event.barcode, event.item_name, event.sap_code,
         itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
         itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
         totalQty, isExtra, hasStv ? newStv : event.stv, event.plant, event.vehicle_number,
-        event.scanned_by_code, event.scanned_by_name,
+        event.scanned_by_code, event.scanned_by_name, event.scanned_at,
       ],
     );
     if (regularQty > 0) await insertEvent(regularQty, false);

@@ -169,9 +169,14 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
       for (const row of stockRows) {
         const qty = Number(row.in_stock ?? 0) + Number(row.extra_qty ?? 0);
         if (qty <= 0) continue;
+        // hidden_in_history: this line is the LEDGER's record of the clear — Overall Stock's
+        // Opening/Purchase/Sale are summed from stock_movements, so without it the report would
+        // carry on showing the cleared stock as still on hand. It is not scanning, though, so it
+        // is kept out of the Scan History list, where one row per item was pure noise. Who ran
+        // the clear is in Activities.
         await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, hidden_in_history, origin)
+           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,true,'settings')`,
           [row.barcode, row.product_id, row.plant, -qty, -Number(row.extra_qty ?? 0), 'Clear Stock (Settings)', userCode ?? null],
         );
       }
@@ -234,9 +239,10 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
         );
         if (updated.length === 0) continue;
         stockRowsAffectedCount += updated.length;
+        // Same as above: kept in the ledger so the report stays right, kept out of Scan History.
         await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
+          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, hidden_in_history, origin)
+           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,true,'settings')`,
           [d.barcode, updated[0]?.product_id ?? null, d.plant, d.inStockDelta, d.extraQtyDelta, `Clear Stock (Settings) — orders up to ${dateParam}`, userCode ?? null],
         );
       }
@@ -607,62 +613,34 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
 
     const counts: ResetCounts = { ...EMPTY_COUNTS };
 
-    // 1. Stock, when a date is set: reverse exactly what the in-scope orders contributed, BEFORE
-    //    their scan events are deleted (the events are what the amounts are read from).
+    // 1. Stock, when a date is set: take it back down by exactly what the in-scope LEDGER rows did,
+    //    read before those rows are deleted just below. No compensating "adjust" entry is written —
+    //    these entries are being removed, not reversed, the same way the Order Import / Scan removal
+    //    works. Reading the ledger rather than the scan events also picks up edits and rollbacks
+    //    that already corrected a quantity, and gets the direction right for free: receiving and
+    //    unloading rows are positive so the stock comes down, loading rows are negative so what a
+    //    load took out comes back.
+    //    (With no date the stock rows are deleted outright instead — see resetScope.)
     if (orderDateUpTo) {
-      const { rows: receivingRows } = await client.query(
-        `SELECT e.barcode, s.plant, SUM(e.total_qty)::int AS total, SUM(e.total_qty) FILTER (WHERE e.is_extra)::int AS extra
-         FROM order_scan_events e JOIN order_import_sessions s ON s.id = e.session_id
-         WHERE e.voided IS NOT TRUE AND ($1::text IS NULL OR LOWER(TRIM(s.plant)) = LOWER(TRIM($1))) AND s.order_date <= $2::text
-         GROUP BY e.barcode, s.plant`,
+      const { rows: effects } = await client.query(
+        `SELECT MIN(barcode) AS barcode, MIN(plant) AS plant,
+                SUM(qty)::int AS qty, SUM(COALESCE(extra_qty, 0))::int AS extra
+         FROM stock_movements
+         WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR ${MOVEMENT_ORDER_DATE} <= $2::text)
+         GROUP BY LOWER(TRIM(barcode)), LOWER(TRIM(plant))`,
         [plant, orderDateUpTo],
       );
-      const { rows: unloadingRows } = await client.query(
-        `SELECT e.barcode, e.plant, SUM(e.total_qty)::int AS total
-         FROM unload_scan_events e JOIN unload_import_sessions s ON s.id = e.session_id
-         WHERE e.voided IS NOT TRUE AND ($1::text IS NULL OR LOWER(TRIM(e.plant)) = LOWER(TRIM($1))) AND s.order_date <= $2::text
-         GROUP BY e.barcode, e.plant`,
-        [plant, orderDateUpTo],
-      );
-      const { rows: loadingRows } = await client.query(
-        `SELECT lse.barcode, lse.plant, SUM(lse.total_qty)::int AS total
-         FROM loading_scan_events lse JOIN proforma_slips ps ON ps.order_number = lse.order_number
-         WHERE lse.voided IS NOT TRUE AND ($1::text IS NULL OR LOWER(TRIM(lse.plant)) = LOWER(TRIM($1))) AND ps.order_date <= $2::date
-         GROUP BY lse.barcode, lse.plant`,
-        [plant, orderDateUpTo],
-      );
-
-      const deltaByKey = new Map<string, { barcode: string; plant: string; inStockDelta: number; extraQtyDelta: number }>();
-      const bump = (barcode: string, plantName: string, inStockDelta: number, extraQtyDelta: number) => {
-        const key = `${barcode.toLowerCase()}::${plantName.toLowerCase()}`;
-        const cur = deltaByKey.get(key) ?? { barcode, plant: plantName, inStockDelta: 0, extraQtyDelta: 0 };
-        cur.inStockDelta += inStockDelta;
-        cur.extraQtyDelta += extraQtyDelta;
-        deltaByKey.set(key, cur);
-      };
-      for (const r of receivingRows as any[]) bump(r.barcode, r.plant, -Number(r.total ?? 0), -Number(r.extra ?? 0));
-      for (const r of unloadingRows as any[]) bump(r.barcode, r.plant, -Number(r.total ?? 0), 0);
-      for (const r of loadingRows as any[]) bump(r.barcode, r.plant, Number(r.total ?? 0), 0);
-
-      for (const d of deltaByKey.values()) {
-        if (d.inStockDelta === 0 && d.extraQtyDelta === 0) continue;
-        const { rows: updated } = await client.query(
+      for (const effect of effects as any[]) {
+        const qty = Number(effect.qty ?? 0);
+        const extra = Number(effect.extra ?? 0);
+        if (qty === 0 && extra === 0) continue;
+        const { rowCount } = await client.query(
           `UPDATE product_plant_stock
-           SET in_stock = GREATEST(0, in_stock + $1), extra_qty = GREATEST(0, extra_qty + $2), updated_at = NOW()
-           WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($3)) AND LOWER(TRIM(plant)) = LOWER(TRIM($4))
-           RETURNING product_id`,
-          [d.inStockDelta, d.extraQtyDelta, d.barcode, d.plant],
+           SET in_stock = GREATEST(0, in_stock - $1), extra_qty = GREATEST(0, extra_qty - $2), updated_at = NOW()
+           WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($3)) AND LOWER(TRIM(plant)) = LOWER(TRIM($4))`,
+          [qty, extra, effect.barcode, effect.plant],
         );
-        if (updated.length === 0) continue;
-        counts.stockRows += updated.length;
-        // The audit line is dated today and belongs to no order, so the delete below (which only
-        // takes in-scope movements) never removes it.
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code)
-           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7)`,
-          [d.barcode, updated[0]?.product_id ?? null, d.plant, d.inStockDelta, d.extraQtyDelta,
-           `Remove operations data (Settings) — orders up to ${orderDateUpTo}`, userCode ?? null],
-        );
+        counts.stockRows += rowCount ?? 0;
       }
     }
 
@@ -730,7 +708,7 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
         + `loading ${counts.loadingRecords} record(s) / ${counts.loadingScanEvents} scan(s), `
         + `${counts.stockMovements} stock movement(s)); `
         + (orderDateUpTo
-          ? `${counts.stockRows} stock row(s) adjusted back; `
+          ? `${counts.stockRows} stock row(s) reduced by what was removed; `
           : `${counts.stockRows} stock row(s) deleted; `)
         + `${counts.slipsLoadingReset} proforma slip(s) reset for loading.`,
       userCode,
@@ -786,6 +764,178 @@ router.post('/settings/backup-csv', requireAdminRole, async (req: Request, res: 
     res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to write the CSV backup' });
   } finally {
     csvBackupRunning = false;
+  }
+});
+// ── Settings > Data Management > "Remove Scan & Order Import Data" ──────────────────────────────
+// The narrow counterpart to Remove All Operations Data: it touches ONLY the receiving side —
+// Order Import CSVs and the Scan Operations work done against them.
+//
+//   Removed : order_import_sessions + their items, order_scan_items, order_scan_events (the scan
+//             history itself, rows deleted outright), and the stock_movements those sessions
+//             wrote. Stock is taken back down by exactly what those movements added.
+//   Untouched: Loading and Unloading — their batches, scans, records and their own stock
+//             movements all stay, including movements that merely happen to share a session id
+//             number with a receiving session (they are told apart by `source`).
+//
+// Deliberately NO compensating "adjust" entry is written: the request is for these entries to be
+// gone, not reversed, so the stock number is corrected in place and the ledger rows are deleted
+// with everything else. That means Overall Stock will show this period as if the receiving never
+// happened — which is the point — while Loading's own sale figures are left exactly as they are.
+//
+// Optional order-date cut-off: the date on the CSV (order_import_sessions.order_date), never the
+// day someone scanned. Blank removes every receiving CSV for the plant scope.
+type ScanResetCounts = {
+  sessions: number; importItems: number; scanItems: number; scanEvents: number;
+  stockMovements: number; stockRowsAdjusted: number; qtyRemoved: number;
+};
+
+const SCAN_SESSIONS_IN_SCOPE = `SELECT id FROM order_import_sessions
+  WHERE ($1::text IS NULL OR LOWER(TRIM(plant)) = LOWER(TRIM($1)))
+    AND ($2::text IS NULL OR order_date <= $2::text)`;
+
+// A receiving session's own ledger rows. Loading and Unloading write their own movements with
+// their own session ids — the two id spaces are separate tables, so without this `source` test a
+// receiving reset could subtract an unloading batch's stock that merely shares an id number.
+const SCAN_MOVEMENTS_IN_SCOPE = `session_id IN (${SCAN_SESSIONS_IN_SCOPE})
+  AND COALESCE(source, '') NOT IN ('loading', 'unloading')`;
+
+const scanResetConfirmPhrase = (plantParam: string) =>
+  (plantParam.toLowerCase() === 'all' ? 'DELETE SCAN ALL' : `DELETE SCAN ${plantParam}`).toUpperCase();
+
+async function countScanResetScope(plant: string | null, orderDateUpTo: string | null): Promise<ScanResetCounts> {
+  const params = [plant, orderDateUpTo];
+  const one = async (sql: string) => Number((await pool.query(sql, params)).rows[0]?.n ?? 0);
+  const counts: ScanResetCounts = {
+    sessions: await one(`SELECT COUNT(*)::int AS n FROM order_import_sessions WHERE id IN (${SCAN_SESSIONS_IN_SCOPE})`),
+    importItems: await one(`SELECT COUNT(*)::int AS n FROM order_import_items WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`),
+    scanItems: await one(`SELECT COUNT(*)::int AS n FROM order_scan_items WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`),
+    scanEvents: await one(`SELECT COUNT(*)::int AS n FROM order_scan_events WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`),
+    stockMovements: await one(`SELECT COUNT(*)::int AS n FROM stock_movements WHERE ${SCAN_MOVEMENTS_IN_SCOPE}`),
+    stockRowsAdjusted: 0,
+    qtyRemoved: 0,
+  };
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS rows, COALESCE(SUM(qty), 0)::int AS qty FROM (
+       SELECT LOWER(TRIM(barcode)) AS b, LOWER(TRIM(plant)) AS p, SUM(qty)::int AS qty
+       FROM stock_movements WHERE ${SCAN_MOVEMENTS_IN_SCOPE}
+       GROUP BY 1, 2
+     ) g`,
+    params,
+  );
+  counts.stockRowsAdjusted = rows[0]?.rows ?? 0;
+  counts.qtyRemoved = rows[0]?.qty ?? 0;
+  return counts;
+}
+
+// GET /api/settings/reset-scan-data/preview?plant=<name|all>&orderDateUpTo=<YYYY-MM-DD>
+router.get('/settings/reset-scan-data/preview', requireAdminRole, async (req: Request, res: Response) => {
+  try {
+    const plantParam = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!plantParam) return res.status(400).json({ message: 'Plant is required' });
+    const plant = plantParam.toLowerCase() === 'all' ? null : plantParam;
+    const orderDateUpTo = typeof req.query.orderDateUpTo === 'string' && req.query.orderDateUpTo.trim()
+      ? req.query.orderDateUpTo.trim() : null;
+    const counts = await countScanResetScope(plant, orderDateUpTo);
+    res.json({
+      counts,
+      totalRows: counts.sessions + counts.importItems + counts.scanItems + counts.scanEvents + counts.stockMovements,
+      dateScoped: !!orderDateUpTo,
+      confirmPhrase: scanResetConfirmPhrase(plantParam),
+    });
+  } catch (error) {
+    console.error('Error building the scan-data reset preview:', error);
+    res.status(500).json({ message: 'Failed to build the preview' });
+  }
+});
+
+// POST /api/settings/reset-scan-data { plant, orderDateUpTo?, confirm } — all or nothing.
+router.post('/settings/reset-scan-data', requireAdminRole, async (req: Request, res: Response) => {
+  const plantParam = typeof req.body?.plant === 'string' ? req.body.plant.trim() : '';
+  if (!plantParam) return res.status(400).json({ message: 'Plant is required' });
+  const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm.trim().toUpperCase() : '';
+  if (confirm !== scanResetConfirmPhrase(plantParam)) {
+    return res.status(400).json({ message: `Type ${scanResetConfirmPhrase(plantParam)} to confirm.` });
+  }
+  const plant = plantParam.toLowerCase() === 'all' ? null : plantParam;
+  const orderDateUpTo = typeof req.body?.orderDateUpTo === 'string' && req.body.orderDateUpTo.trim()
+    ? req.body.orderDateUpTo.trim() : null;
+  const { userCode, userName } = actor(req);
+  const params = [plant, orderDateUpTo];
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const counts: ScanResetCounts = {
+      sessions: 0, importItems: 0, scanItems: 0, scanEvents: 0,
+      stockMovements: 0, stockRowsAdjusted: 0, qtyRemoved: 0,
+    };
+
+    // 1. Take the stock back down by exactly what these sessions' own ledger rows added, BEFORE
+    //    those rows are deleted. Read from the ledger rather than from the scan events, so a CSV
+    //    edit or a rollback that already corrected a quantity is accounted for too. No adjust
+    //    row is written — these entries are being removed, not reversed.
+    const { rows: effects } = await client.query(
+      `SELECT MIN(barcode) AS barcode, MIN(plant) AS plant,
+              SUM(qty)::int AS qty, SUM(COALESCE(extra_qty, 0))::int AS extra
+       FROM stock_movements
+       WHERE ${SCAN_MOVEMENTS_IN_SCOPE}
+       GROUP BY LOWER(TRIM(barcode)), LOWER(TRIM(plant))`,
+      params,
+    );
+    for (const effect of effects as any[]) {
+      const qty = Number(effect.qty ?? 0);
+      const extra = Number(effect.extra ?? 0);
+      if (qty === 0 && extra === 0) continue;
+      const { rowCount } = await client.query(
+        `UPDATE product_plant_stock
+         SET in_stock = GREATEST(0, in_stock - $1), extra_qty = GREATEST(0, extra_qty - $2), updated_at = NOW()
+         WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($3)) AND LOWER(TRIM(plant)) = LOWER(TRIM($4))`,
+        [qty, extra, effect.barcode, effect.plant],
+      );
+      counts.stockRowsAdjusted += rowCount ?? 0;
+      counts.qtyRemoved += qty;
+    }
+
+    // 2. The deletions — the ledger rows first (their scope is defined through the session), then
+    //    the scanning work, then the CSVs themselves.
+    const del = async (sql: string) => (await client.query(sql, params)).rowCount ?? 0;
+    counts.stockMovements = await del(`DELETE FROM stock_movements WHERE ${SCAN_MOVEMENTS_IN_SCOPE}`);
+    counts.scanEvents = await del(`DELETE FROM order_scan_events WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`);
+    counts.scanItems = await del(`DELETE FROM order_scan_items WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`);
+    counts.importItems = await del(`DELETE FROM order_import_items WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`);
+    counts.sessions = await del(`DELETE FROM order_import_sessions WHERE id IN (${SCAN_SESSIONS_IN_SCOPE})`);
+
+    await client.query('COMMIT');
+
+    // products.in_stock is the legacy cross-plant mirror — refreshed after the commit and only
+    // where it is actually wrong, so it can't deadlock the removal against the Notion sync.
+    const mirrorWarning = await recomputeProductStockMirror();
+
+    const totalRows = counts.sessions + counts.importItems + counts.scanItems + counts.scanEvents + counts.stockMovements;
+    await storage.createActivity({
+      pageName: 'Settings',
+      action: 'delete',
+      entityType: 'reset_scan_data',
+      entityId: plant ?? 'all',
+      details: `Removed scan & order import data for ${plant ?? 'all plants'}`
+        + (orderDateUpTo ? `, orders up to ${orderDateUpTo}` : '')
+        + ` by ${userName ?? userCode}: ${counts.sessions} CSV(s), ${counts.importItems} item(s), `
+        + `${counts.scanEvents} scan(s), ${counts.stockMovements} stock movement(s) deleted; `
+        + `${counts.stockRowsAdjusted} stock row(s) reduced by ${counts.qtyRemoved} box(es). `
+        + `Loading and Unloading untouched.`,
+      userCode,
+      userName,
+    });
+
+    res.json({ success: true, counts, totalRows, dateScoped: !!orderDateUpTo, orderDateUpTo, warning: mirrorWarning });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error removing scan & order import data:', error);
+    res.status(500).json({
+      message: `Failed to remove scan & order import data — nothing was deleted (${error instanceof Error ? error.message : String(error)}).`,
+    });
+  } finally {
+    client.release();
   }
 });
 

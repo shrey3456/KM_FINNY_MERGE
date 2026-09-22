@@ -177,6 +177,72 @@ const Settings = () => {
     }
   };
 
+  // Remove Scan & Order Import Data — the receiving side only: Order Import CSVs, the Scan
+  // Operations work against them, their scan history and the stock they brought in. Loading and
+  // Unloading are left alone. Entries are DELETED, not reversed — no adjust row is written.
+  type ScanResetCounts = {
+    sessions: number; importItems: number; scanItems: number; scanEvents: number;
+    stockMovements: number; stockRowsAdjusted: number; qtyRemoved: number;
+  };
+  const [showScanResetDialog, setShowScanResetDialog] = useState(false);
+  const [isResettingScan, setIsResettingScan] = useState(false);
+  const [srPlant, setSrPlant] = useState<string>('');
+  const [srOrderDateUpTo, setSrOrderDateUpTo] = useState('');
+  const [srConfirmText, setSrConfirmText] = useState('');
+  const [srError, setSrError] = useState<string | null>(null);
+
+  const { data: srPreview, isFetching: srPreviewLoading } = useQuery<{
+    counts: ScanResetCounts; totalRows: number; dateScoped: boolean; confirmPhrase: string;
+  }>({
+    queryKey: ['/api/settings/reset-scan-data/preview', srPlant, srOrderDateUpTo],
+    queryFn: () =>
+      apiRequest(
+        'GET',
+        `/api/settings/reset-scan-data/preview?plant=${encodeURIComponent(srPlant)}`
+          + `${srOrderDateUpTo ? `&orderDateUpTo=${encodeURIComponent(srOrderDateUpTo)}` : ''}`,
+      ).then((r) => r.json()),
+    enabled: showScanResetDialog && !!srPlant,
+  });
+
+  const handleScanResetDialogOpenChange = (open: boolean) => {
+    setShowScanResetDialog(open);
+    if (!open) { setSrPlant(''); setSrOrderDateUpTo(''); setSrConfirmText(''); setSrError(null); }
+  };
+
+  const expectedSrConfirmText = srPlant === 'all' ? 'DELETE SCAN ALL' : `DELETE SCAN ${srPlant}`.toUpperCase();
+
+  const resetScanData = async () => {
+    if (!srPlant) return;
+    setSrError(null);
+    setIsResettingScan(true);
+    try {
+      const data = await apiRequest(
+        'POST', '/api/settings/reset-scan-data',
+        {
+          plant: srPlant,
+          ...(srOrderDateUpTo ? { orderDateUpTo: srOrderDateUpTo } : {}),
+          confirm: srConfirmText.trim().toUpperCase(),
+        },
+        false, true,
+      );
+      toast({
+        title: data.warning ? 'Scan data removed (with a note)' : 'Scan data removed',
+        description: (data.warning ? `${data.warning} ` : '')
+          + `${data.counts.sessions} CSV(s), ${data.counts.scanEvents} scan(s) deleted; `
+          + `${data.counts.stockRowsAdjusted} stock row(s) reduced by ${data.counts.qtyRemoved} box(es). `
+          + `Loading and Unloading untouched.`,
+      });
+      queryClient.invalidateQueries();
+      handleScanResetDialogOpenChange(false);
+    } catch (error: any) {
+      console.error('Error removing scan data:', error);
+      setSrError(error?.message || 'Failed to remove the data');
+      toast({ title: 'Nothing was removed', description: error?.message || 'Failed to remove the data', variant: 'destructive' });
+    } finally {
+      setIsResettingScan(false);
+    }
+  };
+
   // Reset Operations Data — deletes the day-to-day work (scan history, stock, loading,
   // unloading, order imports) from the database for good, for one plant or for all of them.
   // Product Master, Vehicle Master, proforma slips, users and plants are kept. Same
@@ -369,7 +435,7 @@ const Settings = () => {
         description: (data.warning ? `${data.warning} ` : '')
           + `${data.totalRows} row(s) deleted for ${rdPlant === 'all' ? 'all plants' : rdPlant}`
           + `${rdOrderDateUpTo ? ` (orders up to ${rdOrderDateUpTo})` : ''}. `
-          + `${data.dateScoped ? `${data.counts.stockRows} stock row(s) adjusted back` : `${data.counts.stockRows} stock row(s) deleted`}, `
+          + `${data.dateScoped ? `${data.counts.stockRows} stock row(s) corrected` : `${data.counts.stockRows} stock row(s) deleted`}, `
           + `${data.counts.slipsLoadingReset} proforma slip(s) can be loaded again from the start.`,
       });
       // Everything on screen was just built from data that no longer exists.
@@ -960,6 +1026,15 @@ const Settings = () => {
                         <Button
                           variant="destructive"
                           size="sm"
+                          onClick={() => setShowScanResetDialog(true)}
+                          disabled={!isAdminUser}
+                          title={!isAdminUser ? "Admin access required" : undefined}
+                        >
+                          Remove Scan &amp; Order Import Data
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
                           onClick={() => setShowResetDialog(true)}
                           disabled={!isAdminUser}
                           title={!isAdminUser ? "Admin access required" : undefined}
@@ -1275,6 +1350,114 @@ const Settings = () => {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Remove Scan & Order Import Data — receiving only; Loading and Unloading stay. */}
+      <AlertDialog open={showScanResetDialog} onOpenChange={handleScanResetDialogOpenChange}>
+        <AlertDialogContent className="max-h-[90vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove scan &amp; order import data?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This <strong>deletes</strong> the receiving side only: the imported order CSVs, the Scan Operations
+              work done against them, their scan history, and the stock those scans brought in.
+              <strong> Loading and Unloading are not touched.</strong> The entries are removed outright — no
+              correction entry is written in their place — so this period reads as if the receiving never happened.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label htmlFor="srPlant">Plant</Label>
+              <Select value={srPlant} onValueChange={(v) => { setSrPlant(v); setSrConfirmText(''); }}>
+                <SelectTrigger id="srPlant">
+                  <SelectValue placeholder="Select a plant" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Plants</SelectItem>
+                  {(allPlants ?? []).map((p: any) => (
+                    <SelectItem key={p.id ?? p.name} value={p.name}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="srOrderDateUpTo">Order date up to (optional)</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="srOrderDateUpTo"
+                  type="date"
+                  value={srOrderDateUpTo}
+                  onChange={(e) => { setSrOrderDateUpTo(e.target.value); setSrConfirmText(''); }}
+                  className="w-auto"
+                />
+                {srOrderDateUpTo && (
+                  <Button variant="ghost" size="sm" onClick={() => { setSrOrderDateUpTo(''); setSrConfirmText(''); }}>
+                    Clear date
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-gray-500">
+                Leave blank to remove every receiving CSV for this plant. Set a date and only CSVs whose own
+                order date is on or before it are removed — never the day someone scanned.
+              </p>
+            </div>
+
+            {srPlant && (
+              <>
+                <div className="rounded border bg-white p-3 text-sm">
+                  <div className="mb-2 font-medium">
+                    {srPreviewLoading ? 'Counting…' : `${srPreview?.totalRows ?? 0} row(s) will be deleted`}
+                  </div>
+                  {srPreview && (
+                    <ul className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+                      <li>Order CSVs: <strong>{srPreview.counts.sessions}</strong></li>
+                      <li>CSV items: <strong>{srPreview.counts.importItems}</strong></li>
+                      <li>Scan history rows: <strong>{srPreview.counts.scanEvents}</strong></li>
+                      <li>Scan item rows: <strong>{srPreview.counts.scanItems}</strong></li>
+                      <li>Stock movements: <strong>{srPreview.counts.stockMovements}</strong></li>
+                      <li>Stock to take back: <strong>{srPreview.counts.qtyRemoved}</strong> box(es) over <strong>{srPreview.counts.stockRowsAdjusted}</strong> row(s)</li>
+                    </ul>
+                  )}
+                </div>
+
+                <div className="rounded border border-yellow-200 bg-yellow-50 p-3 text-sm">
+                  Stock for these items is reduced by exactly what these CSVs brought in
+                  {srOrderDateUpTo ? ` on or before ${srOrderDateUpTo}` : ''}, with no adjustment entry left behind.
+                  Loading, Unloading, proforma slips, Product Master and Vehicle Master are not affected.
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="srConfirmText">Type {expectedSrConfirmText} to confirm</Label>
+                  <Input
+                    id="srConfirmText"
+                    value={srConfirmText}
+                    onChange={(e) => setSrConfirmText(e.target.value)}
+                    placeholder={expectedSrConfirmText}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          {srError && (
+            <div className="mt-3 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <div className="font-medium">Nothing was removed.</div>
+              <p className="mt-1 break-words">{srError}</p>
+            </div>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isResettingScan}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={resetScanData}
+              className="bg-red-600 hover:bg-red-700"
+              disabled={isResettingScan || !srPlant || srConfirmText.trim().toUpperCase() !== expectedSrConfirmText}
+            >
+              {isResettingScan ? 'Removing…' : 'Remove data'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Remove All Operations Data — permanent deletion, so: pick the scope, see exactly how many
           rows go, then type the phrase. */}
       <AlertDialog open={showResetDialog} onOpenChange={handleResetDialogOpenChange}>
@@ -1378,9 +1561,10 @@ const Settings = () => {
                   permanently. Proforma slips stay, but the loading progress of the orders in scope is wiped so
                   they can be loaded again from the start.
                   {rdOrderDateUpTo
-                    ? ' Stock is not deleted here — it is adjusted by exactly what those orders added or took out,'
-                      + ' with one audit line per item. An Opening Stock or manual adjustment inside that range is'
-                      + ' not reversed (it belongs to no order) — run Recalculate Stock afterwards to check.'
+                    ? ' Stock rows are kept (they are running totals with no date of their own) but corrected by'
+                      + ' exactly what those entries did, and no correction entry is left behind. An Opening Stock'
+                      + ' or manual adjustment inside that range is not undone (it belongs to no order) — run'
+                      + ' Recalculate Stock afterwards to check.'
                     : ' Stock rows are deleted outright.'}
                   {(rdPlant !== 'all' || !!rdOrderDateUpTo) && ' The activity log has no plant and no order date, so it is only cleared by a full all-plants removal with no date.'}
                 </div>

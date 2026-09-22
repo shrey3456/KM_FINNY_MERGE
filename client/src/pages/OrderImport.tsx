@@ -1187,13 +1187,20 @@ export default function OrderImport() {
   type UnloadCsvHistoryUpload = {
     csvFileName: string; plant: string; orderDate: string; importedByCode: string | null;
     importedByName: string | null; uploadedAt: string; vehicleCount: number; totalRows: number;
+    // The ordered QUANTITY across this upload's rows — totalRows is only how many lines the file
+    // has, which says nothing about how big the delivery is.
+    totalQty: number;
     vehicleNumbers: string[]; sessionIds: number[]; vehicles: { vehicleNumber: string; sessionId: number }[];
   };
   const [unloadHistoryOffset, setUnloadHistoryOffset] = useState(0);
   const [unloadHistoryPlantFilter, setUnloadHistoryPlantFilter] = usePersistentFilter("orderImport:unloadHistoryPlant", "");
   const [unloadHistoryDateFilter, setUnloadHistoryDateFilter] = usePersistentFilter("orderImport:unloadHistoryDate", "");
   const UNLOAD_HISTORY_LIMIT = 20;
-  const unloadCsvHistoryQuery = useQuery<{ uploads: UnloadCsvHistoryUpload[]; total: number }>({
+  const unloadCsvHistoryQuery = useQuery<{
+    uploads: UnloadCsvHistoryUpload[]; total: number;
+    // Across every upload the filters match, not just the page shown.
+    grandTotals?: { rows: number; qty: number; vehicles: number };
+  }>({
     queryKey: ["/api/unloading/csv-history", unloadHistoryOffset, unloadHistoryPlantFilter, unloadHistoryDateFilter],
     queryFn: () => apiRequest(
       "GET",
@@ -1203,6 +1210,7 @@ export default function OrderImport() {
   });
   const unloadCsvUploads = unloadCsvHistoryQuery.data?.uploads ?? [];
   const unloadCsvHistoryTotal = unloadCsvHistoryQuery.data?.total ?? 0;
+  const unloadCsvGrandTotals = unloadCsvHistoryQuery.data?.grandTotals ?? { rows: 0, qty: 0, vehicles: 0 };
   const [expandedUnloadCsvUpload, setExpandedUnloadCsvUpload] = useState<string | null>(null);
 
   // ── Delete a CSV upload — mirrors Order Import's own per-session delete dialog (replace vs
@@ -2511,6 +2519,7 @@ export default function OrderImport() {
                           <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
                           <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicles</th>
                           <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Total Rows</th>
+                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Total Qty</th>
                           <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Uploaded By</th>
                           <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Uploaded At</th>
                           <th className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
@@ -2535,6 +2544,7 @@ export default function OrderImport() {
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.orderDate}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.vehicleCount}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.totalRows.toLocaleString()}</td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2 text-right font-semibold text-[#001d6e] tabular-nums">{(u.totalQty ?? 0).toLocaleString()}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.importedByName ?? u.importedByCode ?? "—"}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 whitespace-nowrap">{new Date(u.uploadedAt).toLocaleString()}</td>
                                 <td className="border-b border-gray-200 px-3 py-2 text-right">
@@ -2549,7 +2559,7 @@ export default function OrderImport() {
                               </tr>
                               {isExpanded && (
                                 <tr>
-                                  <td colSpan={9} className="border-b border-gray-200 bg-gray-50 px-6 py-3">
+                                  <td colSpan={10} className="border-b border-gray-200 bg-gray-50 px-6 py-3">
                                     <div className="flex flex-wrap items-center gap-1.5">
                                       <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Vehicles</span>
                                       <span className="text-[11px] text-gray-400">(click one to edit its items)</span>
@@ -2575,6 +2585,32 @@ export default function OrderImport() {
                           );
                         })}
                       </tbody>
+                      {/* Two totals: this page, and every upload the filters match. With 20 rows a
+                          page, a single footer figure would quietly describe only what is on screen. */}
+                      <tfoot>
+                        <tr className="border-t-2 border-gray-300 bg-gray-50 font-semibold text-gray-700">
+                          <td className="px-2 py-2"></td>
+                          <td className="px-3 py-2" colSpan={3}>Total on this page</td>
+                          <td className="px-3 py-2 tabular-nums">
+                            {unloadCsvUploads.reduce((n, u) => n + (u.vehicleCount ?? 0), 0).toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 tabular-nums">
+                            {unloadCsvUploads.reduce((n, u) => n + (u.totalRows ?? 0), 0).toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right text-[#001d6e] tabular-nums">
+                            {unloadCsvUploads.reduce((n, u) => n + (u.totalQty ?? 0), 0).toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2" colSpan={3}></td>
+                        </tr>
+                        <tr className="border-t border-gray-200 bg-[#001d6e]/[0.06] font-bold text-[#001d6e]">
+                          <td className="px-2 py-2"></td>
+                          <td className="px-3 py-2" colSpan={3}>Total — all {unloadCsvHistoryTotal.toLocaleString()} upload(s)</td>
+                          <td className="px-3 py-2 tabular-nums">{unloadCsvGrandTotals.vehicles.toLocaleString()}</td>
+                          <td className="px-3 py-2 tabular-nums">{unloadCsvGrandTotals.rows.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{unloadCsvGrandTotals.qty.toLocaleString()}</td>
+                          <td className="px-3 py-2" colSpan={3}></td>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                   {unloadCsvHistoryTotal > UNLOAD_HISTORY_LIMIT && (

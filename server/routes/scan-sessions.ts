@@ -16,6 +16,7 @@ import { eq, desc, inArray, count, asc } from 'drizzle-orm';
 import { z } from 'zod';
 import { requirePageWrite } from '../lib/pageAccess';
 import { getUserPlants } from './order-scan';
+import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilterSql';
 import { pushScanHistoryToNotion, saveScanHistoryNotionConfig } from '../services/scanHistoryNotionSync';
 
 const router = Router();
@@ -819,6 +820,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       ose.scanned_by_code  AS "scannedByCode",
       ose.scanned_by_name  AS "scannedByName",
       ose.scanned_at       AS "scannedAt",
+      -- When this row was CORRECTED, if it was. scannedAt stays the original scan's own time.
+      ose.adjusted_at      AS "adjustedAt",
       ose.voided,
       ose.voided_at        AS "voidedAt",
       ose.void_reason      AS "voidReason",
@@ -859,6 +862,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       sm.created_by_code AS "scannedByCode",
       un.name AS "scannedByName",
       sm.created_at AS "scannedAt",
+      NULL::timestamp AS "adjustedAt",
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
@@ -901,6 +905,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       lse.scanned_by_code   AS "scannedByCode",
       lse.scanned_by_name   AS "scannedByName",
       lse.scanned_at        AS "scannedAt",
+      lse.adjusted_at       AS "adjustedAt",
       COALESCE(lse.voided, false) AS voided,
       lse.voided_at         AS "voidedAt",
       lse.void_reason       AS "voidReason",
@@ -940,6 +945,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       use.scanned_by_code   AS "scannedByCode",
       use.scanned_by_name   AS "scannedByName",
       use.scanned_at        AS "scannedAt",
+      use.adjusted_at       AS "adjustedAt",
       COALESCE(use.voided, false) AS voided,
       use.voided_at         AS "voidedAt",
       use.void_reason       AS "voidReason",
@@ -983,6 +989,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       sm.created_by_code AS "scannedByCode",
       un.name AS "scannedByName",
       sm.created_at AS "scannedAt",
+      NULL::timestamp AS "adjustedAt",
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
@@ -1007,103 +1014,19 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
 // set, not just whatever page happens to be loaded. Only columns in this allowlist are ever
 // touched by user input — the column id (and its SQL expression) is fixed server-side, so a
 // request can never reference an arbitrary column.
-const SCAN_HISTORY_FILTER_COLUMNS: Record<string, { sql: string; type: 'text' | 'number' | 'date' }> = {
+const SCAN_HISTORY_FILTER_COLUMNS: Record<string, SqlFilterColumn> = {
   stv:       { sql: 'stv',         type: 'text' },
   time:      { sql: '"scannedAt"', type: 'date' },
   orderDate: { sql: '"orderDate"', type: 'date' },
   plant:     { sql: '"plant"',     type: 'text' },
   // Client's historyColumns wires the same "+ Filter" condition UI onto these three too
   // (Barcode/Qty/Pallets) — missing here meant the request still went out with the filter,
-  // but applyScanHistoryColumnFilters silently dropped it (unknown column id, not an error),
+  // but the SQL filter engine silently dropped it (unknown column id, not an error),
   // so those three filters looked broken even though everything else worked.
   barcode:   { sql: 'barcode',     type: 'text' },
   qty:       { sql: '"totalQty"',  type: 'number' },
   pallets:   { sql: 'pallets',     type: 'number' },
 };
-
-type GenericFilterCondition = { columnIds?: string[]; operator?: string; value?: unknown };
-
-// Appends zero or more SQL clauses (one per condition, columns within a condition OR'd
-// together) onto `conditions`/`params` — same shape/semantics as the frontend's matchCondition:
-// AND across conditions, OR across the columns picked into one condition.
-function applyScanHistoryColumnFilters(filtersParam: string | undefined, conditions: string[], params: any[]) {
-  if (!filtersParam) return;
-  let parsed: unknown;
-  try { parsed = JSON.parse(filtersParam); } catch { return; }
-  if (!Array.isArray(parsed)) return;
-
-  for (const raw of parsed as GenericFilterCondition[]) {
-    const columnIds = Array.isArray(raw?.columnIds) ? raw.columnIds : [];
-    const operator = typeof raw?.operator === 'string' ? raw.operator : '';
-    if (columnIds.length === 0 || !operator) continue;
-
-    const colClauses: string[] = [];
-    for (const columnId of columnIds) {
-      const col = SCAN_HISTORY_FILTER_COLUMNS[columnId];
-      if (!col) continue; // not in the allowlist — ignore rather than error
-      const clause = buildScanHistoryFilterClause(col, operator, raw.value, params);
-      if (clause) colClauses.push(clause);
-    }
-    if (colClauses.length > 0) conditions.push(`(${colClauses.join(' OR ')})`);
-  }
-}
-
-function buildScanHistoryFilterClause(
-  col: { sql: string; type: 'text' | 'number' | 'date' },
-  operator: string,
-  value: unknown,
-  params: any[],
-): string | null {
-  const push = (v: any) => { params.push(v); return `$${params.length}`; };
-
-  if (operator === 'in') {
-    const values = Array.isArray(value) ? (value as string[]) : [];
-    if (values.length === 0) return null;
-    if (col.type === 'date') {
-      return `(${values.map((v) => `DATE(${col.sql}) = ${push(v)}::date`).join(' OR ')})`;
-    }
-    if (col.type === 'number') {
-      const nums = values.map(Number).filter((n) => !Number.isNaN(n));
-      return nums.length ? `${col.sql} = ANY(${push(nums)}::numeric[])` : null;
-    }
-    return `LOWER(COALESCE(${col.sql}::text,'')) = ANY(${push(values.map((v) => v.toLowerCase()))}::text[])`;
-  }
-
-  if (col.type === 'text') {
-    const v = typeof value === 'string' ? value : '';
-    if (operator === 'empty') return `COALESCE(${col.sql}::text,'') = ''`;
-    if (operator === 'contains') return `LOWER(COALESCE(${col.sql}::text,'')) LIKE ${push(`%${v.toLowerCase()}%`)}`;
-    if (operator === 'equals') return `LOWER(COALESCE(${col.sql}::text,'')) = ${push(v.toLowerCase())}`;
-    return null;
-  }
-
-  if (col.type === 'number') {
-    if (operator === 'between') {
-      const [a, b] = Array.isArray(value) ? (value as string[]) : ['', ''];
-      if (a === '' && b === '') return null;
-      return `${col.sql} BETWEEN ${push(Number(a) || 0)} AND ${push(Number(b) || 0)}`;
-    }
-    const n = Number(value);
-    if (Number.isNaN(n)) return null;
-    if (operator === 'eq') return `${col.sql} = ${push(n)}`;
-    if (operator === 'gt') return `${col.sql} > ${push(n)}`;
-    if (operator === 'lt') return `${col.sql} < ${push(n)}`;
-    return null;
-  }
-
-  // date
-  if (operator === 'between') {
-    const [a, b] = Array.isArray(value) ? (value as string[]) : ['', ''];
-    if (!a && !b) return null;
-    return `DATE(${col.sql}) BETWEEN ${push(a || '1970-01-01')}::date AND ${push(b || '9999-12-31')}::date`;
-  }
-  const v = typeof value === 'string' ? value : '';
-  if (!v) return null;
-  if (operator === 'on') return `DATE(${col.sql}) = ${push(v)}::date`;
-  if (operator === 'before') return `${col.sql} < ${push(v)}::date`;
-  if (operator === 'after') return `${col.sql} >= ${push(v)}::date + INTERVAL '1 day'`;
-  return null;
-}
 
 // The names offered in the page's "Scanned by" dropdown. Three tables, scanned end to end with a
 // DISTINCT — and it was re-run on every request of a page that polls itself every few seconds,
@@ -1142,13 +1065,22 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     const fromParam    = typeof req.query.from    === 'string' && req.query.from.trim()    ? req.query.from.trim()    : null;
     const toParam      = typeof req.query.to      === 'string' && req.query.to.trim()      ? req.query.to.trim()      : null;
     const scannerParam = typeof req.query.scanner === 'string' && req.query.scanner.trim() ? req.query.scanner.trim() : null;
-    // One or more types, comma-separated ("extra,adjust") — the page's Type filter is a
-    // checklist now, and picking two means "either of these", not neither. A single value still
-    // works exactly as it did for any older caller.
+    // One or more types, comma-separated ("extra,adjust") — the page's Type filter is a checklist,
+    // and picking two means "either of these", not neither.
+    //
+    // A type may also name the source it belongs to: "scan:regular", "loading:extra". Without that,
+    // a kind on its own means that kind from ANY source — which is what made "Scan Regular" list
+    // Load Regular rows too while the section dropdown was on All Events. A bare kind still works
+    // exactly as before (the section dropdown is what narrows it then).
     const KNOWN_TYPES = ['regular', 'extra', 'empty', 'exchange', 'adjust'];
-    const typeParams   = typeof req.query.type === 'string'
-      ? String(req.query.type).split(',').map((s) => s.trim().toLowerCase()).filter((s) => KNOWN_TYPES.includes(s))
-      : [];
+    const KNOWN_SOURCES = ['scan', 'loading', 'unloading', 'stock'];
+    const typeParams = (typeof req.query.type === 'string' ? String(req.query.type).split(',') : [])
+      .map((s) => s.trim().toLowerCase())
+      .map((s) => {
+        const [a, b] = s.includes(':') ? s.split(':') : ['', s];
+        return { source: a, kind: b };
+      })
+      .filter((p) => KNOWN_TYPES.includes(p.kind) && (p.source === '' || KNOWN_SOURCES.includes(p.source)));
     // Three distinct sections on the Scan History page (client dropdown) — "Scan History"
     // (receiving + exchange corrections, the original page), "Load Event" (Loading's own
     // item-scanning history, server/routes/loading.ts), and "Unload Event" (Unloading's own scan
@@ -1208,16 +1140,19 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       exchange: `("isExchange" = true)`,
       adjust:   `("isAdjust" = true)`,
     };
-    // Several types selected → a row matching ANY of them passes.
+    // Several types selected → a row matching ANY of them passes. A type that names its source
+    // must match both, so "scan:regular" can never pull in a loading row.
     if (typeParams.length > 0) {
-      conditions.push(`(${typeParams.map((type) => TYPE_CONDITION[type]).join(' OR ')})`);
+      const clauses = typeParams.map(({ source, kind }) =>
+        source ? `("sourceKind" = '${source}' AND ${TYPE_CONDITION[kind]})` : TYPE_CONDITION[kind]);
+      conditions.push(`(${clauses.join(' OR ')})`);
     }
     if (searchParam) {
       params.push(`%${searchParam.toLowerCase()}%`);
       const n = params.length;
       conditions.push(`(LOWER(COALESCE("itemName",'')) LIKE $${n} OR LOWER(COALESCE(barcode,'')) LIKE $${n} OR LOWER(COALESCE("scannedByName",'')) LIKE $${n})`);
     }
-    applyScanHistoryColumnFilters(filtersParam, conditions, params);
+    applyColumnFiltersToSql(filtersParam, SCAN_HISTORY_FILTER_COLUMNS, conditions, params);
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const baseFrom = `FROM ${SCAN_HISTORY_COMBINED_SOURCE} ${where}`;
@@ -1461,6 +1396,53 @@ router.post('/reports/upload-to-notion', requirePageWrite('scan-history'), async
   }
 });
 
+// ── GET /reports/stock-adjustments ───────────────────────────────────────────────────────────
+// Every correction behind one item's Adjust figure, newest first: when, who, how much, why, and
+// where it came from. The Adjust column is a single number per item; this is what it is made of.
+// Read-only, same plant scoping as the stock report itself.
+router.get('/reports/stock-adjustments', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    if (!barcode) return res.status(400).json({ message: 'barcode is required' });
+
+    const allowed = getUserPlants(req.user);
+    if (allowed !== null && allowed.length === 0) return res.json({ items: [] });
+
+    const conditions = [
+      `LOWER(TRIM(sm.barcode)) = LOWER(TRIM($1))`,
+      `sm.type IN ('adjust', 'exchange')`,
+      // Loading's own +/- corrections are Loading's history, not the item's stock-adjust history —
+      // they already show as Load Adjust in Scan History.
+      `COALESCE(sm.source, '') <> 'loading'`,
+    ];
+    const params: any[] = [barcode];
+    if (plant) { params.push(plant); conditions.push(`LOWER(TRIM(sm.plant)) = LOWER(TRIM($${params.length}))`); }
+    if (allowed !== null) { params.push(allowed); conditions.push(`LOWER(sm.plant) = ANY($${params.length}::text[])`); }
+    // The period, when the page is showing one: same from/to the stock report uses.
+    const from = typeof req.query.from === 'string' && req.query.from.trim() ? req.query.from.trim() : '';
+    const to = typeof req.query.to === 'string' && req.query.to.trim() ? req.query.to.trim() : '';
+    if (from) { params.push(from); conditions.push(`sm.created_at::date >= $${params.length}::date`); }
+    if (to) { params.push(to); conditions.push(`sm.created_at::date <= $${params.length}::date`); }
+
+    const { rows } = await pool.query(
+      `SELECT sm.id, sm.barcode, sm.plant, sm.qty, sm.extra_qty AS "extraQty", sm.reason,
+              sm.created_at AS "at", sm.created_by_code AS "byCode",
+              (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "byName",
+              COALESCE(sm.origin, CASE WHEN sm.source = 'manual' THEN 'page' ELSE 'operation' END) AS origin
+       FROM stock_movements sm
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY sm.created_at DESC, sm.id DESC
+       LIMIT 200`,
+      params,
+    );
+    return res.json({ items: rows });
+  } catch (error) {
+    console.error('Error listing stock adjustments:', error);
+    return res.status(500).json({ message: 'Failed to load the adjustment history' });
+  }
+});
+
 // ── Plant-wise stock (Overall Stock page) ─────────────────────────────────
 // Reads the live per-plant running totals from product_plant_stock (one row per
 // barcode+plant), enriched with product specs. Access is plant-scoped: admin/
@@ -1543,7 +1525,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     const inPeriod = (dateExpr: string) => `(${dateExpr} >= $1::date AND ($2::date IS NULL OR ${dateExpr} <= $2::date))`;
     const sourceSql = `(
       WITH purchase_rows AS (
-        SELECT sm.barcode, sm.plant, sm.qty, sm.extra_qty, sm.product_id, sm.created_at,
+        SELECT sm.barcode, sm.plant, sm.qty, sm.extra_qty, sm.product_id, sm.created_at, sm.type,
+               COALESCE(sm.origin, CASE WHEN sm.source = 'manual' THEN 'page' ELSE 'operation' END) AS origin,
                COALESCE(
                  CASE WHEN sm.source = 'unloading' THEN uis.order_date::date ELSE ois.order_date::date END,
                  sm.created_at::date
@@ -1553,21 +1536,46 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         LEFT JOIN unload_import_sessions uis ON sm.source = 'unloading' AND uis.id = sm.session_id
         WHERE sm.source IS DISTINCT FROM 'loading' AND sm.type <> 'dispatch'
       ),
+      -- Purchase is what CAME IN (type = 'receive': order scanning and unloading). Everything
+      -- else on the purchase side is a correction — Clear Stock, a voided scan's rollback, a
+      -- deleted CSV's rollback, a manual Adjust, an exchange — and those are signed, so folding
+      -- them into Purchase made a big clear read as a NEGATIVE purchase, which nobody purchased.
+      -- They are summed separately as Adjust and still count towards Closing, so the row adds up:
+      --   Closing = Opening + Purchase + Adjust - Sale.
       purchases AS (
         SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,
-               COALESCE(SUM(qty) FILTER (WHERE d < $1::date), 0)::int AS opening_purchase,
-               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')}), 0)::int AS purchase,
+               -- Opening leaves the Settings-wide actions out for the same reason Closing does
+               -- (below): a bulk clear run last month is not what this plant "had" at the start
+               -- of the period as far as the day-to-day ledger is concerned.
+               COALESCE(SUM(qty) FILTER (WHERE d < $1::date AND origin <> 'settings'), 0)::int AS opening_purchase,
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type = 'receive'), 0)::int AS purchase,
+               -- Corrections a person or an ordinary action made (a page edit, a voided scan, a
+               -- deleted CSV, an exchange) — the ones worth reading item by item.
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin <> 'settings'), 0)::int AS adjust,
+               -- Settings-wide actions (Clear Stock). Their own figure, so one clear across the
+               -- whole catalogue can't bury the corrections above.
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin = 'settings'), 0)::int AS system_adjust,
                COALESCE(SUM(extra_qty) FILTER (WHERE ${inPeriod('d')}), 0)::int AS extra,
                MAX(created_at) FILTER (WHERE qty > 0) AS last_arrived,
                MAX(product_id) AS product_id
         FROM purchase_rows
         GROUP BY 1, 2
       ),
+      -- A load is attributed to the plant the boxes were actually TAKEN FROM, not to the plant on
+      -- the slip. Loading draws on the whole state pool (server/lib/statePool.ts): a Valsad order
+      -- can legitimately be filled from Vadodra's stock, and every such pull is recorded in
+      -- loading_stock_pulls. Counting the sale against the slip's plant left that plant with a
+      -- sale it never had stock for — a negative closing — while the plant the boxes really came
+      -- from kept a purchase it no longer held. An event from before that table existed (no pull
+      -- rows) still falls back to its own plant and full quantity, exactly as before.
       sale_rows AS (
-        SELECT lse.barcode, lse.plant, lse.total_qty,
+        SELECT lse.barcode,
+               COALESCE(sp.source_plant, lse.plant) AS plant,
+               COALESCE(sp.qty, lse.total_qty)      AS total_qty,
                COALESCE(ps.order_date::date, lse.scanned_at::date) AS d
         FROM loading_scan_events lse
         LEFT JOIN proforma_slips ps ON ps.order_number = lse.order_number
+        LEFT JOIN loading_stock_pulls sp ON sp.loading_scan_event_id = lse.id
         WHERE lse.voided IS NOT TRUE AND lse.barcode IS NOT NULL AND lse.plant IS NOT NULL
       ),
       sales AS (
@@ -1580,10 +1588,19 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       SELECT COALESCE(pu.barcode, sa.barcode) AS barcode,
              COALESCE(pu.plant, sa.plant) AS plant,
              COALESCE(pu.purchase, 0) AS in_stock,
+             COALESCE(pu.adjust, 0) AS adjust_qty,
+             COALESCE(pu.system_adjust, 0) AS system_qty,
              COALESCE(pu.extra, 0) AS extra_qty,
              COALESCE(pu.opening_purchase, 0) - COALESCE(sa.opening_sale, 0) AS opening_stock,
              COALESCE(sa.sale, 0) AS sale_qty,
-             COALESCE(pu.opening_purchase, 0) - COALESCE(sa.opening_sale, 0) + COALESCE(pu.purchase, 0) - COALESCE(sa.sale, 0) AS closing_stock,
+             COALESCE(pu.opening_purchase, 0) - COALESCE(sa.opening_sale, 0)
+               -- Closing counts what the WORK did: receipts, sales and the corrections people
+               -- made (a page edit, a void rollback, an exchange). It deliberately leaves out the
+               -- Settings-wide actions — Clear Stock and Remove All Operations Data — which are
+               -- resets, not movements of goods. Their figure is still on screen in the System
+               -- column, so the clear is never hidden, only kept out of the arithmetic.
+               + COALESCE(pu.purchase, 0) + COALESCE(pu.adjust, 0)
+               - COALESCE(sa.sale, 0) AS closing_stock,
              pu.last_arrived AS updated_at,
              pu.product_id
       FROM purchases pu
@@ -1621,6 +1638,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         pps.barcode,
         pps.plant,
         pps.in_stock                                       AS "inStock",
+        pps.adjust_qty                                     AS "adjustQty",
+        pps.system_qty                                     AS "systemQty",
         pps.extra_qty                                      AS "extraQty",
         pps.opening_stock                                  AS "openingStock",
         pps.sale_qty                                       AS "saleQty",
@@ -1693,6 +1712,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         brand: r.brand ?? null,
         itemsPerPallet: definedIpp || null,
         inStock,
+        // Signed corrections in the period (Clear Stock, rollbacks, manual Adjust, exchange) —
+        // kept apart from Purchase so that column only ever shows stock that came in.
+        adjustQty: Number(r.adjustQty) || 0,
+        // Settings-wide corrections (Clear Stock) — its own column, hidden by default.
+        systemQty: Number(r.systemQty) || 0,
         extraQty: Number(r.extraQty) || 0,
         openingStock: Number(r.openingStock) || 0,
         saleQty: Number(r.saleQty) || 0,
@@ -1716,12 +1740,15 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // visible before a single box is scanned).
     // Same per-state pallet-size resolution as the main query above (plants.state, not a
     // plant-name guess) — plantStateByName was already fetched up front.
+    // Called once per source (receiving CSVs, then unloading CSVs), so it ADDS rather than
+    // replaces — an item ordered on both sides would otherwise keep only whichever ran last.
+    const expectedRowKeysListed = new Set<string>();
     async function applyExpectedRows(expRows: any[]) {
       const unmatchedBarcodes = new Set<string>();
       for (const r of expRows) {
         const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
         const qty = Number(r.expectedQty) || 0;
-        expectedByKey.set(key, qty);
+        expectedByKey.set(key, (expectedByKey.get(key) ?? 0) + qty);
         expectedTotal += qty;
         if (r.barcode) unmatchedBarcodes.add(r.barcode);
       }
@@ -1739,6 +1766,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       for (const r of expRows) {
         const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
         if (items.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key)) continue;
+        if (expectedRowKeysListed.has(key)) continue;   // already listed by the other source
+        expectedRowKeysListed.add(key);
         const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
         const state = plantStateByName.get((r.plant ?? '').toLowerCase());
         const sapCode = p ? (state === 'GJ' ? (p.gj_sap ?? p.sap_code) : state === 'MP' ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
@@ -1770,6 +1799,28 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         HAVING SUM(oii.quantity) <> 0
       `, expParams);
       await applyExpectedRows(expRows);
+    }
+
+    // Unloading's CSVs are the OTHER half of what is expected to come in, and the Purchase column
+    // beside this one already counts what unloading actually received (stock_movements with
+    // source = 'unloading'). Leaving them out here made Expected look short against Purchase, and
+    // against a hand-total of "the receiving CSVs plus the unloading CSVs". Same shape, same date
+    // rule (the batch's own order date), same plant scope.
+    {
+      const uexpParams: any[] = [periodStart];
+      const uexpConds: string[] = ['uis.order_date >= $1', 'uis.is_deleted = false'];
+      if (periodEnd) { uexpParams.push(periodEnd); uexpConds.push(`uis.order_date <= $${uexpParams.length}`); }
+      if (allowed !== null) { uexpParams.push(allowed); uexpConds.push(`LOWER(uii.plant) = ANY($${uexpParams.length}::text[])`); }
+      if (plantFilterList) { uexpParams.push(plantFilterList); uexpConds.push(`LOWER(uii.plant) = ANY($${uexpParams.length}::text[])`); }
+      const { rows: uexpRows } = await pool.query(`
+        SELECT uii.barcode, uii.plant, SUM(uii.quantity)::int AS "expectedQty"
+        FROM unload_import_items uii
+        JOIN unload_import_sessions uis ON uis.id = uii.session_id
+        WHERE ${uexpConds.join(' AND ')}
+        GROUP BY uii.barcode, uii.plant
+        HAVING SUM(uii.quantity) <> 0
+      `, uexpParams);
+      await applyExpectedRows(uexpRows);
     }
 
     // ── Expected Sale — sum of Proforma Slip quantities (what is PLANNED to go out; the real Sale
@@ -1844,6 +1895,14 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       await applySaleRows(saleRows);
     }
 
+    // What the period's work did: stock in, plus the corrections people made, minus what was
+    // loaded out. Settings-wide actions (Clear Stock, Remove All Operations Data) are deliberately
+    // NOT in here — they are resets, not goods moving, and they have their own System column.
+    // Defined once and used by both places that produce a Closing figure; they drifted apart
+    // before, and the silent one won.
+    const closingOf = (opening: number, purchase: number, adjust: number, sale: number) =>
+      opening + purchase + adjust - sale;
+
     const hasExpected = true;
     const ledgerRows = [...items, ...expectedOnlyRows, ...saleOnlyRows].map((it: any) => {
       const key = `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}`;
@@ -1856,7 +1915,10 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       // Rows added only for Expected / Expected Sale carry no ledger figures — all zero.
       const openingStock = Number(it.openingStock) || 0;
       const saleQty = Number(it.saleQty) || 0;
-      const closingStock = openingStock + (Number(it.inStock) || 0) - saleQty;
+      // THE definition of Closing, and the only one — see closingOf's comment. This pass used to
+      // recompute it as opening + purchase − sale, which quietly dropped Adjust and overwrote the
+      // figure the query had already worked out correctly.
+      const closingStock = closingOf(openingStock, Number(it.inStock) || 0, Number(it.adjustQty) || 0, saleQty);
       return {
         ...it,
         expectedQty,
@@ -1876,7 +1938,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // anything expected / planned to sell. A row whose stock merely went in and back out with
     // nothing else (Clear Stock, a voided scan, an adjustment back to zero) is hidden.
     const itemsWithExpected = ledgerRows.filter((it: any) =>
-      it.closingStock !== 0 || it.saleQty !== 0 || (it.expectedQty ?? 0) !== 0 || (it.expectedSaleQty ?? 0) !== 0,
+      it.closingStock !== 0 || it.saleQty !== 0 || (it.adjustQty ?? 0) !== 0 || (it.systemQty ?? 0) !== 0
+      || (it.expectedQty ?? 0) !== 0 || (it.expectedSaleQty ?? 0) !== 0,
     );
     const saleTotal = itemsWithExpected.reduce((sum: number, it: any) => sum + (Number(it.saleQty) || 0), 0);
 

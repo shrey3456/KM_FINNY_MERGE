@@ -69,6 +69,9 @@ type MvRawItem = {
   // The item's real GJ/MP PLT pack size (0/absent when not configured) — same informational
   // field as realPackSize elsewhere on this page, resolved server-side.
   itemsPerPallet?: number;
+  // Inventory Sr. No (products.new_sr), resolved server-side from the SAME product row the pack
+  // size came from — a barcode can sit on more than one row, one per plant.
+  srNo?: string | null;
 };
 type MvFile = { sessionId: number; csvFileName: string; plant: string; items: MvRawItem[] };
 type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
@@ -83,6 +86,9 @@ type MvMergedItem = {
   barcode: string | null; itemName: string | null; sapCode: string | null;
   quantity: number; scannedQty: number; extraQty: number; itemsPerPallet: number;
   isExtraOnly: boolean; lastScannedAt: string | null;
+  // Null for an item with no Product Master row (an extra scanned against a barcode nobody has
+  // catalogued) — those sort last rather than ahead of every real item.
+  srNo: string | null;
 };
 
 // Matches GET /api/order-import/master-view/item-history.
@@ -124,7 +130,10 @@ function fmtIST(value: string | Date | null | undefined): string {
   const d = value instanceof Date ? value : new Date(value);
   if (isNaN(d.getTime())) return "—";
   return d.toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true,
+    timeZone: "Asia/Kolkata", day: "numeric", month: "short",
+    // Seconds included: scans land seconds apart on a busy platform, and without them two rows
+    // of the same item read as the same moment with no way to tell which came first.
+    hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
   });
 }
 
@@ -481,7 +490,7 @@ export default function ScanViewer() {
           g = {
             barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
             quantity: 0, scannedQty: 0, extraQty: 0, itemsPerPallet: 0,
-            isExtraOnly: true, lastScannedAt: null,
+            isExtraOnly: true, lastScannedAt: null, srNo: null,
           };
           groups.set(key, g);
         }
@@ -492,6 +501,7 @@ export default function ScanViewer() {
         if (!g.itemName && item.itemName) g.itemName = item.itemName;
         if (!g.sapCode && item.sapCode) g.sapCode = item.sapCode;
         if (!g.itemsPerPallet && item.itemsPerPallet) g.itemsPerPallet = item.itemsPerPallet;
+        if (!g.srNo && item.srNo) g.srNo = item.srNo;
         if (item.lastScannedAt && (!g.lastScannedAt || new Date(item.lastScannedAt) > new Date(g.lastScannedAt))) {
           g.lastScannedAt = item.lastScannedAt;
         }
@@ -612,6 +622,15 @@ export default function ScanViewer() {
   // shares one order date, so filtering on it can only ever keep all rows or none. Declared here,
   // below stvsByBarcode/stvOptions, because the STV column's options and accessor read them.
   const [mvColumnConditions, setMvColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("scanViewer:mvColumnFilters", {});
+  // The sort is a working preference like the filters beside it, so it is kept the same way —
+  // leave the page, come back, it is still sorted how you left it. Owned here rather than inside
+  // the table so the chip below can clear it in one click; the table just draws the arrow.
+  const [mvSort, setMvSort] = usePersistentFilter<{ columnId: string; direction: "asc" | "desc" } | null>("scanViewer:mvSort", null);
+  const cycleMvSort = (columnId: string) =>
+    setMvSort((cur) =>
+      !cur || cur.columnId !== columnId ? { columnId, direction: "asc" }
+      : cur.direction === "asc" ? { columnId, direction: "desc" }
+      : null);   // third click clears it, same as the table's own cycle
   const mvStatusLabel = (i: MvMergedItem) => {
     const { received, exp } = mvRowState(i);
     return i.isExtraOnly ? "Extra" : received >= exp && exp > 0 ? "Received" : received > 0 ? "Partial" : "Pending";
@@ -624,7 +643,21 @@ export default function ScanViewer() {
     Array.from(new Set(allMvItems.map(pick)))
       .sort((a, b) => a - b)
       .map((v) => ({ value: String(v), label: decimals ? v.toFixed(decimals) : v.toLocaleString() }));
+  // Sr No as a sortable value: the numeric part when there is one, otherwise a very large number
+  // so items without an Sr (extras scanned against an uncatalogued barcode) always land at the
+  // bottom instead of heading the list.
+  const MV_NO_SR = Number.MAX_SAFE_INTEGER;
+  const mvSrSortValue = (row: MvMergedItem) => {
+    const raw = (row.srNo ?? "").trim();
+    if (!raw) return MV_NO_SR;
+    const n = Number(raw.replace(/[^0-9.-]/g, ""));
+    return Number.isFinite(n) ? n : MV_NO_SR;
+  };
+
   const mvFilterColumns: FilterableColumn<MvMergedItem>[] = [
+    // Same filter engine the rest of this table and Scan History use — value checklist plus
+    // equals / greater / less / between.
+    { id: "srNo", label: "Sr No", filterType: "number", options: mvNumberOptions((i) => mvSrSortValue(i) === MV_NO_SR ? 0 : mvSrSortValue(i)), accessor: (i) => (mvSrSortValue(i) === MV_NO_SR ? null : mvSrSortValue(i)) },
     { id: "item", label: "Item", filterType: "text", options: mvTextOptions((i) => i.itemName), accessor: (i) => i.itemName },
     { id: "barcode", label: "Barcode / SAP", filterType: "text", options: mvTextOptions((i) => i.barcode), accessor: (i) => i.barcode },
     { id: "exp", label: "Exp Qty", filterType: "number", options: mvNumberOptions((i) => mvRowState(i).exp), accessor: (i) => mvRowState(i).exp },
@@ -645,7 +678,28 @@ export default function ScanViewer() {
   const mvConditionList = Object.values(mvColumnConditions);
   // search → stat tile → column filters: every Master View layout (desktop table, kiosk table,
   // card list) and its closing totals read from this one list.
-  const mvFiltered = mvStatFiltered.filter((i) => matchAllConditions(i, mvConditionList, mvFilterColumns));
+  const mvFilteredRows = mvStatFiltered.filter((i) => matchAllConditions(i, mvConditionList, mvFilterColumns));
+  // Sorted here rather than inside the table (sortMode="external" below), for two reasons: the
+  // chip in the toolbar can then drop a sort in one click, and rows with no value — an item with
+  // no Sr — can be pinned to the bottom instead of sorting as if they were empty. Every Master
+  // View layout reads this one list, so the table, the kiosk table and the card list agree.
+  // With no sort applied the natural order stands: most recently scanned first.
+  const mvFiltered = (() => {
+    if (!mvSort) return mvFilteredRows;
+    const column = mvFilterColumns.find((c) => c.id === mvSort.columnId);
+    if (!column) return mvFilteredRows;
+    const dir = mvSort.direction === "asc" ? 1 : -1;
+    return [...mvFilteredRows].sort((a, b) => {
+      const va = column.accessor(a) as any;
+      const vb = column.accessor(b) as any;
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
+  })();
   const setMvCondition = (id: string, condition: FilterCondition) =>
     setMvColumnConditions((prev) => ({ ...prev, [id]: condition }));
   const clearMvCondition = (id: string) =>
@@ -1061,12 +1115,14 @@ export default function ScanViewer() {
             </Select>
           </div>
         )}
-        <div className="max-h-72 overflow-y-auto border border-gray-200">
+        {/* Grows with the window instead of stopping at a fixed 288px — the list is the whole
+            point of this panel, and it used to show a handful of rows with empty space beneath. */}
+        <div className={`overflow-y-auto border border-gray-200 ${isQuarterTurn ? "max-h-[70vw]" : "max-h-[70vh]"}`}>
           <table className="w-full table-fixed border-collapse text-xs">
             <thead>
               <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
                 <th className="w-7 border-r border-gray-200 px-2 py-2 font-semibold">#</th>
-                <th className="w-[122px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
+                <th className="w-[150px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Order</th>
                 <th className="w-14 border-r border-gray-200 px-2 py-2 text-center font-semibold">Qty</th>
@@ -1376,21 +1432,27 @@ export default function ScanViewer() {
     // Same leading % ring and separate Barcode / SAP column as the Scan tab and the Scan Order
     // page, so all three tables carry an identical column set.
     {
-      id: "state",
-      header: <CircularProgress percent={mvPct} size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff" />,
-      width: 28,
-      minWidth: 28,
-      align: "center",
+      // Inventory Sr. No, where the per-row % ring used to be. The ring said the same thing the
+      // row's own Received/Remain columns already say, while the Sr is the number people read
+      // items by off a printed list — and the order's overall % is still above the table in the
+      // progress readout. Master View only: the Scan tab and Unloading keep their rings.
+      id: "srNo",
+      header: mvColumnHeader("srNo", "Sr"),
+      width: 64,
+      minWidth: 48,
+      align: "right",
       hideable: false,
       totalable: false,
-      // px-0.5: the ring is only 20px, so default cell padding would cost more width than it.
-      headerClassName: "px-0.5",
-      cellClassName: "align-top px-0.5",
-      render: (row) => {
-        if (row.isExtraOnly) return <AlertTriangle className="mx-auto h-4 w-4 text-orange-500" />;
-        const { exp, received } = mvRowState(row);
-        return <CircularProgress percent={exp > 0 ? Math.min(100, Math.round((Math.min(received, exp) / exp) * 100)) : 0} size={20} strokeWidth={2} />;
-      },
+      sortable: true,
+      // Sorted as a NUMBER when it looks like one, so 9 comes before 10 rather than after it,
+      // with anything unparseable (and every item that has no Sr at all) pushed to the end.
+      accessor: (row) => mvSrSortValue(row),
+      cellClassName: `align-top tabular-nums ${cellBorder}`,
+      render: (row) => (
+        <span className={row.srNo ? "font-semibold text-gray-700" : "text-gray-300"}>
+          {row.srNo ?? "—"}
+        </span>
+      ),
     },
     {
       id: "item",
@@ -2389,6 +2451,23 @@ export default function ScanViewer() {
                     Clear all
                   </Button>
                 )}
+                {/* A sort is as much "something you applied" as a filter is, so it gets the same
+                    kind of chip — and the same one-click way out, instead of having to find the
+                    right header and click it the right number of times. */}
+                {mvSort && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-[#001d6e]/20 bg-[#001d6e]/5 px-2 py-0.5 text-xs text-[#001d6e]">
+                    Sorted by {mvFilterColumns.find((c) => c.id === mvSort.columnId)?.label ?? mvSort.columnId}
+                    {" "}{mvSort.direction === "asc" ? "↑" : "↓"}
+                    <button
+                      type="button"
+                      className="rounded-full p-0.5 hover:bg-[#001d6e]/10"
+                      title="Remove this sort"
+                      onClick={() => setMvSort(null)}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                )}
                 <CollapsibleSearch value={search} onChange={setSearch} placeholder="Search by name or barcode…" />
               </>
             }
@@ -2404,6 +2483,9 @@ export default function ScanViewer() {
                 columnOrder={mvColumnOrder}
                 onColumnOrderChange={setMvColumnOrder}
                 data={mvFiltered}
+                sortMode="external"
+                sortState={mvSort}
+                onSortColumnClick={cycleMvSort}
                 // A stable id for every row. The old Math.random() fallback gave rows without a barcode a
                 // new id on every render, so React rebuilt them each time — including on every mouse
                 // move while dragging a column edge.
@@ -3039,7 +3121,9 @@ function UnloadingViewerSection({
         ) : (uHistoryQuery.data?.items?.length ?? 0) === 0 ? (
           <p className="py-4 text-center text-sm text-gray-400">No unloading history yet for this item.</p>
         ) : (
-          <div className="max-h-[300px] overflow-y-auto border border-gray-300">
+          // Grows with the window rather than stopping at a fixed 300px. This section has no
+          // rotation state of its own, so it keeps the plain viewport-height cap.
+          <div className="max-h-[70vh] overflow-y-auto border border-gray-300">
             <table className="w-full border-collapse text-xs">
               <thead>
                 <tr className="sticky top-0 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">

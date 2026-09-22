@@ -1453,10 +1453,17 @@ async function writeScanEvents(
     forceAllExtra: boolean;
     // A qty edit rather than a fresh scan — marks the corrected event(s) as "Scan Adjust".
     isAdjust?: boolean;
+    // A correction keeps the ORIGINAL scan's date and time (the boxes arrived when they arrived)
+    // and records when the correction itself was made. Left unset by a live scan, which is simply
+    // happening now.
+    scannedAt?: Date | string | null;
+    adjustedAt?: Date | string | null;
   },
 ): Promise<{ events: any[]; updatedItem: any; orderQty: number; extraQty: number }> {
   const { sessionId, scanItem, totalQty, itemsPerPallet, barcode, resolvedItemName, stv, userCode, userName, forceAllExtra } = params;
   const isAdjust = params.isAdjust === true;
+  const scannedAt = params.scannedAt ?? null;   // null → the column default (now)
+  const adjustedAt = params.adjustedAt ?? null;
   const splitPallets = (q: number) => ({
     pallets: itemsPerPallet > 0 ? Math.floor(q / itemsPerPallet) : q,
     looseQty: itemsPerPallet > 0 ? q % itemsPerPallet : 0,
@@ -1476,12 +1483,13 @@ async function writeScanEvents(
     const orderEventResult = await client.query(
       `INSERT INTO order_scan_events
          (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-          items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name,
+          scanned_at, adjusted_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),$15)
        RETURNING *`,
       [sessionId, scanItem.id, barcode, resolvedItemName,
        part.pallets, part.looseQty, orderQty, itemsPerPallet, false, isAdjust,
-       stv ?? null, userCode, userName],
+       stv ?? null, userCode, userName, scannedAt, adjustedAt],
     );
     events.push(orderEventResult.rows[0]);
 
@@ -2299,6 +2307,10 @@ router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res
       userName: event.scanned_by_name,
       forceAllExtra: false,
       isAdjust: true,
+      // The corrected row stands in for the original scan, so it keeps that scan's own time and
+      // records the correction's time separately.
+      scannedAt: event.scanned_at,
+      adjustedAt: new Date(),
     });
 
     if (plant) {

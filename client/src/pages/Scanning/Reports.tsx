@@ -102,6 +102,10 @@ type ScanHistoryItem = {
   scannedByCode: string | null;
   scannedByName: string | null;
   scannedAt: string;
+  // Set only on a row that was CORRECTED: scannedAt stays the original scan's own time, this is
+  // when the correction was made. A qty edit writes a replacement row, so without both times a
+  // correction made today to a scan from the 16th read as if it had been scanned today.
+  adjustedAt?: string | null;
   orderName: string;
   orderDate: string | null;
   srNo: string | null;
@@ -446,6 +450,24 @@ const Reports = () => {
         { value: "regular", label: "Unload Regular" },
         { value: "extra", label: "Unload Extra" },
         { value: "adjust", label: "Unload Adjust" },
+      ]
+    : historySource === "all"
+    // All Events lists every source at once, so a plain "Regular" here would mean regular from
+    // ANY of them — which is exactly why picking "Scan Regular" used to show Load Regular rows
+    // further down the list. Each option names its own source and the server matches both.
+    ? [
+        { value: "scan:regular", label: "Scan Regular" },
+        { value: "scan:extra", label: "Scan Extra" },
+        { value: "scan:empty", label: "Scan Empty Box" },
+        { value: "scan:adjust", label: "Scan Adjust" },
+        { value: "loading:regular", label: "Load Regular" },
+        { value: "loading:extra", label: "Load Extra" },
+        { value: "loading:adjust", label: "Load Adjust" },
+        { value: "unloading:regular", label: "Unload Regular" },
+        { value: "unloading:extra", label: "Unload Extra" },
+        { value: "unloading:adjust", label: "Unload Adjust" },
+        { value: "stock:exchange", label: "Stock Exchange" },
+        { value: "stock:adjust", label: "Stock Adjust" },
       ]
     : [
         { value: "regular", label: "Scan Regular" },
@@ -1100,10 +1122,26 @@ const Reports = () => {
     {
       id: "time",
       header: columnHeader("time", "Time"),
-      width: 130,
+      width: 150,
       accessor: (row) => row.scannedAt,
       cellClassName: "whitespace-nowrap text-gray-500",
-      render: (row) => (row.scannedAt ? format(new Date(row.scannedAt), "MMM d, h:mm a") : dash),
+      // The scan's own time on top; underneath, when it was corrected or voided — so a correction
+      // never hides the day the boxes were actually scanned.
+      render: (row) => (
+        <>
+          <span className="block">{row.scannedAt ? format(new Date(row.scannedAt), "MMM d, h:mm:ss a") : dash}</span>
+          {row.adjustedAt && (
+            <span className="block text-[11px] text-amber-600">
+              edited {format(new Date(row.adjustedAt), "MMM d, h:mm a")}
+            </span>
+          )}
+          {row.voided && row.voidedAt && (
+            <span className="block text-[11px] text-red-500">
+              voided {format(new Date(row.voidedAt), "MMM d, h:mm a")}
+            </span>
+          )}
+        </>
+      ),
     },
     ...(canVoidScan || canVoidLoadEvent || canVoidUnloadEvent || canRemoveEntry
       ? [

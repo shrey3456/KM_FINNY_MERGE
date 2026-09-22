@@ -11,7 +11,6 @@ import Reports from "@/pages/Scanning/Reports.tsx";
 import Users from "@/pages/Users";
 import Settings from "@/pages/Settings";
 import Purchases from "@/pages/Purchases";
-import LoadOperations from "./pages/LoadOperations"; // Renamed component
 import PrintOperations from "./pages/PrintOperationsFinal12";
 import Login from "./pages/Login";
 import ProformaSlips from "./pages/ProformaSlips";
@@ -259,7 +258,6 @@ function Router() {
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requiredPage="notion-inventory" />
         <ProtectedRoute path="/vehicle-master" component={VehicleMaster} requiredPage="vehicle-master" />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
-        <ProtectedRoute path="/load-operations" component={LoadOperations} requiredPage="load-operations" />
         <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />
         <ProtectedRoute path="/proforma-slips" component={ProformaSlips} requiredPage="proforma" />
         <ProtectedRoute path="/dispatch" component={Dispatch} requiredPage="dispatch" />

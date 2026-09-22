@@ -419,6 +419,62 @@ app.use((req, res, next) => {
     for (const table of ['order_scan_events', 'loading_scan_events', 'unload_scan_events', 'stock_movements']) {
       await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS hidden_in_history BOOLEAN DEFAULT false`);
     }
+    // adjusted_at — when a scan was CORRECTED, kept apart from scanned_at, when it happened.
+    // A qty edit voids the old row and writes a fresh one (the FIFO credit machinery makes an
+    // in-place update unsafe), and that fresh row used to be stamped with the edit's own time —
+    // so a correction made today to a scan from the 16th read as if the boxes arrived today, and
+    // the real date was lost from the history. The corrected row now carries the ORIGINAL scan
+    // time in scanned_at and the edit time here, so both are on screen.
+    for (const table of ['order_scan_events', 'loading_scan_events', 'unload_scan_events']) {
+      await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS adjusted_at TIMESTAMP`);
+    }
+    // Settings' own ledger lines (Clear Stock, Remove All Operations Data) write one row per item
+    // — hundreds at a time — and they filled Scan History with "Stock Adjust" entries nobody
+    // scanned. New ones are written hidden; the ones past runs already left behind are hidden here.
+    // They stay in stock_movements on purpose: Overall Stock sums Opening/Purchase/Sale out of that
+    // table, so deleting them would make it show cleared stock as still on hand.
+    {
+      const { rowCount } = await pool.query(`
+        UPDATE stock_movements SET hidden_in_history = true
+        WHERE type = 'adjust' AND NOT COALESCE(hidden_in_history, false)
+          AND (reason LIKE 'Clear Stock (Settings)%' OR reason LIKE 'Remove operations data (Settings)%')`);
+      if (rowCount) console.log(`[migration] hid ${rowCount} Settings stock-correction row(s) from Scan History`);
+    }
+    // Remove All Operations Data used to write a minus ledger line per item AND delete the very
+    // rows that line was offsetting, in the same run. What is left is a correction with nothing
+    // to correct: Stock Overview adds up the survivors and reports a purchase of minus a million
+    // for stock that no longer has any record of arriving. The action no longer writes them (it
+    // corrects the stock directly), so the orphans from earlier runs are cleared out here.
+    // Clear Stock's own lines are deliberately NOT touched — that action leaves its purchases in
+    // place, so its minus line is what explains the clear.
+    {
+      const { rowCount } = await pool.query(
+        `DELETE FROM stock_movements WHERE type = 'adjust' AND reason LIKE 'Remove operations data (Settings)%'`,
+      );
+      if (rowCount) console.log(`[migration] removed ${rowCount} orphaned "Remove operations data" ledger row(s)`);
+    }
+    // stock_movements.origin — WHO made a correction, as a real value rather than something to be
+    // guessed from the reason text (which changes the moment a message is reworded, or when the
+    // person types their own):
+    //   'page'      a per-item edit from Stock Overview's Adjust dialog
+    //   'operation' a correction a normal action produced — a voided scan, a deleted CSV, an
+    //               exchange, a loading/unloading qty edit
+    //   'settings'  a Settings-wide action: Clear Stock (Remove All Operations Data no longer
+    //               writes any ledger line at all)
+    // Stock Overview keeps the first two together as Adjust and the third in its own column, so a
+    // bulk clear can never swamp the corrections an operator actually made.
+    await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS origin TEXT`);
+    {
+      const { rowCount } = await pool.query(`
+        UPDATE stock_movements SET origin = CASE
+            WHEN reason LIKE 'Clear Stock (Settings)%'
+              OR reason LIKE 'Remove operations data (Settings)%' THEN 'settings'
+            WHEN source = 'manual' THEN 'page'
+            ELSE 'operation'
+          END
+        WHERE origin IS NULL AND type IN ('adjust', 'exchange')`);
+      if (rowCount) console.log(`[migration] tagged ${rowCount} existing stock correction(s) with where they came from`);
+    }
     await pool.query(`
       UPDATE loading_scan_events lse SET is_adjust = true
       WHERE lse.is_adjust IS NOT TRUE AND (

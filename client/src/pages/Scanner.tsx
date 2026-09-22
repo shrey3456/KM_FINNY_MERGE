@@ -33,8 +33,9 @@ const Scanner = () => {
         timestamp: Date.now()
       }));
       
-      // Navigate to the LoadOperations page
-      setLocation('/load-operations');
+      // Navigate to the Load Operations page. /load-operations was the retired screen and no
+      // longer exists as a route, so this pointed at nothing.
+      setLocation('/loading');
     }
   };
 

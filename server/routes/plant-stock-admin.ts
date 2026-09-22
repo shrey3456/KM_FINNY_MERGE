@@ -172,8 +172,10 @@ router.post('/plant-stock/adjust', requireAdminRole, async (req: Request, res: R
         );
       }
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)
-         VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'manual')`,
+        // origin 'page': a person adjusted this one item from Stock Overview. Kept apart from a
+        // Settings-wide clear so the Adjust column only ever shows corrections like this one.
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source, origin)
+         VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'manual','page')`,
         [barcode, productId, plant, inStockDelta, extraDelta, reason, userCode ?? null],
       );
       // Recompute the legacy cross-plant mirror from the live per-plant table.

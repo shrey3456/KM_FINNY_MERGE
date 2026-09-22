@@ -1160,47 +1160,64 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
     };
 
     const itemBarcodes = Array.from(new Set(rawItems.map((i: any) => i.barcode).filter((b: any): b is string => !!b)));
-    type PackRow = { plant: string | null; gjPlt: number; mpPlt: number };
+    // newSr rides along with the pallet size because it has to be resolved the SAME way: a
+    // barcode can sit on more than one product row, and picking a different row for the Sr than
+    // for the pallet size would label the item with a number belonging to another plant's row.
+    type PackRow = { plant: string | null; gjPlt: number; mpPlt: number; newSr: string | null };
     const packRowsByBarcode = new Map<string, PackRow[]>();
     if (itemBarcodes.length > 0) {
       const { rows: prodRows } = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, plant, gj_plt, mp_plt FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`,
+        `SELECT LOWER(barcode) AS barcode, plant, gj_plt, mp_plt, new_sr FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`,
         [itemBarcodes.map((b) => b.toLowerCase())],
       );
       for (const p of prodRows as any[]) {
         const list = packRowsByBarcode.get(p.barcode) ?? [];
-        list.push({ plant: p.plant ?? null, gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0 });
+        list.push({ plant: p.plant ?? null, gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0, newSr: p.new_sr ?? null });
         packRowsByBarcode.set(p.barcode, list);
       }
     }
-    const resolvePackSize = (sessionId: number, barcode: string | null): number => {
-      if (!barcode) return 0;
+    // Which product row a barcode means for THIS session's plant. The row for the session's own
+    // plant wins ("VAL & IND" covers Valsad and Indore alike). With no plant match, the first row
+    // that actually has a pallet size for this state is used — a duplicated barcode usually has
+    // the size filled in on only one of its rows, and picking blindly would report "no pallet
+    // size" for an item that has one. Only when no row has a size does it fall back to the first.
+    const resolveProductRow = (sessionId: number, barcode: string | null): { row: PackRow; state: string } | null => {
+      if (!barcode) return null;
       const state = stateBySession.get(sessionId);
       const rows = packRowsByBarcode.get(barcode.toLowerCase());
-      if (!rows || rows.length === 0 || !state) return 0;
+      if (!rows || rows.length === 0 || !state) return null;
       const sizeOf = (r: PackRow) => (state === 'GJ' ? r.gjPlt : state === 'MP' ? r.mpPlt : 0);
-      // The row for this session's own plant wins ("VAL & IND" covers Valsad and Indore alike).
-      // With no plant match, the first row that actually has a size for this state is used — a
-      // duplicated barcode usually has the size filled in on only one of its rows, and picking
-      // blindly would report "no pallet size" for an item that has one. Only when no row has a
-      // size does it fall back to the first row (which then reports 0, i.e. "not set").
-      const pack = rows.length === 1
+      const row = rows.length === 1
         ? rows[0]
         : rows.find((r) => statesOfPlantLabel(r.plant).has(state))
           ?? rows.find((r) => sizeOf(r) > 0)
           ?? rows[0];
-      return sizeOf(pack);
+      return { row, state };
     };
+    const resolvePackSize = (sessionId: number, barcode: string | null): number => {
+      const resolved = resolveProductRow(sessionId, barcode);
+      if (!resolved) return 0;
+      const { row, state } = resolved;
+      return state === 'GJ' ? row.gjPlt : state === 'MP' ? row.mpPlt : 0;
+    };
+    // Inventory Sr. No (products.new_sr) for the SAME row the pallet size came from, so an item
+    // can never carry one plant's Sr and another's pack size.
+    const resolveSrNo = (sessionId: number, barcode: string | null): string | null =>
+      resolveProductRow(sessionId, barcode)?.row.newSr ?? null;
 
     const allItems: Array<{
       id: number; sessionId: number; barcode: string | null; itemName: string | null;
       sapCode: string | null; quantity: number | null; expectedPallets: number | null;
       scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
-      lastScannedAt?: string | null; itemsPerPallet?: number;
+      lastScannedAt?: string | null; itemsPerPallet?: number; srNo?: string | null;
     }> = rawItems.map((item: any) => {
       const credited = item.barcode ? creditedQtyByKey.get(`${item.sessionId}::${item.barcode}`) ?? 0 : 0;
       const withCredit = credited > 0 ? { ...item, scannedQty: (item.scannedQty ?? 0) + credited } : item;
-      return { ...withCredit, itemsPerPallet: resolvePackSize(item.sessionId, item.barcode) };
+      return {
+        ...withCredit,
+        itemsPerPallet: resolvePackSize(item.sessionId, item.barcode),
+        srNo: resolveSrNo(item.sessionId, item.barcode),
+      };
     });
 
     // Group items by sessionId
@@ -1240,12 +1257,12 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       // Same every-row-kept shape as above, so an extra-only barcode entered twice is resolved by
       // plant too rather than by whichever row happened to come last.
       const { rows: extraProdRows } = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, plant, gj_plt, mp_plt FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`,
+        `SELECT LOWER(barcode) AS barcode, plant, gj_plt, mp_plt, new_sr FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`,
         [missingExtraBarcodes.map((b: any) => String(b).toLowerCase())],
       );
       for (const p of extraProdRows as any[]) {
         const list = packRowsByBarcode.get(p.barcode) ?? [];
-        list.push({ plant: p.plant ?? null, gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0 });
+        list.push({ plant: p.plant ?? null, gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0, newSr: p.new_sr ?? null });
         packRowsByBarcode.set(p.barcode, list);
       }
     }
@@ -1270,6 +1287,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         isExtra: true,
         lastScannedAt: ex.lastScannedAt ?? null,
         itemsPerPallet: resolvePackSize(ex.sessionId, ex.barcode),
+        srNo: resolveSrNo(ex.sessionId, ex.barcode),
       });
       itemsBySession.set(ex.sessionId, list);
     });
