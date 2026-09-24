@@ -35,6 +35,7 @@ import { useSidebarContext } from "@/lib/sidebarContext";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { PlantBadge } from "@/components/PlantBadge";
+import { ProductPhoto } from "@/components/ProductPhoto";
 import { apiRequest } from "@/lib/queryClient";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, parseApiErrorMessage } from "@/lib/apiError";
@@ -3182,16 +3183,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 <span className="text-2xl font-semibold">Auto scanned</span>
               </div>
               <div className="flex flex-1 gap-5 items-start pt-4">
-                <img
-                  key={osAutoScanFeedback.productId ?? osAutoScanFeedback.name}
-                  src={
-                    osAutoScanFeedback.productId != null
-                      ? `/api/products/image-by-id?id=${osAutoScanFeedback.productId}`
-                      : `/api/products/image-by-name?name=${encodeURIComponent(osAutoScanFeedback.name)}`
-                  }
-                  alt=""
+                <ProductPhoto
+                  productId={osAutoScanFeedback.productId}
+                  name={osAutoScanFeedback.name}
                   className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
-                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
                 />
                 <div className="flex-1 min-w-0 text-lg">
                   <p className="font-semibold text-gray-900 break-words text-xl">{osAutoScanFeedback.name}</p>
@@ -5359,19 +5354,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
             <div className="flex flex-col sm:flex-row">
               {osResolvedImageName && !osImageFailed && (
                 <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
-                  <img
-                    key={osResolvedImageName}
-                    // inventoryProduct's own id is stable across a rename — prefer it whenever
-                    // it's resolved; a matched CSV item has no product id of its own yet, so it
-                    // still falls back to the name lookup.
-                    src={
-                      osPending?.inventoryProduct
-                        ? `/api/products/image-by-id?id=${osPending.inventoryProduct.id}`
-                        : `/api/products/image-by-name?name=${encodeURIComponent(osResolvedImageName)}`
-                    }
-                    alt=""
+                  {/* Box shot first, product shot as the fallback — see ProductPhoto's own
+                      comment for the full cascade. inventoryProduct's id is stable across a
+                      rename; a matched CSV item with no product id yet falls back to its name. */}
+                  <ProductPhoto
+                    productId={osPending?.inventoryProduct?.id ?? null}
+                    name={osResolvedImageName}
                     className="max-h-96 w-full object-contain sm:max-h-full"
-                    onError={() => setOsImageFailed(true)}
+                    onLoadState={setOsImageFailed}
                   />
                 </div>
               )}

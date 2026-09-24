@@ -56,16 +56,23 @@ function scanTypeLabel(row: {
   // send it yet.
   const source = row.sourceKind
     ?? (row.isDispatch ? "loading" : row.isUnload ? "unloading" : row.isExchange || row.isAdjust ? "stock" : "scan");
-  const word = source === "loading" ? "Load" : source === "unloading" ? "Unload" : source === "stock" ? "Stock" : "Scan";
+  const word = source === "loading" ? "Load"
+    : source === "unloading" ? "Unload"
+    : source === "stock" ? "Stock"
+    // Godown picking on the Sort Slip page — typed in, never scanned, and it moves no stock.
+    : source === "sorting" ? "Sort"
+    : "Scan";
   const kind = row.isExchange ? "Exchange"
     : row.isAdjust ? "Adjust"
     : row.isEmptyBox ? "Empty Box"
     : row.isExtra ? "Extra"
+    : source === "sorting" ? "Pick"
     : "Regular";
   // Colour says the source at a glance; the words carry the detail.
   const className = source === "loading" ? "bg-blue-100 text-blue-800 hover:bg-blue-100"
     : source === "unloading" ? "bg-teal-100 text-teal-800 hover:bg-teal-100"
     : source === "stock" ? "bg-slate-200 text-slate-800 hover:bg-slate-200"
+    : source === "sorting" ? "bg-purple-100 text-purple-800 hover:bg-purple-100"
     : "bg-green-100 text-green-800 hover:bg-green-100";
   return { source: word, kind, label: word + " " + kind, className };
 }
@@ -404,7 +411,7 @@ const Reports = () => {
   // (server/routes/loading.ts), and Unloading's own scan history (server/routes/unloading.ts).
   // Same table/filters/export/void shell for all four; only the server-side `source` scoping
   // (isDispatch/isUnload) and a couple of labels differ.
-  const [historySource, setHistorySource] = usePersistentFilter<"all" | "receiving" | "dispatch" | "unload">("scanHistory:source", "all");
+  const [historySource, setHistorySource] = usePersistentFilter<"all" | "receiving" | "dispatch" | "unload" | "sorting">("scanHistory:source", "all");
   // Seeded from whatever was left applied last time — see HISTORY_FILTERS_KEY.
   const [historySearch,  setHistorySearch]  = useState(() => readSavedHistoryFilters().search ?? "");
   const [historyPage,    setHistoryPage]    = useState(1);
@@ -451,6 +458,9 @@ const Reports = () => {
         { value: "extra", label: "Unload Extra" },
         { value: "adjust", label: "Unload Adjust" },
       ]
+    // Picking has one kind of entry: someone said how much they took off the rack.
+    : historySource === "sorting"
+    ? [{ value: "regular", label: "Sort Pick" }]
     : historySource === "all"
     // All Events lists every source at once, so a plain "Regular" here would mean regular from
     // ANY of them — which is exactly why picking "Scan Regular" used to show Load Regular rows
@@ -468,6 +478,7 @@ const Reports = () => {
         { value: "unloading:adjust", label: "Unload Adjust" },
         { value: "stock:exchange", label: "Stock Exchange" },
         { value: "stock:adjust", label: "Stock Adjust" },
+        { value: "sorting:regular", label: "Sort Pick" },
       ]
     : [
         { value: "regular", label: "Scan Regular" },
@@ -1155,6 +1166,7 @@ const Reports = () => {
               // Same permission-pair-per-source and stock-row exclusion as Void below. A Load
               // Adjust is a +/- correction with no qty to re-edit — void it and press +/- again.
               !row.voided && scanTypeLabel(row).source !== "Stock" && !(row.isAdjust && row.isDispatch)
+              && scanTypeLabel(row).source !== "Sort"
               && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
                   onClick={() => { setEditTarget(row); setEditQty(String(row.totalQty ?? 0)); setEditStv(row.stv ?? ""); }}
@@ -1190,7 +1202,8 @@ const Reports = () => {
               // user with only one of the write-access pairs would otherwise see a Void button
               // that 403s on the row it doesn't cover. Every real scan row can be voided, including
               // the corrections; only the stock-ledger rows (manual adjust, exchange) can't.
-              !row.voided && scanTypeLabel(row).source !== "Stock" && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
+              !row.voided && scanTypeLabel(row).source !== "Stock" && scanTypeLabel(row).source !== "Sort"
+              && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
                   onClick={() => setVoidTarget(row)} title="Void this scan">
                   <Trash2 className="h-3.5 w-3.5" />
@@ -1213,17 +1226,19 @@ const Reports = () => {
               ? "Every item loaded onto a vehicle — who scanned what, when, and for which order."
               : historySource === "unload"
               ? "Every item unloaded for a vehicle + date batch — who scanned what, when, and for which vehicle."
+              : historySource === "sorting"
+              ? "Every pick made on a sort slip — who took what off the rack, when, and for which order."
               : historySource === "all"
-              ? "Every scan event across receiving, Loading, and Unloading — who scanned what, when, and where."
+              ? "Every event across receiving, Loading, Unloading and sorting — who did what, when, and where."
               : "Every individual receiving scan event — who scanned what, when, and on which order."
           }
         />
 
-        {/* Four sections, same table/filters/export/void shell underneath — only the server-side
-            `source` scoping (isDispatch/isUnload, or none at all for "all") and a couple of
-            labels differ between them. A dropdown rather than tab buttons since there are now
-            four options and "All" (the default) needs to read as just one more choice among
-            them, not a separate concept bolted on top of three tabs. */}
+        {/* Five sections, same table/filters/export/void shell underneath — only the server-side
+            `source` scoping (isDispatch/isUnload/sourceKind, or none at all for "all") and a
+            couple of labels differ between them. A dropdown rather than tab buttons since "All"
+            (the default) needs to read as just one more choice among them, not a separate concept
+            bolted on top of the rest. */}
         <Select value={historySource} onValueChange={(v) => { setHistorySource(v as typeof historySource); clearSimpleFilter("type"); }}>
           <SelectTrigger className="h-9 w-[200px] rounded-full border-gray-300 bg-white text-sm font-semibold">
             <SelectValue />
@@ -1233,6 +1248,7 @@ const Reports = () => {
             <SelectItem value="receiving">Scan History</SelectItem>
             <SelectItem value="dispatch">Load Event</SelectItem>
             <SelectItem value="unload">Unload Event</SelectItem>
+            <SelectItem value="sorting">Pick Up Event</SelectItem>
           </SelectContent>
         </Select>
 
@@ -1242,7 +1258,7 @@ const Reports = () => {
             Master View. */}
         <TableCard
           icon={History}
-          title={historySource === "dispatch" ? "Load Events" : historySource === "unload" ? "Unload Events" : historySource === "all" ? "All Events" : "Scan Events"}
+          title={historySource === "dispatch" ? "Load Events" : historySource === "unload" ? "Unload Events" : historySource === "sorting" ? "Pick Up Events" : historySource === "all" ? "All Events" : "Scan Events"}
           subtitle={
             <span className="inline-flex items-center gap-1.5">
               <span>{historyTotal > 0 ? `${historyTotal.toLocaleString()} events` : "0 events"}</span>

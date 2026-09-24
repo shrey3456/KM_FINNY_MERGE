@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
-import { ProformaSlipAPIImport } from "@/components/ProformaSlipAPIImport";
 import { ProformaSlipNotionSync } from "@/components/ProformaSlipNotionSync";
 import PageHeader from "../components/PageHeader";
 import { Lock, Unlock } from "lucide-react";
@@ -2156,27 +2155,6 @@ export default function ProformaSlips() {
           {/* Admin/Super/Write Access only buttons */}
           {(isAdminOrSuper || isReadWriteUser) && !isread && (
             <>
-              <Dialog>
-                <DialogTrigger asChild>
-                  <Button variant="outline" size="sm">
-                    <FileUp className="mr-2 h-4 w-4" /> Import Notion
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="max-w-2xl">
-                  <DialogHeader>
-                    <DialogTitle>Import Proforma Slips from Notion</DialogTitle>
-                    <DialogDescription>
-                      Fetch proforma slip data directly from your Notion database.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <ProformaSlipAPIImport
-                    onImportSuccess={() => {
-                      queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
-                    }}
-                  />
-                </DialogContent>
-              </Dialog>
-
               <Dialog>
                 <DialogTrigger asChild>
                   <Button variant="outline" size="sm">

@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, Bell, CheckCircle2, ChevronDown, CloudDownload, Columns2, Loader2,
-  Pencil, Plus, RefreshCw, Search, Trash2, Truck, X, Zap,
+  AlertTriangle, ArrowDown, ArrowUp, Bell, CheckCircle2, ChevronDown, ChevronsUpDown,
+  CloudDownload, Columns2, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,12 @@ import { hasPageWriteAccess } from "@/lib/permissions";
 import type { VehicleInfo } from "@shared/schema";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
+import {
+  AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton,
+} from "@/components/filters/ColumnFilterChip";
+import {
+  isConditionEmpty, matchAllConditions, type FilterableColumn, type FilterCondition,
+} from "@/lib/columnFilters";
 
 // ─── Types (mirror server/services/notionVehicleSync.ts + vehicle-info route responses) ───
 type EnrichedVehicle = VehicleInfo & { lastEditedByName: string | null; createdByName: string | null };
@@ -79,6 +85,14 @@ const vehicleColumns: VehicleColumn[] = [
 
 const ALL_KEYS = new Set(vehicleColumns.map((c) => String(c.key)));
 
+// A vehicle number or Sr. No. reads as text with digits inside it — plain string comparison
+// sorts "10" before "2". Padding every digit run to the same width first fixes that without
+// needing to know the format in advance, which is what lets one function sort a plate number
+// ("GJ-5-AB-99" before "GJ-12-AB-1"), a Sr. No. and a plain word column all correctly.
+function naturalSortKey(value: string): string {
+  return value.toUpperCase().replace(/\d+/g, (digits) => digits.padStart(8, "0"));
+}
+
 function cellValue(vehicle: EnrichedVehicle, key: keyof EnrichedVehicle): string {
   const value = vehicle[key];
   if (value === null || value === undefined || value === "") return "-";
@@ -116,6 +130,17 @@ export default function VehicleMaster() {
   const admin = isAdminOrSuper();
 
   const [search, setSearch] = usePersistentFilter("vehicleMaster:search", "");
+  // Sorted by Vehicle No by default; any column header can be clicked to sort by that one
+  // instead, cycling asc → desc → back to the Vehicle No default (never a null "no sort" state,
+  // since an unsorted list here would just look randomly ordered).
+  const [sort, setSort] = usePersistentFilter<{ key: string; direction: "asc" | "desc" }>(
+    "vehicleMaster:sort", { key: "vehicleNumber", direction: "asc" },
+  );
+  const cycleSort = (key: string) =>
+    setSort((cur) =>
+      cur.key !== key ? { key, direction: "asc" }
+      : cur.direction === "asc" ? { key, direction: "desc" }
+      : { key: "vehicleNumber", direction: "asc" });
   const [visibleColumnKeys, setVisibleColumnKeys] = useState<Set<string>>(new Set(ALL_KEYS));
   const [showPending, setShowPending] = useState(false);
   const [editing, setEditing] = useState<EnrichedVehicle | null>(null);
@@ -132,11 +157,19 @@ export default function VehicleMaster() {
     },
   });
 
-  const statusQuery = useQuery<{ isSyncing: boolean; hasPending: boolean; autoApplyEnabled: boolean }>({
+  const statusQuery = useQuery<{
+    isSyncing: boolean;
+    // "How far along" the running sync is — a phase label plus a running count. total is null
+    // while Notion's own pagination hasn't given one (it never does, up front).
+    syncProgress: { phase: string; current: number; total: number | null } | null;
+    hasPending: boolean;
+    autoApplyEnabled: boolean;
+  }>({
     queryKey: ["/api/notion-vehicle-sync/status"],
     queryFn: async () => (await apiRequest("GET", "/api/notion-vehicle-sync/status")).json(),
     enabled: admin,
-    refetchInterval: 5000,
+    // Snappier while something is actually running, so the progress line keeps up with it.
+    refetchInterval: (query) => (query.state.data?.isSyncing ? 1500 : 5000),
   });
 
   const pendingQuery = useQuery<{ hasPending: boolean; report: VehicleSyncReport | null }>({
@@ -219,13 +252,47 @@ export default function VehicleMaster() {
   const syncInProgress = !!statusQuery.data?.isSyncing || detectMutation.isPending || applyMutation.isPending || fullSyncMutation.isPending;
 
   const vehicles = vehiclesQuery.data ?? [];
+
+  // One filterable column per table column — value checklist plus contains/equals/between,
+  // the same "+ Filter" picker and header icon every other page's table uses.
+  const vehicleFilterColumns: FilterableColumn<EnrichedVehicle>[] = useMemo(
+    () => vehicleColumns.map((col) => ({
+      id: String(col.key),
+      label: col.label,
+      filterType: "text" as const,
+      options: Array.from(new Set(vehicles.map((v) => cellValue(v, col.key)).filter((v) => v !== "-")))
+        .sort((a, b) => naturalSortKey(a).localeCompare(naturalSortKey(b)))
+        .map((v) => ({ value: v, label: v })),
+      accessor: (v: EnrichedVehicle) => {
+        const value = cellValue(v, col.key);
+        return value === "-" ? null : value;
+      },
+    })),
+    [vehicles],
+  );
+  const [vehicleColumnConditions, setVehicleColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>(
+    "vehicleMaster:columnFilters", {},
+  );
+  const setVehicleCondition = (id: string, condition: FilterCondition) =>
+    setVehicleColumnConditions((prev) => ({ ...prev, [id]: condition }));
+  const clearVehicleCondition = (id: string) =>
+    setVehicleColumnConditions((prev) => { const next = { ...prev }; delete next[id]; return next; });
+  const vehicleConditionList = Object.values(vehicleColumnConditions);
+
   const filteredVehicles = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return vehicles;
-    return vehicles.filter((v) =>
+    const searched = !q ? vehicles : vehicles.filter((v) =>
       [v.vehicleNumber, v.rtoNumber, v.company, v.manufacturer, v.driver, v.plant]
         .some((f) => (f ?? "").toLowerCase().includes(q)));
-  }, [vehicles, search]);
+    const columnFiltered = searched.filter((v) => matchAllConditions(v, vehicleConditionList, vehicleFilterColumns));
+    const sortCol = vehicleColumns.find((c) => String(c.key) === sort.key) ?? vehicleColumns[0];
+    const dir = sort.direction === "asc" ? 1 : -1;
+    return [...columnFiltered].sort((a, b) => {
+      const av = naturalSortKey(cellValue(a, sortCol.key));
+      const bv = naturalSortKey(cellValue(b, sortCol.key));
+      return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+    });
+  }, [vehicles, search, vehicleConditionList, vehicleFilterColumns, sort]);
 
   const linkedCount = vehicles.filter((v) => !!v.notionPageId).length;
   const visibleColumns = vehicleColumns.filter((c) => visibleColumnKeys.has(String(c.key)));
@@ -273,8 +340,19 @@ export default function VehicleMaster() {
         >
           <div className="flex flex-col items-center gap-3 py-4">
             <Loader2 className="h-8 w-8 animate-spin text-amber-500" />
-            <DialogTitle className="text-base">Sync in progress</DialogTitle>
+            <DialogTitle className="text-base">
+              {statusQuery.data?.syncProgress?.phase ?? "Sync in progress"}
+            </DialogTitle>
             <DialogDescription className="text-sm">
+              {statusQuery.data?.syncProgress ? (
+                <>
+                  {statusQuery.data.syncProgress.current.toLocaleString()}
+                  {statusQuery.data.syncProgress.total != null
+                    ? ` of ${statusQuery.data.syncProgress.total.toLocaleString()}`
+                    : ""}
+                  {" "}done so far.{" "}
+                </>
+              ) : null}
               This database has several rollup/formula fields, so a Full Sync can take a minute or more. This will close automatically once it's done — safe to leave this tab open.
             </DialogDescription>
           </div>
@@ -476,6 +554,37 @@ export default function VehicleMaster() {
           </div>
         </div>
 
+        {/* Column filters — same "+ Filter" picker and removable chips as every other page's
+            table (ScanViewer, Sort Slip, Scan History): a value checklist plus contains/equals/
+            between per column, ANDed with the search box above. */}
+        {vehicles.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 bg-white px-3 py-2 sm:px-5">
+            <AddColumnFilterButton
+              columns={vehicleFilterColumns}
+              conditions={vehicleColumnConditions}
+              onApply={setVehicleCondition}
+              onClear={clearVehicleCondition}
+            />
+            {Object.entries(vehicleColumnConditions)
+              .filter(([, c]) => !isConditionEmpty(c))
+              .map(([id, condition]) => (
+                <ColumnFilterChipView
+                  key={id}
+                  columnId={id}
+                  condition={condition}
+                  columns={vehicleFilterColumns}
+                  onEdit={(c) => setVehicleCondition(id, c)}
+                  onRemove={() => clearVehicleCondition(id)}
+                />
+              ))}
+            {Object.keys(vehicleColumnConditions).length > 1 && (
+              <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900" onClick={() => setVehicleColumnConditions({})}>
+                Clear all
+              </Button>
+            )}
+          </div>
+        )}
+
         {/* Empty state */}
         {!vehiclesQuery.isLoading && vehicles.length === 0 && (
           <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -513,13 +622,34 @@ export default function VehicleMaster() {
                   {visibleColumns.map((col) => {
                     const isNameCol = col.key === "vehicleNumber";
                     const mw = col.colWidth ? `${col.colWidth}px` : "90px";
+                    const colKey = String(col.key);
+                    const isSorted = sort.key === colKey;
+                    const filterColumn = vehicleFilterColumns.find((c) => c.id === colKey);
                     return (
                       <th
-                        key={String(col.key)}
+                        key={colKey}
                         style={{ minWidth: mw, maxWidth: isNameCol ? "140px" : undefined }}
-                        className={`sticky top-0 ${isNameCol ? "left-0 z-20 bg-[#001d6e]" : "z-10 bg-[#001d6e]"} whitespace-nowrap border-r border-[#1a3a9c] px-2 py-2 sm:px-2.5 sm:py-2.5 text-left text-[10px] sm:text-[11px] font-semibold tracking-wide uppercase text-white`}
+                        className={`sticky top-0 ${isNameCol ? "left-0 z-20 bg-[#001d6e]" : "z-10 bg-[#001d6e]"} cursor-pointer select-none whitespace-nowrap border-r border-[#1a3a9c] px-2 py-2 sm:px-2.5 sm:py-2.5 text-left text-[10px] sm:text-[11px] font-semibold tracking-wide uppercase text-white hover:bg-[#0a2b7e]`}
+                        onClick={() => cycleSort(colKey)}
                       >
-                        {col.label}
+                        <span className="inline-flex items-center gap-1">
+                          {col.label}
+                          {isSorted ? (
+                            sort.direction === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
+                          ) : (
+                            <ChevronsUpDown className="h-3 w-3 opacity-40" />
+                          )}
+                          {filterColumn && (
+                            <span onClick={(e) => e.stopPropagation()}>
+                              <ColumnHeaderFilterButton
+                                column={filterColumn}
+                                condition={vehicleColumnConditions[colKey]}
+                                onChange={(c) => setVehicleCondition(colKey, c)}
+                                onRemove={() => clearVehicleCondition(colKey)}
+                              />
+                            </span>
+                          )}
+                        </span>
                       </th>
                     );
                   })}

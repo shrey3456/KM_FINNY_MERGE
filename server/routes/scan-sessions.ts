@@ -1005,6 +1005,69 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       AND NOT COALESCE(sm.hidden_in_history, false)
       AND (sm.source = 'manual' OR (sm.source IS NULL AND NOT EXISTS (
             SELECT 1 FROM order_import_sessions ois WHERE ois.id = sm.session_id)))
+
+    UNION ALL
+
+    -- Sort Slip picks (server/routes/sort-slips.ts) — "this much has been brought to the
+    -- platform", typed in by a loader rather than scanned. They move no stock and are NOT a load:
+    -- they carry their own sourceKind so they read as "Sort Pick" here and stay out of the
+    -- Scan / Load / Unload sections, which each filter to their own source. id offset
+    -- 6000000000+ keeps them clear of every other branch's id space.
+    SELECT
+      (6000000000 + ssp.id) AS id,
+      ssp.barcode,
+      ssp.item_name         AS "itemName",
+      -- A pick is typed in pieces, but it is still worth reading in pallets. The pack size is the
+      -- per-STATE one (GJ PLT / MP PLT, resolved through the slip's plant) — the same number the
+      -- Sort Slip page converts with, so the two agree. No size configured means no pallet figure
+      -- rather than a made-up one.
+      CASE WHEN COALESCE(CASE UPPER(COALESCE(pl.state, ''))
+                           WHEN 'GJ' THEN prod.gj_plt WHEN 'MP' THEN prod.mp_plt END, 0) > 0
+           THEN ROUND(ssp.qty::numeric / CASE UPPER(COALESCE(pl.state, ''))
+                           WHEN 'GJ' THEN prod.gj_plt WHEN 'MP' THEN prod.mp_plt END, 2)
+      END::real AS pallets,
+      ssp.qty               AS "totalQty",
+      NULLIF(CASE UPPER(COALESCE(pl.state, ''))
+               WHEN 'GJ' THEN prod.gj_plt WHEN 'MP' THEN prod.mp_plt END, 0) AS "itemsPerPallet",
+      NULL::integer AS "looseQty",
+      false AS "isExtra",
+      false AS "isEmptyBox",
+      false AS "isExchange",
+      false AS "isDispatch",
+      false AS "isUnload",
+      false AS "isAdjust",
+      'sorting' AS "sourceKind",
+      NULL::text AS "emptyBoxNote",
+      -- The platform this order is being loaded on, if Loading has picked one yet — the same STV
+      -- the load's own rows carry, so an order reads as one story across the sections.
+      pslip.loading_stv  AS stv,
+      ssp.picked_by_code AS "scannedByCode",
+      ssp.picked_by_name AS "scannedByName",
+      ssp.picked_at      AS "scannedAt",
+      NULL::timestamp AS "adjustedAt",
+      COALESCE(ssp.voided, false) AS voided,
+      ssp.voided_at      AS "voidedAt",
+      NULL::text AS "voidReason",
+      COALESCE(ssp.sr_no, pb.new_sr) AS "srNo",
+      ssp.order_number   AS "orderName",
+      ss.order_date::text AS "orderDate",
+      ss.plant           AS "plant"
+    FROM sort_slip_picks ssp
+    JOIN sort_slips ss ON ss.id = ssp.sort_slip_id
+    LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ssp.barcode))
+    LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(ss.plant)
+    -- The product row this barcode means at THIS plant — a barcode can sit on more than one row
+    -- (one per plant), and they can carry different pack sizes.
+    LEFT JOIN LATERAL (
+      SELECT p.gj_plt, p.mp_plt FROM products p
+       WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(ssp.barcode))
+       ORDER BY (LOWER(COALESCE(p.plant, '')) = LOWER(COALESCE(ss.plant, ''))) DESC, p.id
+       LIMIT 1
+    ) prod ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT ps.loading_stv FROM proforma_slips ps
+       WHERE ps.order_number = ssp.order_number ORDER BY ps.id DESC LIMIT 1
+    ) pslip ON TRUE
   ) combined
 `;
 
@@ -1073,7 +1136,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // Load Regular rows too while the section dropdown was on All Events. A bare kind still works
     // exactly as before (the section dropdown is what narrows it then).
     const KNOWN_TYPES = ['regular', 'extra', 'empty', 'exchange', 'adjust'];
-    const KNOWN_SOURCES = ['scan', 'loading', 'unloading', 'stock'];
+    const KNOWN_SOURCES = ['scan', 'loading', 'unloading', 'stock', 'sorting'];
     const typeParams = (typeof req.query.type === 'string' ? String(req.query.type).split(',') : [])
       .map((s) => s.trim().toLowerCase())
       .map((s) => {
@@ -1087,7 +1150,7 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
     // history, server/routes/unloading.ts) — plus 'all', which merges all three (no source
     // condition added below at all). Default stays 'receiving' so any older/other caller that
     // never sends this param keeps seeing exactly what it always saw.
-    const sourceParam  = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'all' ? 'all' : 'receiving';
+    const sourceParam  = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'sorting' ? 'sorting' : req.query.source === 'all' ? 'all' : 'receiving';
     // Scopes to one proforma order's own events — used by the Loading page's own landing table
     // (server/routes/loading.ts), whose "click a row to expand" panel re-uses this same endpoint
     // rather than a dedicated one.
@@ -1125,7 +1188,10 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       conditions.push(
         sourceParam === 'dispatch' ? `"isDispatch" = true`
         : sourceParam === 'unload' ? `"isUnload" = true`
-        : `NOT "isDispatch" AND NOT "isUnload"`,
+        // Sorting is its own kind of work: its own section, and kept out of the receiving one,
+        // which is otherwise "anything that is not a load or an unload".
+        : sourceParam === 'sorting' ? `"sourceKind" = 'sorting'`
+        : `NOT "isDispatch" AND NOT "isUnload" AND "sourceKind" <> 'sorting'`,
       );
     }
     // Empty boxes and exchanges ARE shown in scan history as their own distinct statuses, but
@@ -1175,16 +1241,16 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       pool.query(
         `SELECT
            COUNT(*) AS total,
-           COALESCE(SUM("totalQty") FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" <> 'stock'), 0)  AS "totalBoxes",
-           COALESCE(SUM(pallets)    FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" <> 'stock'), 0)  AS "totalPallets",
-           COUNT(*) FILTER (WHERE "isExtra" = true AND barcode <> 'EMPTY_BOX' AND "sourceKind" <> 'stock') AS "extraCount",
-           COALESCE(SUM("totalQty") FILTER (WHERE barcode = 'EMPTY_BOX' AND "sourceKind" <> 'stock'), 0)   AS "emptyBoxCount",
+           COALESCE(SUM("totalQty") FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')), 0)  AS "totalBoxes",
+           COALESCE(SUM(pallets)    FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')), 0)  AS "totalPallets",
+           COUNT(*) FILTER (WHERE "isExtra" = true AND barcode <> 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')) AS "extraCount",
+           COALESCE(SUM("totalQty") FILTER (WHERE barcode = 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')), 0)   AS "emptyBoxCount",
            -- Stock corrections (a delete, a void or a manual Adjust writes a signed ledger row)
            -- are listed, but they are not scanning, and a negative one used to pull this total
            -- below what was actually scanned — a day with one big correction could even read as
            -- a minus. Counted the same way the tiles above already count: scans only.
-           COALESCE(SUM("totalQty") FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" <> 'stock'), 0) AS "qtyTotal",
-           COALESCE(SUM(pallets)    FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" <> 'stock'), 0) AS "palletsTotal"
+           COALESCE(SUM("totalQty") FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" NOT IN ('stock', 'sorting')), 0) AS "qtyTotal",
+           COALESCE(SUM(pallets)    FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" NOT IN ('stock', 'sorting')), 0) AS "palletsTotal"
          ${baseFrom}`,
         params,
       ),
@@ -1306,10 +1372,11 @@ router.get('/reports/scan-history/filter-values', async (req: Request, res: Resp
     // Same tab scoping as GET /reports/scan-history — Values checklists on the Load/Unload Event
     // tabs shouldn't offer barcodes/plants/etc. that only ever appear on other rows, and vice
     // versa. 'all' merges every source, so no source condition at all.
-    const sourceParam = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'all' ? 'all' : 'receiving';
+    const sourceParam = req.query.source === 'dispatch' ? 'dispatch' : req.query.source === 'unload' ? 'unload' : req.query.source === 'sorting' ? 'sorting' : req.query.source === 'all' ? 'all' : 'receiving';
     const sourceCond =
       sourceParam === 'dispatch' ? `"isDispatch" = true`
       : sourceParam === 'unload' ? `"isUnload" = true`
+      : sourceParam === 'sorting' ? `"sourceKind" = 'sorting'`
       : sourceParam === 'all' ? null
       : `NOT "isDispatch" AND NOT "isUnload"`;
     // Always starts with WHERE (falling back to the no-op "WHERE TRUE") — every call site below

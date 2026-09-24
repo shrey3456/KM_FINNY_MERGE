@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/data-table';
 import {
   Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, LogOut,
   UserPlus, UserCog, AlertTriangle, KeyRound, IdCard, ShieldCheck,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -58,6 +58,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { PlantBadge } from "@/components/PlantBadge";
 import { CONTROLLABLE_PAGES } from "@shared/pageKeys";
 import { hasPageViewAccess, hasPageWriteAccess } from "@/lib/permissions";
+import { useAuth } from "@/hooks/use-auth";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
@@ -105,9 +106,10 @@ function DialogBanner({
   icon: typeof UserPlus;
   title: string;
   description: string;
-  tone?: "navy" | "danger";
+  tone?: "navy" | "danger" | "warning";
 }) {
-  const bg = tone === "danger" ? "bg-red-600" : "bg-[#001d6e]";
+  // navy = routine, red = destructive, amber = disruptive but undoable (signing someone out).
+  const bg = tone === "danger" ? "bg-red-600" : tone === "warning" ? "bg-amber-600" : "bg-[#001d6e]";
   return (
     <DialogHeader className={`${bg} space-y-0 px-5 py-4 text-left`}>
       <div className="flex items-center gap-3">
@@ -239,7 +241,13 @@ const Users = () => {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<Partial<User> | null>(null);
-  const DEFAULT_VISIBLE_COLUMN_IDS = ['avatar', 'name', 'username', 'designation', 'role', 'plants', 'actions'];
+  // Who is looking at this page. The PIN column is for an "admin" only — a super-admin does not
+  // get it — and the server decides the same way, so hiding it here is presentation, not the
+  // safeguard: a non-admin's /api/users response simply has no PIN in it to show.
+  const { user: viewer } = useAuth();
+  const canSeePins = viewer?.role === 'admin';
+  const [logoutTarget, setLogoutTarget] = useState<User | null>(null);
+  const DEFAULT_VISIBLE_COLUMN_IDS = ['avatar', 'name', 'username', 'pin', 'designation', 'role', 'plants', 'actions'];
   // Column visibility/order are real preferences, not working context for one sitting — saved to
   // localStorage (not sessionStorage) so choosing which columns to see survives closing the
   // browser/logging out, and only changes again when the user actually touches it here.
@@ -255,6 +263,17 @@ const Users = () => {
   useEffect(() => {
     try { localStorage.setItem("users:visibleColumnIds", JSON.stringify(Array.from(visibleColumnIds))); } catch { /* storage unavailable */ }
   }, [visibleColumnIds]);
+  // PIN is a new column, and anyone who had already touched the column toggle has a saved set
+  // that predates it — they would never see it without going looking. So it is switched on once,
+  // remembered, and after that it obeys the toggle like every other column.
+  useEffect(() => {
+    if (!canSeePins) return;
+    try {
+      if (localStorage.getItem("users:pinColumnIntroduced")) return;
+      localStorage.setItem("users:pinColumnIntroduced", "1");
+    } catch { /* storage unavailable — then it is on by default anyway */ }
+    setVisibleColumnIds((prev) => (prev.has('pin') ? prev : new Set([...Array.from(prev), 'pin'])));
+  }, [canSeePins]);
 
   // Column order, remembered per page. An empty array means "declared order", which is also what
   // Reset order restores.
@@ -355,6 +374,28 @@ const Users = () => {
     }
   });
 
+  // Sign a user out everywhere. The server drops their session rows, so the next request from
+  // any browser they are signed in on comes back unauthenticated and drops them at the login
+  // screen — including this very page, if an admin signs themselves out.
+  const forceLogoutMutation = useMutation({
+    mutationFn: async (userCode: string) => {
+      const res = await apiRequest('POST', `/api/users/${userCode}/force-logout`);
+      return res.json() as Promise<{ sessionsEnded: number; username: string }>;
+    },
+    onSuccess: (result) => {
+      toast({
+        title: result.sessionsEnded > 0 ? "Signed out" : "Nothing to sign out",
+        description: result.sessionsEnded > 0
+          ? `${result.username} was signed out of ${result.sessionsEnded} session${result.sessionsEnded === 1 ? '' : 's'}.`
+          : `${result.username} was not signed in anywhere.`,
+      });
+      setLogoutTarget(null);
+    },
+    onError: (error) => {
+      toast({ title: "Error", description: `Failed to sign the user out: ${error.message}`, variant: "destructive" });
+    },
+  });
+
   const filteredUsers = searchTerm && Array.isArray(users)
     ? users.filter((user: User) =>
         user.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -436,7 +477,8 @@ const Users = () => {
   };
 
   const [departments, setDepartments] = useState<string[]>([
-    "MANAGEMENT", "IT", "BILLING", "SALES", "DISPATCH {VALSAD}", "DISPATCH {INDORE}", "DISPATCH {LUCKNOW}", "ACCOUNTS", "STEER", "M&S"
+    "MANAGEMENT", "IT", "BILLING", "SALES", "DISPATCH {VALSAD}", "DISPATCH {INDORE}", "DISPATCH {LUCKNOW}", "ACCOUNTS", "STEER", "M&S",
+    "LOADING"
   ]);
   const [customDepartment, setCustomDepartment] = useState("");
   const [isAddingDepartment, setIsAddingDepartment] = useState(false);
@@ -760,6 +802,22 @@ const Users = () => {
       accessor: (user) => user.username,
       render: (user) => user.username,
     },
+    // Admin-only, and only present at all for an admin — the column is spliced out below rather
+    // than rendered empty, so nobody else sees a PIN column they can never fill.
+    ...(canSeePins ? [{
+      id: 'pin',
+      header: 'PIN',
+      width: 90,
+      sortable: true,
+      accessor: (user: User) => user.pin ?? '',
+      cellClassName: 'tabular-nums',
+      render: (user: User) => (
+        user.pin
+          ? <span className="font-mono text-gray-900">{user.pin}</span>
+          // Blank for a PIN stored hashed: it cannot be read back, only replaced through Edit.
+          : <span className="text-gray-300" title="Stored encrypted — set a new PIN through Edit">—</span>
+      ),
+    } as DataTableColumn<User>] : []),
     {
       id: 'designation',
       header: 'Designation',
@@ -809,7 +867,7 @@ const Users = () => {
     {
       id: 'actions',
       header: 'Actions',
-      width: 90,
+      width: 120,
       align: 'left',
       hideable: false,  
       preventRowClick: true,
@@ -818,6 +876,14 @@ const Users = () => {
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEditDialog(user)}>
             <Edit className="h-3.5 w-3.5" />
             <span className="sr-only">Edit</span>
+          </Button>
+          <Button
+            variant="ghost" size="icon" className="h-7 w-7 text-amber-600 hover:text-amber-700"
+            title="Sign this user out of every device"
+            onClick={() => setLogoutTarget(user)}
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            <span className="sr-only">Sign out</span>
           </Button>
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openDeleteDialog(user)}>
             <Trash className="h-3.5 w-3.5" />
@@ -941,6 +1007,11 @@ const Users = () => {
                               {user.designation && (
                                 <span className="text-xs text-gray-500">{user.designation}</span>
                               )}
+                              {canSeePins && user.pin && (
+                                <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-700">
+                                  PIN {user.pin}
+                                </span>
+                              )}
                             </div>
                             {userPlants.length > 0 && (
                               <div className="mt-1.5 flex flex-wrap gap-1">
@@ -954,6 +1025,13 @@ const Users = () => {
                             <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEditDialog(user)}>
                               <Edit className="h-4 w-4" />
                               <span className="sr-only">Edit</span>
+                            </Button>
+                            <Button
+                              variant="ghost" size="icon" className="h-8 w-8 text-amber-600"
+                              onClick={() => setLogoutTarget(user)}
+                            >
+                              <LogOut className="h-4 w-4" />
+                              <span className="sr-only">Sign out</span>
                             </Button>
                             <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openDeleteDialog(user)}>
                               <Trash className="h-4 w-4" />
@@ -1105,6 +1183,54 @@ const Users = () => {
               </DialogFooter>
             </form>
           </Form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Sign Out Confirmation — ends every session this user has open */}
+      <Dialog open={!!logoutTarget} onOpenChange={(open) => { if (!open) setLogoutTarget(null); }}>
+        <DialogContent className="sm:max-w-[440px] gap-0 overflow-hidden p-0 [&>button]:text-white [&>button]:opacity-80 [&>button:hover]:opacity-100">
+          <DialogBanner
+            icon={LogOut}
+            tone="warning"
+            title="Sign User Out"
+            description="Ends every device this user is signed in on."
+          />
+          <div className="px-5 py-5">
+            {logoutTarget && (
+              <div className="flex items-center gap-3 rounded-xl border border-amber-100 bg-amber-50/60 p-3">
+                <Avatar>
+                  <AvatarFallback className="bg-amber-100 text-amber-700">
+                    {(logoutTarget.name || logoutTarget.username || "").substring(0, 2).toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-gray-900">{logoutTarget.name}</p>
+                  <p className="truncate text-sm text-gray-500">{logoutTarget.username}</p>
+                </div>
+              </div>
+            )}
+            <p className="mt-3 text-sm text-gray-500">
+              {logoutTarget?.userCode === viewer?.userCode
+                ? "This is your own account — signing out here will end this session too, and you will be sent back to the login screen."
+                : "Their screen keeps what is already on it until the app next checks who they are — within a minute, or the moment they click anything — and then drops them at the login screen. Their PIN is unchanged, so they can sign straight back in."}
+            </p>
+          </div>
+          <DialogFooter className="gap-2 border-t bg-gray-50 px-5 py-3">
+            <Button type="button" variant="outline" onClick={() => setLogoutTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              className="bg-amber-600 text-white hover:bg-amber-700"
+              onClick={() => logoutTarget && forceLogoutMutation.mutate(logoutTarget.userCode)}
+              disabled={forceLogoutMutation.isPending}
+            >
+              {forceLogoutMutation.isPending
+                ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                : <LogOut className="mr-2 h-4 w-4" />}
+              Sign Out
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

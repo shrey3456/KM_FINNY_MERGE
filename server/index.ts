@@ -242,6 +242,89 @@ app.use((req, res, next) => {
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_loading_stock_pulls_event_id ON loading_stock_pulls(loading_scan_event_id)
     `);
+    // Sort Slip (server/routes/sort-slips.ts) — godown picking. See sortSlips in shared/schema.ts:
+    // these tables are the ONLY place a pick is written; nothing here feeds Load Operations.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sort_slips (
+        id SERIAL PRIMARY KEY,
+        order_number TEXT NOT NULL UNIQUE,
+        proforma_slip_id INTEGER,
+        party_name TEXT,
+        plant TEXT,
+        order_date DATE,
+        total_qty INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'unassigned',
+        created_by_code TEXT REFERENCES users(user_code),
+        created_by_name TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        activated_at TIMESTAMP,
+        completed_at TIMESTAMP,
+        completed_by_code TEXT REFERENCES users(user_code),
+        completed_by_name TEXT,
+        notes TEXT
+      )
+    `);
+    // platform_stv — the STV (platform) picked when the slip is created, same plantStvs concept
+    // proforma_slips.loading_stv already uses for Loading. ADD COLUMN separately (not just in the
+    // CREATE TABLE above) since sort_slips already existed before this field did.
+    await pool.query(`ALTER TABLE sort_slips ADD COLUMN IF NOT EXISTS platform_stv TEXT`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sort_slip_assignees (
+        id SERIAL PRIMARY KEY,
+        sort_slip_id INTEGER NOT NULL REFERENCES sort_slips(id) ON DELETE CASCADE,
+        user_code TEXT NOT NULL REFERENCES users(user_code),
+        user_name TEXT,
+        assigned_by_code TEXT REFERENCES users(user_code),
+        assigned_by_name TEXT,
+        assigned_at TIMESTAMP DEFAULT NOW(),
+        removed_at TIMESTAMP,
+        removed_by_code TEXT REFERENCES users(user_code),
+        is_active BOOLEAN DEFAULT true
+      )
+    `);
+    // "One active slip per loader", guaranteed by the database rather than by a check in the
+    // route: two supervisors assigning the same loader at the same moment cannot both win, and
+    // the route turns the constraint violation into a readable message naming the other slip.
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS sort_slip_one_active_per_loader
+        ON sort_slip_assignees (user_code) WHERE is_active
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sort_slip_picks (
+        id SERIAL PRIMARY KEY,
+        sort_slip_id INTEGER NOT NULL REFERENCES sort_slips(id) ON DELETE CASCADE,
+        order_number TEXT NOT NULL,
+        proforma_slip_item_id INTEGER,
+        barcode TEXT,
+        sr_no TEXT,
+        item_name TEXT,
+        qty INTEGER NOT NULL,
+        picked_by_code TEXT REFERENCES users(user_code),
+        picked_by_name TEXT,
+        picked_at TIMESTAMP DEFAULT NOW(),
+        voided BOOLEAN DEFAULT false,
+        voided_by_code TEXT REFERENCES users(user_code),
+        voided_at TIMESTAMP
+      )
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_sort_slip_picks_slip ON sort_slip_picks(sort_slip_id)
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sort_slip_handoffs (
+        id SERIAL PRIMARY KEY,
+        sort_slip_id INTEGER NOT NULL REFERENCES sort_slips(id) ON DELETE CASCADE,
+        order_number TEXT NOT NULL,
+        from_user_code TEXT REFERENCES users(user_code),
+        from_user_name TEXT,
+        to_user_code TEXT REFERENCES users(user_code),
+        to_user_name TEXT,
+        transferred_by_code TEXT REFERENCES users(user_code),
+        transferred_by_name TEXT,
+        transferred_at TIMESTAMP DEFAULT NOW(),
+        reason TEXT
+      )
+    `);
     // Unloading (server/routes/unloading.ts) — vehicle-wise receiving. See unloadImportSessions'
     // comment in shared/schema.ts: FIFO grouping like order_import_sessions, but scoped one level
     // deeper by vehicleNumber (plant + vehicleNumber + orderDate), so one CSV upload can span
@@ -464,6 +547,16 @@ app.use((req, res, next) => {
     // Stock Overview keeps the first two together as Adjust and the third in its own column, so a
     // bulk clear can never swamp the corrections an operator actually made.
     await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS origin TEXT`);
+    // products.box_image / box_image_hash — Notion's second image per product ("Box Image", the
+    // packed carton). Cached on disk like the product shot, under <id>-box.jpg.
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS box_image TEXT`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS box_image_hash TEXT`);
+    // products.product_image_ref / box_image_ref — which Notion file the cached picture came
+    // from. Left NULL here on purpose: the next sync reads "ref unknown" as "check this one",
+    // downloads it once to fill the column in, and from then on a replaced picture is spotted
+    // without downloading anything.
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS product_image_ref TEXT`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS box_image_ref TEXT`);
     {
       const { rowCount } = await pool.query(`
         UPDATE stock_movements SET origin = CASE
@@ -621,6 +714,23 @@ app.use((req, res, next) => {
       // but this is a startup migration and must never crash the server over a pre-existing data
       // issue; log it so it's visible/fixable instead.
       console.error('Failed to add vehicle_info_notion_page_id_unique constraint — check for duplicate notion_page_id rows:', (err as Error)?.message);
+    }
+
+    // activities.created_at was written via the column's old defaultNow() default, which casts
+    // now() to `timestamp` using the Postgres SESSION's TimeZone setting — Asia/Calcutta on this
+    // server — storing IST wall-clock digits. Drizzle always reads a naive `timestamp` column as
+    // UTC (see shared/schema.ts's comment on this column), so every activity's time displayed
+    // 5:30 ahead of when it actually happened. The column's default is now `(now() AT TIME ZONE
+    // 'UTC')`, which stores true UTC digits regardless of session TimeZone; this corrects rows
+    // already written under the old default. created_at_tz_fixed marks a row as done so a
+    // restart never shifts an already-fixed row a second time.
+    await pool.query(`ALTER TABLE activities ALTER COLUMN created_at SET DEFAULT (now() AT TIME ZONE 'UTC')`);
+    await pool.query(`ALTER TABLE activities ADD COLUMN IF NOT EXISTS created_at_tz_fixed BOOLEAN DEFAULT false`);
+    {
+      const { rowCount } = await pool.query(`
+        UPDATE activities SET created_at = created_at - INTERVAL '5 hours 30 minutes', created_at_tz_fixed = true
+        WHERE NOT COALESCE(created_at_tz_fixed, false)`);
+      if (rowCount) console.log(`[migration] corrected the stored time zone on ${rowCount} existing activity row(s)`);
     }
 
     console.log('Database migrations completed successfully');

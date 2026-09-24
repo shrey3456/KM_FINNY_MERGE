@@ -17,6 +17,7 @@ import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/Re
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, matchBarcodeNotInSystemError, parseApiErrorMessage } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
+import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1953,16 +1954,10 @@ export default function Unloading() {
                         <span className="text-2xl font-semibold">{autoFeedback.isExtra ? "Auto scanned (extra)" : "Auto scanned"}</span>
                       </div>
                       <div className="flex flex-1 gap-5 items-start pt-4">
-                        <img
-                          key={autoFeedback.productId ?? autoFeedback.barcode}
-                          src={
-                            autoFeedback.productId != null
-                              ? `/api/products/image-by-id?id=${autoFeedback.productId}`
-                              : `/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`
-                          }
-                          alt=""
+                        <ProductPhoto
+                          productId={autoFeedback.productId}
+                          name={autoFeedback.name}
                           className="h-60 w-60 shrink-0 object-contain bg-gray-50 border border-gray-100"
-                          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
                         />
                         <div className="flex-1 min-w-0 text-lg">
                           <p className="font-semibold text-gray-900 break-words text-xl">{autoFeedback.name}</p>
@@ -2001,19 +1996,14 @@ export default function Unloading() {
           <div className="flex flex-col sm:flex-row">
             {dialogResolvedImageName && dialogImageFailed !== dialogResolvedImageName && (
               <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-80 sm:border-b-0 sm:border-r">
-                <img
-                  key={dialogResolvedImageName}
+                <ProductPhoto
                   // pending.product's own id is stable across a rename — prefer it whenever
                   // it's resolved (always true for "not in this batch"; a matched item has no
                   // product id of its own yet, so it still falls back to the name lookup).
-                  src={
-                    pending?.product
-                      ? `/api/products/image-by-id?id=${pending.product.id}`
-                      : `/api/products/image-by-name?name=${encodeURIComponent(dialogResolvedImageName)}`
-                  }
-                  alt=""
+                  productId={pending?.product?.id ?? null}
+                  name={dialogResolvedImageName}
                   className="max-h-96 w-full object-contain sm:max-h-full"
-                  onError={() => setDialogImageFailed(dialogResolvedImageName)}
+                  onLoadState={(failed) => setDialogImageFailed(failed ? dialogResolvedImageName : null)}
                 />
               </div>
             )}

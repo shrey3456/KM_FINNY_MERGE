@@ -5,9 +5,12 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   Bell,
   CheckCircle2,
   ChevronDown,
+  ChevronsUpDown,
   CloudDownload,
   Columns2,
   Database,
@@ -69,6 +72,10 @@ import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 type SyncStatus = {
   isSyncing: boolean;
+  // "How far along" whatever sync is currently running — a phase label plus a running count,
+  // e.g. fetching Notion pages (total unknown, Notion's own pagination gives no upfront count)
+  // or checking/downloading images (a real total, since that job list is known before it starts).
+  syncProgress: { phase: string; current: number; total: number | null } | null;
   lastSyncTime: string | null;
   lastReport: SyncReport | null;
   configured: boolean;
@@ -135,6 +142,7 @@ const productColumns: ProductColumn[] = [
   { key: "saleCategory",     label: "Sale Category" },
   { key: "type",             label: "Type" },
   { key: "productImage",     label: "Product Image" },
+  { key: "boxImage",         label: "Box Image" },
   { key: "volumeInCuFt",     label: "Vol Master" },
   { key: "itemsPerPallet",   label: "Packets" },
   { key: "mpPlt",            label: "MP PLT",             tone: "mp" },
@@ -178,6 +186,13 @@ const productColumns: ProductColumn[] = [
 
 const ALL_KEYS = new Set(productColumns.map((c) => String(c.key)));
 
+// Every digit run padded to the same width before comparing — so "V2" sorts before "V10" and a
+// New Sr. like "C0001"/"V001" reads in the order it's printed, not the order plain string
+// comparison would put it in.
+function naturalSortKey(value: string): string {
+  return value.toUpperCase().replace(/\d+/g, (digits) => digits.padStart(8, "0"));
+}
+
 function cellValue(product: Product, key: keyof Product) {
   const value = product[key];
   if (value === null || value === undefined || value === "") return "-";
@@ -193,6 +208,16 @@ const BTN_OUTLINE = "h-8 border border-[#001d6e] text-[#001d6e] bg-white hover:b
 export default function NotionInventory() {
   const { toast } = useToast();
   const [searchTerm, setSearchTerm] = usePersistentFilter("notionInventory:search", "");
+  // Sorted by New Sr. by default; any column header can be clicked to sort by that one instead,
+  // cycling asc → desc → back to the New Sr. default.
+  const [productSort, setProductSort] = usePersistentFilter<{ key: string; direction: "asc" | "desc" }>(
+    "notionInventory:sort", { key: "newSr", direction: "asc" },
+  );
+  const cycleProductSort = (key: string) =>
+    setProductSort((cur) =>
+      cur.key !== key ? { key, direction: "asc" }
+      : cur.direction === "asc" ? { key, direction: "desc" }
+      : { key: "newSr", direction: "asc" });
   const [showFullSyncConfirm, setShowFullSyncConfirm] = useState(false);
   const [lastApplyReport, setLastApplyReport] = useState<SyncReport | null>(null);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
@@ -258,7 +283,11 @@ export default function NotionInventory() {
       const response = await apiRequest("GET", "/api/notion-inventory-sync/status");
       return response.json();
     },
-    refetchInterval: 5 * 60 * 1000, // 5 minutes
+    // Slow (5 min) normally — this is also how the page learns about a scheduled server-side
+    // sync nobody triggered from here. While a sync is actually running (server truth, so this
+    // also catches one another admin started) it speeds up to show live progress instead of a
+    // stale number sitting on screen for minutes.
+    refetchInterval: (query) => (query.state.data?.isSyncing ? 1500 : 5 * 60 * 1000),
     refetchOnWindowFocus: false,
   });
 
@@ -467,11 +496,17 @@ export default function NotionInventory() {
 
   const filteredProducts = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
-    if (!query) return products;
-    return products.filter((product) =>
+    const searched = !query ? products : products.filter((product) =>
       visibleColumns.some((col) => cellValue(product, col.key).toLowerCase().includes(query)),
     );
-  }, [products, searchTerm, visibleColumns]);
+    const sortCol = productColumns.find((c) => String(c.key) === productSort.key) ?? productColumns[0];
+    const dir = productSort.direction === "asc" ? 1 : -1;
+    return [...searched].sort((a, b) => {
+      const av = naturalSortKey(cellValue(a, sortCol.key));
+      const bv = naturalSortKey(cellValue(b, sortCol.key));
+      return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+    });
+  }, [products, searchTerm, visibleColumns, productSort]);
 
   function toggleColumn(key: string) {
     setVisibleColumnKeys((prev) => {
@@ -533,6 +568,40 @@ export default function NotionInventory() {
         title="Product Master"
         description="Product master synced from Notion into PostgreSQL."
       />
+
+      {/* Popup instead of a button spinner alone — same pattern as Vehicle Master's own sync
+          dialog: stays open for as long as a sync is actually running (server truth via the
+          polled status, so it also shows for whoever ELSE triggered it), closes itself the
+          moment it flips false. No close button — dismissing it wouldn't stop the sync. */}
+      <Dialog open={isBusy} onOpenChange={() => {}}>
+        <DialogContent
+          className="max-w-sm text-center"
+          hideCloseButton
+          onInteractOutside={(e) => e.preventDefault()}
+          onEscapeKeyDown={(e) => e.preventDefault()}
+        >
+          <div className="flex flex-col items-center gap-3 py-4">
+            <Loader2 className="h-8 w-8 animate-spin text-amber-500" />
+            <DialogTitle className="text-base">
+              {statusQuery.data?.syncProgress?.phase ?? "Sync in progress"}
+            </DialogTitle>
+            <DialogDescription className="text-sm">
+              {statusQuery.data?.syncProgress ? (
+                <>
+                  {statusQuery.data.syncProgress.current.toLocaleString()}
+                  {statusQuery.data.syncProgress.total != null
+                    ? ` of ${statusQuery.data.syncProgress.total.toLocaleString()}`
+                    : ""}
+                  {" "}done so far.
+                </>
+              ) : (
+                "This can take a minute or more with a database this size."
+              )}
+              {" "}Safe to leave this tab open — this will close automatically once it's done.
+            </DialogDescription>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleCsvFile} />
 
@@ -861,9 +930,17 @@ export default function NotionInventory() {
                             ? { width: dragged, minWidth: dragged, maxWidth: dragged }
                             : { minWidth: mw, maxWidth: isNameCol ? "150px" : undefined }
                         }
-                        className={`group relative sticky top-0 ${isNameCol ? "left-0 z-20 bg-[#001d6e]" : "z-10 bg-[#001d6e]"} whitespace-nowrap border-r border-[#1a3a9c] px-2 py-2 sm:px-2.5 sm:py-2.5 text-left text-[10px] sm:text-[11px] font-semibold tracking-wide uppercase text-white`}
+                        className={`group relative sticky top-0 ${isNameCol ? "left-0 z-20 bg-[#001d6e]" : "z-10 bg-[#001d6e]"} cursor-pointer select-none whitespace-nowrap border-r border-[#1a3a9c] px-2 py-2 sm:px-2.5 sm:py-2.5 text-left text-[10px] sm:text-[11px] font-semibold tracking-wide uppercase text-white hover:bg-[#0a2b7e]`}
+                        onClick={() => cycleProductSort(String(col.key))}
                       >
-                        {col.label}
+                        <span className="inline-flex items-center gap-1">
+                          {col.label}
+                          {productSort.key === col.key ? (
+                            productSort.direction === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
+                          ) : (
+                            <ChevronsUpDown className="h-3 w-3 opacity-40" />
+                          )}
+                        </span>
                         {/* Drag the right edge to resize; double-click resets this column. */}
                         <span
                           onMouseDown={(e) => startColResize(e, col)}
@@ -925,11 +1002,13 @@ export default function NotionInventory() {
                                   ? `sticky left-0 z-[5] text-[11px] sm:text-xs font-semibold text-[#001d6e] whitespace-normal break-words leading-snug shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${isOdd ? "bg-slate-50" : "bg-white"}`
                                   : `text-[11px] sm:text-xs ${isEmpty ? "text-gray-300" : "text-gray-700"} whitespace-nowrap truncate`
                               }`}
-                              title={col.key === "productImage" ? product.name : val}
+                              title={col.key === "productImage" || col.key === "boxImage" ? product.name : val}
                             >
-                              {col.key === "productImage" && !isEmpty ? (
+                              {/* Both pictures are cached files, so the cell shows the thumbnail
+                                  rather than the filename the column actually holds. */}
+                              {(col.key === "productImage" || col.key === "boxImage") && !isEmpty ? (
                                 <img
-                                  src={`/api/products/image-by-id?id=${product.id}`}
+                                  src={`/api/products/${col.key === "boxImage" ? "box-image-by-id" : "image-by-id"}?id=${product.id}`}
                                   alt=""
                                   className="h-8 w-8 rounded border border-gray-200 bg-gray-50 object-contain"
                                   onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}

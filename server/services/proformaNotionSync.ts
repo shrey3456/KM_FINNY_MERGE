@@ -355,7 +355,10 @@ export interface OrderDiff {
   partyName: string;
   isNew: boolean;
   fieldChanges: FieldChange[];
-  itemChanges: string[]; // human-readable lines, e.g. "C058: 10 -> 15", "+ New SKU C036: 30", "- Removed SKU C099"
+  // Human-readable lines naming the product, not just its Sr — "C058 30GM*120 BHADANG: 10 -> 15".
+  // A bare Sr means nothing to the person approving the sync; the name is what lets them see that
+  // an order line actually resolved to the product they expect before anything is written.
+  itemChanges: string[];
 }
 
 export interface SyncReport {
@@ -419,16 +422,25 @@ async function diffOrder(orderData: OrderData): Promise<OrderDiff> {
   const itemChanges: string[] = [];
 
   for (const [srNo, itemData] of Array.from(orderData.items.entries())) {
-    const existingItem = existingBySr.get(itemData.productSrNo || srNo);
+    const key = itemData.productSrNo || srNo;
+    const label = itemData.productName ? `${key} ${itemData.productName}` : key;
+    const existingItem = existingBySr.get(key);
     if (!existingItem) {
-      itemChanges.push(`+ ${itemData.productSrNo || srNo}: ${itemData.quantity}`);
+      itemChanges.push(`+ ${label}: ${itemData.quantity}`);
     } else if (existingItem.quantity !== itemData.quantity) {
-      itemChanges.push(`${itemData.productSrNo || srNo}: ${existingItem.quantity ?? 0} -> ${itemData.quantity}`);
+      itemChanges.push(`${label}: ${existingItem.quantity ?? 0} -> ${itemData.quantity}`);
+      // Worth seeing at approval time: the same Sr now resolves to a different product than the
+      // slip already holds (a product renamed in Notion, or an Sr reassigned).
+      if (itemData.productName && existingItem.itemName && existingItem.itemName !== itemData.productName) {
+        itemChanges.push(`    name: ${existingItem.itemName} → ${itemData.productName}`);
+      }
+    } else if (itemData.productName && existingItem.itemName && existingItem.itemName !== itemData.productName) {
+      itemChanges.push(`${label}: name ${existingItem.itemName} → ${itemData.productName}`);
     }
-    existingBySr.delete(itemData.productSrNo || srNo);
+    existingBySr.delete(key);
   }
-  for (const [srNo] of Array.from(existingBySr.entries())) {
-    if (srNo) itemChanges.push(`- Removed ${srNo}`);
+  for (const [srNo, existingItem] of Array.from(existingBySr.entries())) {
+    if (srNo) itemChanges.push(`- Removed ${srNo}${existingItem.itemName ? ` ${existingItem.itemName}` : ''}`);
   }
 
   return {

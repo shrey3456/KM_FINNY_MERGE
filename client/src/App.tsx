@@ -6,6 +6,8 @@ import NotFound from "./pages/not-found";
 import Home from "@/pages/Dashboard";
 import ScanOrder from "@/pages/Scanning/Scan";
 import ScanViewer from "@/pages/ScanViewer";
+import SortSlips from "@/pages/SortSlip/SortSlips";
+import DailyReports from "@/pages/DailyReports";
 import NotionInventory from "@/pages/NotionInventory";
 import Reports from "@/pages/Scanning/Reports.tsx";
 import Users from "@/pages/Users";
@@ -273,6 +275,8 @@ function Router() {
         <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />
         <ProtectedRoute path="/unloading" component={Unloading} requiredPage="unloading" />
         <ProtectedRoute path="/scan-viewer" component={ScanViewer} requiredPage="scan-viewer" />
+        <ProtectedRoute path="/sort-slip" component={SortSlips} requiredPage="sort-slip" />
+        <ProtectedRoute path="/daily-reports" component={DailyReports} requiredPage="daily-reports" />
         <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
         <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />
         <ProtectedRoute path="/settings" component={Settings} requiredPage="settings" />

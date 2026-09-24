@@ -20,7 +20,7 @@ import { hasPageWriteAccess } from '../lib/permissions';
 // needs to load jsbarcode itself; they just display an already-rendered image.
 function generateBarcodeDataUrl(text: string): string {
   const canvas = document.createElement('canvas');
-  JsBarcode(canvas, text, { format: 'CODE128', displayValue: false, margin: 4, height: 40 });
+  JsBarcode(canvas, text, { format: 'CODE128', displayValue: false, margin: 4, height: 40, width: 3 });
   return canvas.toDataURL('image/png');
 }
 
@@ -337,29 +337,27 @@ const PrintOperations: React.FC = () => {
       </div>
 
       <div style="margin-bottom: 0.5mm;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5mm;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2mm;">
           <div style="display: flex; width: 45px; height: 45px; border-radius: 50%; border: 2px solid #000000; background-color: transparent; color: #000000; font-size: ${vehicleCircleFontPt(proformaData.slip.vehicleNumber)}pt; font-weight: bold; line-height: 1; white-space: nowrap; overflow: hidden; text-align: center; align-items: center; justify-content: center; flex-shrink: 0;">${proformaData.slip.vehicleNumber || ''}</div>
           <div style="text-align: center; font-size: 10pt; font-weight: bold; flex: 1; padding: 0 5mm;">
             ${proformaData.slip.partyName}
-            <!-- Time box for load start & end time -->
-            <div style="margin-top: 3mm; border: 1px solid #000; padding: 2mm; background-color: #ffffff;">
-              <div style="display: flex; justify-content: space-between; gap: 2mm;">
-                <div style="flex: 1;">
-                  <div style="font-size: 7pt; margin-bottom: 1mm;">Start:</div>
-                  <div style="height: 12px; width: 100%;"></div>
-                </div>
-                <div style="flex: 1;">
-                  <div style="font-size: 7pt; margin-bottom: 1mm;">End:</div>
-                  <div style="height: 12px; width: 100%;"></div>
-                </div>
-              </div>
+            <!-- Barcode with the slip number directly beneath it — moved here from the right
+                 column so both sit together under the party name. -->
+            <div style="margin-top: 2mm;">
+              ${barcodeDataUrl ? `<img src="${barcodeDataUrl}" style="height: 13mm; width: auto; display: block; margin: 0 auto;" alt="Order barcode" />` : ''}
+              <div style="font-size: 11pt; font-weight: bold; text-align: center; color: #a10808; line-height: 1.1;">#${proformaData.slip.orderNumber}</div>
             </div>
           </div>
           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1mm;">
-            <!-- Slip number with its scannable barcode directly beneath it, then the date. -->
-            <div style="display: flex; flex-direction: column; align-items: flex-end;">
-              <div style="font-size: 14pt; font-weight: bold; text-align: right; color: #a10808; line-height: 1.1;">#${proformaData.slip.orderNumber}</div>
-              ${barcodeDataUrl ? `<img src="${barcodeDataUrl}" style="height: 7mm; width: auto; display: block; margin-top: 0.5mm;" alt="Order barcode" />` : ''}
+            <!-- Time box for load start & end time — moved here from the party-name column.
+                 "TIME" is a plain label above the box now, not a title bar inside it, so the
+                 box itself is just its two equal rows split by one line. -->
+            <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.5mm;">
+              <div style="font-size: 7pt; font-weight: bold;">TIME</div>
+              <div style="border: 1px solid #000; width: 22mm; background-color: #ffffff;">
+                <div style="height: 4mm;"></div>
+                <div style="height: 4mm; border-top: 1px solid #000;"></div>
+              </div>
             </div>
             <div style="font-size: 10pt; font-weight: bold; line-height: 1.2; text-align: right;">${formatDate(proformaData.slip.orderDate)}</div>
           </div>
@@ -1055,7 +1053,7 @@ const PrintOperations: React.FC = () => {
                     })()}
 
                     <div style={{ marginBottom: '0.5mm' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5mm' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2mm' }}>
                         <div style={{ 
                           display: 'flex',
                           width: '45px', 
@@ -1078,27 +1076,26 @@ const PrintOperations: React.FC = () => {
                         </div>
                         <div style={{ textAlign: 'center', fontSize: '10pt', fontWeight: 'bold', flex: 1, padding: '0 5mm' }}>
                           {proformaData.slip.partyName}
-                          {/* Time box for load start & end time */}
-                          <div style={{ marginTop: '3mm', border: '1px solid #000', padding: '2mm', backgroundColor: '#ffffff' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '2mm' }}>
-                              <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: '7pt', marginBottom: '1mm' }}>Start:</div>
-                                <div style={{ height: '12px', width: '100%' }}></div>
-                              </div>
-                              <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: '7pt', marginBottom: '1mm' }}>End:</div>
-                                <div style={{ height: '12px', width: '100%' }}></div>
-                              </div>
-                            </div>
+                          {/* Barcode with the slip number directly beneath it — moved here from
+                              the right column so both sit together under the party name. */}
+                          <div style={{ marginTop: '2mm' }}>
+                            {barcodeDataUrl && (
+                              <img src={barcodeDataUrl} alt="Order barcode" style={{ height: '13mm', width: 'auto', display: 'block', margin: '0 auto' }} />
+                            )}
+                            <div style={{ fontSize: '11pt', fontWeight: 'bold', textAlign: 'center', color: '#a10808', lineHeight: '1.1' }}>#{proformaData.slip.orderNumber}</div>
                           </div>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1mm' }}>
-                          {/* Slip number with its scannable barcode directly beneath it, then the date — same as the printed slip. */}
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                            <div style={{ fontSize: '14pt', fontWeight: 'bold', textAlign: 'right', color: '#a10808', lineHeight: '1.1' }}>#{proformaData.slip.orderNumber}</div>
-                            {barcodeDataUrl && (
-                              <img src={barcodeDataUrl} alt="Order barcode" style={{ height: '7mm', width: 'auto', display: 'block', marginTop: '0.5mm' }} />
-                            )}
+                          {/* Time box for load start & end time — moved here from the party-name
+                              column. "TIME" is a plain label above the box now, not a title bar
+                              inside it, so the box itself is just its two equal rows split by
+                              one line. */}
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5mm' }}>
+                            <div style={{ fontSize: '7pt', fontWeight: 'bold' }}>TIME</div>
+                            <div style={{ border: '1px solid #000', width: '22mm', backgroundColor: '#ffffff' }}>
+                              <div style={{ height: '4mm' }}></div>
+                              <div style={{ height: '4mm', borderTop: '1px solid #000' }}></div>
+                            </div>
                           </div>
                           <div style={{ fontSize: '10pt', fontWeight: 'bold', lineHeight: '1.2', textAlign: 'right' }}>{formatDate(proformaData.slip.orderDate)}</div>
                         </div>

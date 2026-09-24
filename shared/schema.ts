@@ -54,6 +54,16 @@ export const products = pgTable("products", {
   type: text("type"),               // Type : (BOX / NOS / JAR)
   productImage: text("product_image"), // Local cached filename (server/uploads/product-images/<id>.jpg), not a URL
   productImageHash: text("product_image_hash"), // SHA-256 of the cached file's bytes — lets sync skip re-downloading unchanged images
+  // Which Notion FILE the cached picture came from: the stable part of its URL (the storage
+  // path, without the presigned query string). The hash above can only be compared after
+  // downloading the image; this can be compared straight off the page data, so a plain
+  // "Sync Notion" can tell that someone replaced the picture in Notion and fetch just that one.
+  productImageRef: text("product_image_ref"),
+  // Notion's second image per product ("Box Image" — the packed carton, as opposed to the
+  // product shot). Cached the same way, under <id>-box.jpg, with its own hash.
+  boxImage: text("box_image"),
+  boxImageHash: text("box_image_hash"),
+  boxImageRef: text("box_image_ref"),
   notionPageId: text("notion_page_id"), // Notion page.id for unique identification
 
   // ── Volume / pallet ───────────────────────────────────────────────────────
@@ -133,7 +143,8 @@ export const insertProductSchema = createInsertSchema(products, {
   // core
   newSr: true, itemNo: true, barcode: true, name: true,
   notionWiseName: true, brand: true, category: true, saleCategory: true,
-  plant: true, type: true, productImage: true, productImageHash: true, notionPageId: true,
+  plant: true, type: true, productImage: true, productImageHash: true,
+  productImageRef: true, boxImage: true, boxImageHash: true, boxImageRef: true, notionPageId: true,
   // volume / pallet
   volumeInCuFt: true, itemsPerPallet: true, pallets: true, mpPlt: true, gjPlt: true,
   // stock
@@ -433,6 +444,113 @@ export const loadingHandoffs = pgTable("loading_handoffs", {
 });
 
 export type LoadingHandoff = typeof loadingHandoffs.$inferSelect;
+
+// ============================================================================
+// SORT SLIPS
+// Purpose : Godown picking/sorting. A supervisor turns a proforma order into a sort slip,
+//           puts one or more loaders on it, and each loader records how much of every
+//           product they have physically picked — typed in, never scanned.
+// Used by : Sort Slip page (/sort-slip), server/routes/sort-slips.ts.
+//
+// DELIBERATELY SEPARATE FROM LOAD OPERATIONS. A sort slip shares only the order number with
+// Loading: picks are written here and nowhere else, they move no stock, and they are invisible
+// to Load Operations' loaded quantity, its progress, its completion check, Scan History and
+// Stock Overview. Sorting is "what has been brought to the platform", loading is "what went on
+// the truck" — counting one as the other would double-count the same cartons.
+// ============================================================================
+
+export const sortSlips = pgTable("sort_slips", {
+  id: serial("id").primaryKey(),
+  // One sort slip per order. The order is the identity here (as on the Loading page), not the
+  // proforma row's id, so the slip survives a re-import of the same order.
+  orderNumber: text("order_number").notNull().unique(),
+  proformaSlipId: integer("proforma_slip_id"),
+  // Snapshots taken when the slip is created, so the landing list needs no joins and still
+  // reads correctly if the order is edited afterwards.
+  partyName: text("party_name"),
+  plant: text("plant"),
+  orderDate: date("order_date"),
+  totalQty: integer("total_qty").default(0),
+  // STV (platform) the operator picks when the slip is created — same per-plant plantStvs
+  // concept proformaSlips.loadingStv already uses for Loading. Write-once at creation; a pick
+  // event never carries its own STV (unlike loadingScanEvents/scanSessionPalletScans), since
+  // sorting happens at whichever platform the slip itself was created for.
+  platformStv: text("platform_stv"),
+  // 'unassigned' until the first loader is put on it, 'active' from then on, 'completed' only
+  // when a supervisor says so — a fully-picked slip never closes itself.
+  status: text("status").default("unassigned"),
+  createdByCode: text("created_by_code"),
+  createdByName: text("created_by_name"),
+  createdAt: timestamp("created_at").defaultNow(),
+  activatedAt: timestamp("activated_at"),
+  completedAt: timestamp("completed_at"),
+  completedByCode: text("completed_by_code"),
+  completedByName: text("completed_by_name"),
+  notes: text("notes"),
+});
+
+// Who is picking a slip. Several loaders can work one slip at once, and a loader can be on only
+// ONE active slip at a time — enforced by a partial unique index on isActive (see server/index.ts),
+// so two supervisors assigning the same person simultaneously cannot both succeed.
+export const sortSlipAssignees = pgTable("sort_slip_assignees", {
+  id: serial("id").primaryKey(),
+  sortSlipId: integer("sort_slip_id").notNull(),
+  userCode: text("user_code").notNull(),
+  userName: text("user_name"),
+  assignedByCode: text("assigned_by_code"),
+  assignedByName: text("assigned_by_name"),
+  assignedAt: timestamp("assigned_at").defaultNow(),
+  removedAt: timestamp("removed_at"),
+  removedByCode: text("removed_by_code"),
+  // True while this loader is live on a slip that is itself still active. Cleared when the
+  // loader is removed, transferred away, or the slip is completed — which is what frees them
+  // for their next slip.
+  isActive: boolean("is_active").default(true),
+});
+
+// One row per "I picked this much", never a running total. Keeping the events means the slip can
+// say WHO picked what and when, a mistake can be voided instead of silently overwritten, and two
+// loaders on one slip both keep their own contribution.
+export const sortSlipPicks = pgTable("sort_slip_picks", {
+  id: serial("id").primaryKey(),
+  sortSlipId: integer("sort_slip_id").notNull(),
+  orderNumber: text("order_number").notNull(),
+  proformaSlipItemId: integer("proforma_slip_item_id"),
+  // Snapshots, same rule as every other table here: the line reads correctly later even if the
+  // product master or the order line changes.
+  barcode: text("barcode"),
+  srNo: text("sr_no"),
+  itemName: text("item_name"),
+  qty: integer("qty").notNull(),
+  pickedByCode: text("picked_by_code"),
+  pickedByName: text("picked_by_name"),
+  pickedAt: timestamp("picked_at").defaultNow(),
+  voided: boolean("voided").default(false),
+  voidedByCode: text("voided_by_code"),
+  voidedAt: timestamp("voided_at"),
+});
+
+// A supervisor moving a slip from one loader to another. Unlike Loading's pause/claim (where the
+// worker moves it themselves), a transfer here is always performed BY someone else, so the row
+// records the supervisor as well as both loaders.
+export const sortSlipHandoffs = pgTable("sort_slip_handoffs", {
+  id: serial("id").primaryKey(),
+  sortSlipId: integer("sort_slip_id").notNull(),
+  orderNumber: text("order_number").notNull(),
+  fromUserCode: text("from_user_code"),
+  fromUserName: text("from_user_name"),
+  toUserCode: text("to_user_code"),
+  toUserName: text("to_user_name"),
+  transferredByCode: text("transferred_by_code"),
+  transferredByName: text("transferred_by_name"),
+  transferredAt: timestamp("transferred_at").defaultNow(),
+  reason: text("reason"),
+});
+
+export type SortSlip = typeof sortSlips.$inferSelect;
+export type SortSlipAssignee = typeof sortSlipAssignees.$inferSelect;
+export type SortSlipPick = typeof sortSlipPicks.$inferSelect;
+export type SortSlipHandoff = typeof sortSlipHandoffs.$inferSelect;
 
 // IMPORTANT: All fields below are IMMUTABLE SNAPSHOTS of product data at import
 // time. They must NEVER be updated after the slip is created, even if the live
@@ -1293,7 +1411,14 @@ export const activities = pgTable("activities", {
   details: text("details"),                  // extra JSON metadata about the change
   userCode: text("user_code").references(() => users.userCode),
   userName: text("user_name"),               // cached for fast display without a join
-  createdAt: timestamp("created_at").defaultNow(),
+  // Drizzle always reads a naive "timestamp without time zone" column as UTC (it appends "+0000"
+  // to whatever digits are stored — see node_modules/drizzle-orm/pg-core/columns/timestamp.js).
+  // defaultNow() casts now() to `timestamp` using the Postgres SESSION's TimeZone setting, which
+  // on this server is Asia/Calcutta — so it was storing IST wall-clock digits that Drizzle then
+  // mislabeled as UTC, showing every activity's time 5:30 ahead of when it actually happened.
+  // AT TIME ZONE 'UTC' sidesteps the session setting entirely and stores true UTC digits, which is
+  // what Drizzle already assumes on read.
+  createdAt: timestamp("created_at").default(sql`(now() AT TIME ZONE 'UTC')`),
 });
 
 export const insertActivitySchema = createInsertSchema(activities).pick({

@@ -196,7 +196,12 @@ router.get('/products/image-by-name', async (req: Request, res: Response) => {
     }
 
     res.set({
-      'Cache-Control': 'public, max-age=3600',
+      // must-revalidate, not a plain max-age: the URL is the product's id, so it stays the same
+      // when the picture behind it changes. With "max-age=3600" the browser kept serving its own
+      // copy for an hour without asking, so a photo re-synced from Notion did not appear —
+      // looking exactly like the sync had failed. Revalidating every time costs one conditional
+      // request that answers 304 from the ETag below whenever the image really is unchanged.
+      'Cache-Control': 'public, max-age=0, must-revalidate',
       'ETag': product.productImageHash,
     });
     if (req.headers['if-none-match'] === product.productImageHash) {
@@ -208,6 +213,39 @@ router.get('/products/image-by-name', async (req: Request, res: Response) => {
     });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve product image' });
+  }
+});
+
+// GET /api/products/box-image-by-name?name=...
+// Same lookup as image-by-name above, reading box_image instead — the packed-carton photo for
+// whatever code path only has a bare item name yet (a CSV row not yet matched to a real product
+// id). Needed for parity with box-image-by-id, which only works once an id is known.
+router.get('/products/box-image-by-name', async (req: Request, res: Response) => {
+  try {
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+    const name = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+    if (!name) return res.status(400).json({ message: 'name is required' });
+
+    const product = await storage.getProductByName(name) as any;
+    if (!product?.boxImage || !product.boxImageHash) {
+      return res.status(404).json({ message: 'No box image for this product' });
+    }
+
+    res.set({
+      'Cache-Control': 'public, max-age=0, must-revalidate',
+      'ETag': product.boxImageHash,
+    });
+    if (req.headers['if-none-match'] === product.boxImageHash) {
+      return res.status(304).end();
+    }
+
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.boxImage), (err) => {
+      if (err && !res.headersSent) res.status(404).json({ message: 'Box image file missing' });
+    });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve box image' });
   }
 });
 
@@ -232,7 +270,12 @@ router.get('/products/image-by-id', async (req: Request, res: Response) => {
     }
 
     res.set({
-      'Cache-Control': 'public, max-age=3600',
+      // must-revalidate, not a plain max-age: the URL is the product's id, so it stays the same
+      // when the picture behind it changes. With "max-age=3600" the browser kept serving its own
+      // copy for an hour without asking, so a photo re-synced from Notion did not appear —
+      // looking exactly like the sync had failed. Revalidating every time costs one conditional
+      // request that answers 304 from the ETag below whenever the image really is unchanged.
+      'Cache-Control': 'public, max-age=0, must-revalidate',
       'ETag': product.productImageHash,
     });
     if (req.headers['if-none-match'] === product.productImageHash) {
@@ -244,6 +287,43 @@ router.get('/products/image-by-id', async (req: Request, res: Response) => {
     });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve product image' });
+  }
+});
+
+// GET /api/products/box-image-by-id?id=...
+// The packed-carton photo, alongside image-by-id above. Separate endpoint rather than a ?kind=
+// flag so the browser caches and revalidates each picture on its own ETag.
+router.get('/products/box-image-by-id', async (req: Request, res: Response) => {
+  try {
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+    const id = parseInt(String(req.query.id ?? ''), 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id is required' });
+
+    const product = await storage.getProduct(id) as any;
+    if (!product?.boxImage || !product.boxImageHash) {
+      return res.status(404).json({ message: 'No box image for this product' });
+    }
+
+    res.set({
+      // must-revalidate, not a plain max-age: the URL is the product's id, so it stays the same
+      // when the picture behind it changes. With "max-age=3600" the browser kept serving its own
+      // copy for an hour without asking, so a photo re-synced from Notion did not appear —
+      // looking exactly like the sync had failed. Revalidating every time costs one conditional
+      // request that answers 304 from the ETag below whenever the image really is unchanged.
+      'Cache-Control': 'public, max-age=0, must-revalidate',
+      'ETag': product.boxImageHash,
+    });
+    if (req.headers['if-none-match'] === product.boxImageHash) {
+      return res.status(304).end();
+    }
+
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.boxImage), (err) => {
+      if (err && !res.headersSent) res.status(404).json({ message: 'Box image file missing' });
+    });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve box image' });
   }
 });
 

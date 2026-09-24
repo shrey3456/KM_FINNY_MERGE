@@ -12,6 +12,8 @@ export const CONTROLLABLE_PAGES = [
   { key: "loading", label: "Load Operations" },
   { key: "unloading", label: "Unload Operations" },
   { key: "scan-order", label: "Scan Operations" },
+  { key: "sort-slip", label: "Sort Slip" },
+  { key: "daily-reports", label: "Reports" },
   { key: "scan-viewer", label: "Overall Scan Ops" },
   { key: "scan-history", label: "Scan History" },
   { key: "overall-stock", label: "Stock Overview" },

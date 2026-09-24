@@ -53,6 +53,10 @@ function requireUnloadingVoidAccess(req: Request, res: Response, next: any) {
   // Loading/Order Scan void gates) — a user with unloading write access should be able to
   // reopen/void within Unloading on its own.
   if (hasWriteAccess(user, 'unloading')) return next();
+  // Same allowance Order Scan's void gate gives its own cross-session viewer (requireVoidAccess
+  // in order-scan.ts): write access to Overall Scan Ops lets someone void an unloading scan from
+  // that page's own item-history panel, without needing separate write access to Unloading itself.
+  if (hasWriteAccess(user, 'scan-viewer')) return next();
   return res.status(403).json({ message: 'Write access required' });
 }
 // Delete/delete-preview specifically (not reopen/void — those stay unloading-only above) also

@@ -35,6 +35,7 @@ import {
   LayoutList,
   Eye,
   PackageOpen,
+  ClipboardList,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -214,6 +215,18 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/scan",
           badge: hasScanBadge ? 1 : 0,
           pageKey: "scan-order",
+        },
+        {
+          label: "Sort Slip",
+          icon: <ClipboardList className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/sort-slip",
+          pageKey: "sort-slip",
+        },
+        {
+          label: "Reports",
+          icon: <FileBarChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/daily-reports",
+          pageKey: "daily-reports",
         },
         {
           label: "Overall Scan Ops",

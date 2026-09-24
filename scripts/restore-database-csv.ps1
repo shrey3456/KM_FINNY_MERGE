@@ -115,6 +115,14 @@ if (-not $psql) {
     throw "psql.exe not found on PATH or under C:\Program Files\PostgreSQL\*\bin. Install PostgreSQL client tools or add psql to PATH."
 }
 
+# -- Talk to Postgres in UTF-8 whatever the console's codepage is. psql otherwise takes its
+#    client encoding from the Windows codepage (WIN1252 on a stock Windows Server), and the first
+#    character the data holds that WIN1252 has no room for - the app's own Notion statuses carry
+#    one, "VEHI=ASSGN" is spelled with U+2248 - kills the export with
+#      character with byte sequence 0xe2 0x89 0x88 ... has no equivalent in encoding "WIN1252"
+#    The database is UTF-8; this just stops psql transcoding on the way out (and on the way back
+#    in, where the same mismatch would silently mangle those characters instead). --
+$env:PGCLIENTENCODING = "UTF8"
 $env:PGPASSWORD = $dbPassword
 try {
     $importScriptPath = [System.IO.Path]::GetTempFileName()
@@ -215,6 +223,7 @@ END $$;
     }
 } finally {
     Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+    Remove-Item Env:\PGCLIENTENCODING -ErrorAction SilentlyContinue
 }
 
 Write-Host ""

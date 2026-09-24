@@ -621,7 +621,10 @@ export default function ScanViewer() {
   // removable chips), over every Master View column except Order Date — every row on this page
   // shares one order date, so filtering on it can only ever keep all rows or none. Declared here,
   // below stvsByBarcode/stvOptions, because the STV column's options and accessor read them.
-  const [mvColumnConditions, setMvColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("scanViewer:mvColumnFilters", {});
+  // ".v2": the Sr No filter used to hold the digits out of an Sr ("1" for V001). A filter saved
+  // in that shape matches nothing now that it holds the printed code, and would leave someone
+  // staring at an empty table, so the older saved set is left behind once rather than migrated.
+  const [mvColumnConditions, setMvColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("scanViewer:mvColumnFilters.v2", {});
   // The sort is a working preference like the filters beside it, so it is kept the same way —
   // leave the page, come back, it is still sorted how you left it. Owned here rather than inside
   // the table so the chip below can clear it in one click; the table just draws the arrow.
@@ -643,21 +646,30 @@ export default function ScanViewer() {
     Array.from(new Set(allMvItems.map(pick)))
       .sort((a, b) => a - b)
       .map((v) => ({ value: String(v), label: decimals ? v.toFixed(decimals) : v.toLocaleString() }));
-  // Sr No as a sortable value: the numeric part when there is one, otherwise a very large number
-  // so items without an Sr (extras scanned against an uncatalogued barcode) always land at the
-  // bottom instead of heading the list.
-  const MV_NO_SR = Number.MAX_SAFE_INTEGER;
-  const mvSrSortValue = (row: MvMergedItem) => {
-    const raw = (row.srNo ?? "").trim();
-    if (!raw) return MV_NO_SR;
-    const n = Number(raw.replace(/[^0-9.-]/g, ""));
-    return Number.isFinite(n) ? n : MV_NO_SR;
+  // Sr No as a sortable key. An Sr is a letter and a number — "V001", "C0001", "I197" — so the
+  // letter is kept and the number zero-padded behind it: the list groups by prefix and then runs
+  // 1, 2, 10 rather than 1, 10, 2. Null for an item with no Sr (an extra scanned against an
+  // uncatalogued barcode), which the sort below pins to the bottom.
+  const mvSrSortKey = (row: MvMergedItem): string | null => {
+    const raw = (row.srNo ?? "").trim().toUpperCase();
+    if (!raw) return null;
+    const parts = raw.match(/^([A-Z]*)\s*(\d+)(.*)$/);
+    return parts ? `${parts[1]}${parts[2].padStart(8, "0")}${parts[3]}` : raw;
   };
 
   const mvFilterColumns: FilterableColumn<MvMergedItem>[] = [
     // Same filter engine the rest of this table and Scan History use — value checklist plus
     // equals / greater / less / between.
-    { id: "srNo", label: "Sr No", filterType: "number", options: mvNumberOptions((i) => mvSrSortValue(i) === MV_NO_SR ? 0 : mvSrSortValue(i)), accessor: (i) => (mvSrSortValue(i) === MV_NO_SR ? null : mvSrSortValue(i)) },
+    // Filtered on the Sr exactly as it is printed — "V001", "C0001" — not on the digits inside
+    // it. Reading only the number turned V001 and C0001 into the same entry, "1", so the
+    // checklist could neither tell them apart nor offer the code anyone actually looks for.
+    {
+      id: "srNo", label: "Sr No", filterType: "text",
+      options: Array.from(new Set(allMvItems.map((i) => (i.srNo ?? "").trim()).filter(Boolean)))
+        .sort((a, b) => String(mvSrSortKey({ srNo: a } as MvMergedItem)).localeCompare(String(mvSrSortKey({ srNo: b } as MvMergedItem))))
+        .map((v) => ({ value: v, label: v })),
+      accessor: (i) => (i.srNo ?? "").trim() || null,
+    },
     { id: "item", label: "Item", filterType: "text", options: mvTextOptions((i) => i.itemName), accessor: (i) => i.itemName },
     { id: "barcode", label: "Barcode / SAP", filterType: "text", options: mvTextOptions((i) => i.barcode), accessor: (i) => i.barcode },
     { id: "exp", label: "Exp Qty", filterType: "number", options: mvNumberOptions((i) => mvRowState(i).exp), accessor: (i) => mvRowState(i).exp },
@@ -689,9 +701,12 @@ export default function ScanViewer() {
     const column = mvFilterColumns.find((c) => c.id === mvSort.columnId);
     if (!column) return mvFilteredRows;
     const dir = mvSort.direction === "asc" ? 1 : -1;
+    // Sr is the one column whose display value doesn't sort the way it reads, so it sorts on the
+    // padded key instead; every other column sorts on the value it filters by.
+    const value = (row: MvMergedItem) => (column.id === "srNo" ? mvSrSortKey(row) : column.accessor(row));
     return [...mvFilteredRows].sort((a, b) => {
-      const va = column.accessor(a) as any;
-      const vb = column.accessor(b) as any;
+      const va = value(a) as any;
+      const vb = value(b) as any;
       if (va == null && vb == null) return 0;
       if (va == null) return 1;
       if (vb == null) return -1;
@@ -705,6 +720,9 @@ export default function ScanViewer() {
   const clearMvCondition = (id: string) =>
     setMvColumnConditions((prev) => { const next = { ...prev }; delete next[id]; return next; });
   const mvColumnHeader = (id: string, label: string) => {
+    // Sr is sortable but not filterable — it's the code a printed list is read by, not a value
+    // worth a checklist, and the padded-key sort still reads this same list by id.
+    if (id === "srNo") return label;
     const column = mvFilterColumns.find((c) => c.id === id);
     if (!column) return label;
     return (
@@ -1090,7 +1108,7 @@ export default function ScanViewer() {
     // Sticky + width-capped, matching the Scan Order page's panel: this renders inside a
     // <td colSpan> of a much wider table that scrolls sideways, so a plain 100%-width block
     // inherits that full width. sticky left-0 pins it to the visible left edge instead.
-    <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
+    <div className="sticky left-0 w-full max-w-[min(1500px,calc(100vw-17rem))] bg-gray-50 p-3">
       {historyQuery.isLoading ? (
         <SectionSkeleton lines={3} />
       ) : historyEventsInStvScope.length === 0 ? (
@@ -1123,7 +1141,8 @@ export default function ScanViewer() {
               <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
                 <th className="w-7 border-r border-gray-200 px-2 py-2 font-semibold">#</th>
                 <th className="w-[150px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
-                <th className="border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
+                <th className="w-[130px] border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
+                <th className="w-[110px] border-r border-gray-200 px-2 py-2 font-semibold">STV</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Order</th>
                 <th className="w-14 border-r border-gray-200 px-2 py-2 text-center font-semibold">Qty</th>
                 <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
@@ -1137,6 +1156,10 @@ export default function ScanViewer() {
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{fmtIST(ev.scannedAt)}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{ev.scannedByName ?? "—"}</td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">
+                    {ev.stv ?? <span className="text-gray-300">—</span>}
+                  </td>
+                  {/* Wraps instead of truncating: an order name is how you tell two rows apart. */}
+                  <td className="whitespace-normal break-words border-r border-gray-100 px-2 py-2 text-gray-600">
                     {ev.orderName?.replace(/\.csv$/i, "")}
                   </td>
                   <td className="border-r border-gray-100 px-2 py-2 text-center">
@@ -1448,9 +1471,9 @@ export default function ScanViewer() {
       hideable: false,
       totalable: false,
       sortable: true,
-      // Sorted as a NUMBER when it looks like one, so 9 comes before 10 rather than after it,
-      // with anything unparseable (and every item that has no Sr at all) pushed to the end.
-      accessor: (row) => mvSrSortValue(row),
+      // The Sr as printed, so an export carries "V001" rather than the 1 inside it. Ordering is
+      // the sort above's job (sortMode="external"), which uses the padded key.
+      accessor: (row) => row.srNo ?? "",
       cellClassName: `align-top tabular-nums ${cellBorder}`,
       render: (row) => (
         <span className={row.srNo ? "font-semibold text-gray-700" : "text-gray-300"}>
@@ -2237,7 +2260,7 @@ export default function ScanViewer() {
                           </tr>
                           {isOpen && (
                             <tr>
-                              <td colSpan={6} className="border-b border-gray-200 p-0">{historyPanel}</td>
+                              <td colSpan={7} className="border-b border-gray-200 p-0">{historyPanel}</td>
                             </tr>
                           )}
                         </Fragment>
@@ -2435,7 +2458,7 @@ export default function ScanViewer() {
             headerActions={
               <>
                 <AddColumnFilterButton
-                  columns={mvFilterColumns}
+                  columns={mvFilterColumns.filter((c) => c.id !== "srNo")}
                   conditions={mvColumnConditions}
                   onApply={setMvCondition}
                   onClear={clearMvCondition}
@@ -2571,7 +2594,7 @@ export default function ScanViewer() {
                               </td>
                             </tr>
                             {isOpen && (
-                              <tr><td colSpan={6} className="border-b border-gray-200 p-0">{historyPanel}</td></tr>
+                              <tr><td colSpan={7} className="border-b border-gray-200 p-0">{historyPanel}</td></tr>
                             )}
                           </Fragment>
                         );
@@ -2793,12 +2816,43 @@ type UnloadingHistoryEvent = {
   stv: string | null; vehicleNumber: string | null; orderDate: string | null;
 };
 
+// Same allowance the void gate for POST /api/unloading/events/:id/void gives (see
+// requireUnloadingVoidAccess in server/routes/unloading.ts): admin/super-admin, write access to
+// Unloading itself, or write access to this viewer page — mirroring the Order Scan panel's own
+// canVoidScan just above, so voiding from either cross-session viewer follows the same rule.
+function useCanVoidUnloadEvent(): boolean {
+  const { user } = useAuth();
+  const role = ((user as any)?.role ?? "").toLowerCase();
+  return ["admin", "super-admin"].includes(role)
+    || hasPageWriteAccess("unloading")
+    || hasPageWriteAccess("scan-viewer");
+}
+
 function UnloadingViewerSection({
   plantOptions, getPlantColorCfg,
 }: {
   plantOptions: string[];
   getPlantColorCfg: (plantName: string | null | undefined) => Plant | null;
 }) {
+  const { toast: uToast } = useToast();
+  const uQc = useQueryClient();
+  const canVoidUnloadEvent = useCanVoidUnloadEvent();
+  const [uVoidTarget, setUVoidTarget] = useState<UnloadingHistoryEvent | null>(null);
+  const [uVoidReason, setUVoidReason] = useState("");
+  const uVoidMutation = useMutation({
+    mutationFn: (payload: { id: number; reason: string }) =>
+      apiRequest("POST", `/api/unloading/events/${payload.id}/void`, { reason: payload.reason }).then((r) => r.json()),
+    onSuccess: () => {
+      uQc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/unloading-history"] });
+      uQc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
+      uQc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      setUVoidTarget(null);
+      setUVoidReason("");
+      uToast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
+    },
+    onError: (err: any) => uToast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
+  });
+
   const [uPlant, setUPlant] = useState(() => readSavedUnloadingViewerFilters().plant ?? "");
   // ?? not ||: a saved "" is a real choice here ("All dates"), not an absent value.
   const [uDate, setUDate] = useState(() => readSavedUnloadingViewerFilters().date ?? getLocalISODate());
@@ -3109,12 +3163,17 @@ function UnloadingViewerSection({
     return extra > 0 ? "bg-orange-50/40" : "";
   };
 
-  // Same expanded-row history panel shape as the real Unloading page's own renderItemHistoryPanel
-  // — just backed by /reports/unloading-history (plant-wide, all-time) instead of that page's own
-  // per-session scan events, since this is a read-only cross-session viewer, not the live batch.
+  // The item's unloading history, in the same shape as the Order Scan side's panel above: row
+  // numbers, date, who scanned it, the STV, then what makes it an unloading row (vehicle and
+  // order date), the quantity, and its status. Backed by /reports/unloading-history (plant-wide,
+  // all-time) rather than the live Unloading page's own session events, since this is a read-only
+  // cross-session viewer.
   function renderUItemHistoryPanel(row: UnloadingProgressItem) {
     return (
-      <div className="bg-gray-50 p-3">
+      // Pinned to the visible left edge and sized to the window less the sidebar — this renders
+      // inside a <td> of a much wider table that scrolls sideways, so a plain full-width block
+      // would follow that table off the screen.
+      <div className="sticky left-0 w-full max-w-[min(1500px,calc(100vw-17rem))] bg-gray-50 p-3">
         <div className="mb-2 flex items-center gap-2 text-[#001d6e]">
           <ScanLine className="h-4 w-4 shrink-0" />
           <span className="text-sm font-semibold">{row.itemName ?? "Item"}</span>
@@ -3127,41 +3186,73 @@ function UnloadingViewerSection({
         ) : (
           // Grows with the window rather than stopping at a fixed 300px. This section has no
           // rotation state of its own, so it keeps the plain viewport-height cap.
-          <div className="max-h-[70vh] overflow-y-auto border border-gray-300">
-            <table className="w-full border-collapse text-xs">
+          <div className="max-h-[70vh] overflow-y-auto border border-gray-200">
+            <table className="w-full table-fixed border-collapse text-xs">
               <thead>
-                <tr className="sticky top-0 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
-                  <th className="border-r border-gray-300 px-3 py-2 font-semibold">Date &amp; Movement</th>
-                  <th className="border-r border-gray-300 px-3 py-2 font-semibold">Vehicle</th>
-                  <th className="border-r border-gray-300 px-3 py-2 font-semibold">Order Date</th>
-                  <th className="px-3 py-2 text-right font-semibold">Qty</th>
+                <tr className="sticky top-0 z-10 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                  <th className="w-7 border-r border-gray-200 px-2 py-2 font-semibold">#</th>
+                  <th className="w-[150px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
+                  <th className="w-[130px] border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
+                  <th className="w-[110px] border-r border-gray-200 px-2 py-2 font-semibold">STV</th>
+                  <th className="border-r border-gray-200 px-2 py-2 font-semibold">Vehicle</th>
+                  <th className="w-[120px] border-r border-gray-200 px-2 py-2 font-semibold">Order Date</th>
+                  <th className="w-14 border-r border-gray-200 px-2 py-2 text-center font-semibold">Qty</th>
+                  <th className={`${canVoidUnloadEvent ? "w-20 border-r border-gray-200" : "w-20"} px-2 py-2 font-semibold`}>Status</th>
+                  {canVoidUnloadEvent && <th className="w-14 px-2 py-2 text-right font-semibold">Action</th>}
                 </tr>
               </thead>
               <tbody>
-                {uHistoryQuery.data!.items.map((m) => {
-                  const badge = m.voided
-                    ? <span className="inline-block bg-gray-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">Voided</span>
-                    : m.isExtra
-                    ? <span className="inline-block bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">Extra</span>
-                    : <span className="inline-block bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Received</span>;
-                  return (
-                    <tr key={m.id} className="border-b border-gray-200 bg-white">
-                      <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
-                        <div className="flex flex-col gap-1">
-                          <span>{fmtIST(m.scannedAt)}</span>
-                          {badge}
-                        </div>
+                {uHistoryQuery.data!.items.map((m, idx) => (
+                  <tr
+                    key={m.id}
+                    className={`border-b border-gray-100 ${m.voided ? "opacity-60" : "hover:bg-gray-50"} ${idx % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
+                  >
+                    <td className="border-r border-gray-100 px-2 py-2 font-mono text-gray-400">{idx + 1}</td>
+                    <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-800">{fmtIST(m.scannedAt)}</td>
+                    <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">{m.scannedByName ?? "—"}</td>
+                    <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">
+                      {m.stv ?? <span className="text-gray-300">—</span>}
+                    </td>
+                    {/* Wraps instead of truncating — the vehicle is how you tell two rows apart here. */}
+                    <td className="whitespace-normal break-words border-r border-gray-100 px-2 py-2 text-gray-600">
+                      {m.vehicleNumber ?? "—"}
+                    </td>
+                    <td className="truncate border-r border-gray-100 px-2 py-2 text-gray-600">
+                      {m.orderDate ? format(new Date(`${m.orderDate}T00:00:00`), "MMM d, yyyy") : "—"}
+                    </td>
+                    <td className="border-r border-gray-100 px-2 py-2 text-center">
+                      <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                        m.voided ? "bg-gray-100 text-gray-400 line-through"
+                        : m.isExtra ? "bg-amber-100 text-amber-700"
+                        : "bg-[#001d6e]/10 text-[#001d6e]"
+                      }`}>
+                        {m.isExtra ? "+" : ""}{m.qty}
+                      </span>
+                    </td>
+                    <td className={`truncate px-2 py-2 text-[11px] ${canVoidUnloadEvent ? "border-r border-gray-100" : ""}`}>
+                      {m.voided ? (
+                        <span className="font-medium text-red-500" title={m.voidReason ?? undefined}>Voided</span>
+                      ) : m.isExtra ? (
+                        <span className="font-semibold uppercase text-amber-700">Extra</span>
+                      ) : (
+                        <span className="font-semibold uppercase text-emerald-700">Received</span>
+                      )}
+                    </td>
+                    {canVoidUnloadEvent && (
+                      <td className="px-2 py-2 text-right">
+                        {!m.voided && (
+                          <Button
+                            size="sm" variant="ghost"
+                            className="h-6 px-2 text-[11px] text-red-600 hover:bg-red-50 hover:text-red-700"
+                            onClick={() => setUVoidTarget(m)}
+                          >
+                            Void
+                          </Button>
+                        )}
                       </td>
-                      <td className="border-r border-gray-200 px-3 py-2 text-gray-600">{m.vehicleNumber ?? "—"}</td>
-                      <td className="border-r border-gray-200 px-3 py-2 text-gray-600 whitespace-nowrap">
-                        {m.orderDate ? format(new Date(`${m.orderDate}T00:00:00`), "MMM d, yyyy") : "—"}
-                      </td>
-                      <td className={`px-3 py-2 text-right font-bold tabular-nums ${m.voided ? "text-gray-400 line-through" : "text-[#001d6e]"}`}>
-                        {m.qty}
-                      </td>
-                    </tr>
-                  );
-                })}
+                    )}
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -3391,6 +3482,38 @@ function UnloadingViewerSection({
           />
         </div>
       )}
+
+      {/* Void confirmation — same rule as Order Scan's own void dialog above. */}
+      <Dialog open={!!uVoidTarget} onOpenChange={(o) => { if (!o) { setUVoidTarget(null); setUVoidReason(""); } }}>
+        <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-red-600">Void this scan?</DialogTitle>
+            <DialogDescription>
+              This reverses its stock impact and excludes it from totals — the entry stays visible in history, marked as voided.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5 py-1">
+            <Label htmlFor="scan-viewer-unload-void-reason" className="text-xs">Reason</Label>
+            <Input
+              id="scan-viewer-unload-void-reason"
+              value={uVoidReason}
+              onChange={(e) => setUVoidReason(e.target.value)}
+              placeholder="e.g. scanned wrong item, duplicate scan"
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setUVoidTarget(null); setUVoidReason(""); }}>Cancel</Button>
+            <Button
+              className="bg-red-600 text-white hover:bg-red-700"
+              disabled={uVoidMutation.isPending || !uVoidReason.trim()}
+              onClick={() => uVoidTarget && uVoidMutation.mutate({ id: uVoidTarget.id, reason: uVoidReason.trim() })}
+            >
+              {uVoidMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Void Scan"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

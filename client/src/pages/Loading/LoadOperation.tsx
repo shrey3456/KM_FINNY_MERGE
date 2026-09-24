@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, Calendar, Camera, CheckCircle2, Factory, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
+  AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
   Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
@@ -15,6 +15,7 @@ import { type FilterableColumn, type FilterCondition, type FilterOption, matchAl
 import { format as formatDay } from "date-fns";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
+import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { buildPageList } from "@/components/ui/data-table/data-table-pagination";
@@ -40,13 +41,6 @@ import { hasPageWriteAccess } from "@/lib/permissions";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, matchBarcodeNotInSystemError, matchExtraNotAllowedError, parseApiErrorMessage } from "@/lib/apiError";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
-
-// Width split (percent) between the Load Totals card and the Scan Items column — operator-
-// draggable, same mechanism (and same localStorage-key naming convention) as Order Scan's own
-// totals/scanner split (OS_TOTALS_PCT_KEY in Scan.tsx).
-const LOADING_TOTALS_PCT_KEY = "km-finny.loading.totalsWidthPct";
-const LOADING_TOTALS_PCT_MIN = 30;
-const LOADING_TOTALS_PCT_MAX = 80;
 
 // Kiosk rotation — same idea and CSS mechanics as Order Scan's and Unloading's own rotate views
 // (.kiosk-rotate-* in index.css): for a screen physically mounted at an angle next to the
@@ -175,6 +169,55 @@ function OwnerTimelineSummary({ timeline }: { timeline: OwnerTimelineEntry[] }) 
             </TableCell>
             <TableCell className="text-right">
               <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-200">{entry.loadedQty}</Badge>
+            </TableCell>
+            <TableCell className="text-muted-foreground whitespace-nowrap">{fmt(entry.from)}</TableCell>
+            <TableCell className="text-muted-foreground whitespace-nowrap">
+              {entry.to ? fmt(entry.to) : <span className="font-medium text-emerald-600">current</span>}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+// The Sort Slip side of the same order, if it has ever been sorted — who picked it and how much,
+// same shape as the owner timeline above. See GET /sort-slips/by-order/:orderNumber/loader-history
+// in server/routes/sort-slips.ts: gated on Loading OR Sort Slip access, so seeing this needs
+// neither a separate Sort Slip grant nor exposes anything Loading doesn't already show the
+// equivalent of for its own owners.
+type SortLoaderEntry = { userCode: string | null; userName: string | null; from: string | null; to: string | null; pickedQty: number };
+type SortLoaderHistoryResponse = {
+  exists: boolean;
+  status?: string;
+  totalQty?: number;
+  pickedQty?: number;
+  timeline?: SortLoaderEntry[];
+};
+
+function SortLoaderTimelineSummary({ timeline }: { timeline: SortLoaderEntry[] }) {
+  if (timeline.length === 0) return null;
+  const fmt = (d: string | null) =>
+    d ? new Date(d).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Loader</TableHead>
+          <TableHead className="text-right">Picked Qty</TableHead>
+          <TableHead>From</TableHead>
+          <TableHead>To</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {timeline.map((entry, idx) => (
+          <TableRow key={idx}>
+            <TableCell className="flex items-center gap-1.5">
+              <UserCircle2 className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+              {entry.userName ?? entry.userCode ?? "—"}
+            </TableCell>
+            <TableCell className="text-right">
+              <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-200">{entry.pickedQty}</Badge>
             </TableCell>
             <TableCell className="text-muted-foreground whitespace-nowrap">{fmt(entry.from)}</TableCell>
             <TableCell className="text-muted-foreground whitespace-nowrap">
@@ -538,10 +581,11 @@ export default function LoadOperation() {
   // routes/loading.ts) — distinct from slip.totalVolume (the order's full planned volume) and
   // slip.vehicleVolume (the vehicle's capacity).
   const [loadedVolume, setLoadedVolume] = useState(0);
-  // Owner+contribution history — collapsed by default (a Pause/Claim history table isn't
-  // something you need to see every time you open a load), a click on the summary line reveals
-  // it rather than it always taking up its own banner row.
-  const [ownerHistoryOpen, setOwnerHistoryOpen] = useState(false);
+  // Owner history / Sort loader history — a tab switch between the two (only one showing at a
+  // time), collapsed by default (null) since neither is something you need to see every time
+  // you open a load; a click on either tab reveals it instead of both always taking up their
+  // own banner row.
+  const [historyTab, setHistoryTab] = useState<"owner" | "sort" | null>(null);
 
   // "Items on this order" table — click a row to expand it and see that item's own scan history.
   // Fetched once for the whole order (same endpoint the Loading landing table's own expand panel
@@ -601,42 +645,12 @@ export default function LoadOperation() {
   // box below it as well.
   const [vehiclePanelOpen, setVehiclePanelOpen] = useState(false);
 
-  // Draggable split between the Load Totals card and the Scan Items column — same
-  // percent-of-row-width persistence and pointer-drag mechanism as Order Scan's own
-  // totalsRowRef/totalsPct/startTotalsResize (Scan.tsx).
-  const totalsRowRef = useRef<HTMLDivElement | null>(null);
-  const [totalsPct, setTotalsPct] = useState<number>(() => {
-    try {
-      const saved = Number(localStorage.getItem(LOADING_TOTALS_PCT_KEY));
-      return Number.isFinite(saved) && saved >= LOADING_TOTALS_PCT_MIN && saved <= LOADING_TOTALS_PCT_MAX ? saved : 50;
-    } catch { return 50; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(LOADING_TOTALS_PCT_KEY, String(Math.round(totalsPct))); } catch { /* private mode */ }
-  }, [totalsPct]);
-  // Pointer events (not mouse) so a stylus/touch drag works too. Listeners go on window so the
-  // drag keeps tracking even when the cursor leaves the thin handle.
-  const startTotalsResize = (e: React.PointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const row = totalsRowRef.current;
-    if (!row) return;
-    const onMove = (ev: PointerEvent) => {
-      const rect = row.getBoundingClientRect();
-      if (!rect.width) return;
-      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-      setTotalsPct(Math.min(LOADING_TOTALS_PCT_MAX, Math.max(LOADING_TOTALS_PCT_MIN, pct)));
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-    };
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "col-resize";
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
+  // Totals and Scan Items used to sit side by side in a draggable split; now a tab switch
+  // instead — one visible at a time, same row. The Scan Items card stays mounted underneath
+  // (see canScanThisLoad below) even while this says "total", just visually hidden, so the
+  // barcode-gun listener's refocus-after-scan and the camera stream aren't torn down every time
+  // the operator glances at totals.
+  const [totalsScanTab, setTotalsScanTab] = useState<"total" | "scanner">("scanner");
   const orderLoadHistoryQuery = useQuery<{ items: LoadHistoryEvent[] }>({
     queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", slip?.orderNumber],
     queryFn: async () =>
@@ -657,6 +671,16 @@ export default function LoadOperation() {
       (await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(slip?.orderNumber ?? "")}/handoffs`)).json(),
     enabled: !!slip,
     // Also picks up changes made by someone else on another screen.
+    refetchInterval: 15000,
+  });
+
+  // The Sort Slip side of this same order, if any — most orders are loaded without ever being
+  // sorted, so `exists: false` is the common case, not an error (see the endpoint's own comment).
+  const sortLoaderHistoryQuery = useQuery<SortLoaderHistoryResponse>({
+    queryKey: ["/api/sort-slips/by-order", slip?.orderNumber, "loader-history"],
+    queryFn: async () =>
+      (await apiRequest("GET", `/api/sort-slips/by-order/${encodeURIComponent(slip?.orderNumber ?? "")}/loader-history`)).json(),
+    enabled: !!slip,
     refetchInterval: 15000,
   });
 
@@ -3122,25 +3146,58 @@ export default function LoadOperation() {
                   </div>
                 )}
 
-                {/* Full owner+contribution history — "the owner is an array": every user who's
-                    ever held this load, oldest first, with how much each one loaded. Display
-                    only — access control never reads this, only the slip's own current owner
-                    (see checkLoadOwnership/checkLoadViewAccess). Collapsed by default — a click
-                    on this line reveals the table instead of it always taking up a banner row. */}
-                {(loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
+                {/* Owner history / Sort loader history — a tab switch between the two instead of
+                    two independent collapsible banners. "Owner": every user who's ever held this
+                    load, oldest first, with how much each one loaded — display only, access
+                    control never reads this (see checkLoadOwnership/checkLoadViewAccess).
+                    "Sort": the Sort Slip side of this order, who picked it and how much while
+                    sorting rather than loading. Either tab button is omitted when its own history
+                    has nothing to show (e.g. an order loaded without ever being sorted), and the
+                    whole row disappears if neither does. Collapsed by default (historyTab===null)
+                    — clicking a tab reveals it instead of it always taking up a banner row;
+                    clicking the active tab again collapses it. */}
+                {((loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 ||
+                  (sortLoaderHistoryQuery.data?.exists && (sortLoaderHistoryQuery.data.timeline?.length ?? 0) > 0)) && (
                   <div className="px-4 sm:px-5 py-2 border-b border-gray-100">
-                    <button
-                      type="button"
-                      onClick={() => setOwnerHistoryOpen((v) => !v)}
-                      className="flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-[#001d6e]"
-                    >
-                      <UserCircle2 className="h-3.5 w-3.5 text-gray-400" />
-                      Owner history
-                      <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${ownerHistoryOpen ? "rotate-180" : ""}`} />
-                    </button>
-                    {ownerHistoryOpen && (
+                    <div className="flex items-center gap-2">
+                      {(loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setHistoryTab((t) => (t === "owner" ? null : "owner"))}
+                          className={
+                            historyTab === "owner"
+                              ? "inline-flex items-center gap-1.5 rounded-full bg-[#001d6e] px-3 py-1 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                              : "inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                          }
+                        >
+                          <UserCircle2 className="h-3.5 w-3.5" /> Owner History
+                        </button>
+                      )}
+                      {sortLoaderHistoryQuery.data?.exists && (sortLoaderHistoryQuery.data.timeline?.length ?? 0) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setHistoryTab((t) => (t === "sort" ? null : "sort"))}
+                          className={
+                            historyTab === "sort"
+                              ? "inline-flex items-center gap-1.5 rounded-full bg-[#001d6e] px-3 py-1 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                              : "inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                          }
+                        >
+                          <ClipboardList className="h-3.5 w-3.5" /> Sort History
+                          <span className={historyTab === "sort" ? "text-white/70" : "text-gray-400"}>
+                            ({sortLoaderHistoryQuery.data.pickedQty ?? 0}/{sortLoaderHistoryQuery.data.totalQty ?? 0})
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                    {historyTab === "owner" && (loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
                       <div className="mt-2 border rounded-md overflow-hidden bg-white">
                         <OwnerTimelineSummary timeline={loadHandoffsQuery.data!.timeline} />
+                      </div>
+                    )}
+                    {historyTab === "sort" && (
+                      <div className="mt-2 border rounded-md overflow-hidden bg-white">
+                        <SortLoaderTimelineSummary timeline={sortLoaderHistoryQuery.data?.timeline ?? []} />
                       </div>
                     )}
                   </div>
@@ -3230,107 +3287,99 @@ export default function LoadOperation() {
                 )}
               </div>
 
-          {/* Load Totals | Scan Items — same side-by-side layout as Order Scan's own Order
-              Totals + scanner controls row, instead of stacking everything in one narrow rail.
-              Two resizable columns on lg+ (the --totals-col variable drives the split so the
-              drag handle can change it without Tailwind needing a static class); below lg the
-              columns stack and the handle is hidden. Only resizable when Scan Items actually
-              renders (canWrite && !locked) — with nothing to drag against, it just falls back
-              to a single column. */}
-          <div
-            ref={totalsRowRef}
-            style={{ "--totals-col": `${totalsPct}%` } as React.CSSProperties}
-            className={`grid items-start gap-3 ${
-              // bigView (rotated kiosk, or a naturally portrait screen) always stacks — Tailwind's
-              // lg: breakpoint keys off the real (unrotated) window width, not the rotated
-              // container's effective width, so relying on it alone would crush the desktop grid
-              // into a narrow rotated band. Same fix Unloading's own kiosk view uses.
-              canWrite && !locked && !bigView ? "lg:grid-cols-[var(--totals-col)_0.75rem_minmax(0,1fr)] lg:gap-0" : "lg:grid-cols-1"
-            }`}
-          >
-            <div className="flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
-              <div className="flex items-baseline justify-between">
-                <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Load Totals</p>
-                {itemTotals.expected <= 0 ? (
-                  <p className="text-sm font-medium text-gray-400">—</p>
-                ) : itemPct >= 100 ? (
-                  <p className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
-                    <CheckCircle2 className="h-4 w-4" /> Complete
-                  </p>
-                ) : (
-                  <p className="text-sm font-medium text-gray-400">{itemPct}% complete</p>
-                )}
+          {/* Total | Scanner — a tab switch instead of the two cards stacked, so glancing at
+              totals doesn't push the barcode input off-screen. Only one panel visible at a
+              time; Scan Items stays mounted underneath while "Total" is active (hidden via
+              class, not unmounted) so the barcode-gun listener's refocus-after-scan and the
+              camera stream survive a tab switch. */}
+          <div className="space-y-3">
+            {canScanThisLoad && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTotalsScanTab("total")}
+                  className={
+                    totalsScanTab === "total"
+                      ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                      : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  }
+                >
+                  Total
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTotalsScanTab("scanner")}
+                  className={
+                    totalsScanTab === "scanner"
+                      ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                      : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  }
+                >
+                  Scanner
+                </button>
               </div>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {([
-                  { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
-                  { key: "done" as const, label: "Loaded", value: itemTotals.loaded, plt: itemTotals.pltLoaded, dot: "bg-emerald-500", text: "text-emerald-600" },
-                  { key: "remaining" as const, label: "Remaining", value: itemTotals.remaining, plt: itemTotals.pltRemaining, dot: "bg-red-500", text: "text-red-600" },
-                  { key: "extra" as const, label: "Extra", value: itemTotals.extra, plt: itemTotals.pltExtra, dot: "bg-orange-500", text: itemTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
-                ]).map((s) => {
-                  const isActive = itemStatusFilter === s.key;
-                  return (
-                    <button
-                      key={s.label}
-                      type="button"
-                      onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
-                      aria-pressed={isActive}
-                      title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                      className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
-                        isActive ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30" : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
-                      }`}
-                    >
-                      <div className="flex items-center justify-center gap-1.5">
-                        <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
-                        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
-                      </div>
-                      <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
-                      <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="space-y-1">
-                <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
-                  <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${itemPct}%` }} />
+            )}
+
+            <div className={canScanThisLoad && totalsScanTab !== "total" ? "hidden" : ""}>
+              <div className="flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
+                <div className="flex items-baseline justify-between">
+                  <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Load Totals</p>
+                  {itemTotals.expected <= 0 ? (
+                    <p className="text-sm font-medium text-gray-400">—</p>
+                  ) : itemPct >= 100 ? (
+                    <p className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+                      <CheckCircle2 className="h-4 w-4" /> Complete
+                    </p>
+                  ) : (
+                    <p className="text-sm font-medium text-gray-400">{itemPct}% complete</p>
+                  )}
                 </div>
-                <div className="flex justify-between text-[10px] font-medium text-gray-400">
-                  <span>{itemTotals.loaded} loaded</span>
-                  <span>{itemTotals.remaining} remaining</span>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {([
+                    { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
+                    { key: "done" as const, label: "Loaded", value: itemTotals.loaded, plt: itemTotals.pltLoaded, dot: "bg-emerald-500", text: "text-emerald-600" },
+                    { key: "remaining" as const, label: "Remaining", value: itemTotals.remaining, plt: itemTotals.pltRemaining, dot: "bg-red-500", text: "text-red-600" },
+                    { key: "extra" as const, label: "Extra", value: itemTotals.extra, plt: itemTotals.pltExtra, dot: "bg-orange-500", text: itemTotals.extra > 0 ? "text-amber-600" : "text-gray-300" },
+                  ]).map((s) => {
+                    const isActive = itemStatusFilter === s.key;
+                    return (
+                      <button
+                        key={s.label}
+                        type="button"
+                        onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
+                        aria-pressed={isActive}
+                        title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
+                        className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                          isActive ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30" : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
+                        }`}
+                      >
+                        <div className="flex items-center justify-center gap-1.5">
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                        </div>
+                        <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
+                        <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="space-y-1">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${itemPct}%` }} />
+                  </div>
+                  <div className="flex justify-between text-[10px] font-medium text-gray-400">
+                    <span>{itemTotals.loaded} loaded</span>
+                    <span>{itemTotals.remaining} remaining</span>
+                  </div>
                 </div>
               </div>
             </div>
 
-            {/* Drag handle — sits in the 0.75rem gutter column and trades width between the two
-                cards. Keyboard-accessible via arrow keys since a pointer drag isn't reachable
-                without a mouse. Only rendered alongside Scan Items — nothing to resize against
-                otherwise. */}
-            {canWrite && !locked && !bigView && (
-              <div
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize totals and scanner columns"
-                aria-valuenow={Math.round(totalsPct)}
-                aria-valuemin={LOADING_TOTALS_PCT_MIN}
-                aria-valuemax={LOADING_TOTALS_PCT_MAX}
-                tabIndex={0}
-                onPointerDown={startTotalsResize}
-                onDoubleClick={() => setTotalsPct(50)}
-                onKeyDown={(e) => {
-                  if (e.key === "ArrowLeft") { e.preventDefault(); setTotalsPct((p) => Math.max(LOADING_TOTALS_PCT_MIN, p - 2)); }
-                  if (e.key === "ArrowRight") { e.preventDefault(); setTotalsPct((p) => Math.min(LOADING_TOTALS_PCT_MAX, p + 2)); }
-                }}
-                title="Drag to resize · double-click to reset"
-                className="group hidden cursor-col-resize touch-none select-none items-center justify-center rounded focus:outline-none focus:ring-2 focus:ring-[#001d6e]/40 lg:flex"
-              >
-                <span className="h-10 w-[3px] rounded-full bg-gray-200 transition-colors group-hover:bg-[#001d6e]" />
-              </div>
-            )}
-
-              {/* Scan items — hidden once locked; a vehicle is guaranteed set by the time Stage B
-                  ever mounts (see Stage B(pre) above), so there's no "not linked yet" case to
-                  guard here anymore. Same Camera/Manual pattern as order search. */}
-              {canScanThisLoad && (
+            {/* Scan items — hidden once locked; a vehicle is guaranteed set by the time Stage B
+                ever mounts (see Stage B(pre) above), so there's no "not linked yet" case to
+                guard here anymore. Same Camera/Manual pattern as order search. */}
+            {canScanThisLoad && (
+              <div className={totalsScanTab !== "scanner" ? "hidden" : ""}>
                 <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                   <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
@@ -3398,7 +3447,8 @@ export default function LoadOperation() {
 
                   </div>
                 </div>
-              )}
+              </div>
+            )}
           </div>
 
           {/* Items table with live load progress — full width below the totals/scanner row. */}
@@ -3499,16 +3549,11 @@ export default function LoadOperation() {
                   onError) so the text column actually reflows to take the freed width when the
                   product has no cached image, instead of leaving a blank gap where it was. */}
               {!autoFeedbackImageFailed && (
-                <img
-                  key={autoFeedback.productId ?? autoFeedback.barcode}
-                  src={
-                    autoFeedback.productId != null
-                      ? `/api/products/image-by-id?id=${autoFeedback.productId}`
-                      : `/api/products/image-by-name?name=${encodeURIComponent(autoFeedback.name)}`
-                  }
-                  alt=""
+                <ProductPhoto
+                  productId={autoFeedback.productId}
+                  name={autoFeedback.name}
                   className="h-64 w-64 shrink-0 object-contain bg-gray-50 border border-gray-100"
-                  onError={() => setAutoFeedbackImageFailed(true)}
+                  onLoadState={setAutoFeedbackImageFailed}
                 />
               )}
               <div className="flex-1 min-w-0 text-lg">
@@ -3907,12 +3952,9 @@ export default function LoadOperation() {
           <div className={extraTarget ? "flex flex-col sm:flex-row" : ""}>
             {extraTarget && (
               <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-56 sm:border-b-0 sm:border-r">
-                <img
-                  key={extraTarget.id}
-                  src={`/api/products/image-by-id?id=${extraTarget.id}`}
-                  alt=""
+                <ProductPhoto
+                  productId={extraTarget.id}
                   className="max-h-56 w-full object-contain sm:max-h-64"
-                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden"; }}
                 />
               </div>
             )}
@@ -4087,11 +4129,9 @@ export default function LoadOperation() {
                               onClick={() => pickExtraTarget(p)}
                               className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-gray-50"
                             >
-                              <img
-                                src={`/api/products/image-by-id?id=${p.id}`}
-                                alt=""
+                              <ProductPhoto
+                                productId={p.id}
                                 className="h-9 w-9 shrink-0 rounded border bg-white object-contain"
-                                onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden"; }}
                               />
                               <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-medium text-gray-900">{p.name}</p>

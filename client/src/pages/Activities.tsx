@@ -36,7 +36,7 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/ui/pagination";
-import { Calendar, Activity, Filter, RefreshCcw, Search, User, CheckCircle2 } from "lucide-react";
+import { Calendar, Activity, Filter, RefreshCcw, Search, User, CheckCircle2, Download } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { format } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -53,6 +53,24 @@ type ActivityData = {
   userName: string | null;
   createdAt: string;
 };
+
+function downloadCsv(filename: string, rows: Array<Array<string | number>>) {
+  const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// Asia/Kolkata-forced formatting for the CSV export — matches the convention every other
+// export in the app uses (ReportsDialog's fmtIST, OrderImport's fmtIST, etc.), so this doesn't
+// disagree with them for the same instant regardless of the exporting browser's own timezone.
+function fmtIST(dateString: string | null | undefined): string {
+  if (!dateString) return "—";
+  const d = new Date(dateString);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+}
 
 export default function Activities() {
   const { toast } = useToast();
@@ -146,110 +164,204 @@ export default function Activities() {
   console.log("Filter debug - Total activities:", data?.length);
   console.log("Filter debug - Action types:", [...new Set(data?.map(a => a.action))]);
   
-  const filteredData = data
-    ? data.filter((activity: ActivityData) => {
-        // Exclude test entries completely
-        if (activity.pageName?.toLowerCase() === 'test' || 
-            activity.action?.toLowerCase() === 'test') {
-          return false;
-        }
-        
-        // Parse details to get reference number for search
-        let referenceNumber = "";
-        if (activity.details) {
-          try {
-            const details = JSON.parse(activity.details);
-            referenceNumber = details.referenceNumber || "";
-          } catch (e) {
-            // Ignore parsing errors
-          }
-        }
-        
-        const matchesSearch =
-          searchQuery === "" ||
-          activity.pageName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          activity.action?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          activity.entityType?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          (activity.userName &&
-            activity.userName.toLowerCase().includes(searchQuery.toLowerCase())) ||
-          (activity.details &&
-            activity.details.toLowerCase().includes(searchQuery.toLowerCase())) ||
-          (referenceNumber && 
-            referenceNumber.toLowerCase().includes(searchQuery.toLowerCase()));
+  // Pulled out to a standalone predicate (was an inline .filter callback) so the CSV export can
+  // apply the exact same search/action/page filters to a freshly-fetched, uncapped activity set
+  // instead of duplicating this logic against a second copy of it.
+  const matchesFilters = (activity: ActivityData): boolean => {
+    // Exclude test entries completely
+    if (activity.pageName?.toLowerCase() === 'test' ||
+        activity.action?.toLowerCase() === 'test') {
+      return false;
+    }
 
-        // Check if action matches the filter (with special handling for 'generated', 'deleted', and 'updated')
-        let matchesAction = false;
-        
-        // Add debug logging for the actionFilter value
-        console.log("ActionFilter:", actionFilter, "Activity:", activity.id, "Action:", activity.action, "EntityType:", activity.entityType);
-        
-        if (actionFilter.toLowerCase() === "all-actions") {
-          // All actions should match regardless of type
-          matchesAction = true;
-          console.log("All actions filter - should match everything");
-        } else if (actionFilter.toLowerCase() === "generated") {
-          // Match "generated" filter with sales create activities or load operations create activities
-          matchesAction = (activity.entityType?.toLowerCase() === "sale" && activity.action?.toLowerCase() === "create") ||
-                          (activity.action?.toLowerCase() === "create" && (
-                            activity.entityType?.toLowerCase() === "loadoperation" || 
-                            activity.entityType?.toLowerCase() === "loadingoperation"
-                          ));
-        } else if (actionFilter.toLowerCase() === "deleted") {
-          // Match "deleted" filter with "delete" action
-          matchesAction = activity.action?.toLowerCase() === "delete";
-        } else if (actionFilter.toLowerCase() === "updated") {
-          // Match "updated" filter with "update" action
-          matchesAction = activity.action?.toLowerCase() === "update";
-        } else if (actionFilter.toLowerCase() === "update") {
-          // Direct match for update action
-          matchesAction = activity.action?.toLowerCase() === "update";
-        } else if (actionFilter.toLowerCase() === "create") {
-          // Direct match for create action 
-          matchesAction = activity.action?.toLowerCase() === "create";
-        } else if (actionFilter.toLowerCase() === "delete") {
-          // Direct match for delete action
-          matchesAction = activity.action?.toLowerCase() === "delete";
-        } else {
-          // Direct match for other action types
-          matchesAction = activity.action?.toLowerCase() === actionFilter.toLowerCase();
-        }
-        
-        // Debug log for action matching
-        console.log("Action match result:", matchesAction);
+    // Parse details to get reference number for search
+    let referenceNumber = "";
+    if (activity.details) {
+      try {
+        const details = JSON.parse(activity.details);
+        referenceNumber = details.referenceNumber || "";
+      } catch (e) {
+        // Ignore parsing errors
+      }
+    }
 
-        // Special handling for different page filters
-        let matchesPage = false;
-        
-        // If "All Pages" is selected, show everything
-        if (pageFilter.toLowerCase() === "all-pages") {
-          matchesPage = true;
-        }
-        // For LoadOperations, include both LoadOperations and GJOperations and relevant entity types
-        else if (pageFilter.toLowerCase() === "loadoperations") {
-          matchesPage = activity.pageName?.toLowerCase() === "loadoperations" || 
-                        activity.pageName?.toLowerCase() === "gjoperations" ||
+    const matchesSearch =
+      searchQuery === "" ||
+      activity.pageName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      activity.action?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      activity.entityType?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (activity.userName &&
+        activity.userName.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      (activity.details &&
+        activity.details.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      (referenceNumber &&
+        referenceNumber.toLowerCase().includes(searchQuery.toLowerCase()));
+
+    // Check if action matches the filter (with special handling for 'generated', 'deleted', and 'updated')
+    let matchesAction = false;
+
+    if (actionFilter.toLowerCase() === "all-actions") {
+      // All actions should match regardless of type
+      matchesAction = true;
+    } else if (actionFilter.toLowerCase() === "generated") {
+      // Match "generated" filter with sales create activities or load operations create activities
+      matchesAction = (activity.entityType?.toLowerCase() === "sale" && activity.action?.toLowerCase() === "create") ||
+                      (activity.action?.toLowerCase() === "create" && (
                         activity.entityType?.toLowerCase() === "loadoperation" ||
-                        activity.entityType?.toLowerCase() === "loadingoperation" ||
-                        activity.entityType?.toLowerCase() === "loadoperations";
-        } 
-        // For Sales, include both Sales page and sale entity types
-        else if (pageFilter.toLowerCase() === "sales") {
-          matchesPage = activity.pageName?.toLowerCase() === "sales" || 
-                        activity.entityType?.toLowerCase() === "sale";
-        }
-        // Default case: direct page name match
-        else {
-          matchesPage = activity.pageName?.toLowerCase() === pageFilter.toLowerCase();
-        }
+                        activity.entityType?.toLowerCase() === "loadingoperation"
+                      ));
+    } else if (actionFilter.toLowerCase() === "deleted") {
+      // Match "deleted" filter with "delete" action
+      matchesAction = activity.action?.toLowerCase() === "delete";
+    } else if (actionFilter.toLowerCase() === "updated") {
+      // Match "updated" filter with "update" action
+      matchesAction = activity.action?.toLowerCase() === "update";
+    } else if (actionFilter.toLowerCase() === "update") {
+      // Direct match for update action
+      matchesAction = activity.action?.toLowerCase() === "update";
+    } else if (actionFilter.toLowerCase() === "create") {
+      // Direct match for create action
+      matchesAction = activity.action?.toLowerCase() === "create";
+    } else if (actionFilter.toLowerCase() === "delete") {
+      // Direct match for delete action
+      matchesAction = activity.action?.toLowerCase() === "delete";
+    } else {
+      // Direct match for other action types
+      matchesAction = activity.action?.toLowerCase() === actionFilter.toLowerCase();
+    }
 
-        return matchesSearch && matchesAction && matchesPage;
-      })
-    : [];
+    // Special handling for different page filters
+    let matchesPage = false;
+
+    // If "All Pages" is selected, show everything
+    if (pageFilter.toLowerCase() === "all-pages") {
+      matchesPage = true;
+    }
+    // For LoadOperations, include both LoadOperations and GJOperations and relevant entity types
+    else if (pageFilter.toLowerCase() === "loadoperations") {
+      matchesPage = activity.pageName?.toLowerCase() === "loadoperations" ||
+                    activity.pageName?.toLowerCase() === "gjoperations" ||
+                    activity.entityType?.toLowerCase() === "loadoperation" ||
+                    activity.entityType?.toLowerCase() === "loadingoperation" ||
+                    activity.entityType?.toLowerCase() === "loadoperations";
+    }
+    // For Sales, include both Sales page and sale entity types
+    else if (pageFilter.toLowerCase() === "sales") {
+      matchesPage = activity.pageName?.toLowerCase() === "sales" ||
+                    activity.entityType?.toLowerCase() === "sale";
+    }
+    // Default case: direct page name match
+    else {
+      matchesPage = activity.pageName?.toLowerCase() === pageFilter.toLowerCase();
+    }
+
+    return Boolean(matchesSearch) && matchesAction && matchesPage;
+  };
+
+  const filteredData = data ? data.filter(matchesFilters) : [];
 
   // Sort activities by newest first (createdAt desc)
   const sortedData = filteredData.sort((a, b) => {
     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   });
+
+  // Same parsing formatDetails does, flattened to plain text — formatDetails returns JSX,
+  // which can't go in a CSV cell.
+  const detailsToPlainText = (activity: ActivityData): string => {
+    const { details, entityType } = activity;
+    if (!details) return "—";
+    try {
+      const parsed = JSON.parse(details);
+      if (entityType === "sale") {
+        const orderDate = parsed.orderDate ? format(new Date(parsed.orderDate), "dd/MM/yyyy") : "";
+        return `Order #${parsed.orderNumber || ""}, ${parsed.dealer || "Unknown"}, ₹${parsed.amount || "0"}${orderDate ? `, Date: ${orderDate}` : ""}`;
+      }
+      if (parsed.referenceNumber) {
+        const bits = [`Order #${parsed.referenceNumber}`];
+        if (parsed.plant || parsed.plantName) bits.push(String(parsed.plant || parsed.plantName));
+        if (parsed.vehicleNumber) bits.push(`Vehicle: ${parsed.vehicleNumber}`);
+        let line = bits.join(", ");
+        if (parsed.oldStatus && parsed.newStatus) line += ` — Status changed from ${parsed.oldStatus} to ${parsed.newStatus}`;
+        else if (parsed.status) line += ` — Status: ${parsed.status}`;
+        return line;
+      }
+      if (parsed.oldStatus && parsed.newStatus) {
+        return `Status changed from ${parsed.oldStatus} to ${parsed.newStatus}`;
+      }
+      return Object.entries(parsed)
+        .filter(([key]) => !["operationId", "entityId", "referenceNumber", "status"].includes(key))
+        .map(([key, value]) => `${key.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase())}: ${value}`)
+        .join(", ");
+    } catch {
+      return details;
+    }
+  };
+
+  const [isExportingCsv, setIsExportingCsv] = useState(false);
+
+  // Exports every activity matching the current filters — a Start/End summary line first
+  // (first entry = earliest, last entry = most recent), a blank separator, then the header row
+  // and one row per activity, matching the timing-block convention other exports in the app use
+  // (ReportsDialog). Fetches its own uncapped copy of the activity list rather than reusing the
+  // page's own `data` — that query always asks the server for its default 100 most-recent rows
+  // (see the /api/activities route), so reusing it would silently truncate Start to "the oldest
+  // of the last 100" instead of the true first-ever matching activity.
+  const handleExportCsv = async () => {
+    setIsExportingCsv(true);
+    try {
+      const res = await apiRequest("GET", `/api/activities?limit=1000000`);
+      if (!res.ok) throw new Error(`Failed to fetch activities: ${res.status}`);
+      const all: ActivityData[] = await res.json();
+      const matching = all.filter(matchesFilters).sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      if (matching.length === 0) {
+        toast({
+          title: "Nothing to export",
+          description: "No activities match the current filters.",
+          variant: "destructive",
+        });
+        return;
+      }
+      const firstEntryAt = matching[matching.length - 1].createdAt;
+      const lastEntryAt = matching[0].createdAt;
+      const rows: Array<Array<string | number>> = [
+        ["Start", fmtIST(firstEntryAt), "End", fmtIST(lastEntryAt)],
+        [],
+        ["Time", "User", "Page", "Action", "Details"],
+      ];
+      matching.forEach((activity: ActivityData) => {
+        const pageName = activity.pageName === "LoadOperations" || activity.pageName === "GJOperations"
+          ? "Load Operations"
+          : activity.pageName === "ProformaSlips"
+          ? "Proforma Slips"
+          : activity.pageName === "Sales"
+          ? "Sales"
+          : activity.pageName ?? "";
+        const actionText = activity.entityType === "sale" && activity.action === "create"
+          ? "generated"
+          : activity.action === "delete"
+            ? "deleted"
+            : activity.action === "update"
+              ? "updated"
+              : activity.action === "create" && (activity.entityType === "loadOperation" || activity.entityType === "loadingOperation")
+                ? "created"
+                : activity.action ?? "";
+        const userName = (activity.entityType === "sale" && activity.action === "create") ? "System" : activity.userName || "System";
+        rows.push([fmtIST(activity.createdAt), userName, pageName, actionText, detailsToPlainText(activity)]);
+      });
+      downloadCsv(`activities_${Date.now()}.csv`, rows);
+    } catch (error) {
+      console.error("Error exporting activities:", error);
+      toast({
+        title: "Export failed",
+        description: "Could not export activities. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsExportingCsv(false);
+    }
+  };
 
   // Extract unique action types and page names for filters, excluding test entries
   const actionTypes = data 
@@ -299,20 +411,31 @@ export default function Activities() {
     : [];
 
   // Format date for display
+  // date-fns' format() has no timezone conversion built in — it just reads the Date object's
+  // components in the BROWSER's own local timezone, which only happens to match IST if the
+  // viewer's machine is set to one. Every other page (Loading, Unloading, OrderImport, ScanViewer,
+  // VehicleMaster, ReportsDialog's own fmtIST) explicitly forces Asia/Kolkata instead of relying
+  // on that, so this page's times could otherwise disagree with theirs for the exact same event.
   const formatDate = (dateString: string) => {
     try {
       const date = new Date(dateString);
-      return format(date, "dd-MM-yyyy");
+      if (isNaN(date.getTime())) return dateString;
+      return date
+        .toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
+        .replace(/\//g, "-");
     } catch (error) {
       return dateString;
     }
   };
 
-  // Format time for display in 24-hour format
+  // Format time for display in 24-hour format, forced to IST for the same reason as formatDate.
   const formatTime = (dateString: string) => {
     try {
       const date = new Date(dateString);
-      return format(date, "HH:mm:ss");
+      if (isNaN(date.getTime())) return "";
+      return date.toLocaleTimeString("en-GB", {
+        timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+      });
     } catch (error) {
       return "";
     }
@@ -573,6 +696,17 @@ export default function Activities() {
             >
               <RefreshCcw className={`h-4 w-4 mr-2 ${isRefetching ? "animate-spin" : ""}`} />
               Refresh {newActivities > 0 && `(${newActivities} new)`}
+            </Button>
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExportCsv}
+              className="w-full md:w-auto"
+              disabled={isExportingCsv}
+            >
+              <Download className={`h-4 w-4 mr-2 ${isExportingCsv ? "animate-pulse" : ""}`} />
+              {isExportingCsv ? "Exporting…" : "Export CSV"}
             </Button>
           </div>
         </div>

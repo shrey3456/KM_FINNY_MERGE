@@ -12,6 +12,14 @@ export const NOTION_VEHICLE_DATABASE_ID = (process.env.NOTION_VEHICLE_DATABASE_I
 
 let isSyncing = false;
 
+// Live progress for whatever sync is running — read by the polled /status endpoint. This
+// database carries several rollup/formula fields, so pagination alone can take a minute or more;
+// this is the same "how many pages so far" figure already logged to the console, just surfaced
+// to the page instead of only the server log. total is null — Notion's own pagination gives no
+// upfront count — and this is cleared to null the moment nothing is running.
+type SyncProgress = { phase: string; current: number; total: number | null };
+let syncProgress: SyncProgress | null = null;
+
 // Human labels for the diff report — same role as notionInventorySync.ts's FIELD_LABELS.
 export const VEHICLE_FIELD_LABELS: Record<string, string> = {
   srNo: 'Sr. No.', vehicleNumber: 'Vehicle No', rtoNumber: 'RTO Number', series: 'Series',
@@ -82,7 +90,7 @@ export async function setAutoApplyEnabled(enabled: boolean, updatedBy: string | 
 
 export function getPendingReport(): VehicleSyncReport | null { return pendingReport; }
 export function getSyncHistory(): VehicleSyncReport[] { return syncHistory; }
-export function getSyncStatus() { return { isSyncing, hasPending: !!pendingReport }; }
+export function getSyncStatus() { return { isSyncing, syncProgress, hasPending: !!pendingReport }; }
 
 // ─── Map Notion page → vehicle fields ────────────────────────────────────────
 // Property names confirmed against the real Notion database (schema-inspection run,
@@ -199,6 +207,7 @@ async function fetchAllVehiclePages(): Promise<any[]> {
     });
     pages.push(...response.results);
     cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    syncProgress = { phase: 'Fetching from Notion', current: pages.length, total: null };
     console.log(`[Notion Vehicle Sync] Fetched ${pages.length} page(s) so far...`);
   } while (cursor);
   return pages;
@@ -242,7 +251,10 @@ function computeChanges(notionPages: any[], allVehicles: VehicleInfo[]) {
     return String(value).trim().replace(/\s+/g, ' ');
   };
 
+  let compared = 0;
   for (const page of notionPages) {
+    compared++;
+    syncProgress = { phase: 'Comparing with Notion', current: compared, total: notionPages.length };
     try {
       const fields = mapNotionPageToVehicleFields(page);
       if (!fields.vehicleNumber) { notFound++; continue; }
@@ -305,6 +317,7 @@ export async function detectVehicleChangesFromNotion(triggeredBy = 'system'): Pr
     return report;
   } finally {
     isSyncing = false;
+    syncProgress = null;
   }
 }
 
@@ -359,6 +372,7 @@ export async function applyPendingVehicleChanges(appliedByCode: string | null): 
     return report;
   } finally {
     isSyncing = false;
+    syncProgress = null;
   }
 }
 
@@ -383,7 +397,10 @@ export async function fullSyncVehiclesFromNotion(triggeredBy: string, triggeredB
 
     // One row per Notion page, unconditionally — vehicle_number is just a regular field here
     // now, so two pages sharing a number is normal and both get their own row.
+    let rebuilt = 0;
     for (const page of notionPages) {
+      rebuilt++;
+      syncProgress = { phase: 'Rebuilding Vehicle Master', current: rebuilt, total: notionPages.length };
       try {
         const fields = mapNotionPageToVehicleFields(page);
         if (!fields.vehicleNumber) continue;
@@ -415,6 +432,7 @@ export async function fullSyncVehiclesFromNotion(triggeredBy: string, triggeredB
     return report;
   } finally {
     isSyncing = false;
+    syncProgress = null;
   }
 }
 

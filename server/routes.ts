@@ -108,6 +108,8 @@ import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
 import vehicleInfoRoutes from "./routes/vehicle-info";
 import loadingRoutes from "./routes/loading";
+import sortSlipRoutes from "./routes/sort-slips";
+import dailyReportsRoutes from "./routes/daily-reports";
 import orderImportRoutes from "./routes/order-import";
 import orderImportEditRoutes from "./routes/order-import-edit";
 import unloadingEditRoutes from "./routes/unloading-edit";
@@ -8140,6 +8142,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount Loading routes (link a Vehicle Master vehicle onto a Proforma Slip) — new feature,
   // own file, no dependency on the legacy Load Operations routes.
   apiRouter.use(loadingRoutes);
+
+  // Sort Slip — godown picking. Deliberately separate from Loading above: it shares only the
+  // order number, writes only its own tables, and moves no stock (see server/routes/sort-slips.ts).
+  apiRouter.use(sortSlipRoutes);
+  apiRouter.use(dailyReportsRoutes);
 
   // Mount order import routes
   apiRouter.use(orderImportRoutes);

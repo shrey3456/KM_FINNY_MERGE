@@ -1,10 +1,23 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { storage } from "../storage";
+import { pool } from "../db";
 import { insertUserSchema } from "@shared/schema";
 import { requirePageWrite } from "../lib/pageAccess";
 
 const router = Router();
+
+// The PIN as User Management is allowed to display it.
+//
+// Only an "admin" viewer gets it — super-admin deliberately does not, which is how it was asked
+// for. And only when the stored PIN is still the PIN: one set through the hashing path is kept as
+// "<hash>.<salt>" and cannot be turned back into the four digits somebody types, so that reads as
+// null and the page shows a dash instead of a hash nobody could use.
+function visiblePin(req: Request, pin: string | null | undefined): string | null {
+  if ((req.user as any)?.role !== "admin") return null;
+  const value = String(pin ?? "");
+  return value && !value.includes(".") ? value : null;
+}
 
 // List users
 router.get("/users", async (req: Request, res: Response) => {
@@ -16,7 +29,7 @@ router.get("/users", async (req: Request, res: Response) => {
 
     const usersWithoutPins = users.map((user) => {
       const { pin, ...userWithoutPin } = user;
-      return userWithoutPin;
+      return { ...userWithoutPin, pin: visiblePin(req, pin) };
     });
 
     res.json(usersWithoutPins);
@@ -33,7 +46,33 @@ router.get("/users/:userCode", async (req: Request, res: Response) => {
     return res.status(404).json({ message: "User not found" });
   }
   const { pin, ...userWithoutPin } = user;
-  res.json(userWithoutPin);
+  res.json({ ...userWithoutPin, pin: visiblePin(req, pin) });
+});
+
+// Sign a user out of every device they are logged in on.
+//
+// Sessions live in the `session` table (connect-pg-simple) and a logged-in one carries its user
+// as sess -> passport -> user, so deleting that user's rows ends all of them at once: the next
+// request from any of their browsers arrives with a session id the store no longer knows, and
+// they land back on the login page. Their current screen keeps showing what is already on it
+// until it next talks to the server, which for these pages is a matter of seconds.
+router.post("/users/:userCode/force-logout", requirePageWrite("user-management"), async (req: Request, res: Response) => {
+  try {
+    const { userCode } = req.params;
+    const user = await storage.getUser(userCode);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const result = await pool.query(
+      `DELETE FROM session WHERE sess::jsonb -> 'passport' ->> 'user' = $1`,
+      [userCode],
+    );
+    const sessionsEnded = result.rowCount ?? 0;
+    console.log(`[Users] ${(req.user as any)?.username ?? "someone"} signed ${user.username} out of ${sessionsEnded} session(s)`);
+    res.json({ sessionsEnded, username: user.username });
+  } catch (err) {
+    console.error("Error signing user out:", err);
+    res.status(500).json({ message: err instanceof Error ? err.message : "Failed to sign the user out" });
+  }
 });
 
 // Create user

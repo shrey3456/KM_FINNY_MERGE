@@ -293,10 +293,17 @@ export function getUserPlants(user: any): string[] | null {
 // source of a "defined" pallet size. Deliberately does NOT fall back to itemsPerPallet
 // ("Packets" in the Product Master UI) or the generic "pallets" column — those are a
 // different concept from a real pallet size and are no longer treated as equivalent to one.
+//
+// `product` is optional/nullable: a barcode that no longer resolves to any Product Master row
+// (a stale barcode, or one dropped in a Notion re-sync) still reaches this call at both of its
+// direct call sites (Loading and Unloading's own progress computation, which pass whatever
+// storage.getProductByBarcode returned straight through) — `product.gjPlt` on a bare object
+// access used to throw "Cannot read properties of null" for exactly that case, taking down the
+// whole request instead of just reporting "no pallet size configured" for that one item.
 export function getPalletSize(product: any, state: string | null): number {
   const s = (state ?? '').toUpperCase();
-  if (s === 'GJ') return Number(product.gjPlt) || 0;
-  if (s === 'MP') return Number(product.mpPlt) || 0;
+  if (s === 'GJ') return Number(product?.gjPlt) || 0;
+  if (s === 'MP') return Number(product?.mpPlt) || 0;
   return 0;
 }
 
