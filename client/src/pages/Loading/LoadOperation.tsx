@@ -2354,14 +2354,10 @@ export default function LoadOperation() {
               />
             </div>
 
-            {/* Filter controls — date, plant, column filters + their chips. Its own wrapping row
-                so it never fights the status buttons / Load Operation button below for space;
-                previously all of this lived in one flex-wrap row together with `ml-auto` on the
-                Load Operation button, which meant a middling width (tablet, portrait) wrapped
-                READY≈DESP onto its own line and then stranded the button on a THIRD line, still
-                pinned right by ml-auto with nothing next to it — the "unstructured" look. */}
-            <div className="items-center flex-wrap gap-2 flex">
-              <div className="flex-grow-0">
+            {/* One stable toolbar for calendar, filters, statuses, and the primary action.
+                Tablet uses horizontal scrolling instead of splitting related controls apart. */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
+              <div className="shrink-0">
                 <SingleDateFilter
                   pageKey="loading-page"
                   selectedDate={selectedDate}
@@ -2400,49 +2396,41 @@ export default function LoadOperation() {
                   Clear all
                 </Button>
               )}
-            </div>
 
-            {/* Status buttons + Load Operation — its own row, separate from the filters above.
-                justify-between keeps the button pinned right on a wide screen without `ml-auto`,
-                which only ever pins something to the right of whatever line IT lands on; here the
-                three status buttons are grouped in their own flex-wrap span so they wrap together
-                as a block, onto a line of their own if needed, while the button either sits beside
-                them or drops to its own line right below — never stranded on a third line. */}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="grid shrink-0 grid-cols-3 gap-2">
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-auto py-1.5 px-3 flex items-center bg-gray-50 hover:bg-gray-100"
+                  className="h-auto min-w-0 justify-start bg-gray-50 px-2 py-1.5 hover:bg-gray-100 sm:px-3"
                   onClick={() => setActiveViewTab("overall")}
                 >
-                  <Layers className="h-4 w-4 mr-2 text-gray-700" />
+                  <Layers className="mr-1.5 h-4 w-4 shrink-0 text-gray-700 sm:mr-2" />
                   <div className="flex flex-col items-start">
-                    <span className="text-xs font-bold">SLIPS</span>
+                    <span className="whitespace-nowrap text-xs font-bold">SLIPS</span>
                     <span className="text-sm font-semibold">{recordsItems.length}</span>
                   </div>
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-auto py-1.5 px-3 flex items-center bg-blue-50 hover:bg-blue-100"
+                  className="h-auto min-w-0 justify-start bg-blue-50 px-2 py-1.5 hover:bg-blue-100 sm:px-3"
                   onClick={() => setActiveViewTab("loading")}
                 >
-                  <Truck className="h-4 w-4 mr-2 text-blue-600" />
+                  <Truck className="mr-1.5 h-4 w-4 shrink-0 text-blue-600 sm:mr-2" />
                   <div className="flex flex-col items-start">
-                    <span className="text-xs font-bold">LOADING</span>
+                    <span className="whitespace-nowrap text-xs font-bold">LOADING</span>
                     <span className="text-sm font-semibold">{inProgressCount}</span>
                   </div>
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-auto py-1.5 px-3 flex items-center bg-amber-50 hover:bg-amber-100"
+                  className="h-auto min-w-0 justify-start bg-amber-50 px-2 py-1.5 hover:bg-amber-100 sm:px-3"
                   onClick={() => setActiveViewTab("ready-desp")}
                 >
-                  <Truck className="h-4 w-4 mr-2 text-amber-600" />
+                  <Truck className="mr-1.5 h-4 w-4 shrink-0 text-amber-600 sm:mr-2" />
                   <div className="flex flex-col items-start">
-                    <span className="text-xs font-bold">READY≈DESP</span>
+                    <span className="whitespace-nowrap text-xs font-bold">READY≈DESP</span>
                     <span className="text-sm font-semibold">{readyDespCount}</span>
                   </div>
                 </Button>
@@ -2450,7 +2438,7 @@ export default function LoadOperation() {
 
               {canWrite && (
                 <Button
-                  className="h-10 rounded-lg bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b]"
+                  className="h-10 shrink-0 rounded-lg bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b]"
                   onClick={openOrderSearch}
                 >
                   <Plus className="mr-1.5 h-4 w-4" /> Load Operation

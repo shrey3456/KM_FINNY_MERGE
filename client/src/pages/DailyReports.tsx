@@ -24,6 +24,7 @@ type Fmt = "CSV" | "Excel" | "PDF";
 // literal text even though it looks like a number — see exportRows' CSV branch for why.
 type Cell = string | number | { text: string };
 type ExportRow = Cell[];
+const REPORT_TABLE_HEADER_CLASS = "bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white";
 // Wraps a barcode for export — Excel's own CSV importer auto-detects a long all-digit cell as a
 // number and renders it in scientific notation (e.g. "8906010500221" becomes "8.91E+12"),
 // regardless of CSV quoting (quoting only protects delimiter-splitting, not Excel's type
@@ -129,10 +130,57 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: ExportRow[]
   } else {
     const plain = rows.map((r) => r.map((c) => (c !== null && typeof c === "object" ? c.text : c)));
     const doc = new jsPDF({ orientation: "landscape" });
-    doc.setFontSize(12);
-    doc.text(title, 14, 12);
-    const [header, ...body] = plain;
-    autoTable(doc, { head: [header as string[]], body: body as string[][], startY: 18, styles: { fontSize: 8 }, headStyles: { fillColor: [0, 29, 110] } });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 14;
+    const separatorIndex = plain.findIndex((row) => row.length === 0);
+    const headerIndex = separatorIndex >= 0 ? separatorIndex + 1 : 0;
+    const metadata = plain.slice(0, headerIndex).filter((row) => row.length > 0);
+    const header = plain[headerIndex] ?? [];
+    const body = plain.slice(headerIndex + 1);
+
+    doc.setFillColor(0, 29, 110);
+    doc.rect(0, 0, pageWidth, 24, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(15);
+    doc.text(title, margin, 14);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    const scope = metadata
+      .map((row) => row.reduce<string[]>((parts, cell, index) => {
+        if (index % 2 === 0 && row[index + 1] !== undefined) parts.push(`${String(cell)}: ${String(row[index + 1])}`);
+        return parts;
+      }, []).join("  |  "))
+      .join("  |  ");
+    if (scope) doc.text(scope, margin, 20);
+    doc.setFontSize(8);
+    doc.text(`Generated ${fmtIST(new Date().toISOString())}`, pageWidth - margin, 17, { align: "right" });
+    doc.setTextColor(0, 0, 0);
+
+    const columnStyles: Record<number, { halign: "right" }> = {};
+    header.forEach((cell, index) => {
+      if (/(qty|pallet|expected|actual|extra|order|event)/i.test(String(cell))) columnStyles[index] = { halign: "right" };
+    });
+    autoTable(doc, {
+      head: [header as string[]],
+      body: body as string[][],
+      startY: 30,
+      theme: "grid",
+      styles: { fontSize: 7, cellPadding: 2.2, lineColor: [210, 210, 210], lineWidth: 0.15 },
+      headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold", halign: "left" },
+      alternateRowStyles: { fillColor: [245, 247, 251] },
+      columnStyles,
+      margin: { left: margin, right: margin },
+    });
+    const pageCount = doc.getNumberOfPages();
+    for (let page = 1; page <= pageCount; page++) {
+      doc.setPage(page);
+      doc.setFontSize(8);
+      doc.setTextColor(150, 150, 150);
+      doc.text("KM Finny - Confidential", margin, pageHeight - 8);
+      doc.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 8, { align: "right" });
+    }
     doc.save(`${baseName}.pdf`);
   }
 }
@@ -464,7 +512,7 @@ export default function DailyReports() {
                 showMobileSwipeHint
                 isStickyHeader
                 maxHeight="420px"
-                headerClassName="bg-gray-50 text-gray-500"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
               />
               </div>
               <div className="md:hidden">
@@ -498,7 +546,7 @@ export default function DailyReports() {
                   showMobileSwipeHint
                   isStickyHeader
                   maxHeight="420px"
-                  headerClassName="bg-gray-50 text-gray-500"
+                  headerClassName={REPORT_TABLE_HEADER_CLASS}
                 />
               </div>
               <div className="space-y-2 p-3 md:hidden">
@@ -537,7 +585,7 @@ export default function DailyReports() {
                   showMobileSwipeHint
                   isStickyHeader
                   maxHeight="420px"
-                  headerClassName="bg-gray-50 text-gray-500"
+                  headerClassName={REPORT_TABLE_HEADER_CLASS}
                 />
               </div>
               <div className="space-y-2 p-3 md:hidden">
@@ -578,7 +626,7 @@ export default function DailyReports() {
                 enableZebraStripes
                 enableColumnResizing
                 showMobileSwipeHint
-                headerClassName="bg-gray-50 text-gray-500"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
               />
               </div>
               <div className="md:hidden">
@@ -612,7 +660,7 @@ export default function DailyReports() {
                 enableZebraStripes
                 enableColumnResizing
                 showMobileSwipeHint
-                headerClassName="bg-gray-50 text-gray-500"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
               />
               </div>
               <div className="md:hidden">
@@ -696,7 +744,7 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
                 totalsLabel="TOTAL"
                 totalsLabelColumnId="itemName"
                 emptyState="No items"
-                headerClassName="bg-gray-50 text-gray-500"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
                 maxHeight="calc(100vh - 300px)"
               />
             ) : (
@@ -706,7 +754,7 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
                 getRowId={(_row, idx) => String(idx)}
                 enableZebraStripes
                 emptyState="No scans"
-                headerClassName="bg-gray-50 text-gray-500"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
                 maxHeight="calc(100vh - 300px)"
               />
             )}
@@ -841,61 +889,34 @@ function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: str
             </div>
 
             {detailTab === "items" ? (
-              <div className="overflow-hidden rounded-xl border border-gray-200">
-                <div className="max-h-64 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-gray-50">
-                      <tr className="text-left text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                        <th className="px-3 py-1.5">Item</th>
-                        <th className="px-3 py-1.5 text-right">Expected</th>
-                        <th className="px-3 py-1.5 text-right">Actual</th>
-                        <th className="px-3 py-1.5 text-right">Extra</th>
-                        <th className="px-3 py-1.5 text-right">Pallets</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detail.itemTotals.length === 0 ? (
-                        <tr><td colSpan={5} className="px-3 py-4 text-center text-gray-400">No items</td></tr>
-                      ) : detail.itemTotals.map((i, idx) => (
-                        <tr key={i.barcode} className={`border-t border-gray-50 ${idx % 2 === 1 ? "bg-gray-50/40" : ""}`}>
-                          <td className="px-3 py-1.5 text-gray-900">{i.itemName || i.barcode}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-gray-700">{i.expectedQty}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums font-medium text-emerald-600">{i.actualQty}</td>
-                          <td className={`px-3 py-1.5 text-right tabular-nums ${i.extraQty > 0 ? "font-medium text-amber-600" : "text-gray-400"}`}>{i.extraQty}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-[#001d6e]">{i.pallets.toFixed(2)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <DataTable<ItemTotal>
+                className="space-y-0"
+                columns={summaryColumnsForDetail}
+                data={detail.itemTotals}
+                getRowId={(row) => row.barcode}
+                emptyState="No items"
+                enableZebraStripes
+                enableTotalsRow
+                totalsLabel="TOTAL"
+                totalsLabelColumnId="itemName"
+                enableColumnResizing
+                isStickyHeader
+                maxHeight="16rem"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
+              />
             ) : (
-              <div className="overflow-hidden rounded-xl border border-gray-200">
-                <div className="max-h-64 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-gray-50">
-                      <tr className="text-left text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                        <th className="px-3 py-1.5">Time</th>
-                        <th className="px-3 py-1.5">Item</th>
-                        <th className="px-3 py-1.5 text-right">Qty</th>
-                        <th className="px-3 py-1.5">By</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detail.activities.length === 0 ? (
-                        <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No scans yet</td></tr>
-                      ) : detail.activities.map((a, idx) => (
-                        <tr key={idx} className={`border-t border-gray-50 ${idx % 2 === 1 ? "bg-gray-50/40" : ""}`}>
-                          <td className="whitespace-nowrap px-3 py-1.5 text-gray-500">{fmtIST(a.scannedAt)}</td>
-                          <td className="px-3 py-1.5 text-gray-900">{a.itemName || a.barcode}{a.isExtra && <span className="ml-1 text-amber-600">(Extra)</span>}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums font-medium text-emerald-600">{a.qty}</td>
-                          <td className="px-3 py-1.5 text-gray-500">{a.scannedByName || "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <DataTable<Activity>
+                className="space-y-0"
+                columns={activitiesColumnsForDetail}
+                data={detail.activities}
+                getRowId={(_row, index) => String(index)}
+                emptyState="No scans yet"
+                enableZebraStripes
+                enableColumnResizing
+                isStickyHeader
+                maxHeight="16rem"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
+              />
             )}
           </div>
         ) : null}
@@ -1011,65 +1032,34 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
             </div>
 
             {detailTab === "items" ? (
-              <div className="overflow-hidden rounded-xl border border-gray-200">
-                <div className="max-h-64 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-gray-50">
-                      <tr className="text-left text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                        <th className="px-3 py-1.5">Item</th>
-                        <th className="px-3 py-1.5 text-right">Expected</th>
-                        <th className="px-3 py-1.5 text-right">Actual</th>
-                        <th className="px-3 py-1.5 text-right">Extra</th>
-                        <th className="px-3 py-1.5 text-right">Pallets</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detail.itemTotals.length === 0 ? (
-                        <tr><td colSpan={5} className="px-3 py-4 text-center text-gray-400">No items</td></tr>
-                      ) : detail.itemTotals.map((i, idx) => (
-                        <tr key={i.barcode} className={`border-t border-gray-50 ${idx % 2 === 1 ? "bg-gray-50/40" : ""}`}>
-                          <td className="px-3 py-1.5 text-gray-900">{i.itemName || i.barcode}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-gray-700">{i.expectedQty}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums font-medium text-emerald-600">{i.actualQty}</td>
-                          <td className={`px-3 py-1.5 text-right tabular-nums ${i.extraQty > 0 ? "font-medium text-amber-600" : "text-gray-400"}`}>{i.extraQty}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-[#001d6e]">{i.pallets.toFixed(2)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <DataTable<ItemTotal>
+                className="space-y-0"
+                columns={summaryColumnsForDetail}
+                data={detail.itemTotals}
+                getRowId={(row) => row.barcode}
+                emptyState="No items"
+                enableZebraStripes
+                enableTotalsRow
+                totalsLabel="TOTAL"
+                totalsLabelColumnId="itemName"
+                enableColumnResizing
+                isStickyHeader
+                maxHeight="16rem"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
+              />
             ) : (
-              <div className="overflow-hidden rounded-xl border border-gray-200">
-                <div className="max-h-64 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-gray-50">
-                      <tr className="text-left text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                        <th className="px-3 py-1.5">Time</th>
-                        <th className="px-3 py-1.5">Item</th>
-                        <th className="px-3 py-1.5 text-right">Qty</th>
-                        <th className="px-3 py-1.5 text-right">Pallets</th>
-                        <th className="px-3 py-1.5">STV</th>
-                        <th className="px-3 py-1.5">By</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detail.activities.length === 0 ? (
-                        <tr><td colSpan={6} className="px-3 py-4 text-center text-gray-400">No scans yet</td></tr>
-                      ) : detail.activities.map((a, idx) => (
-                        <tr key={idx} className={`border-t border-gray-50 ${idx % 2 === 1 ? "bg-gray-50/40" : ""}`}>
-                          <td className="whitespace-nowrap px-3 py-1.5 text-gray-500">{fmtIST(a.scannedAt)}</td>
-                          <td className="px-3 py-1.5 text-gray-900">{a.itemName || a.barcode}{a.isExtra && <span className="ml-1 text-amber-600">(Extra)</span>}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums font-medium text-emerald-600">{a.qty}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-[#001d6e]">{a.pallets?.toFixed(2) ?? "—"}</td>
-                          <td className="px-3 py-1.5 text-gray-500">{a.stv || "—"}</td>
-                          <td className="px-3 py-1.5 text-gray-500">{a.scannedByName || "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <DataTable<Activity>
+                className="space-y-0"
+                columns={activitiesColumnsForDetail}
+                data={detail.activities}
+                getRowId={(_row, index) => String(index)}
+                emptyState="No scans yet"
+                enableZebraStripes
+                enableColumnResizing
+                isStickyHeader
+                maxHeight="16rem"
+                headerClassName={REPORT_TABLE_HEADER_CLASS}
+              />
             )}
           </div>
         ) : null}

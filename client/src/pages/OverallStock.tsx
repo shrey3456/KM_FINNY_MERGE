@@ -251,6 +251,10 @@ function sumNullable(a: number | null | undefined, b: number | null | undefined)
   return (a ?? 0) + (b ?? 0);
 }
 
+function normalizedText(value: unknown): string {
+  return typeof value === "string" ? value.toLowerCase() : "";
+}
+
 function buildUrl(base: string, params: Record<string, string | number | undefined>) {
   const sp = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
@@ -1172,14 +1176,14 @@ export default function OverallStock() {
       if (!matchesActiveFilters(r)) return false;
       if (!matchAllConditions(r, columnConditionList, filterableColumns)) return false;
       if (!search) return true;
-      const q = search.toLowerCase();
+      const q = normalizedText(search);
       return (
-        r.itemName.toLowerCase().includes(q) ||
-        (r.barcode ?? "").toLowerCase().includes(q) ||
-        (r.sapCode ?? "").toLowerCase().includes(q) ||
-        (r.category ?? "").toLowerCase().includes(q) ||
-        (r.brand ?? "").toLowerCase().includes(q) ||
-        r.plant.toLowerCase().includes(q)
+        normalizedText(r.itemName).includes(q) ||
+        normalizedText(r.barcode).includes(q) ||
+        normalizedText(r.sapCode).includes(q) ||
+        normalizedText(r.category).includes(q) ||
+        normalizedText(r.brand).includes(q) ||
+        normalizedText(r.plant).includes(q)
       );
     });
   }, [rows, search, activeFilters, columnConditionList, filterableColumns]);
@@ -1218,7 +1222,7 @@ export default function OverallStock() {
     const byBarcode = new Map<string, PlantStockRow>();
     for (const r of filtered) {
       if (r.isEmptyBox) continue; // empty boxes stay their own per-plant rows below, never merged
-      const key = (r.barcode ?? r.itemName).toLowerCase();
+      const key = normalizedText(r.barcode) || normalizedText(r.itemName) || `missing-${r.srNo}`;
       const existing = byBarcode.get(key);
       if (!existing) {
         byBarcode.set(key, { ...r, plant: activeState || "ALL", combinedPlants: [r.plant] });
@@ -1255,10 +1259,10 @@ export default function OverallStock() {
     if (activeFilters.some((f) => f.value)) return [];
     if (columnConditionList.some((c) => !isConditionEmpty(c))) return [];
     const list = stockData?.emptyBoxByPlant ?? [];
-    const q = search.toLowerCase();
+    const q = normalizedText(search);
     return list
       .filter((e) => e.qty > 0)
-      .filter((e) => !search || "empty box".includes(q) || e.plant.toLowerCase().includes(q))
+      .filter((e) => !search || "empty box".includes(q) || normalizedText(e.plant).includes(q))
       .map((e) => ({
         srNo: 0, barcode: "EMPTY_BOX", plant: e.plant, itemName: "Empty Box",
         itemNo: null, sapCode: null, hsnCode: null, category: null, brand: null,
@@ -1800,7 +1804,7 @@ export default function OverallStock() {
   const detailPlantRows = detailPlants.map((plant) => ({
     plant,
     stock: rows.find((r) => r.barcode === detailRow?.barcode && r.plant === plant) ?? null,
-    breakdown: sourceBreakdownData?.breakdown.find((b) => b.plant.toLowerCase() === plant.toLowerCase()) ?? null,
+    breakdown: sourceBreakdownData?.breakdown.find((b) => normalizedText(b.plant) === normalizedText(plant)) ?? null,
   }));
 
   const detailsTabContent = (

@@ -1579,11 +1579,122 @@ export default function Unloading() {
                 </p>
               </div>
             ) : (
-              // Rotated/kiosk mode reuses this exact same table, just bounded + self-scrolling
-              // inside kioskTableBoxClass (same treatment as the item table's own DataTable) —
-              // rather than a different, cut-down card view, so what an operator sees rotated is
-              // the same table as everywhere else in the app, only fitted to the rotated screen.
-              <div ref={vehiclesTableScrollRef} className={bigView ? kioskTableBoxClass : "overflow-x-auto"}>
+              <>
+              <div className="space-y-3 p-3 xl:hidden">
+                {sessions.map((s) => {
+                  const isLockedSession = s.scanStatus === "available" && !s.canActivate;
+                  const openLabel = s.scanStatus === "completed"
+                    ? "View"
+                    : s.scanStatus === "active"
+                      ? "Continue"
+                      : s.canActivate ? "Start" : "Locked";
+                  return (
+                    <article
+                      key={s.id}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`${openLabel} unload operation for ${s.vehicleNumber}`}
+                      aria-disabled={isLockedSession}
+                      onClick={() => { if (!isLockedSession) openSession(s); }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          if (!isLockedSession) openSession(s);
+                        }
+                      }}
+                      className={`rounded-lg border px-3 py-3.5 shadow-sm transition-colors ${
+                        isLockedSession
+                          ? "cursor-not-allowed border-gray-200 bg-gray-50 opacity-65"
+                          : s.scanStatus === "active"
+                            ? "cursor-pointer border-emerald-200 bg-emerald-50/40 hover:border-emerald-300"
+                            : "cursor-pointer border-gray-200 bg-white hover:border-[#001d6e]/30 hover:bg-[#001d6e]/[0.02]"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-lg font-bold leading-none text-gray-900">#{s.id}</span>
+                            <PlantBadge plant={s.plant} />
+                            {s.partsCount > 1 && (
+                              <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                Batch {s.partIndex}/{s.partsCount}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-2 truncate text-base font-medium text-gray-600">{s.vehicleNumber}</p>
+                          {s.rtoNumber && <p className="mt-0.5 truncate text-xs text-gray-400">RTO: {s.rtoNumber}</p>}
+                        </div>
+                        <div className="shrink-0">{statusBadge(s.scanStatus, s.canActivate)}</div>
+                      </div>
+
+                      <div className="mt-4 flex items-center gap-2">
+                        <span
+                          title="Received quantity"
+                          className="inline-flex h-11 min-w-11 items-center justify-center rounded-full bg-amber-50 px-2 text-sm font-semibold tabular-nums text-amber-700"
+                        >
+                          {String(s.scannedQty).padStart(2, "0")}
+                        </span>
+                        <button
+                          type="button"
+                          className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-blue-50 text-[#001d6e] hover:bg-blue-100"
+                          title="Reports"
+                          aria-label={`View reports for ${s.vehicleNumber}`}
+                          onClick={(e) => { e.stopPropagation(); openReports(s); }}
+                        >
+                          <FileBarChart className="h-5 w-5" />
+                        </button>
+                        {canWrite && (
+                          <button
+                            type="button"
+                            className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-red-50 text-red-500 hover:bg-red-100"
+                            title="Delete"
+                            aria-label={`Delete unload operation for ${s.vehicleNumber}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteTarget({ id: s.id, vehicleNumber: s.vehicleNumber, orderDate: s.orderDate });
+                              setDeleteMode("replace");
+                            }}
+                          >
+                            <Trash2 className="h-5 w-5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="ml-auto inline-flex h-11 w-11 items-center justify-center rounded-full bg-[#001d6e] text-white hover:bg-[#00154b] disabled:cursor-not-allowed disabled:bg-gray-300"
+                          title={openLabel}
+                          aria-label={`${openLabel} unload operation for ${s.vehicleNumber}`}
+                          disabled={isLockedSession}
+                          onClick={(e) => { e.stopPropagation(); openSession(s); }}
+                        >
+                          <ChevronRight className="h-5 w-5" />
+                        </button>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-gray-100 pt-2 text-xs text-gray-500">
+                        <span>Order <span className="font-semibold text-gray-700">{s.orderDate}</span></span>
+                        <span className="text-gray-300">|</span>
+                        <span>Expected <span className="font-semibold tabular-nums text-gray-700">{s.expectedQty}</span></span>
+                        {s.extraQty > 0 && (
+                          <>
+                            <span className="text-gray-300">|</span>
+                            <span className="font-medium text-amber-600">{s.extraQty} extra</span>
+                          </>
+                        )}
+                        {statusTab === "history" && formatDuration(s.scanActivatedAt, s.scanCompletedAt) && (
+                          <>
+                            <span className="text-gray-300">|</span>
+                            <span>{formatDuration(s.scanActivatedAt, s.scanCompletedAt)}</span>
+                          </>
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+
+              {/* Desktop and kiosk mode retain the full table, bounded and self-scrolling when
+                  rotated. The card list above is reserved for tablet and mobile widths. */}
+              <div ref={vehiclesTableScrollRef} className={`hidden xl:block ${bigView ? kioskTableBoxClass : "overflow-x-auto"}`}>
                 {/* table-fixed + an explicit %-width per column is what actually makes "all
                     columns at every size, no horizontal scroll" true — border-collapse alone
                     (the previous className here) still lets the browser's own auto-layout give
@@ -1686,6 +1797,7 @@ export default function Unloading() {
                   </tbody>
                 </table>
               </div>
+              </>
             )}
 
             {statusTab !== "recent-complete" && total > 0 && (() => {
