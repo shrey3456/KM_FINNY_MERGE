@@ -1584,25 +1584,33 @@ export default function Unloading() {
               // rather than a different, cut-down card view, so what an operator sees rotated is
               // the same table as everywhere else in the app, only fitted to the rotated screen.
               <div ref={vehiclesTableScrollRef} className={bigView ? kioskTableBoxClass : "overflow-x-auto"}>
-                <table className="w-full min-w-full caption-bottom border-collapse text-xs">
+                {/* table-fixed + an explicit %-width per column is what actually makes "all
+                    columns at every size, no horizontal scroll" true — border-collapse alone
+                    (the previous className here) still lets the browser's own auto-layout give
+                    each column its natural content width, which adds up to wider than a tablet
+                    viewport and forces the horizontal scroll this was meant to avoid. Fixed
+                    layout instead divides w-full by these percentages up front, so text wraps
+                    (break-words, already in place) rather than the table ever growing past its
+                    container. */}
+                <table className="w-full min-w-full table-fixed caption-bottom border-collapse text-xs">
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">
-                      {/* All 9 columns at every size — the fixed layout wraps them to fit
-                          rather than dropping any. */}
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("vehicle", "Vehicle")}</th>
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("orderDate", "Order Date")}</th>
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("plant", "Plant")}</th>
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">
+                      {/* All 10 columns at every size — table-fixed + these widths wrap them to
+                          fit rather than dropping any or needing a horizontal scroll. */}
+                      <th className="w-[5%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
+                      <th className="w-[13%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("vehicle", "Vehicle")}</th>
+                      <th className="w-[9%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("orderDate", "Order Date")}</th>
+                      <th className="w-[9%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("plant", "Plant")}</th>
+                      <th className="w-[8%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">
                         <span title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">
                           {sessionColumnHeader("batch", "Batch")}
                         </span>
                       </th>
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("status", "Status")}</th>
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("progress", "Progress")}</th>
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
-                      <th className="border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Who marked this batch complete — the Complete button, or the scan that finished it">{sessionColumnHeader("completedBy", "Completed By")}</th>
-                      <th className="px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
+                      <th className="w-[9%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("status", "Status")}</th>
+                      <th className="w-[10%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("progress", "Progress")}</th>
+                      <th className="w-[8%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
+                      <th className="w-[10%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Who marked this batch complete — the Complete button, or the scan that finished it">{sessionColumnHeader("completedBy", "Completed By")}</th>
+                      <th className="w-[19%] px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
                     </tr>
                   </thead>
                   <tbody>

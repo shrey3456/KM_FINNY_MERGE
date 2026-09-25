@@ -5,6 +5,8 @@ import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { DateInput } from "@/components/ui/date-input";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { TableCard } from "@/components/ui/table-card";
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
@@ -217,6 +219,64 @@ export default function DailyReports() {
     { expectedQty: 0, actualQty: 0, extraQty: 0, pallets: 0 },
   );
 
+  // Same shared DataTable/TableCard the rest of the app's tables use (Overall Stock, Scan
+  // History) — sortable/resizable/hideable columns, zebra stripes, a totals row — instead of
+  // this page's own hand-built <table>s.
+  const summaryColumns: DataTableColumn<ItemTotal>[] = [
+    {
+      id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode,
+      totalable: false, cellClassName: "font-mono text-xs text-gray-500",
+    },
+    {
+      id: "itemName", header: "Item Name", accessor: (r) => r.itemName, totalable: false,
+      cellClassName: "text-gray-900", render: (r) => r.itemName || "—",
+    },
+    { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
+    { id: "actualQty", header: "Actual", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    {
+      id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty,
+      render: (r) => <span className={r.extraQty > 0 ? "font-medium text-amber-600" : "text-gray-400"}>{r.extraQty}</span>,
+    },
+    { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets.toFixed(2) },
+  ];
+
+  const activitiesColumns: DataTableColumn<Activity>[] = [
+    { id: "scannedAt", header: "Time", width: 150, accessor: (r) => r.scannedAt, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.scannedAt) },
+    { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
+    {
+      id: "itemName", header: "Item Name", accessor: (r) => r.itemName, totalable: false,
+      cellClassName: "text-gray-900",
+      render: (r) => (
+        <>
+          {r.itemName || "—"}
+          {r.isExtra && <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Extra</span>}
+        </>
+      ),
+    },
+    { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? null, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets?.toFixed(2) ?? "—" },
+    { id: "stv", header: "STV", width: 100, accessor: (r) => r.stv, totalable: false, cellClassName: "text-gray-500", render: (r) => r.stv || "—" },
+    { id: "scannedByName", header: "By", width: 140, accessor: (r) => r.scannedByName, totalable: false, cellClassName: "text-gray-500", render: (r) => r.scannedByName || "—" },
+  ];
+
+  const breakdownColumns: DataTableColumn<ReportRow>[] = [
+    {
+      id: "label", header: activeTab.breakdownLabel, accessor: (r) => r.label, totalable: false,
+      cellClassName: "font-medium text-gray-900",
+      render: (r) => {
+        const clickable = (tab === "unloading" || tab === "scan") && r.key !== "—";
+        return clickable ? <span className="text-[#001d6e] underline decoration-dotted">{r.label}</span> : r.label;
+      },
+    },
+    { id: "plant", header: "Plant", width: 120, accessor: (r) => r.plant, totalable: false, render: (r) => r.plant ?? "—" },
+    { id: "orderCount", header: "Orders", align: "right", accessor: (r) => r.orderCount, cellClassName: "tabular-nums" },
+    { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
+    { id: "actualQty", header: "Actual", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    { id: "eventCount", header: "Events", align: "right", accessor: (r) => r.eventCount, cellClassName: "tabular-nums" },
+    { id: "startTime", header: "Start", width: 140, accessor: (r) => r.startTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.startTime) },
+    { id: "endTime", header: "End", width: 140, accessor: (r) => r.endTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.endTime) },
+  ];
+
   return (
     <div className="container-fluid max-w-full space-y-5 px-4 py-6 md:px-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -318,165 +378,88 @@ export default function DailyReports() {
           </div>
 
           {reportTab === "summary" ? (
-            <Card className="border-gray-200 shadow-sm overflow-hidden">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 bg-gray-50/70 px-4 py-3">
-                <div className="flex items-center gap-4">
-                  <span className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
-                    <SectionIcon icon={Package} /> Total Summary Report
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    Start: <span className="font-medium text-gray-700">{fmtIST(data.activitySummary.startTime)}</span>
-                    {"  ·  "}End: <span className="font-medium text-gray-700">{fmtIST(data.activitySummary.endTime)}</span>
-                  </span>
-                </div>
-                <DownloadMenu onExport={handleExportSummaryReport} />
-              </div>
-              <div className="max-h-[420px] overflow-y-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-gray-50">
-                    <tr className="text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      <th className="px-4 py-2">Barcode</th>
-                      <th className="px-4 py-2">Item Name</th>
-                      <th className="px-4 py-2 text-right">Expected</th>
-                      <th className="px-4 py-2 text-right">Actual</th>
-                      <th className="px-4 py-2 text-right">Extra</th>
-                      <th className="px-4 py-2 text-right">Pallets</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.itemTotals === undefined ? (
-                      <tr><td colSpan={6} className="px-4 py-6 text-center text-gray-400">Not available yet for this operation</td></tr>
-                    ) : data.itemTotals.length === 0 ? (
-                      <tr><td colSpan={6} className="px-4 py-6 text-center text-gray-400">No items for this date</td></tr>
-                    ) : (
-                      <>
-                        {data.itemTotals.map((i, idx) => (
-                          <tr key={i.barcode} className={`border-t border-gray-50 ${idx % 2 === 1 ? "bg-gray-50/40" : ""}`}>
-                            <td className="px-4 py-2 font-mono text-xs text-gray-500">{i.barcode}</td>
-                            <td className="px-4 py-2 text-gray-900">{i.itemName || "—"}</td>
-                            <td className="px-4 py-2 text-right tabular-nums text-gray-700">{i.expectedQty}</td>
-                            <td className="px-4 py-2 text-right tabular-nums font-medium text-emerald-600">{i.actualQty}</td>
-                            <td className={`px-4 py-2 text-right tabular-nums ${i.extraQty > 0 ? "font-medium text-amber-600" : "text-gray-400"}`}>{i.extraQty}</td>
-                            <td className="px-4 py-2 text-right tabular-nums text-[#001d6e]">{i.pallets.toFixed(2)}</td>
-                          </tr>
-                        ))}
-                        {summaryTotals && (
-                          <tr className="border-t-2 border-gray-200 bg-[#001d6e]/[0.04] font-bold">
-                            <td className="px-4 py-2" colSpan={2}>TOTAL</td>
-                            <td className="px-4 py-2 text-right tabular-nums text-gray-900">{summaryTotals.expectedQty}</td>
-                            <td className="px-4 py-2 text-right tabular-nums text-emerald-700">{summaryTotals.actualQty}</td>
-                            <td className={`px-4 py-2 text-right tabular-nums ${summaryTotals.extraQty > 0 ? "text-amber-700" : "text-gray-400"}`}>{summaryTotals.extraQty}</td>
-                            <td className="px-4 py-2 text-right tabular-nums text-[#001d6e]">{summaryTotals.pallets.toFixed(2)}</td>
-                          </tr>
-                        )}
-                      </>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
+            <TableCard
+              icon={Package}
+              title="Total Summary Report"
+              subtitle={
+                <span>
+                  Start: <span className="font-medium text-gray-600">{fmtIST(data.activitySummary.startTime)}</span>
+                  {"  ·  "}End: <span className="font-medium text-gray-600">{fmtIST(data.activitySummary.endTime)}</span>
+                </span>
+              }
+              className="rounded-xl shadow-none border-gray-300"
+              headerActions={<DownloadMenu onExport={handleExportSummaryReport} />}
+            >
+              <DataTable<ItemTotal>
+                className="space-y-0"
+                containerClassName="rounded-none border-0"
+                columns={summaryColumns}
+                data={data.itemTotals ?? []}
+                getRowId={(row) => row.barcode}
+                emptyState={data.itemTotals === undefined ? "Not available yet for this operation" : "No items for this date"}
+                enableZebraStripes
+                enableTotalsRow
+                totalsLabel="TOTAL"
+                totalsLabelColumnId="itemName"
+                enableColumnResizing
+                enableColumnVisibility
+                showMobileSwipeHint
+                isStickyHeader
+                maxHeight="420px"
+                headerClassName="bg-gray-50 text-gray-500"
+              />
+            </TableCard>
           ) : reportTab === "activities" ? (
-            <Card className="border-gray-200 shadow-sm overflow-hidden">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 bg-gray-50/70 px-4 py-3">
-                <span className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
-                  <SectionIcon icon={ListChecks} /> Activities Report
-                  {data.activities && <span className="text-xs font-normal text-gray-400">({data.activities.length})</span>}
-                </span>
-                <DownloadMenu onExport={handleExportActivitiesReport} />
-              </div>
-              <div className="max-h-[420px] overflow-y-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-gray-50">
-                    <tr className="text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      <th className="px-4 py-2">Time</th>
-                      <th className="px-4 py-2">Barcode</th>
-                      <th className="px-4 py-2">Item Name</th>
-                      <th className="px-4 py-2 text-right">Qty</th>
-                      <th className="px-4 py-2 text-right">Pallets</th>
-                      <th className="px-4 py-2">STV</th>
-                      <th className="px-4 py-2">By</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.activities === undefined ? (
-                      <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">Not available yet for this operation</td></tr>
-                    ) : data.activities.length === 0 ? (
-                      <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">No scans for this date</td></tr>
-                    ) : (
-                      data.activities.map((a, idx) => (
-                        <tr key={idx} className={`border-t border-gray-50 ${idx % 2 === 1 ? "bg-gray-50/40" : ""}`}>
-                          <td className="whitespace-nowrap px-4 py-2 text-xs text-gray-500">{fmtIST(a.scannedAt)}</td>
-                          <td className="px-4 py-2 font-mono text-xs text-gray-500">{a.barcode}</td>
-                          <td className="px-4 py-2 text-gray-900">
-                            {a.itemName || "—"}
-                            {a.isExtra && <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Extra</span>}
-                          </td>
-                          <td className="px-4 py-2 text-right tabular-nums font-medium text-emerald-600">{a.qty}</td>
-                          <td className="px-4 py-2 text-right tabular-nums text-[#001d6e]">{a.pallets?.toFixed(2) ?? "—"}</td>
-                          <td className="px-4 py-2 text-gray-500">{a.stv || "—"}</td>
-                          <td className="px-4 py-2 text-gray-500">{a.scannedByName || "—"}</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
+            <TableCard
+              icon={ListChecks}
+              title="Activities Report"
+              subtitle={data.activities ? `${data.activities.length} event${data.activities.length === 1 ? "" : "s"}` : undefined}
+              className="rounded-xl shadow-none border-gray-300"
+              headerActions={<DownloadMenu onExport={handleExportActivitiesReport} />}
+            >
+              <DataTable<Activity>
+                className="space-y-0"
+                containerClassName="rounded-none border-0"
+                columns={activitiesColumns}
+                data={data.activities ?? []}
+                getRowId={(_row, idx) => String(idx)}
+                emptyState={data.activities === undefined ? "Not available yet for this operation" : "No scans for this date"}
+                enableZebraStripes
+                enableColumnResizing
+                enableColumnVisibility
+                showMobileSwipeHint
+                isStickyHeader
+                maxHeight="420px"
+                headerClassName="bg-gray-50 text-gray-500"
+              />
+            </TableCard>
           ) : (
-            <Card className="border-gray-200 shadow-sm overflow-hidden">
-              <div className="flex items-center gap-2 border-b border-gray-100 bg-gray-50/70 px-4 py-3">
-                <SectionIcon icon={Truck} />
-                <span className="text-sm font-semibold text-gray-900">
-                  {activeTab.breakdownLabel} Breakdown ({data.breakdown.length})
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50">
-                    <tr className="text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      <th className="px-4 py-2">{activeTab.breakdownLabel}</th>
-                      <th className="px-4 py-2">Plant</th>
-                      <th className="px-4 py-2 text-right">Orders</th>
-                      <th className="px-4 py-2 text-right">Expected</th>
-                      <th className="px-4 py-2 text-right">Actual</th>
-                      <th className="px-4 py-2 text-right">Events</th>
-                      <th className="px-4 py-2">Start</th>
-                      <th className="px-4 py-2">End</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.breakdown.length === 0 ? (
-                      <tr>
-                        <td colSpan={8} className="px-4 py-6 text-center text-gray-400">No activity for this date</td>
-                      </tr>
-                    ) : (
-                      data.breakdown.map((r, idx) => {
-                        const clickable = (tab === "unloading" || tab === "scan") && r.key !== "—";
-                        const openRow = tab === "unloading" ? () => setOpenVehicle(r.key) : () => setOpenCsv(r.key);
-                        return (
-                          <tr
-                            key={r.key}
-                            onClick={clickable ? openRow : undefined}
-                            className={`border-t border-gray-50 ${idx % 2 === 1 ? "bg-gray-50/40" : ""} ${clickable ? "cursor-pointer hover:bg-[#001d6e]/[0.04]" : ""}`}
-                          >
-                            <td className="px-4 py-2 font-medium text-gray-900">
-                              {clickable ? <span className="text-[#001d6e] underline decoration-dotted">{r.label}</span> : r.label}
-                            </td>
-                            <td className="px-4 py-2">{r.plant ?? "—"}</td>
-                            <td className="px-4 py-2 text-right tabular-nums">{r.orderCount}</td>
-                            <td className="px-4 py-2 text-right tabular-nums text-gray-700">{r.expectedQty}</td>
-                            <td className="px-4 py-2 text-right tabular-nums font-medium text-emerald-600">{r.actualQty}</td>
-                            <td className="px-4 py-2 text-right tabular-nums">{r.eventCount}</td>
-                            <td className="whitespace-nowrap px-4 py-2 text-xs text-gray-500">{fmtIST(r.startTime)}</td>
-                            <td className="whitespace-nowrap px-4 py-2 text-xs text-gray-500">{fmtIST(r.endTime)}</td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
+            <TableCard
+              icon={Truck}
+              title={`${activeTab.breakdownLabel} Breakdown`}
+              subtitle={`${data.breakdown.length} row${data.breakdown.length === 1 ? "" : "s"}`}
+              className="rounded-xl shadow-none border-gray-300"
+            >
+              <DataTable<ReportRow>
+                className="space-y-0"
+                containerClassName="rounded-none border-0"
+                columns={breakdownColumns}
+                data={data.breakdown}
+                getRowId={(row, idx) => `${row.key}-${idx}`}
+                emptyState="No activity for this date"
+                onRowClick={(row) => {
+                  if (row.key === "—") return;
+                  if (tab === "unloading") setOpenVehicle(row.key);
+                  else if (tab === "scan") setOpenCsv(row.key);
+                }}
+                isRowClickable={(row) => (tab === "unloading" || tab === "scan") && row.key !== "—"}
+                enableZebraStripes
+                enableColumnResizing
+                enableColumnVisibility
+                showMobileSwipeHint
+                headerClassName="bg-gray-50 text-gray-500"
+              />
+            </TableCard>
           )}
         </>
       ) : null}
