@@ -837,13 +837,35 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
     const barcode = String(req.body?.barcode ?? '').trim();
     const qty = Math.round(Number(req.body?.qty));
     const isExtraScan = req.body?.extra === true;
+    // Set by the offline queue on every scan attempt, resent unchanged on a retry of that same
+    // attempt — if this exact attempt already landed (the request reached the server before but
+    // its response was lost to a flaky connection), skip re-recording it rather than double-count.
+    const clientRequestId = typeof req.body?.clientRequestId === 'string' ? req.body.clientRequestId.trim() || null : null;
+    // True only for a request replayed by the offline queue's flush (client/src/lib/offlineQueue.ts) —
+    // see the "already complete" check just below for why that distinction matters.
+    const fromOfflineQueue = req.body?.fromOfflineQueue === true;
     if (!barcode) return res.status(400).json({ message: 'barcode is required' });
     if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be a positive number' });
+    if (clientRequestId) {
+      const { rows: dupRows } = await client.query(
+        `SELECT id FROM loading_scan_events WHERE order_number = $1 AND client_request_id = $2 LIMIT 1`,
+        [req.params.orderNumber, clientRequestId],
+      );
+      if (dupRows.length > 0) {
+        return res.json({ success: true, duplicate: true, message: 'Already recorded — duplicate request skipped.' });
+      }
+    }
 
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
-    if ((slip as any).loadingCompletedAt) {
+    // A LIVE scan on an already-completed load is refused — reopen it first. But a request
+    // replayed from the offline queue represents a scan physically made BEFORE the load
+    // completed (the operator was offline); it only shows as complete now because another item
+    // queued alongside it happened to flush first. Rejecting it here would silently discard a
+    // real scan — let it through instead and record it as pure extra, same as any qty beyond
+    // 100% already is.
+    if ((slip as any).loadingCompletedAt && !fromOfflineQueue) {
       return res.status(409).json({ message: 'This load is already marked complete — reopen it before scanning more.' });
     }
     const ownershipError = checkLoadOwnership(slip, req, await resolveLoadOwner(slip));
@@ -948,22 +970,34 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
       // for it) can only be logged through the dedicated Add Extra flow, never a regular scan —
       // tagged for matchExtraNotAllowedError's client-side handling (a distinct centered popup)
       // in LoadOperation.tsx. The Add Extra flow sends extra:true and skips this check entirely.
-      if (!isExtraScan && extraQty > 0) {
+      // A replayed offline scan skips it too, for the same reason the "already complete" check
+      // above does: it can't be sent back to prompt the operator to pick Add Extra instead —
+      // the physical scan already happened while still genuinely regular, and by the time this
+      // replay runs, an earlier item in the same offline batch may have used up what was
+      // remaining. Recording it as extra automatically beats losing it.
+      if (!isExtraScan && !fromOfflineQueue && extraQty > 0) {
         throw Object.assign(new Error(matchedItem
           ? `EXTRA_NOT_ALLOWED: Only ${remainingBefore} left to load for "${matchedItem.itemName ?? barcode}" — scanning ${qty} would add ${extraQty} extra. Use Add Extra for the extra quantity.`
           : `EXTRA_NOT_ALLOWED: "${barcode}" is not on this order. Use Add Extra to scan it.`), { status: 400 });
       }
 
+      // clientRequestId is recorded on only the FIRST of the (up to two) rows this attempt
+      // produces — the duplicate check above only needs to find one row to know this attempt
+      // already landed, and the unique index backing it is one-id-per-table, not per-row-of-a-
+      // split-scan.
+      let requestIdRecorded = false;
       const insertEvent = async (totalQty: number, isExtra: boolean): Promise<number> => {
+        const idForThisRow = requestIdRecorded ? null : clientRequestId;
+        requestIdRecorded = true;
         const { rows: insertedRows } = await client.query(
           `INSERT INTO loading_scan_events
-             (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+             (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name, client_request_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
           [
             slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
             itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
             itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-            totalQty, isExtra, slip.plant, stv, userCode ?? null, userName ?? null,
+            totalQty, isExtra, slip.plant, stv, userCode ?? null, userName ?? null, idForThisRow,
           ],
         );
         return insertedRows[0].id as number;
@@ -1422,6 +1456,37 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
   }
 });
 
+// Whether a scan counts as "regular" (fills the item's expected quantity) or "extra" (beyond it)
+// is decided once, at scan time, and stored on that row — /scan itself never revisits it. So
+// voiding or correcting an EARLIER event never used to update a LATER event's own is_extra flag:
+// void a 20-box regular scan and a pre-existing 5-box "extra" scan for the same barcode stayed
+// labeled extra forever, even though the void just opened up 20 boxes of room it could slide
+// into. This re-walks every surviving (non-voided) event for the order+barcode in original scan
+// order and recomputes each one's flag fresh against the item's expected quantity — the exact
+// split logic /scan uses, just re-applied to what's left. A single scan that straddled the
+// regular/extra boundary was always inserted as two separate rows (see insertEvent below), never
+// one row with a mixed qty, so this only ever flips a whole row's flag — it never needs to split
+// or merge rows.
+async function reclassifyLoadingEvents(client: any, orderNumber: string, barcode: string, expectedQty: number): Promise<void> {
+  const { rows } = await client.query(
+    `SELECT id, total_qty, is_extra FROM loading_scan_events
+      WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE
+      ORDER BY scanned_at ASC, id ASC
+      FOR UPDATE`,
+    [orderNumber, barcode],
+  );
+  let regularSoFar = 0;
+  for (const row of rows) {
+    const qty = Number(row.total_qty ?? 0);
+    const remainingBefore = Math.max(0, expectedQty - regularSoFar);
+    const shouldBeExtra = qty > remainingBefore;
+    if (shouldBeExtra !== row.is_extra) {
+      await client.query(`UPDATE loading_scan_events SET is_extra = $1 WHERE id = $2`, [shouldBeExtra, row.id]);
+    }
+    if (!shouldBeExtra) regularSoFar += qty;
+  }
+}
+
 // POST /api/loading/events/:id/void — the Load Event tab's Void action (Scan History page).
 // Marks a single loading_scan_events row as a mistake: stays in history (never deleted), but its
 // quantity is reversed back into product_plant_stock — the mirror image of what /scan's decrement
@@ -1491,6 +1556,15 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
        RETURNING *`,
       [userCode ?? null, reason, eventId],
     );
+
+    // This void just changed how much of this barcode is "loaded," so any surviving extra scan
+    // for the same order+barcode may now belong in the regular slot this freed up.
+    const voidedSlip = await storage.getProformaSlipByOrderNumber(event.order_number);
+    const voidedItems = voidedSlip ? await storage.getProformaSlipItems(voidedSlip.id) : [];
+    const voidedMatchedItem = voidedItems.find((i: any) => normalize(i.barcode) === normalize(event.barcode));
+    if (voidedMatchedItem) {
+      await reclassifyLoadingEvents(client, event.order_number, event.barcode, voidedMatchedItem.quantity ?? 0);
+    }
 
     await client.query('COMMIT');
 
@@ -1651,6 +1725,13 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
          VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'loading')`,
         [event.barcode, product?.id ?? null, c.plant, -c.qty, extraQtyByPlant.get(c.plant) ?? 0, `Qty corrected (edited by ${editorLabel})`, userCode ?? null],
       );
+    }
+
+    // This correction just changed how much of this barcode is "loaded" — re-check every
+    // surviving event for the same order+barcode, not just the two rows just inserted, in case a
+    // separate pre-existing extra scan should now slide into the room this correction opened up.
+    if (matchedItem) {
+      await reclassifyLoadingEvents(client, slip.orderNumber, event.barcode, expected);
     }
 
     await client.query('COMMIT');

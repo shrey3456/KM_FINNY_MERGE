@@ -33,6 +33,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { DataTable, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { scanOrQueue } from "@/lib/offlineQueue";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
@@ -639,17 +640,64 @@ export default function Unloading() {
   };
 
   const scanMutation = useMutation({
-    mutationFn: ({ barcode, qty, stv }: { barcode: string; qty: number; stv?: string | null }) =>
-      apiRequest("POST", `/api/unloading/sessions/${activeSessionId}/scan`, { barcode, qty, stv: stv ?? null }, false, true),
-    onMutate: () => {
+    mutationFn: async ({ barcode, qty, stv }: { barcode: string; qty: number; stv?: string | null }) => {
+      // Tries live first; falls back to the offline queue only on a genuine network failure —
+      // see client/src/lib/offlineQueue.ts. A queued scan has no server response yet (the
+      // regular/extra split is decided server-side, under a lock, so it can't be guessed
+      // client-side) — but the optimistic bump in onMutate below still moves "scanned/remaining"
+      // locally using the server's own math (expected/scanned, regardless of regular vs extra),
+      // so the operator sees this scan land immediately. The 15s live poll on this query (see
+      // activeSessionQuery's refetchInterval above) corrects it once the real data is back.
+      const result = await scanOrQueue(
+        `/api/unloading/sessions/${activeSessionId}/scan`,
+        { barcode, qty, stv: stv ?? null },
+        `${barcode} × ${qty} — Unloading session #${activeSessionId}`,
+      );
+      if (result.queued) return { queued: true as const };
+      const res = result.response;
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Scan failed");
+      return { queued: false as const, data: await res.json() };
+    },
+    onMutate: ({ barcode, qty }) => {
       const item = scanItemRef.current;
       if (item) {
         const s = itemScanSeqRef.current;
         s.seq += 1;
         s.byId.set(item.id, s.seq);
       }
+      const key = ["/api/unloading/sessions", activeSessionId] as const;
+      const prevData = queryClient.getQueryData<{ session: SessionDetail; items: SessionItem[]; allComplete: boolean; offBatchExtraQty?: number; offBatchExtraPallets?: number }>(key);
+      const idx = prevData?.items.findIndex((i) => normalize(i.barcode) === normalize(barcode)) ?? -1;
+      if (!prevData || idx === -1) return { prevData };
+      const target = prevData.items[idx];
+      const scanned = target.scanned + qty;
+      const nextItems = prevData.items.slice();
+      nextItems[idx] = {
+        ...target,
+        scanned,
+        remaining: Math.max(0, target.expected - scanned),
+        isComplete: target.expected > 0 && scanned >= target.expected,
+      };
+      queryClient.setQueryData(key, { ...prevData, items: nextItems });
+      return { prevData };
     },
-    onSuccess: (data) => {
+    onSuccess: (result, vars) => {
+      if (result.queued) {
+        // Text must differ scan-to-scan — TOAST_LIMIT is 1 (use-toast.ts), so a second queued
+        // scan replaces the first toast in the very same tick. Identical text on both meant a
+        // second scan of a different item looked exactly like nothing had happened at all.
+        // The dialog's per-call onSuccess is not a reliable place to release the UI when the
+        // request is queued (the queue has no server response yet). Clear it here as well, so
+        // an offline scan does not leave `pending` blocking the next different barcode.
+        scanLockRef.current = false;
+        setPending((current) => current && normalize(current.barcode) === normalize(vars.barcode) ? null : current);
+        toast({
+          title: "Scan saved offline",
+          description: `${vars.barcode} × ${vars.qty} — will sync once you're back online.`,
+        });
+        return;
+      }
+      const data = result.data;
       // This scan was the batch's first — it just became active, so the landing list and tab
       // counts (still showing it as available) need a refresh.
       const becameActive = detail?.session?.scanStatus === "available" && data.session?.scanStatus === "active";
@@ -669,7 +717,9 @@ export default function Unloading() {
       }
       if (data.allComplete) toast({ title: "Batch complete", description: "Every item's expected quantity has been matched." });
     },
-    onError: (error: any) => {
+    onError: (error: any, _vars, context) => {
+      // A genuine rejection (not a queue) — the optimistic bump never happened for real, so undo it.
+      if (context?.prevData) queryClient.setQueryData(["/api/unloading/sessions", activeSessionId], context.prevData);
       const productMasterMissing = matchProductMasterMissingError(error);
       if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
       const barcodeNotInSystem = matchBarcodeNotInSystemError(error);
@@ -847,7 +897,13 @@ export default function Unloading() {
       && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
       scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null }, {
-        onSuccess: (data) => showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra, data.event.productId),
+        // Queued (offline) has no event data to show — the mutation's own onSuccess already
+        // toasts "Scan saved offline" in that case, so this just skips the feedback popup.
+        onSuccess: (result) => {
+          if (result.queued) return;
+          const { event } = result.data;
+          showAutoFeedback(event.itemName, event.barcode, event.sapCode, event.totalQty, event.remaining, event.isExtra, event.productId);
+        },
       });
       setItemBarcode("");
       return;

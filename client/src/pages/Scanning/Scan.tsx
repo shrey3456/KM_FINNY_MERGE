@@ -37,6 +37,7 @@ import { CircularProgress } from "@/components/ui/circular-progress";
 import { PlantBadge } from "@/components/PlantBadge";
 import { ProductPhoto } from "@/components/ProductPhoto";
 import { apiRequest } from "@/lib/queryClient";
+import { scanOrQueue } from "@/lib/offlineQueue";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, parseApiErrorMessage } from "@/lib/apiError";
 import { useToast } from "@/hooks/use-toast";
@@ -982,8 +983,22 @@ export default function ScanOrderPage() {
   const osItemsKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] as const;
 
   const osScanMutation = useMutation({
-    mutationFn: (payload: { barcode: string; qty: number; isExtra: boolean; stv: string | null }) =>
-      apiRequest("POST", `/api/order-scan/sessions/${activeOrderScanSession!.id}/scan`, payload).then((r) => r.json()),
+    mutationFn: async (payload: { barcode: string; qty: number; isExtra: boolean; stv: string | null }) => {
+      // Tries live first; falls back to the offline queue only on a genuine network failure —
+      // see client/src/lib/offlineQueue.ts. onMutate below already applied this scan
+      // optimistically to the UI regardless of network state; a queued result just skips the
+      // onSuccess reconciliation step (there's no real server data yet) and leaves that
+      // optimistic estimate on screen until the queue actually flushes.
+      const result = await scanOrQueue(
+        `/api/order-scan/sessions/${activeOrderScanSession!.id}/scan`,
+        payload,
+        `${payload.barcode} × ${payload.qty}${payload.isExtra ? " (extra)" : ""} — Order Scan session #${activeOrderScanSession!.id}`,
+      );
+      if (result.queued) return { queued: true as const };
+      const res = result.response;
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Scan failed");
+      return { queued: false as const, data: await res.json() };
+    },
 
     onMutate: async (payload) => {
       // Cancel any in-flight refetch so it doesn't overwrite our optimistic update
@@ -1064,7 +1079,21 @@ export default function ScanOrderPage() {
       return { previousItems, previousPending };
     },
 
-    onSuccess: (data: any) => {
+    onSuccess: (result: any, vars: any) => {
+      if (result.queued) {
+        // Text must differ scan-to-scan — TOAST_LIMIT is 1 (use-toast.ts), so a second queued
+        // scan replaces the first toast in the very same tick. Identical text on both meant a
+        // second scan of a different item looked exactly like nothing had happened at all.
+        // onMutate already closes the dialog; release the auto-scan guard explicitly as well so
+        // an offline queue result never depends on a later callback to admit the next barcode.
+        osScanLockRef.current = false;
+        toast({
+          title: "Scan saved offline",
+          description: `${vars.barcode} × ${vars.qty}${vars.isExtra ? " (extra)" : ""} — will sync once you're back online.`,
+        });
+        return;
+      }
+      const data = result.data;
       // Reconcile with exact server values (handles rounding, status edge cases)
       if (data?.updatedItem) {
         const u = data.updatedItem;
@@ -1110,6 +1139,10 @@ export default function ScanOrderPage() {
       if (productMasterMissing) { setOsProductMasterMissingMessage(productMasterMissing); return; }
       toast({ title: "Scan failed", description: parseApiErrorMessage(err) ?? "Unknown error", variant: "destructive" });
     },
+    // Always release the synchronous auto-scan guard, including network failures and queued
+    // offline scans. The per-call callback covers the normal auto-scan path, but a mutation-level
+    // cleanup is required so one failed/queued submission cannot silence every later barcode.
+    onSettled: () => { osScanLockRef.current = false; },
   });
   const [osProductMasterMissingMessage, setOsProductMasterMissingMessage] = useState<string | null>(null);
 

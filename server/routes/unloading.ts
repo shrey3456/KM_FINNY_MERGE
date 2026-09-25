@@ -893,8 +893,24 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     const barcode = String(req.body?.barcode ?? '').trim();
     const qty = Math.round(Number(req.body?.qty));
     const stv = req.body?.stv ? String(req.body.stv).trim() : null;
+    // Set by the offline queue on every scan attempt, resent unchanged on a retry of that same
+    // attempt — see loading.ts's identical guard for the full rationale.
+    const clientRequestId = typeof req.body?.clientRequestId === 'string' ? req.body.clientRequestId.trim() || null : null;
+    // True only for a request replayed by the offline queue's flush (client/src/lib/offlineQueue.ts),
+    // never for a scan the operator is making live right now — see the "already complete" checks
+    // below for why that distinction matters.
+    const fromOfflineQueue = req.body?.fromOfflineQueue === true;
     if (!barcode) return res.status(400).json({ message: 'barcode is required' });
     if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be a positive number' });
+    if (clientRequestId) {
+      const { rows: dupRows } = await client.query(
+        `SELECT id FROM unload_scan_events WHERE session_id = $1 AND client_request_id = $2 LIMIT 1`,
+        [id, clientRequestId],
+      );
+      if (dupRows.length > 0) {
+        return res.json({ success: true, duplicate: true, message: 'Already recorded — duplicate request skipped.' });
+      }
+    }
 
     // Fast, UNLOCKED pre-checks — fail obviously-bad requests cheaply before opening a
     // transaction. NOT authoritative for scan_status/alreadyScanned: two concurrent scans of the
@@ -907,7 +923,14 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     const session = sessionRows[0];
     if (!session) return res.status(404).json({ message: 'Unloading session not found' });
     if (!canAccessPlant(req, session.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
-    if (session.scan_status === 'completed') {
+    // A LIVE scan on an already-completed part is refused — the operator must explicitly Reopen
+    // first. But a request replayed from the offline queue represents a scan physically made
+    // BEFORE this part completed (the operator was offline and had no way to know); the part only
+    // shows as 'completed' now because an earlier item queued alongside it happened to be flushed
+    // first. Rejecting it here would silently discard a real scan that already happened — it's let
+    // through instead and recorded as pure extra (matching how any qty beyond 100% is already
+    // handled below).
+    if (session.scan_status === 'completed' && !fromOfflineQueue) {
       return res.status(409).json({ message: 'This part is already complete — reopen it before scanning more.' });
     }
 
@@ -956,7 +979,13 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
         [id],
       );
       const lockedSession = lockedSessionRows[0];
-      if (!lockedSession || lockedSession.scan_status === 'completed') {
+      if (!lockedSession) {
+        throw Object.assign(new Error('This part is already complete — reopen it before scanning more.'), { status: 409 });
+      }
+      // Same exemption as the unlocked pre-check above — re-checked here against the
+      // FOR-UPDATE-locked row since another request could have completed the part between
+      // the pre-check and this lock being acquired.
+      if (lockedSession.scan_status === 'completed' && !fromOfflineQueue) {
         throw Object.assign(new Error('This part is already complete — reopen it before scanning more.'), { status: 409 });
       }
 
@@ -991,17 +1020,24 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
       regularQty = matchedItem ? Math.min(qty, remainingBefore) : 0;
       extraQty = qty - regularQty;
 
-      const insertEvent = (totalQty: number, isExtra: boolean) => client.query(
-        `INSERT INTO unload_scan_events
-           (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        [
-          id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
-          itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
-          itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-          totalQty, isExtra, stv, session.plant, session.vehicle_number, userCode ?? null, userName ?? null,
-        ],
-      );
+      // clientRequestId is recorded on only the FIRST of the (up to two) rows this attempt
+      // produces — see loading.ts's identical comment for why.
+      let requestIdRecorded = false;
+      const insertEvent = (totalQty: number, isExtra: boolean) => {
+        const idForThisRow = requestIdRecorded ? null : clientRequestId;
+        requestIdRecorded = true;
+        return client.query(
+          `INSERT INTO unload_scan_events
+             (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, client_request_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [
+            id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
+            itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
+            itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
+            totalQty, isExtra, stv, session.plant, session.vehicle_number, userCode ?? null, userName ?? null, idForThisRow,
+          ],
+        );
+      };
       if (regularQty > 0) await insertEvent(regularQty, false);
       if (extraQty > 0) await insertEvent(extraQty, true);
 
@@ -1287,6 +1323,47 @@ router.delete('/unloading/sessions/:id', requireUnloadingDeleteAccess, async (re
   }
 });
 
+// Whether a scan counts as "regular" (fills this part's own expected quantity) or "extra"
+// (beyond it) is decided once, at scan time, and stored on that row — /scan itself never
+// revisits it. So voiding or correcting an EARLIER event never used to update a LATER event's
+// own is_extra flag: void a 20-box regular scan and a pre-existing 5-box "extra" scan for the
+// same barcode stayed labeled extra forever, even though the void just opened up 20 boxes of
+// room it could slide into. This re-walks every surviving (non-voided) event for the SAME
+// SESSION (a part's own manifest is its own — unlike this file's cross-part credit system,
+// which is a separate concern; /scan itself only ever compares against this one session's own
+// expected/scanned, never the whole plant+date group, so reclassifying matches that scope) and
+// recomputes each one's flag fresh. A row already touched by the credit system (credited_qty >
+// 0, source of a credit already carried to a later part, or is_credit itself, a credit received
+// FROM an earlier part) is left untouched — flipping it here would desync whichever other part
+// it's linked to, so it's frozen exactly like the PUT edit endpoint already refuses to touch it
+// directly. A single scan that straddled the regular/extra boundary was always inserted as two
+// separate rows (see insertEvent in /scan and here), never one row with a mixed qty, so this
+// only ever flips a whole row's flag — it never needs to split or merge rows.
+async function reclassifyUnloadEvents(client: any, sessionId: number, barcode: string, expectedQty: number): Promise<void> {
+  const { rows } = await client.query(
+    `SELECT id, total_qty, is_extra, credited_qty, is_credit FROM unload_scan_events
+      WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE
+      ORDER BY scanned_at ASC, id ASC
+      FOR UPDATE`,
+    [sessionId, barcode],
+  );
+  let regularSoFar = 0;
+  for (const row of rows) {
+    const qty = Number(row.total_qty ?? 0);
+    const frozen = Number(row.credited_qty ?? 0) > 0 || row.is_credit;
+    if (frozen) {
+      if (!row.is_extra) regularSoFar += qty;
+      continue;
+    }
+    const remainingBefore = Math.max(0, expectedQty - regularSoFar);
+    const shouldBeExtra = qty > remainingBefore;
+    if (shouldBeExtra !== row.is_extra) {
+      await client.query(`UPDATE unload_scan_events SET is_extra = $1 WHERE id = $2`, [shouldBeExtra, row.id]);
+    }
+    if (!shouldBeExtra) regularSoFar += qty;
+  }
+}
+
 // POST /api/unloading/events/:id/void — reverses the stock this scan added and marks it voided.
 router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
@@ -1304,9 +1381,24 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
     if (event.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This scan is already voided' }); }
 
     const qty = Number(event.total_qty ?? 0);
+    let product: any = null;
     if (qty > 0 && event.plant && event.barcode) {
-      const product = await storage.getProductByBarcode(event.barcode, event.plant);
+      product = await storage.getProductByBarcode(event.barcode, event.plant);
       await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+      // Voiding a receive removes stock (the mirror of adding it) — but if those boxes have
+      // already been consumed elsewhere (loaded out, etc.) since they were received, there
+      // isn't enough left to take back. Reject rather than letting the pool go negative.
+      const { rows: stockRows } = await client.query(
+        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
+        [event.barcode, event.plant],
+      );
+      const currentStock = Number(stockRows[0]?.inStock ?? 0);
+      if (currentStock < qty) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message: `Can't undo this — only ${currentStock} of these boxes are still in stock (${qty} were received here); the rest are already used elsewhere.`,
+        });
+      }
       await client.query(
         `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
         [qty, event.barcode, event.plant],
@@ -1321,6 +1413,17 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
       `UPDATE unload_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
       [userCode ?? null, reason, eventId],
     );
+
+    // This void just changed how much of this barcode is "scanned" for this session — reclassify
+    // any surviving events for the same session+barcode in case a separate extra scan now belongs
+    // in the room this freed up.
+    if (event.barcode) {
+      const { rows: expectedRows } = await client.query(
+        `SELECT COALESCE(SUM(quantity), 0)::int AS expected FROM unload_import_items WHERE session_id = $1 AND barcode = $2`,
+        [event.session_id, event.barcode],
+      );
+      await reclassifyUnloadEvents(client, event.session_id, event.barcode, expectedRows[0]?.expected ?? 0);
+    }
     await client.query('COMMIT');
     res.json({ success: true });
   } catch (error) {
@@ -1386,8 +1489,20 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
     const oldQty = Number(event.total_qty ?? 0);
     const product = await storage.getProductByBarcode(event.barcode, event.plant);
 
-    // Reverse the old qty's stock — same direction the void handler above uses.
+    // Reverse the old qty's stock — same direction the void handler above uses. Same guard too:
+    // if these boxes are already used elsewhere, there isn't enough left to take back.
     await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
+    const { rows: stockRows } = await client.query(
+      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
+      [event.barcode, event.plant],
+    );
+    const currentStock = Number(stockRows[0]?.inStock ?? 0);
+    if (currentStock < oldQty) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        message: `Can't correct this — only ${currentStock} of these boxes are still in stock (${oldQty} were received here); the rest are already used elsewhere.`,
+      });
+    }
     await client.query(
       `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
       [oldQty, event.barcode, event.plant],
@@ -1450,6 +1565,11 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
        VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,$8,'unloading')`,
       [event.barcode, product?.id ?? null, event.plant, newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, event.session_id, userCode ?? null],
     );
+
+    // This correction just changed how much of this barcode is "scanned" for this session —
+    // re-check every surviving event, not just the ones just inserted, in case a separate extra
+    // scan should now slide into the room this correction opened up.
+    await reclassifyUnloadEvents(client, event.session_id, event.barcode, expected);
 
     await client.query('COMMIT');
     res.json({ success: true, regularQty, extraQty });

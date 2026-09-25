@@ -1,5 +1,7 @@
 import { Switch, Route, Redirect, useLocation } from "wouter";
 import { queryClient, handleUnauthorized } from "./lib/queryClient";
+import { flushQueue, onQueueChange, getQueueState, type QueueState } from "./lib/offlineQueue";
+import { Loader2 as Loader2Icon, CloudOff as CloudOffIcon, Cloud as CloudIcon } from "lucide-react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
@@ -146,6 +148,10 @@ function Router() {
           description: "Full functionality has been restored",
           variant: "default",
         });
+        // Send whatever scans piled up in the offline queue while the connection was down —
+        // see client/src/lib/offlineQueue.ts. Fire-and-forget: OfflineQueueBadge (rendered
+        // globally) shows progress/results, this effect doesn't need to await it.
+        void flushQueue();
       }
     };
 
@@ -311,6 +317,50 @@ const OfflineBanner = ({ isOnline }: { isOnline: boolean }) => {
   );
 };
 
+// The only visible sign the offline queue (client/src/lib/offlineQueue.ts) exists at all — a
+// small "N pending" pill with a manual Sync button, replacing what used to be total silence:
+// a scan made offline just failed and vanished with nothing to show for it either way. Rendered
+// globally (not per-page) since a scan queued on one page should stay visible while navigating
+// elsewhere, right up until it actually sends.
+function OfflineQueueBadge() {
+  const [state, setState] = useState<QueueState>({ pending: 0, flushing: false, lastMessage: null });
+
+  useEffect(() => {
+    getQueueState().then(setState);
+    return onQueueChange(setState);
+  }, []);
+
+  if (state.pending === 0 && !state.flushing && !state.lastMessage) return null;
+
+  return (
+    <div className="fixed bottom-3 right-3 z-50 flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-lg">
+      {state.flushing ? (
+        <Loader2Icon className="h-3.5 w-3.5 animate-spin text-[#001d6e]" />
+      ) : state.pending > 0 ? (
+        <CloudOffIcon className="h-3.5 w-3.5 text-amber-600" />
+      ) : (
+        <CloudIcon className="h-3.5 w-3.5 text-emerald-600" />
+      )}
+      <span>
+        {state.flushing
+          ? `Syncing… (${state.pending} left)`
+          : state.pending > 0
+            ? `${state.pending} scan${state.pending === 1 ? "" : "s"} waiting to sync`
+            : (state.lastMessage ?? "Synced")}
+      </span>
+      {state.pending > 0 && !state.flushing && (
+        <button
+          type="button"
+          onClick={() => void flushQueue()}
+          className="rounded-full bg-[#001d6e] px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-[#00154b]"
+        >
+          Sync now
+        </button>
+      )}
+    </div>
+  );
+}
+
 function App() {
   // Track online status
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -363,6 +413,7 @@ function App() {
           <Router />
           <Toaster />
           <OfflineBanner isOnline={isOnline} />
+          <OfflineQueueBadge />
         </Suspense>
       </AuthProvider>
     </QueryClientProvider>

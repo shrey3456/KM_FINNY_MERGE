@@ -733,6 +733,19 @@ app.use((req, res, next) => {
       if (rowCount) console.log(`[migration] corrected the stored time zone on ${rowCount} existing activity row(s)`);
     }
 
+    // client_request_id — the offline queue's duplicate-safety net. A scan made while offline is
+    // queued locally with a UUID generated once at scan time; if that request actually reaches
+    // the server but the response is lost to a flaky connection, the queue retries it with the
+    // SAME id. The partial unique index (NULLs excluded, since most rows predate this and never
+    // set it) makes a second insert with a seen id fail at the database level even under a race,
+    // not just whatever the route's own pre-check catches.
+    for (const table of ['loading_scan_events', 'unload_scan_events', 'order_scan_events']) {
+      await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS client_request_id TEXT`);
+      await pool.query(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${table}_client_request_id_idx ON ${table} (client_request_id) WHERE client_request_id IS NOT NULL`,
+      );
+    }
+
     console.log('Database migrations completed successfully');
 
     // Auto-sync scan history to the configured Notion inventory DB every 30 minutes. No-ops

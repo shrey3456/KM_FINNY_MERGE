@@ -1465,10 +1465,14 @@ async function writeScanEvents(
     // happening now.
     scannedAt?: Date | string | null;
     adjustedAt?: Date | string | null;
+    // Offline-queue duplicate-safety UUID — see loading.ts's identical guard for the full
+    // rationale. Recorded on only the FIRST of the (up to two) rows this attempt produces.
+    clientRequestId?: string | null;
   },
 ): Promise<{ events: any[]; updatedItem: any; orderQty: number; extraQty: number }> {
   const { sessionId, scanItem, totalQty, itemsPerPallet, barcode, resolvedItemName, stv, userCode, userName, forceAllExtra } = params;
   const isAdjust = params.isAdjust === true;
+  const clientRequestId = params.clientRequestId ?? null;
   const scannedAt = params.scannedAt ?? null;   // null → the column default (now)
   const adjustedAt = params.adjustedAt ?? null;
   const splitPallets = (q: number) => ({
@@ -1485,19 +1489,21 @@ async function writeScanEvents(
   const events: any[] = [];
   let updatedItem: any = scanItem;
 
+  let requestIdRecorded = false;
   if (orderQty > 0) {
     const part = splitPallets(orderQty);
     const orderEventResult = await client.query(
       `INSERT INTO order_scan_events
          (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
           items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name,
-          scanned_at, adjusted_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),$15)
+          scanned_at, adjusted_at, client_request_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),$15,$16)
        RETURNING *`,
       [sessionId, scanItem.id, barcode, resolvedItemName,
        part.pallets, part.looseQty, orderQty, itemsPerPallet, false, isAdjust,
-       stv ?? null, userCode, userName, scannedAt, adjustedAt],
+       stv ?? null, userCode, userName, scannedAt, adjustedAt, clientRequestId],
     );
+    requestIdRecorded = true;
     events.push(orderEventResult.rows[0]);
 
     const updateResult = await client.query(
@@ -1525,12 +1531,12 @@ async function writeScanEvents(
     const extraEventResult = await client.query(
       `INSERT INTO order_scan_events
          (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-          items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name, client_request_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING *`,
       [sessionId, scanItem?.id ?? null, barcode, resolvedItemName,
        part.pallets, part.looseQty, extraQty, itemsPerPallet, true, isAdjust,
-       stv ?? null, userCode, userName],
+       stv ?? null, userCode, userName, requestIdRecorded ? null : clientRequestId],
     );
     events.push(extraEventResult.rows[0]);
 
@@ -1576,10 +1582,26 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
   // SEPARATE stock row that silently orphans whatever quantity gets scanned under it.
   const barcode = typeof rawBarcode === 'string' ? rawBarcode.trim() : rawBarcode;
   if (!barcode) return res.status(400).json({ message: 'barcode is required' });
+  // Set by the offline queue on every scan attempt, resent unchanged on a retry of that same
+  // attempt — see loading.ts's identical guard for the full rationale. Checked globally (not
+  // scoped to this session) since it's a UUID generated fresh per attempt.
+  const clientRequestId = typeof (req.body as any)?.clientRequestId === 'string'
+    ? (req.body as any).clientRequestId.trim() || null : null;
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    if (clientRequestId) {
+      const { rows: dupRows } = await client.query(
+        `SELECT id FROM order_scan_events WHERE client_request_id = $1 LIMIT 1`,
+        [clientRequestId],
+      );
+      if (dupRows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.json({ success: true, duplicate: true, message: 'Already recorded — duplicate request skipped.' });
+      }
+    }
 
     // Verify session exists and hasn't been deleted (no lock needed — session row isn't
     // mutated here). Rejecting a deleted session closes the window where a scan could land
@@ -1704,7 +1726,7 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
 
     if (matchedSession && matchedSession.id === frontSession.id) {
       // Found in the front part — the simple case, same as a single-part scan.
-      const r = await writeScanEvents(client, { ...baseParams, sessionId: matchedSession.id, scanItem: matchedItem, forceAllExtra: false });
+      const r = await writeScanEvents(client, { ...baseParams, sessionId: matchedSession.id, scanItem: matchedItem, forceAllExtra: false, clientRequestId });
       events.push(...r.events.map((e: any) => ({ ...e, __sessionId: matchedSession.id })));
       updatedItem = r.updatedItem;
       stockOrderQty = r.orderQty; stockExtraQty = r.extraQty; stockLedgerSessionId = matchedSession.id;
@@ -1712,12 +1734,15 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
       // Not on the front part's CSV, but found further down the sequence — dual-log per the
       // spec: Extra against the front part's report AND Scanned against the part that
       // actually matched. Same physical box, two bookkeeping entries; stock (below) is only
-      // ever applied once, from the matched part's real split.
+      // ever applied once, from the matched part's real split. clientRequestId goes on the
+      // MATCH call only (the one insert below skips it) — one physical scan attempt gets one
+      // id recorded once, even though it produces rows in two sessions; either row is enough
+      // for the duplicate-check above to find it on a retry.
       const frontItem = itemRowsBySession.get(frontSession.id) ?? null;
       const rFront = await writeScanEvents(client, { ...baseParams, sessionId: frontSession.id, scanItem: frontItem, forceAllExtra: true });
       events.push(...rFront.events.map((e: any) => ({ ...e, __sessionId: frontSession.id })));
 
-      const rMatch = await writeScanEvents(client, { ...baseParams, sessionId: matchedSession.id, scanItem: matchedItem, forceAllExtra: false });
+      const rMatch = await writeScanEvents(client, { ...baseParams, sessionId: matchedSession.id, scanItem: matchedItem, forceAllExtra: false, clientRequestId });
       events.push(...rMatch.events.map((e: any) => ({ ...e, __sessionId: matchedSession.id })));
       updatedItem = rMatch.updatedItem;
       touchedSessions.add(matchedSession.id);
@@ -1725,7 +1750,7 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     } else {
       // Not found anywhere in the group — pure Extra against the front part.
       const frontItem = itemRowsBySession.get(frontSession.id) ?? null;
-      const rFront = await writeScanEvents(client, { ...baseParams, sessionId: frontSession.id, scanItem: frontItem, forceAllExtra: true });
+      const rFront = await writeScanEvents(client, { ...baseParams, sessionId: frontSession.id, scanItem: frontItem, forceAllExtra: true, clientRequestId });
       events.push(...rFront.events.map((e: any) => ({ ...e, __sessionId: frontSession.id })));
       updatedItem = rFront.updatedItem;
       stockOrderQty = rFront.orderQty; stockExtraQty = rFront.extraQty; stockLedgerSessionId = frontSession.id;
@@ -2168,6 +2193,20 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       }
     } else if (plant && event.barcode) {
       const qty = Number(event.total_qty ?? 0);
+      // reverseLiveScanStock itself clamps at 0 (GREATEST) as a last-resort backstop, but that
+      // clamp is silent — it would let this void quietly under-reverse instead of telling the
+      // caller these boxes are already used elsewhere. Reject up front instead.
+      const { rows: stockRows } = await client.query(
+        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
+        [event.barcode, plant],
+      );
+      const currentStock = Number(stockRows[0]?.inStock ?? 0);
+      if (currentStock < qty) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message: `Can't undo this — only ${currentStock} of these boxes are still in stock (${qty} were received here); the rest are already used elsewhere.`,
+        });
+      }
       await reverseLiveScanStock(
         client, plant, event.barcode,
         event.is_extra ? 0 : qty,
@@ -2263,6 +2302,19 @@ router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res
     // Reverse the old qty's stock — same simple branch the void handler above takes once
     // is_credit/credited_qty have been ruled out (the two blocks above this one guarantee that).
     if (plant && event.barcode) {
+      // Same guard as void — reject up front rather than let reverseLiveScanStock's own
+      // GREATEST(0, ...) backstop silently under-reverse it.
+      const { rows: stockRows } = await client.query(
+        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
+        [event.barcode, plant],
+      );
+      const currentStock = Number(stockRows[0]?.inStock ?? 0);
+      if (currentStock < oldQty) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message: `Can't correct this — only ${currentStock} of these boxes are still in stock (${oldQty} were received here); the rest are already used elsewhere.`,
+        });
+      }
       await reverseLiveScanStock(client, plant, event.barcode, event.is_extra ? 0 : oldQty, event.is_extra ? oldQty : 0, event.session_id);
     }
 

@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { scanOrQueue } from "@/lib/offlineQueue";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, matchBarcodeNotInSystemError, matchExtraNotAllowedError, parseApiErrorMessage } from "@/lib/apiError";
@@ -1434,12 +1435,66 @@ export default function LoadOperation() {
   }
 
   const scanItemMutation = useMutation({
-    mutationFn: async ({ barcode, qty, extra }: { barcode: string; qty: number; extra?: boolean }) => {
-      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, { barcode, qty, extra: !!extra });
+    mutationFn: async ({ barcode, qty, extra }: { barcode: string; qty: number; extra?: boolean }): Promise<
+      { queued: true } | { queued: false; data: ScanResponse }
+    > => {
+      // Tries live first; falls back to the offline queue only on a genuine network failure —
+      // see client/src/lib/offlineQueue.ts. A queued scan has no server response yet (the
+      // regular/extra split is decided server-side, under a lock, against live stock/expected
+      // qty — it can't be guessed client-side), so the AUTHORITATIVE regular/extra classification
+      // and totals only arrive once the queue actually flushes. The optimistic bump applied in
+      // onMutate below is just a best-effort local estimate so the operator sees this scan land
+      // immediately; the 15s silent poll above (and the real response on a live scan) corrects it.
+      const result = await scanOrQueue(
+        `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`,
+        { barcode, qty, extra: !!extra },
+        `${barcode} × ${qty}${extra ? " (extra)" : ""} — Loading #${slip!.orderNumber}`,
+      );
+      if (result.queued) return { queued: true };
+      const res = result.response;
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Scan failed");
-      return res.json() as Promise<ScanResponse>;
+      const data = (await res.json()) as ScanResponse;
+      return { queued: false, data };
     },
-    onSuccess: (data) => {
+    // Optimistic local bump — applied BEFORE the network attempt even starts, so it shows up for
+    // a live scan too (briefly, until the real response overwrites it a moment later) and, more
+    // importantly, PERSISTS for a queued one, where there is no real response for a while. Mirrors
+    // the server's own "loaded" math (withProgress in loading.ts): loaded counts every scan
+    // (regular or extra) toward remaining, so this needs no regular/extra guess to be accurate.
+    onMutate: ({ barcode, qty }) => {
+      const prevItems = itemsRef.current;
+      const idx = prevItems.findIndex((i) => normalize(i.barcode) === normalize(barcode));
+      if (idx === -1) return { prevItems: null };
+      const item = prevItems[idx];
+      const loaded = item.loaded + qty;
+      const nextItems = prevItems.slice();
+      nextItems[idx] = {
+        ...item,
+        loaded,
+        remaining: Math.max(0, item.expected - loaded),
+        isComplete: item.expected > 0 && loaded >= item.expected,
+        stockAvailable: item.stockAvailable != null ? Math.max(0, item.stockAvailable - qty) : item.stockAvailable,
+      };
+      setItems(nextItems);
+      return { prevItems };
+    },
+    onSuccess: (result, vars) => {
+      if (result.queued) {
+        // Text must differ scan-to-scan — TOAST_LIMIT is 1 (use-toast.ts), so a second queued
+        // scan replaces the first toast in the very same tick. Identical text on both meant a
+        // second scan of a different item looked exactly like nothing had happened at all.
+        // A queued request has no server response, so release the same local guards here as the
+        // live success path. Otherwise the confirmation dialog can remain open and block the
+        // next barcode while the offline queue is waiting to flush.
+        scanLockRef.current = false;
+        setPending((current) => current && normalize(current.barcode) === normalize(vars.barcode) ? null : current);
+        toast({
+          title: "Scan saved offline",
+          description: `${vars.barcode} × ${vars.qty}${vars.extra ? " (extra)" : ""} — will sync once you're back online.`,
+        });
+        return;
+      }
+      const data = result.data;
       markItemScanned(data.event?.barcode, data.items);
       refreshOwnerHistory(data.slip.orderNumber);
       setSlip(data.slip);
@@ -1455,7 +1510,9 @@ export default function LoadOperation() {
       }
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", data.slip.orderNumber] });
     },
-    onError: (err: any) => {
+    onError: (err: any, _vars, context) => {
+      // A genuine rejection (not a queue) — the optimistic bump never happened for real, so undo it.
+      if (context?.prevItems) setItems(context.prevItems);
       const productMasterMissing = matchProductMasterMissingError(err);
       if (productMasterMissing) { setProductMasterMissingMessage(productMasterMissing); return; }
       const barcodeNotInSystem = matchBarcodeNotInSystemError(err);
@@ -1632,8 +1689,13 @@ export default function LoadOperation() {
     if (canAutoScan) {
       const qty = ipp;
       scanItemMutation.mutate({ barcode, qty }, {
-        onSuccess: (data) =>
-          showAutoFeedback(data.event.itemName, data.event.barcode, data.event.sapCode, data.event.totalQty, data.event.remaining, data.event.isExtra, data.event.productId),
+        // Queued (offline) has no event data to show — the mutation's own onSuccess already
+        // toasts "Scan saved offline" in that case, so this just skips the feedback popup.
+        onSuccess: (result) => {
+          if (result.queued) return;
+          const { event } = result.data;
+          showAutoFeedback(event.itemName, event.barcode, event.sapCode, event.totalQty, event.remaining, event.isExtra, event.productId);
+        },
       });
       setItemBarcode("");
       return;

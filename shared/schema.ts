@@ -661,6 +661,12 @@ export const loadingScanEvents = pgTable("loading_scan_events", {
   voidedByCode: text("voided_by_code").references(() => users.userCode),
   voidedAt: timestamp("voided_at"),
   voidReason: text("void_reason"),
+  // A UUID the CLIENT generates once per scan attempt and resends unchanged on every retry of
+  // that same attempt — the offline queue's safety net. Without this, a scan queued while
+  // offline that actually reached the server but whose response was lost to a flaky connection
+  // would get resent and double-counted when the queue retries it. /scan checks this against
+  // already-recorded rows before inserting; NULL for anything scanned before this existed.
+  clientRequestId: text("client_request_id"),
 });
 
 export const insertLoadingScanEventSchema = createInsertSchema(loadingScanEvents).pick({
@@ -1243,6 +1249,8 @@ export const orderScanEvents = pgTable("order_scan_events", {
   // (how every read identifies one — no real numeric SKU collides), its count in total_qty,
   // is_extra=false and scan_item_id=null (so received/extra/stock totals never see it), and its
   // item_name holding the label + optional note ('Empty Box' or 'Empty Box: <note>').
+  // Same offline-queue duplicate-safety UUID as loadingScanEvents — see its own comment.
+  clientRequestId: text("client_request_id"),
 });
 
 export const insertOrderScanItemSchema = createInsertSchema(orderScanItems).pick({
@@ -1373,6 +1381,8 @@ export const unloadScanEvents = pgTable("unload_scan_events", {
   isCredit: boolean("is_credit").default(false),
   creditedQty: integer("credited_qty").default(0),
   creditSourceEventId: integer("credit_source_event_id"),
+  // Same offline-queue duplicate-safety UUID as loadingScanEvents — see its own comment.
+  clientRequestId: text("client_request_id"),
 });
 
 export const insertUnloadImportSessionSchema = createInsertSchema(unloadImportSessions).pick({
