@@ -91,6 +91,20 @@ function fmtIST(dt: string | null): string {
   return isNaN(d.getTime()) ? "—" : d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 }
 
+// The report date is already selected above the summary, so these cards need only the complete
+// clock value. This keeps the important time visible instead of truncating a repeated date-time.
+function fmtISTClock(dt: string | null): string {
+  if (!dt) return "—";
+  const d = new Date(dt);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true,
+  });
+}
+
+// An item's physical received quantity includes both its regular receipt and any extra receipt.
+// Extra stays visible in its own column, so the operator can still see that split.
+const receivedIncludingExtra = (item: ItemTotal): number => item.actualQty + item.extraQty;
+
 function dailyReportPlantsFromUser(): string[] | null {
   try {
     const user = JSON.parse(localStorage.getItem("currentUser") || "{}");
@@ -282,14 +296,14 @@ export default function DailyReports() {
   const handleExportSummaryReport = (fmt: Fmt) => {
     if (!data?.itemTotals) return;
     const totals = data.itemTotals.reduce(
-      (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + i.actualQty, extraQty: acc.extraQty + i.extraQty, pallets: acc.pallets + i.pallets }),
+      (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + receivedIncludingExtra(i), extraQty: acc.extraQty + i.extraQty, pallets: acc.pallets + i.pallets }),
       { expectedQty: 0, actualQty: 0, extraQty: 0, pallets: 0 },
     );
     const rows: ExportRow[] = [
       ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime)],
       [],
-      ["Barcode", "Item Name", "Expected Qty", "Actual Qty", "Extra Qty", "Pallets"],
-      ...data.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, i.actualQty, i.extraQty, i.pallets.toFixed(2)]),
+      ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Pallets"],
+      ...data.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
       ["TOTAL", "", totals.expectedQty, totals.actualQty, totals.extraQty, totals.pallets.toFixed(2)],
     ];
     exportRows(fmt, `${tab}-summary-report-${data.date}`, `${activeTab.label} — Total Summary Report — ${data.date}`, rows);
@@ -310,7 +324,7 @@ export default function DailyReports() {
   };
 
   const summaryTotals = data?.itemTotals?.reduce(
-    (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + i.actualQty, extraQty: acc.extraQty + i.extraQty, pallets: acc.pallets + i.pallets }),
+    (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + receivedIncludingExtra(i), extraQty: acc.extraQty + i.extraQty, pallets: acc.pallets + i.pallets }),
     { expectedQty: 0, actualQty: 0, extraQty: 0, pallets: 0 },
   );
 
@@ -327,7 +341,7 @@ export default function DailyReports() {
       cellClassName: "text-gray-900", render: (r) => r.itemName || "—",
     },
     { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
-    { id: "actualQty", header: "Actual", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra, cellClassName: "tabular-nums font-medium text-emerald-600" },
     {
       id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty,
       render: (r) => <span className={r.extraQty > 0 ? "font-medium text-amber-600" : "text-gray-400"}>{r.extraQty}</span>,
@@ -365,20 +379,8 @@ export default function DailyReports() {
     },
     { id: "plant", header: "Plant", width: 120, accessor: (r) => r.plant, totalable: false, render: (r) => r.plant ?? "—" },
     { id: "orderCount", header: "Orders", align: "right", accessor: (r) => r.orderCount, cellClassName: "tabular-nums" },
-    {
-      id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty,
-      cellClassName: "tabular-nums text-gray-700",
-      render: (r) => <><span className="block">{r.expectedQty.toLocaleString()}</span><span className="block text-[11px] text-gray-400">{(r.expectedPallets ?? 0).toFixed(2)} plt</span></>,
-    },
-    {
-      id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty,
-      cellClassName: "tabular-nums font-medium text-emerald-600",
-      render: (r) => <><span className="block">{r.actualQty.toLocaleString()}</span><span className="block text-[11px] text-emerald-500">{(r.receivedPallets ?? 0).toFixed(2)} plt</span></>,
-    },
-    {
-      id: "extraQty", header: "Extra", align: "right", accessor: (r) => Math.max(0, r.actualQty - r.expectedQty),
-      render: (r) => <><span className={`block ${r.actualQty > r.expectedQty ? "font-medium text-amber-600" : "text-gray-400"}`}>{Math.max(0, r.actualQty - r.expectedQty)}</span><span className="block text-[11px] text-amber-500">{(r.extraPallets ?? 0).toFixed(2)} plt</span></>,
-    },
+    { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
+    { id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600" },
     { id: "eventCount", header: "Events", align: "right", accessor: (r) => r.eventCount, cellClassName: "tabular-nums" },
     { id: "startTime", header: "Start", width: 140, accessor: (r) => r.startTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.startTime) },
     { id: "endTime", header: "End", width: 140, accessor: (r) => r.endTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.endTime) },
@@ -440,7 +442,7 @@ export default function DailyReports() {
                   <StatBox label="Orders" value={data.totalSummary.orderCount} />
                   <StatBox label={activeTab.key === "scan" ? "CSVs" : activeTab.key === "loading" ? "Slips" : "Vehicles"} value={data.totalSummary.vehicleCount} />
                   <StatBox label="Expected" value={data.totalSummary.expectedQty} />
-                  <StatBox label="Actual" value={data.totalSummary.actualQty} />
+                  <StatBox label="Received" value={data.totalSummary.actualQty} />
                   <StatBox label="Extra" value={data.totalSummary.extraQty} />
                 </div>
               </CardContent>
@@ -450,10 +452,10 @@ export default function DailyReports() {
                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   <SectionIcon icon={CalendarClock} /> Activities Summary
                 </p>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-[minmax(3.75rem,0.6fr)_minmax(0,1.7fr)_minmax(0,1.7fr)] gap-2">
                   <StatBox label="Events" value={data.activitySummary.eventCount} />
-                  <StatBox label="Start Time" text={fmtIST(data.activitySummary.startTime)} />
-                  <StatBox label="End Time" text={fmtIST(data.activitySummary.endTime)} />
+                  <StatBox label="Start Time" text={fmtISTClock(data.activitySummary.startTime)} title={fmtIST(data.activitySummary.startTime)} />
+                  <StatBox label="End Time" text={fmtISTClock(data.activitySummary.endTime)} title={fmtIST(data.activitySummary.endTime)} />
                 </div>
               </CardContent>
             </Card>}
@@ -573,7 +575,7 @@ export default function DailyReports() {
                     <p className="mt-1 break-all font-mono text-xs text-gray-500">{item.barcode}</p>
                     <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-gray-600">
                       <span>Expected: <strong>{item.expectedQty}</strong></span>
-                      <span>Actual: <strong className="text-emerald-600">{item.actualQty}</strong></span>
+                      <span>Received: <strong className="text-emerald-600">{receivedIncludingExtra(item)}</strong></span>
                       <span>Extra: <strong className="text-amber-600">{item.extraQty}</strong></span>
                       <span>Pallets: <strong>{item.pallets.toFixed(2)}</strong></span>
                     </div>
@@ -735,7 +737,7 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3 sm:flex sm:gap-4">
               <StatBox label="Expected" value={detail.itemTotals.reduce((sum, item) => sum + item.expectedQty, 0)} />
-              <StatBox label="Received" value={detail.itemTotals.reduce((sum, item) => sum + item.actualQty, 0)} />
+              <StatBox label="Received" value={detail.itemTotals.reduce((sum, item) => sum + receivedIncludingExtra(item), 0)} />
               <StatBox label="Extra" value={detail.itemTotals.reduce((sum, item) => sum + item.extraQty, 0)} />
               <StatBox label="Pallets" text={detail.itemTotals.reduce((sum, item) => sum + item.pallets, 0).toFixed(2)} />
             </div>
@@ -786,7 +788,7 @@ const summaryColumnsForDetail: DataTableColumn<ItemTotal>[] = [
   { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
   { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => r.itemName || "—" },
   { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty },
-  { id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty },
+  { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra },
   { id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty },
   { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets, render: (r) => r.pallets.toFixed(2) },
 ];
@@ -830,8 +832,8 @@ function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: str
     const rows: ExportRow[] = detailTab === "items"
       ? [
           header, timing, [],
-          ["Barcode", "Item Name", "Expected Qty", "Actual Qty", "Extra Qty", "Pallets"],
-          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, i.actualQty, i.extraQty, i.pallets.toFixed(2)]),
+          ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Pallets"],
+          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
         ]
       : [
           header, timing, [],
@@ -972,8 +974,8 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
     const rows: ExportRow[] = detailTab === "items"
       ? [
           header, timing, [],
-          ["Barcode", "Item Name", "Expected Qty", "Actual Qty", "Extra Qty", "Pallets"],
-          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, i.actualQty, i.extraQty, i.pallets.toFixed(2)]),
+          ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Pallets"],
+          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
         ]
       : [
           header, timing, [],
@@ -1105,7 +1107,7 @@ function ReportRowCards({ rows, tab, onRowClick }: { rows: ReportRow[]; tab: Tab
             <span>Plant: <strong className="text-gray-900">{row.plant ?? "—"}</strong></span>
             <span>Orders: <strong className="text-gray-900">{row.orderCount}</strong></span>
             <span>Expected: <strong className="text-gray-900">{row.expectedQty.toLocaleString()}</strong></span>
-            <span>Actual: <strong className="text-emerald-600">{row.actualQty.toLocaleString()}</strong></span>
+            <span>Received: <strong className="text-emerald-600">{row.actualQty.toLocaleString()}</strong></span>
             <span>Events: <strong className="text-gray-900">{row.eventCount}</strong></span>
             <span>Start: <strong className="text-gray-900">{fmtIST(row.startTime)}</strong></span>
           </div>
@@ -1115,11 +1117,11 @@ function ReportRowCards({ rows, tab, onRowClick }: { rows: ReportRow[]; tab: Tab
   );
 }
 
-function StatBox({ label, value, text }: { label: string; value?: number; text?: string }) {
+function StatBox({ label, value, text, title }: { label: string; value?: number; text?: string; title?: string }) {
   return (
     <div className="rounded-lg border border-gray-100 bg-gray-50/70 px-2.5 py-1.5">
       <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{label}</p>
-      <p className="mt-0.5 truncate text-base font-bold tabular-nums text-gray-900">
+      <p title={title} className={`mt-0.5 font-bold tabular-nums text-gray-900 ${text !== undefined ? "whitespace-nowrap text-xs" : "truncate text-base"}`}>
         {text ?? value!.toLocaleString()}
       </p>
     </div>

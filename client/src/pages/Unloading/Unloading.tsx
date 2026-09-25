@@ -1247,13 +1247,13 @@ export default function Unloading() {
 
   // ─── Scan-view header pieces ─────────────────────────────────────────────────────────
   // Shared because they render in two different places. Normally they hang off the page's own
-  // PageHeader: Back to list above the title, the vehicle beside it, status + Complete opposite
+  // PageHeader: Back above the title, the vehicle beside it, status + Complete opposite
   // it. But PageHeader is hidden in rotated kiosk mode (the fixed rotate overlay covers it), so
   // the rotated layout folds these same three pieces into its own batch bar instead.
   const scanSession = detail?.session;
 
   const scanBackButton = canWrite ? (
-    <Button variant="outline" size="sm" onClick={backToList}>&larr; Back to list</Button>
+    <Button variant="outline" size="sm" onClick={backToList}>&larr; Back</Button>
   ) : null;
 
   // While a vehicle is on the bay it IS the page — so the truck and its number take the title
@@ -1350,9 +1350,9 @@ export default function Unloading() {
           />
         )}
 
-        {/* Scan view: Back to List, the vehicle, and when/where all on one identity line —
+        {/* Scan view: Back, the vehicle, and when/where all on one identity line —
             same compact single-row header the Loading page's own scan view uses — instead of
-            Back to List sitting alone on a line above it. */}
+            a navigation action sitting alone on a line above it. */}
         {!rotated && view === "scan" && scanSession && (
           <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-sm">
             {scanBackButton}
@@ -1695,33 +1695,21 @@ export default function Unloading() {
               {/* Desktop and kiosk mode retain the full table, bounded and self-scrolling when
                   rotated. The card list above is reserved for tablet and mobile widths. */}
               <div ref={vehiclesTableScrollRef} className={`hidden xl:block ${bigView ? kioskTableBoxClass : "overflow-x-auto"}`}>
-                {/* table-fixed + an explicit %-width per column is what actually makes "all
-                    columns at every size, no horizontal scroll" true — border-collapse alone
-                    (the previous className here) still lets the browser's own auto-layout give
-                    each column its natural content width, which adds up to wider than a tablet
-                    viewport and forces the horizontal scroll this was meant to avoid. Fixed
-                    layout instead divides w-full by these percentages up front, so text wraps
-                    (break-words, already in place) rather than the table ever growing past its
-                    container. */}
+                {/* The kiosk version intentionally shows only the operational essentials. Its
+                    width is the physical screen's short edge after a quarter turn, so hiding
+                    desktop-only History details prevents every cell from collapsing and wrapping. */}
                 <table className="w-full min-w-full table-fixed caption-bottom border-collapse text-xs">
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-[#001d6e]">
-                      {/* All 10 columns at every size — table-fixed + these widths wrap them to
-                          fit rather than dropping any or needing a horizontal scroll. */}
-                      <th className="w-[5%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">Sr. No</th>
-                      <th className="w-[13%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("vehicle", "Vehicle")}</th>
-                      <th className="w-[9%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("orderDate", "Order Date")}</th>
-                      <th className="w-[9%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("plant", "Plant")}</th>
-                      <th className="w-[8%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">
-                        <span title="When the same vehicle + date is uploaded more than once, each upload becomes a numbered batch — batches scan in order, one at a time.">
-                          {sessionColumnHeader("batch", "Batch")}
-                        </span>
-                      </th>
-                      <th className="w-[9%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("status", "Status")}</th>
-                      <th className="w-[10%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white">{sessionColumnHeader("progress", "Progress")}</th>
-                      <th className="w-[8%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>
-                      <th className="w-[10%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Who marked this batch complete — the Complete button, or the scan that finished it">{sessionColumnHeader("completedBy", "Completed By")}</th>
-                      <th className="w-[19%] px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
+                      <th className={`${compactVehicleTable ? "w-[6%]" : "w-[5%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>Sr. No</th>
+                      <th className={`${compactVehicleTable ? "w-[20%]" : "w-[15%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("vehicle", "Vehicle")}</th>
+                      <th className={`${compactVehicleTable ? "w-[14%]" : "w-[11%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("orderDate", "Order Date")}</th>
+                      <th className={`${compactVehicleTable ? "w-[13%]" : "w-[10%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("plant", "Plant")}</th>
+                      <th className={`${compactVehicleTable ? "w-[14%]" : "w-[12%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("status", "Status")}</th>
+                      <th className={`${compactVehicleTable ? "w-[15%]" : "w-[10%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("progress", "Progress")}</th>
+                      {!compactVehicleTable && <th className="w-[10%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>}
+                      {!compactVehicleTable && <th className="w-[10%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Who marked this batch complete — the Complete button, or the scan that finished it">{sessionColumnHeader("completedBy", "Completed By")}</th>}
+                      <th className={`${compactVehicleTable ? "w-[18%]" : "w-[17%]"} px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white`}>Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1739,24 +1727,17 @@ export default function Unloading() {
                             </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">{s.orderDate}</td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words"><PlantBadge plant={s.plant} /></td>
-                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">
-                              {s.partsCount > 1 ? (
-                                <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex} of {s.partsCount}</span>
-                              ) : (
-                                <span className="text-gray-400">—</span>
-                              )}
-                            </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">{statusBadge(s.scanStatus, s.canActivate)}</td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
                               {s.scannedQty} / {s.expectedQty}
                               {s.extraQty > 0 && <span className="block text-[11px] text-amber-600">incl. {s.extraQty} extra</span>}
                             </td>
-                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
+                            {!compactVehicleTable && <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
                               {statusTab === "history" ? (formatDuration(s.scanActivatedAt, s.scanCompletedAt) ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">
+                            </td>}
+                            {!compactVehicleTable && <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">
                               {s.scanCompletedAt ? (s.scanCompletedByName ?? <span className="text-gray-300">—</span>) : <span className="text-gray-300">—</span>}
-                            </td>
+                            </td>}
                             <td className="border-b border-gray-200 px-1.5 py-2 break-words text-right">
                               <div className="flex flex-wrap items-center justify-end gap-1">
                                 <Button
