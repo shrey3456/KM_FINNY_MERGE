@@ -25,7 +25,7 @@ import { PlantBadge } from "@/components/PlantBadge";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 import {
   AlertTriangle, ArrowLeft, ArrowRightLeft, CheckCircle2, ChevronLeft, ChevronRight,
-  ChevronDown, ClipboardList, Loader2, Package, Plus, RotateCcw, Search, Trash2, User, X,
+  ChevronDown, ClipboardList, Loader2, Package, Pause, Plus, RotateCcw, Search, Trash2, User, X,
 } from "lucide-react";
 
 // Sort Slip — godown picking.
@@ -48,7 +48,7 @@ type SortSlipRow = {
   totalQty: number;
   pickedQty: number;
   platformStv: string | null;
-  status: "unassigned" | "active" | "completed";
+  status: "unassigned" | "active" | "paused" | "completed";
   createdByName: string | null;
   createdAt: string;
   completedAt: string | null;
@@ -86,12 +86,14 @@ type Loader = {
 const STATUS_STYLES: Record<string, string> = {
   unassigned: "border-gray-200 bg-gray-50 text-gray-600",
   active: "border-blue-200 bg-blue-50 text-blue-700",
+  paused: "border-amber-200 bg-amber-50 text-amber-700",
   completed: "border-green-200 bg-green-50 text-green-700",
 };
 
 const STATUS_LABELS: Record<string, string> = {
   unassigned: "Needs a loader",
   active: "Active",
+  paused: "Paused",
   completed: "Completed",
 };
 
@@ -174,7 +176,7 @@ export default function SortSlips() {
 
   // ── Landing list ───────────────────────────────────────────────────────────
   const [search, setSearch] = useState("");
-  const [statusTab, setStatusTab] = useState<"" | "unassigned" | "active" | "completed">("");
+  const [statusTab, setStatusTab] = useState<"" | "unassigned" | "active" | "paused" | "completed">("");
   const [pageIndex, setPageIndex] = useState(0);
   const [pageSize, setPageSize] = useState(25);
   const [conditions, setConditions] = useState<Record<string, FilterCondition>>({});
@@ -443,9 +445,11 @@ export default function SortSlips() {
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {/* "unassigned" is gone as a tab: a slip is created with its loader, and the only
-                  way it loses one is a reopen that could not give it back — a rare state that the
-                  All tab still shows. */}
-              {(["", "active", "completed"] as const).map((tab) => (
+                  way it loses one without a Pause is a reopen that could not give it back — a
+                  rare state that the All tab still shows. "paused" IS its own tab, though — a
+                  supervisor pausing a slip to free its loader is an expected, everyday action,
+                  not a rare edge case. */}
+              {(["", "active", "paused", "completed"] as const).map((tab) => (
                 <Button
                   key={tab || "all"}
                   size="sm"
@@ -1341,6 +1345,15 @@ function SortSlipDetail({
     onError: (err: any) => toast({ title: "Could not transfer", description: err.message, variant: "destructive" }),
   });
 
+  // Steps the current loader off without naming a replacement — unlike transfer, which always
+  // hands it to somebody. The loader is free the moment this succeeds; the slip itself just goes
+  // back to unassigned, same state a brand-new slip starts in.
+  const pauseMutation = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/sort-slips/${slip.id}/pause`),
+    onSuccess: () => { toast({ title: "Sort slip paused", description: "The loader is free for another slip." }); refresh(); },
+    onError: (err: any) => toast({ title: "Could not pause", description: err.message, variant: "destructive" }),
+  });
+
   // The dialog itself (SortSlipDeleteDialog) owns the delete/replace mutations — after either
   // one, the loader picker's cache and Scan History both need a refetch, same as the landing
   // list's own after-delete step, and this view specifically goes back to the list (the slip it
@@ -1542,20 +1555,39 @@ function SortSlipDetail({
 
                 {canWrite && !isCompleted && (
                   <>
+                    {/* w-[calc(50%-...)] instead of flex-1 on mobile — with 4 buttons now
+                        (Transfer/Complete/Pause/Delete), flex-1 stretched all four to share one
+                        row, squeezing each into an unreadable sliver on a narrow screen instead
+                        of wrapping. This wraps them 2-per-row below sm, then reverts to natural
+                        width on one row at sm+. */}
                     <Button
                       size="sm"
-                      className="h-9 flex-1 bg-[#001d6e] text-xs text-white hover:bg-[#00154b] sm:h-8 sm:flex-none"
+                      className="h-9 w-[calc(50%-0.25rem)] bg-[#001d6e] text-xs text-white hover:bg-[#00154b] sm:h-8 sm:w-auto"
                       onClick={() => setTransferOpen(true)}
                     >
                       <ArrowRightLeft className="mr-1.5 h-3.5 w-3.5" /> Transfer
                     </Button>
-                    <Button size="sm" className="h-9 flex-1 bg-green-600 text-xs text-white hover:bg-green-700 sm:h-8 sm:flex-none" onClick={() => setCompleteOpen(true)}>
+                    <Button size="sm" className="h-9 w-[calc(50%-0.25rem)] bg-green-600 text-xs text-white hover:bg-green-700 sm:h-8 sm:w-auto" onClick={() => setCompleteOpen(true)}>
                       <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" /> Complete
                     </Button>
+                    {/* Only while a loader is actually on it — pausing an already-unassigned slip
+                        makes no sense, and this is the one-click "free the loader now" action,
+                        not Loading's own two-step Pause/Claim. */}
+                    {slip.status === "active" && (
+                      <Button
+                        size="sm" variant="outline"
+                        className="h-9 w-[calc(50%-0.25rem)] border-amber-200 text-xs text-amber-700 hover:bg-amber-50 sm:h-8 sm:w-auto"
+                        onClick={() => pauseMutation.mutate()}
+                        disabled={pauseMutation.isPending}
+                      >
+                        {pauseMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Pause className="mr-1.5 h-3.5 w-3.5" />}
+                        Pause
+                      </Button>
+                    )}
                     {/* Only before Complete — a finished sort is a record, not a draft. */}
                     <Button
                       size="sm" variant="outline"
-                      className="h-9 flex-1 border-red-200 text-xs text-red-600 hover:bg-red-50 hover:text-red-700 sm:h-8 sm:flex-none"
+                      className="h-9 w-[calc(50%-0.25rem)] border-red-200 text-xs text-red-600 hover:bg-red-50 hover:text-red-700 sm:h-8 sm:w-auto"
                       onClick={() => setDeleteOpen(true)}
                     >
                       <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Delete

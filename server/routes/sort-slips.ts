@@ -1083,6 +1083,44 @@ router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), asy
   }
 });
 
+// POST /sort-slips/:id/pause — the supervisor steps the current loader off without naming a
+// replacement, freeing them for another slip immediately. Unlike transfer (which always has an
+// on-half), this is transfer's off-half alone: the assignee row is deactivated the same way, and
+// the slip becomes 'paused' — a distinct status from 'unassigned' (a slip that has never had a
+// loader at all) so the landing list can show pausing as its own, expected section rather than
+// the rare "reopen with nobody free" state 'unassigned' represents elsewhere. A later Transfer
+// (giving it any loader) is what un-pauses it — it unconditionally sets status back to 'active'
+// regardless of prior status, so no separate "resume" action is needed. Write access only, same
+// as every other action that changes who is working a slip.
+router.post('/sort-slips/:id(\\d+)/pause', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+  const client = await pool.connect();
+  try {
+    const id = parseInt(req.params.id, 10);
+    const slip = await getSlipById(id);
+    if (!slip) return res.status(404).json({ message: 'Sort slip not found' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Plant access required' });
+    if (slip.status === 'completed') return res.status(400).json({ message: 'This sort slip is completed' });
+    if (slip.status !== 'active') return res.status(400).json({ message: 'This sort slip has no active loader to pause' });
+
+    const { userCode } = actor(req);
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE sort_slip_assignees SET removed_at = NOW(), removed_by_code = $2, is_active = false
+        WHERE sort_slip_id = $1 AND removed_at IS NULL`,
+      [id, userCode],
+    );
+    await client.query(`UPDATE sort_slips SET status = 'paused' WHERE id = $1`, [id]);
+    await client.query('COMMIT');
+    res.json({ paused: true });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[Sort Slip] pause failed:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to pause' });
+  } finally {
+    client.release();
+  }
+});
+
 // POST /sort-slips/:id/complete — the supervisor closes it.
 // A slip never completes itself, even when every line is fully picked: closing it is a decision,
 // and it is what frees its loaders for their next slip. Short slips can be closed too — the page
