@@ -42,6 +42,9 @@ type ReportRow = {
   eventCount: number;
   startTime: string | null;
   endTime: string | null;
+  expectedPallets?: number;
+  receivedPallets?: number;
+  extraPallets?: number;
 };
 type ItemTotal = { barcode: string; itemName: string | null; expectedQty: number; actualQty: number; extraQty: number; pallets: number };
 type Activity = {
@@ -51,7 +54,7 @@ type Activity = {
 };
 type ReportData = {
   date: string;
-  totalSummary: { orderCount: number; expectedQty: number; actualQty: number; vehicleCount: number };
+  totalSummary: { orderCount: number; expectedQty: number; actualQty: number; extraQty: number; vehicleCount: number };
   activitySummary: { eventCount: number; startTime: string | null; endTime: string | null };
   breakdown: ReportRow[];
   // Undefined (not [] ) for a tab whose backend hasn't been extended with these yet — kept
@@ -234,6 +237,7 @@ export default function DailyReports() {
   const [date, setDate] = useState(todayIST());
   const [selectedPlant, setSelectedPlant] = usePersistentFilter("dailyReports:plant", "");
   const activeTab = TABS.find((t) => t.key === tab)!;
+  const showActivitySummary = tab === "unloading" || tab === "scan";
   const { data: allPlants = [] } = useQuery<Array<{ name: string }>>({
     queryKey: ["/api/plants", "daily-reports"],
     queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
@@ -361,8 +365,20 @@ export default function DailyReports() {
     },
     { id: "plant", header: "Plant", width: 120, accessor: (r) => r.plant, totalable: false, render: (r) => r.plant ?? "—" },
     { id: "orderCount", header: "Orders", align: "right", accessor: (r) => r.orderCount, cellClassName: "tabular-nums" },
-    { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
-    { id: "actualQty", header: "Actual", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    {
+      id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty,
+      cellClassName: "tabular-nums text-gray-700",
+      render: (r) => <><span className="block">{r.expectedQty.toLocaleString()}</span><span className="block text-[11px] text-gray-400">{(r.expectedPallets ?? 0).toFixed(2)} plt</span></>,
+    },
+    {
+      id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty,
+      cellClassName: "tabular-nums font-medium text-emerald-600",
+      render: (r) => <><span className="block">{r.actualQty.toLocaleString()}</span><span className="block text-[11px] text-emerald-500">{(r.receivedPallets ?? 0).toFixed(2)} plt</span></>,
+    },
+    {
+      id: "extraQty", header: "Extra", align: "right", accessor: (r) => Math.max(0, r.actualQty - r.expectedQty),
+      render: (r) => <><span className={`block ${r.actualQty > r.expectedQty ? "font-medium text-amber-600" : "text-gray-400"}`}>{Math.max(0, r.actualQty - r.expectedQty)}</span><span className="block text-[11px] text-amber-500">{(r.extraPallets ?? 0).toFixed(2)} plt</span></>,
+    },
     { id: "eventCount", header: "Events", align: "right", accessor: (r) => r.eventCount, cellClassName: "tabular-nums" },
     { id: "startTime", header: "Start", width: 140, accessor: (r) => r.startTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.startTime) },
     { id: "endTime", header: "End", width: 140, accessor: (r) => r.endTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.endTime) },
@@ -414,21 +430,22 @@ export default function DailyReports() {
       ) : data ? (
         <>
           {/* Total Summary + Activities Summary, side by side in one row. */}
-          <div className="grid gap-3 lg:grid-cols-2">
+          <div className={`grid gap-3 ${showActivitySummary ? "lg:grid-cols-2" : "grid-cols-1"}`}>
             <Card className="border-gray-200 shadow-sm">
               <CardContent className="p-3">
                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   <SectionIcon icon={Package} /> Total Summary
                 </p>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                   <StatBox label="Orders" value={data.totalSummary.orderCount} />
                   <StatBox label={activeTab.key === "scan" ? "CSVs" : activeTab.key === "loading" ? "Slips" : "Vehicles"} value={data.totalSummary.vehicleCount} />
                   <StatBox label="Expected" value={data.totalSummary.expectedQty} />
                   <StatBox label="Actual" value={data.totalSummary.actualQty} />
+                  <StatBox label="Extra" value={data.totalSummary.extraQty} />
                 </div>
               </CardContent>
             </Card>
-            <Card className="border-gray-200 shadow-sm">
+            {showActivitySummary && <Card className="border-gray-200 shadow-sm">
               <CardContent className="p-3">
                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   <SectionIcon icon={CalendarClock} /> Activities Summary
@@ -439,7 +456,7 @@ export default function DailyReports() {
                   <StatBox label="End Time" text={fmtIST(data.activitySummary.endTime)} />
                 </div>
               </CardContent>
-            </Card>
+            </Card>}
           </div>
 
           {/* Loading/Unloading use Summary + Activities. Scan Operations also keeps its CSV breakdown. */}

@@ -64,6 +64,9 @@ type Row = {
   eventCount: number;
   startTime: string | null;
   endTime: string | null;
+  expectedPallets?: number;
+  receivedPallets?: number;
+  extraPallets?: number;
 };
 
 function minDate(a: string | null, b: string | null): string | null {
@@ -87,6 +90,10 @@ function buildReport(date: string, rows: Row[]) {
     }),
     { orderCount: 0, expectedQty: 0, actualQty: 0, vehicleCount: 0 },
   );
+  const totalSummaryWithExtra = {
+    ...totalSummary,
+    extraQty: Math.max(0, totalSummary.actualQty - totalSummary.expectedQty),
+  };
   const activitySummary = rows.reduce(
     (acc, r) => ({
       eventCount: acc.eventCount + r.eventCount,
@@ -95,7 +102,7 @@ function buildReport(date: string, rows: Row[]) {
     }),
     { eventCount: 0, startTime: null as string | null, endTime: null as string | null },
   );
-  return { date, totalSummary, activitySummary, breakdown: rows };
+  return { date, totalSummary: totalSummaryWithExtra, activitySummary, breakdown: rows };
 }
 
 // GET /api/daily-reports/loading?date=YYYY-MM-DD — proforma_slips.order_date is a real Postgres
@@ -117,13 +124,16 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
     );
 
     const orderNumbers = orderRows.map((r) => r.orderNumber);
-    const eventsByOrder = new Map<string, { actualQty: number; startTime: string | null; endTime: string | null; eventCount: number }>();
+    const eventsByOrder = new Map<string, { actualQty: number; regularQty: number; regularPallets: number; extraPallets: number; startTime: string | null; endTime: string | null; eventCount: number }>();
     let activities: Array<{ barcode: string; itemName: string | null; qty: number; pallets: number; stv: string | null; isExtra: boolean; scannedByName: string | null; scannedAt: string }> = [];
     if (orderNumbers.length > 0) {
       const [eventSummaryRes, activityRes] = await Promise.all([
         pool.query(
           `SELECT order_number AS "orderNumber",
                   COALESCE(SUM(total_qty), 0)::int AS "actualQty",
+                  COALESCE(SUM(total_qty) FILTER (WHERE NOT is_extra), 0)::int AS "regularQty",
+                  COALESCE(SUM(pallets) FILTER (WHERE NOT is_extra), 0)::real AS "regularPallets",
+                  COALESCE(SUM(pallets) FILTER (WHERE is_extra), 0)::real AS "extraPallets",
                   MIN(scanned_at) AS "startTime", MAX(scanned_at) AS "endTime",
                   COUNT(*)::int AS "eventCount"
              FROM loading_scan_events
@@ -160,6 +170,9 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
         eventCount: ev?.eventCount ?? 0,
         startTime: ev?.startTime ?? null,
         endTime: ev?.endTime ?? null,
+        expectedPallets: ev?.regularQty > 0 ? Number(((ev.regularPallets ?? 0) * o.expectedQty / ev.regularQty).toFixed(2)) : 0,
+        receivedPallets: Number(((ev?.regularPallets ?? 0) + (ev?.extraPallets ?? 0)).toFixed(2)),
+        extraPallets: Number((ev?.extraPallets ?? 0).toFixed(2)),
       };
     });
 
@@ -253,13 +266,16 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
     // Start = first scan entry, still from the events themselves. End = when the session was
     // actually marked Complete (scanCompletedAt on the session row) — NOT the last scan event,
     // which can predate the operator pressing Complete by any amount of time.
-    const eventsBySession = new Map<number, { actualQty: number; startTime: string | null; eventCount: number }>();
+    const eventsBySession = new Map<number, { actualQty: number; regularQty: number; regularPallets: number; extraPallets: number; startTime: string | null; eventCount: number }>();
     let activities: Array<{ barcode: string; itemName: string | null; qty: number; pallets: number; stv: string | null; isExtra: boolean; scannedByName: string | null; scannedAt: string }> = [];
     if (sessionIds.length > 0) {
       const [eventSummaryRes, activityRes] = await Promise.all([
         pool.query(
           `SELECT session_id AS "sessionId",
                   COALESCE(SUM(total_qty), 0)::int AS "actualQty",
+                  COALESCE(SUM(total_qty) FILTER (WHERE NOT is_extra), 0)::int AS "regularQty",
+                  COALESCE(SUM(pallets) FILTER (WHERE NOT is_extra), 0)::real AS "regularPallets",
+                  COALESCE(SUM(pallets) FILTER (WHERE is_extra), 0)::real AS "extraPallets",
                   MIN(scanned_at) AS "startTime",
                   COUNT(*)::int AS "eventCount"
              FROM unload_scan_events
@@ -296,6 +312,12 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
       row.eventCount += ev?.eventCount ?? 0;
       row.startTime = minDate(row.startTime, ev?.startTime ?? null);
       row.endTime = maxDate(row.endTime, s.scanCompletedAt ?? null);
+      row.expectedPallets = row.expectedPallets ?? 0;
+      row.receivedPallets = Number(((row.receivedPallets ?? 0) + (ev?.regularPallets ?? 0) + (ev?.extraPallets ?? 0)).toFixed(2));
+      row.extraPallets = Number(((row.extraPallets ?? 0) + (ev?.extraPallets ?? 0)).toFixed(2));
+      if ((ev?.regularQty ?? 0) > 0) {
+        row.expectedPallets = Number(((row.expectedPallets ?? 0) + (ev!.regularPallets ?? 0) * s.expectedQty / ev!.regularQty).toFixed(2));
+      }
       byVehicle.set(key, row);
     }
 
