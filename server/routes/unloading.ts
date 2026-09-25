@@ -5,7 +5,10 @@ import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/p
 import { getPlantStateCode, resolvePalletSizeOrQty, getPalletSize, getUserPlants } from './order-scan';
 import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
-import { computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId } from '../lib/unloadGroupReport';
+import {
+  computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId,
+  computeUnloadDateReport, computeUnloadDateActivity,
+} from '../lib/unloadGroupReport';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
 import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilterSql';
 
@@ -810,6 +813,41 @@ router.get('/unloading/sessions/:id/scan-activity', requirePageAccess('unloading
     res.json({ scope, totalEvents: withLabels.length, events: withLabels, sessions });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch scan activity' });
+  }
+});
+
+// GET /api/unloading/date-report — Total Summary across EVERY vehicle that unloaded against
+// this plant+order date, not just one vehicle's own FIFO group (see computeUnloadDateReport's
+// comment in unloadGroupReport.ts for why that's a different scope than /group-report).
+router.get('/unloading/date-report', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const plant = String(req.query.plant ?? '').trim();
+    const orderDate = String(req.query.orderDate ?? '').trim();
+    if (!plant || !orderDate) return res.status(400).json({ message: 'plant and orderDate are required' });
+    if (!canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const report = await computeUnloadDateReport(plant, orderDate);
+    if (!report) return res.status(404).json({ message: 'No unloading sessions found for this plant and order date' });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build date report' });
+  }
+});
+
+// GET /api/unloading/date-report/scan-activity — same plant+order-date scope, raw scan events
+// per vehicle instead of the netted summary.
+router.get('/unloading/date-report/scan-activity', requirePageAccess('unloading'), async (req: Request, res: Response) => {
+  try {
+    const plant = String(req.query.plant ?? '').trim();
+    const orderDate = String(req.query.orderDate ?? '').trim();
+    if (!plant || !orderDate) return res.status(400).json({ message: 'plant and orderDate are required' });
+    if (!canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const activity = await computeUnloadDateActivity(plant, orderDate);
+    if (!activity) return res.status(404).json({ message: 'No unloading sessions found for this plant and order date' });
+    res.json(activity);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build date activity' });
   }
 });
 

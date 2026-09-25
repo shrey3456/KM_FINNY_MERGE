@@ -38,10 +38,20 @@ function parseDate(req: Request): string {
 // same way every other report in this app does (getUserPlants: null = admin, sees everything).
 function plantClause(req: Request, column: string, params: unknown[]): string {
   const userPlants = getUserPlants(req.user);
-  if (userPlants === null) return '';
-  if (userPlants.length === 0) return ' AND FALSE';
-  params.push(userPlants);
-  return ` AND LOWER(${column}) = ANY($${params.length})`;
+  const requested = String(req.query.plant ?? '').trim().toLowerCase();
+  if (userPlants !== null && userPlants.length === 0) return ' AND FALSE';
+  if (requested && userPlants !== null && !userPlants.includes(requested)) return ' AND FALSE';
+
+  const clauses: string[] = [];
+  if (userPlants !== null) {
+    params.push(userPlants);
+    clauses.push(`LOWER(${column}) = ANY($${params.length})`);
+  }
+  if (requested) {
+    params.push(requested);
+    clauses.push(`LOWER(${column}) = $${params.length}`);
+  }
+  return clauses.length ? ` AND ${clauses.join(' AND ')}` : '';
 }
 
 type Row = {
@@ -108,41 +118,118 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
 
     const orderNumbers = orderRows.map((r) => r.orderNumber);
     const eventsByOrder = new Map<string, { actualQty: number; startTime: string | null; endTime: string | null; eventCount: number }>();
+    let activities: Array<{ barcode: string; itemName: string | null; qty: number; pallets: number; stv: string | null; isExtra: boolean; scannedByName: string | null; scannedAt: string }> = [];
     if (orderNumbers.length > 0) {
-      const { rows: eventRows } = await pool.query(
-        `SELECT order_number AS "orderNumber",
-                COALESCE(SUM(total_qty), 0)::int AS "actualQty",
-                MIN(scanned_at) AS "startTime", MAX(scanned_at) AS "endTime",
-                COUNT(*)::int AS "eventCount"
-           FROM loading_scan_events
-          WHERE order_number = ANY($1) AND NOT voided
-          GROUP BY order_number`,
-        [orderNumbers],
-      );
+      const [eventSummaryRes, activityRes] = await Promise.all([
+        pool.query(
+          `SELECT order_number AS "orderNumber",
+                  COALESCE(SUM(total_qty), 0)::int AS "actualQty",
+                  MIN(scanned_at) AS "startTime", MAX(scanned_at) AS "endTime",
+                  COUNT(*)::int AS "eventCount"
+             FROM loading_scan_events
+            WHERE order_number = ANY($1) AND NOT voided
+            GROUP BY order_number`,
+          [orderNumbers],
+        ),
+        pool.query(
+            `SELECT order_number AS "groupKey", order_number AS "groupLabel",
+              barcode, item_name AS "itemName", total_qty AS "qty", pallets, stv,
+                  is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt"
+             FROM loading_scan_events
+            WHERE order_number = ANY($1) AND NOT voided
+            ORDER BY scanned_at ASC`,
+          [orderNumbers],
+        ),
+      ]);
+      const eventRows = eventSummaryRes.rows;
       for (const r of eventRows) eventsByOrder.set(r.orderNumber, r);
+      activities = activityRes.rows;
     }
 
-    const byVehicle = new Map<string, Row>();
-    for (const o of orderRows) {
-      const key = o.vehicleNumber || '—';
+    // Summary rows are one row per loading slip/order. Vehicle is useful context, but it is
+    // not the report's identity: multiple slips can legitimately share a vehicle on one date.
+    const rows: Row[] = orderRows.map((o) => {
       const ev = eventsByOrder.get(o.orderNumber);
-      const row = byVehicle.get(key) ?? {
-        key, label: key === '—' ? 'No vehicle yet' : key, plant: o.plant,
-        orderCount: 0, expectedQty: 0, actualQty: 0, eventCount: 0, startTime: null, endTime: null,
+      return {
+        key: o.orderNumber,
+        label: o.orderNumber,
+        plant: o.plant,
+        orderCount: 1,
+        expectedQty: o.expectedQty,
+        actualQty: ev?.actualQty ?? 0,
+        eventCount: ev?.eventCount ?? 0,
+        startTime: ev?.startTime ?? null,
+        endTime: ev?.endTime ?? null,
       };
-      row.orderCount += 1;
-      row.expectedQty += o.expectedQty;
-      row.actualQty += ev?.actualQty ?? 0;
-      row.eventCount += ev?.eventCount ?? 0;
-      row.startTime = minDate(row.startTime, ev?.startTime ?? null);
-      row.endTime = maxDate(row.endTime, ev?.endTime ?? null);
-      byVehicle.set(key, row);
-    }
+    });
 
-    res.json(buildReport(date, Array.from(byVehicle.values()).sort((a, b) => a.key.localeCompare(b.key))));
+    res.json({ ...buildReport(date, rows.sort((a, b) => a.key.localeCompare(b.key))), activities });
   } catch (error) {
     console.error('[Daily Reports] loading failed:', error);
     res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to build the loading report' });
+  }
+});
+
+// GET /api/daily-reports/loading/slip?date=YYYY-MM-DD&order=<order number> — the drill-down
+// behind a Loading Summary row. It returns the slip's item totals and every loading event.
+router.get('/daily-reports/loading/slip', requirePageAccess('daily-reports'), async (req: Request, res: Response) => {
+  try {
+    const date = parseDate(req);
+    const order = String(req.query.order ?? '').trim();
+    if (!order) return res.status(400).json({ message: 'An order number is required' });
+
+    const params: unknown[] = [date, order];
+    const clause = plantClause(req, 'ps.plant', params);
+    const { rows: slipRows } = await pool.query(
+      `SELECT ps.id, ps.order_number AS "orderNumber", ps.party_name AS "partyName", ps.plant,
+              ps.vehicle_number AS "vehicleNumber", ps.loading_completed_at AS "completedAt"
+         FROM proforma_slips ps
+        WHERE ps.order_date = $1::date AND ps.order_number = $2 ${clause}`,
+      params,
+    );
+    if (slipRows.length === 0) {
+      return res.json({ date, order, partyName: null, plant: null, vehicleNumber: null, startTime: null, endTime: null, itemTotals: [], activities: [] });
+    }
+
+    const slip = slipRows[0];
+    const [expectedRes, actualRes, activityRes] = await Promise.all([
+      pool.query(
+        `SELECT barcode, item_name AS "itemName", COALESCE(SUM(quantity), 0)::int AS "expectedQty"
+           FROM proforma_slip_items WHERE proforma_slip_id = $1 GROUP BY barcode, item_name`,
+        [slip.id],
+      ),
+      pool.query(
+        `SELECT barcode,
+                COALESCE(SUM(total_qty) FILTER (WHERE NOT is_extra), 0)::int AS "actualQty",
+                COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS "extraQty",
+                COALESCE(SUM(pallets), 0)::real AS "pallets"
+           FROM loading_scan_events WHERE order_number = $1 AND NOT voided GROUP BY barcode`,
+        [order],
+      ),
+      pool.query(
+        `SELECT barcode, item_name AS "itemName", total_qty AS "qty", pallets, stv,
+                is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt"
+           FROM loading_scan_events WHERE order_number = $1 AND NOT voided ORDER BY scanned_at ASC`,
+        [order],
+      ),
+    ]);
+
+    const actualByBarcode = new Map(actualRes.rows.map((r: any) => [r.barcode, r]));
+    const itemTotals = expectedRes.rows.map((r: any) => {
+      const actual = actualByBarcode.get(r.barcode);
+      return {
+        barcode: r.barcode, itemName: r.itemName, expectedQty: r.expectedQty,
+        actualQty: actual?.actualQty ?? 0, extraQty: actual?.extraQty ?? 0, pallets: actual?.pallets ?? 0,
+      };
+    });
+    const startTime = activityRes.rows.length > 0 ? activityRes.rows[0].scannedAt : null;
+    res.json({
+      date, order, partyName: slip.partyName, plant: slip.plant, vehicleNumber: slip.vehicleNumber,
+      startTime, endTime: slip.completedAt, itemTotals, activities: activityRes.rows,
+    });
+  } catch (error) {
+    console.error('[Daily Reports] loading slip detail failed:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to build the loading slip report' });
   }
 });
 
@@ -167,18 +254,32 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
     // actually marked Complete (scanCompletedAt on the session row) — NOT the last scan event,
     // which can predate the operator pressing Complete by any amount of time.
     const eventsBySession = new Map<number, { actualQty: number; startTime: string | null; eventCount: number }>();
+    let activities: Array<{ barcode: string; itemName: string | null; qty: number; pallets: number; stv: string | null; isExtra: boolean; scannedByName: string | null; scannedAt: string }> = [];
     if (sessionIds.length > 0) {
-      const { rows: eventRows } = await pool.query(
-        `SELECT session_id AS "sessionId",
-                COALESCE(SUM(total_qty), 0)::int AS "actualQty",
-                MIN(scanned_at) AS "startTime",
-                COUNT(*)::int AS "eventCount"
-           FROM unload_scan_events
-          WHERE session_id = ANY($1) AND NOT voided
-          GROUP BY session_id`,
-        [sessionIds],
-      );
+      const [eventSummaryRes, activityRes] = await Promise.all([
+        pool.query(
+          `SELECT session_id AS "sessionId",
+                  COALESCE(SUM(total_qty), 0)::int AS "actualQty",
+                  MIN(scanned_at) AS "startTime",
+                  COUNT(*)::int AS "eventCount"
+             FROM unload_scan_events
+            WHERE session_id = ANY($1) AND NOT voided
+            GROUP BY session_id`,
+          [sessionIds],
+        ),
+        pool.query(
+            `SELECT vehicle_number AS "groupKey", vehicle_number AS "groupLabel",
+              barcode, item_name AS "itemName", total_qty AS "qty", pallets, stv,
+                  is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt"
+             FROM unload_scan_events
+            WHERE session_id = ANY($1) AND NOT voided
+            ORDER BY scanned_at ASC`,
+          [sessionIds],
+        ),
+      ]);
+      const eventRows = eventSummaryRes.rows;
       for (const r of eventRows) eventsBySession.set(r.sessionId, r);
+      activities = activityRes.rows;
     }
 
     const byVehicle = new Map<string, Row>();
@@ -198,7 +299,7 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
       byVehicle.set(key, row);
     }
 
-    res.json(buildReport(date, Array.from(byVehicle.values()).sort((a, b) => a.key.localeCompare(b.key))));
+    res.json({ ...buildReport(date, Array.from(byVehicle.values()).sort((a, b) => a.key.localeCompare(b.key))), activities });
   } catch (error) {
     console.error('[Daily Reports] unloading failed:', error);
     res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to build the unloading report' });

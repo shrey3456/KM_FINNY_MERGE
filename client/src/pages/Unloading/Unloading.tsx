@@ -1035,7 +1035,7 @@ export default function Unloading() {
   // pointed at Unloading's own report endpoints via basePath="unloading". ───────────────────────
   const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
   const openReports = (s: SessionListItem) => {
-    setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.groupId, partIndex: s.partIndex });
+    setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.groupId, partIndex: s.partIndex, orderDate: s.orderDate });
   };
 
   // ─── Delete (replace vs discard) ──────────────────────────────────────────────────────────

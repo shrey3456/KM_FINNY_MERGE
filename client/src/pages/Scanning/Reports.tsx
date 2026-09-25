@@ -31,13 +31,14 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
-import { DataTable, DataTableColumnToggle, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTable, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
 import { PlantBadge } from "@/components/PlantBadge";
 import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { ColumnFilterPopoverContent, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, conditionSummary, isConditionEmpty } from "@/lib/columnFilters";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 
 // The Type column, in one place — the table cell, its badge and the CSV export all read it, so a
 // row can never be labelled one way in the table and another in the export.
@@ -143,11 +144,6 @@ type ScanHistoryResponse = {
 // (rounded-xl) for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
-// Column ids that can be hidden via the column-visibility toggle — mirrors historyColumns
-// below. "#", Scanned By, Item and Void always stay visible (hideable: false there), so they
-// don't need to be included/excluded here — DataTable adds them back regardless.
-const HISTORY_OPTIONAL_COLUMNS = ["barcode", "orderNumber", "order", "plant", "qty", "pallets", "stv", "type", "time"] as const;
-
 // Rows per request. One page per view keeps the load to a single query — see the note on the
 // query below for why this page is paginated rather than loading the whole history.
 const HISTORY_PAGE_SIZE = 20;               // the default; the footer's "Show" picker changes it
@@ -214,6 +210,92 @@ function downloadPdf(filename: string, title: string, rows: Array<Array<string |
     headStyles: { fillColor: [0, 29, 110] },
   });
   doc.save(filename);
+}
+
+// ─── Loading "Total Summary" / "Activity" — every proforma slip loaded on one plant+order date,
+// mirroring Unloading's own per-vehicle date report (ReportsDialog.tsx's "Order Date — All
+// Vehicles" section) but slip-wise instead of vehicle-wise, since Loading has no vehicle/FIFO
+// grouping at all. Lives here (the Load Event view of this shared history page) rather than a
+// per-order modal, since there's no single "session row" to open it from the way Unloading's
+// landing list has. See server/lib/loadDateReport.ts for the read-time computation. ────────────
+type LoadDateReportItem = {
+  barcode: string; itemName: string; itemsPerPallet: number;
+  expectedQty: number; receivedQty: number; extraQty: number; missingQty: number;
+};
+type LoadDateReportSlip = {
+  slipId: number; orderNumber: string; partyName: string; vehicleNumber: string | null;
+  startTime: string | null; endTime: string | null; allComplete: boolean;
+  items: LoadDateReportItem[];
+  summary: { totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number };
+};
+type LoadDateReport = {
+  plant: string; orderDate: string; slips: LoadDateReportSlip[];
+  grand: { totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number };
+};
+type LoadDateActivityEvent = {
+  orderNumber: string; barcode: string | null; itemName: string | null; sapCode: string | null;
+  pallets: number | null; looseQty: number | null; totalQty: number | null;
+  isExtra: boolean | null; isAdjust: boolean | null; stv: string | null;
+  scannedByCode: string | null; scannedByName: string | null; scannedAt: string | null;
+  voided: boolean | null; voidedAt: string | null; voidReason: string | null;
+};
+type LoadDateActivitySlip = {
+  slipId: number; orderNumber: string; partyName: string; vehicleNumber: string | null;
+  startTime: string | null; endTime: string | null; events: LoadDateActivityEvent[];
+};
+type LoadDateActivity = { plant: string; orderDate: string; slips: LoadDateActivitySlip[] };
+
+function fmtSlipTime(iso: string | null): string {
+  return iso ? format(new Date(iso), "MMM d, h:mm a") : "—";
+}
+function fmtSlipDuration(startIso: string | null, endIso: string | null): string {
+  if (!startIso || !endIso) return "—";
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  if (isNaN(start) || isNaN(end) || end < start) return "—";
+  const totalMinutes = Math.round((end - start) / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+function slipHeaderNote(startIso: string | null, endIso: string | null): string {
+  if (!startIso) return "Not started yet";
+  const started = `Started ${fmtSlipTime(startIso)}`;
+  if (!endIso) return `${started} · still in progress`;
+  return `${started} · Ended ${fmtSlipTime(endIso)} · Active for ${fmtSlipDuration(startIso, endIso)}`;
+}
+// A qty cell that also carries its pallet count on a second line ("40\n1.00 plt"), same
+// convention Unloading's report dialog uses — plain qty when the pallet size is unknown (ipp <= 0).
+function qtyWithPlt(qty: number, ipp: number): string {
+  return ipp > 0 ? `${qty}\n${(qty / ipp).toFixed(2)} plt` : String(qty);
+}
+function buildSlipSummaryRows(slip: LoadDateReportSlip): Array<Array<string | number>> {
+  const rows: Array<Array<string | number>> = [["Barcode", "Item Name", "Expected", "Received", "Extra", "Missing"]];
+  const pltSum = { exp: 0, rec: 0, ext: 0, mis: 0 };
+  let anyPlt = false;
+  slip.items.forEach((i) => {
+    const ipp = i.itemsPerPallet ?? 0;
+    if (ipp > 0) {
+      anyPlt = true;
+      pltSum.exp += i.expectedQty / ipp; pltSum.rec += i.receivedQty / ipp;
+      pltSum.ext += i.extraQty / ipp; pltSum.mis += i.missingQty / ipp;
+    }
+    rows.push([i.barcode, i.itemName, qtyWithPlt(i.expectedQty, ipp), qtyWithPlt(i.receivedQty, ipp), qtyWithPlt(i.extraQty, ipp), qtyWithPlt(i.missingQty, ipp)]);
+  });
+  const totalCell = (qty: number, plt: number) => (anyPlt ? `${qty}\n${plt.toFixed(2)} plt` : String(qty));
+  rows.push(["TOTAL", "", totalCell(slip.summary.totalExpected, pltSum.exp), totalCell(slip.summary.totalReceived, pltSum.rec), totalCell(slip.summary.totalExtra, pltSum.ext), totalCell(slip.summary.totalMissing, pltSum.mis)]);
+  return rows;
+}
+function buildSlipActivityRows(slip: LoadDateActivitySlip): Array<Array<string | number>> {
+  const rows: Array<Array<string | number>> = [["#", "Scanned By", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time", "Void"]];
+  slip.events.forEach((e, idx) => rows.push([
+    idx + 1, e.scannedByName ?? "", e.barcode ?? "", e.itemName ?? "",
+    e.pallets ?? 0, e.looseQty ?? 0, e.totalQty ?? 0,
+    e.isAdjust ? "Adjust" : e.isExtra ? "Extra" : "Regular", e.stv ?? "", fmtSlipTime(e.scannedAt),
+    e.voided ? `Voided${e.voidedAt ? ` (${fmtSlipTime(e.voidedAt)})` : ""}${e.voidReason ? ` — ${e.voidReason}` : ""}` : "",
+  ]));
+  if (slip.events.length === 0) rows.push(["No scans recorded"]);
+  return rows;
 }
 
 // A header filter icon for the "special" single-value filters (Type, Scanner) — mirrors
@@ -585,6 +667,88 @@ const Reports = () => {
       delete next[columnId];
       return next;
     });
+
+  // ─── Loading "Total Summary" / "Activity" (Load Event view only) — needs exactly ONE plant
+  // narrowed down via the Plant column's own filter (an "in" condition with a single value; see
+  // FilterCondition in lib/columnFilters.ts) plus the existing single Date filter above, since
+  // the underlying report is scoped to one plant+order-date, not a free-form filtered event list.
+  const plantCondition = columnConditions["plant"];
+  const selectedPlants = plantCondition && !isConditionEmpty(plantCondition) && plantCondition.operator === "in"
+    ? (plantCondition.value as string[]) : [];
+  const loadDateReportPlant = selectedPlants.length === 1 ? selectedPlants[0] : "";
+  const loadDateReportReady = historySource === "dispatch" && !!loadDateReportPlant && !!selectedDate;
+
+  const [loadDateBusy, setLoadDateBusy] = useState<"summary" | "activity" | null>(null);
+  const [loadDateView, setLoadDateView] = useState<{
+    kind: "summary" | "activity"; plant: string; orderDate: string;
+    sections: { key: string; label: string; headerNote: string; rows: Array<Array<string | number>> }[];
+    grandRows: Array<Array<string | number>>;
+  } | null>(null);
+
+  async function viewLoadDateSummary() {
+    if (!loadDateReportReady) return;
+    setLoadDateBusy("summary");
+    try {
+      const report = await apiRequest(
+        "GET", `/api/loading/date-report?plant=${encodeURIComponent(loadDateReportPlant)}&orderDate=${encodeURIComponent(selectedDate)}`,
+      ).then((r) => r.json()) as LoadDateReport;
+      setLoadDateView({
+        kind: "summary", plant: report.plant, orderDate: report.orderDate,
+        sections: report.slips.map((s) => ({
+          key: String(s.slipId), label: `${s.orderNumber} — ${s.partyName}`,
+          headerNote: slipHeaderNote(s.startTime, s.endTime), rows: buildSlipSummaryRows(s),
+        })),
+        grandRows: [
+          ["", "Expected", report.grand.totalExpected, "Received", report.grand.totalReceived,
+            "Extra", report.grand.totalExtra, "Missing", report.grand.totalMissing],
+        ],
+      });
+    } catch {
+      toast({ title: "Failed to load report", variant: "destructive" });
+    } finally { setLoadDateBusy(null); }
+  }
+
+  async function viewLoadDateActivity() {
+    if (!loadDateReportReady) return;
+    setLoadDateBusy("activity");
+    try {
+      const activity = await apiRequest(
+        "GET", `/api/loading/date-report/scan-activity?plant=${encodeURIComponent(loadDateReportPlant)}&orderDate=${encodeURIComponent(selectedDate)}`,
+      ).then((r) => r.json()) as LoadDateActivity;
+      let totalQty = 0, totalPallets = 0, totalScans = 0;
+      activity.slips.forEach((s) => s.events.forEach((e) => {
+        if (e.voided) return;
+        totalQty += e.totalQty ?? 0; totalPallets += e.pallets ?? 0; totalScans += 1;
+      }));
+      setLoadDateView({
+        kind: "activity", plant: activity.plant, orderDate: activity.orderDate,
+        sections: activity.slips.map((s) => ({
+          key: String(s.slipId), label: `${s.orderNumber} — ${s.partyName}`,
+          headerNote: slipHeaderNote(s.startTime, s.endTime), rows: buildSlipActivityRows(s),
+        })),
+        grandRows: [["TOTAL (all slips)", "", "", "", Number(totalPallets.toFixed(2)), "", totalQty, `${totalScans} scan(s)`, "", "", ""]],
+      });
+    } catch {
+      toast({ title: "Failed to load activity", variant: "destructive" });
+    } finally { setLoadDateBusy(null); }
+  }
+
+  function downloadLoadDateView(fmt: "CSV" | "Excel" | "PDF") {
+    if (!loadDateView) return;
+    const rows: Array<Array<string | number>> = [];
+    loadDateView.sections.forEach((sec) => {
+      rows.push([`${sec.label} — ${sec.headerNote}`]);
+      sec.rows.forEach((r) => rows.push(r));
+      rows.push([]);
+    });
+    rows.push(loadDateView.kind === "summary" ? ["GRAND TOTAL (all slips)"] : []);
+    loadDateView.grandRows.forEach((r) => rows.push(r));
+    const title = `${loadDateView.kind === "summary" ? "Total Summary" : "Activity"} — ${loadDateView.plant} · ${loadDateView.orderDate}`;
+    const base = `${loadDateView.kind}-${loadDateView.plant}-${loadDateView.orderDate}`.replace(/[^\w.-]+/g, "_");
+    if (fmt === "CSV") downloadCsv(`${base}.csv`, rows);
+    else if (fmt === "Excel") downloadExcel(`${base}.xlsx`, rows);
+    else downloadPdf(`${base}.pdf`, title, rows);
+  }
   const columnHeader = (id: string, label: string, initialTab?: "values" | "condition") => {
     const col = filterableColumns.find((c) => c.id === id);
     if (!col) return label;
@@ -736,48 +900,6 @@ const Reports = () => {
   const [editFilterOpen, setEditFilterOpen] = useState(false);
   const [editFilterKey, setEditFilterKey] = useState("");
   const editFilterColumn = filterableColumns.find((c) => c.id === editFilterKey) ?? null;
-
-  // Column visibility/order are real preferences, not working context for one sitting — saved to
-  // localStorage (not sessionStorage) so choosing which columns to see survives closing the
-  // browser/logging out, and only changes again when the user actually touches it here.
-  const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(() => {
-    try {
-      const raw = localStorage.getItem("scanHistory:visibleColumnIds");
-      const parsed = raw ? JSON.parse(raw) : null;
-      return Array.isArray(parsed) ? new Set(parsed) : new Set(HISTORY_OPTIONAL_COLUMNS);
-    } catch {
-      return new Set(HISTORY_OPTIONAL_COLUMNS);
-    }
-  });
-  useEffect(() => {
-    try { localStorage.setItem("scanHistory:visibleColumnIds", JSON.stringify(Array.from(visibleColumnIds))); } catch { /* storage unavailable */ }
-  }, [visibleColumnIds]);
-
-  // Column order, remembered per page. An empty array means "declared order", which is also what
-  // Reset order restores.
-  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem("scanHistory:columnOrder");
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  });
-  useEffect(() => {
-    try { localStorage.setItem("scanHistory:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
-  }, [columnOrder]);
-
-  const toggleColumn = (key: string) =>
-    setVisibleColumnIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        // Keep at least one optional column visible.
-        const remainingOptional = HISTORY_OPTIONAL_COLUMNS.filter((c) => c !== key && next.has(c));
-        if (remainingOptional.length > 0) next.delete(key);
-      } else next.add(key);
-      return next;
-    });
 
   // Notion upload state
   const [notionOpen,      setNotionOpen]      = useState(false);
@@ -1252,6 +1374,36 @@ const Reports = () => {
           </SelectContent>
         </Select>
 
+        {/* Loading only — every proforma slip loaded on one plant+order date, slip-wise, with
+            each slip's own start/end time. Needs exactly one Plant (via the Plant column's own
+            filter below) and one Date narrowed down first — disabled with a hint otherwise,
+            rather than guessing which plant/date to run it against. */}
+        {historySource === "dispatch" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm" variant="default" disabled={!loadDateReportReady || loadDateBusy !== null}
+              className="h-8 gap-1.5 rounded-full bg-[#001d6e] px-3 text-xs hover:bg-[#00154b]"
+              onClick={viewLoadDateSummary}
+              title={loadDateReportReady ? undefined : "Filter by exactly one Plant and a Date above to see the Total Summary"}
+            >
+              {loadDateBusy === "summary" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Total Summary
+            </Button>
+            <Button
+              size="sm" variant="outline" disabled={!loadDateReportReady || loadDateBusy !== null}
+              className="h-8 gap-1.5 rounded-full px-3 text-xs"
+              onClick={viewLoadDateActivity}
+              title={loadDateReportReady ? undefined : "Filter by exactly one Plant and a Date above to see Activity"}
+            >
+              {loadDateBusy === "activity" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Activity
+            </Button>
+            {!loadDateReportReady && (
+              <span className="text-xs text-gray-400">Pick one Plant and a Date (below) to enable these.</span>
+            )}
+          </div>
+        )}
+
         {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/
             hideable columns, zebra stripes, mobile swipe hint. No pagination — the whole filtered
             list loads and the table body scrolls under a sticky header, matching the Scan page's
@@ -1578,16 +1730,6 @@ const Reports = () => {
                 </Popover>
               )}
 
-              <DataTableColumnToggle
-              columnOrder={columnOrder}
-              onColumnOrderChange={setColumnOrder}
-                columns={historyColumns}
-                visibleColumnIds={visibleColumnIds}
-                onToggleColumn={toggleColumn}
-                onSetAll={(visible) => setVisibleColumnIds(visible ? new Set(HISTORY_OPTIONAL_COLUMNS) : new Set())}
-                buttonClassName={FILTER_BTN_CLASS}
-              />
-
               {/* One Export control instead of three buttons; the format is picked from the menu. */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -1676,11 +1818,6 @@ const Reports = () => {
             enableZebraStripes
             enableTotalsRow
             enableColumnResizing
-            enableColumnVisibility
-            columnVisibility={visibleColumnIds}
-            columnOrder={columnOrder}
-            onColumnOrderChange={setColumnOrder}
-            onColumnVisibilityChange={setVisibleColumnIds}
             showMobileSwipeHint
             // No isStickyHeader/maxHeight here, matching develop: a 20-row page is short enough to
             // read whole, so a bounded scroll box would only add an inner scrollbar next to the
@@ -2087,6 +2224,90 @@ const Reports = () => {
             {editMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Save
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* Loading's "Total Summary" / "Activity" (Load Event view) — one collapsed-by-default
+        accordion item per proforma slip, each showing that slip's own Started/Ended/Active-For
+        plus either its item-wise expected/received/extra/missing (with pallet equivalents) or
+        its own scan log, with a grand total across every slip on this date at the very bottom. */}
+    <Dialog open={!!loadDateView} onOpenChange={(open) => { if (!open) setLoadDateView(null); }}>
+      <DialogContent className="max-w-4xl max-h-[85vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="text-base">
+            {loadDateView ? `${loadDateView.kind === "summary" ? "Total Summary" : "Activity"} — ${loadDateView.plant} · ${loadDateView.orderDate}` : ""}
+          </DialogTitle>
+          <DialogDescription className="text-xs">
+            {loadDateView ? `${loadDateView.sections.length} proforma slip(s)` : ""}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-auto rounded border">
+          {loadDateView && loadDateView.sections.length === 0 && (
+            <p className="p-4 text-sm text-gray-400">No proforma slips found for this plant and order date</p>
+          )}
+          {loadDateView && loadDateView.sections.length > 0 && (
+            <Accordion type="multiple" className="px-2">
+              {loadDateView.sections.map((sec) => (
+                <AccordionItem key={sec.key} value={sec.key}>
+                  <AccordionTrigger className="py-2.5 text-sm hover:no-underline">
+                    <span className="font-medium">{sec.label}</span>
+                    <span className="mr-2 text-xs font-normal text-gray-500">{sec.headerNote}</span>
+                  </AccordionTrigger>
+                  <AccordionContent className="pb-3">
+                    {sec.rows.length <= 1 ? (
+                      <p className="text-xs text-gray-400">No data for this slip.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="text-left text-gray-400">
+                              {sec.rows[0].map((h, i) => (
+                                <th key={i} className="py-1 pr-3 font-medium whitespace-nowrap">{String(h)}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {sec.rows.slice(1).filter((r) => r.length > 0).map((r, i) => (
+                              <tr key={i} className="border-t border-gray-100">
+                                {r.map((c, j) => (
+                                  <td key={j} className="py-1 pr-3 whitespace-pre-line">{c === "" || c == null ? "—" : String(c)}</td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </AccordionContent>
+                </AccordionItem>
+              ))}
+            </Accordion>
+          )}
+          {loadDateView && (
+            <div className="border-t bg-slate-50 px-4 py-2.5 text-xs font-semibold text-gray-700">
+              GRAND TOTAL (all slips) — {loadDateView.grandRows.flat().filter((c) => c !== "" && c != null).join("  ·  ")}
+            </div>
+          )}
+        </div>
+        <DialogFooter className="mt-2 gap-2 sm:justify-between">
+          <Button variant="outline" onClick={() => setLoadDateView(null)}>Close</Button>
+          {loadDateView && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline" className="gap-1">
+                  <FileDown className="h-3.5 w-3.5" /> Download <ChevronDown className="h-3 w-3 opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {(["CSV", "Excel", "PDF"] as const).map((f) => (
+                  <DropdownMenuItem key={f} onClick={() => downloadLoadDateView(f)} className="text-xs cursor-pointer">
+                    <FileDown className="mr-2 h-3.5 w-3.5" /> {f}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

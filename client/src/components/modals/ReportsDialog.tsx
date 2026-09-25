@@ -71,6 +71,25 @@ type ScanActivitySession = {
 };
 type ScanActivity = { scope: string; totalEvents: number; events: ScanEvent[]; sessions?: ScanActivitySession[] };
 
+// Unloading only — a group (GroupReport above) is already scoped to one vehicle's own FIFO
+// chain of CSV uploads for one order date. On a busy day several DIFFERENT vehicles unload
+// against that SAME order date, each with its own separate group — these mirror
+// computeUnloadDateReport/computeUnloadDateActivity (server/lib/unloadGroupReport.ts), which fan
+// that same per-vehicle computation out across every vehicle sharing the date.
+type DateReportVehicle = {
+  vehicleNumber: string; groupId: number;
+  startTime: string | null; endTime: string | null; allComplete: boolean;
+  parts: GroupReportPart[]; consolidated: GroupReport["consolidated"];
+};
+type DateReport = {
+  plant: string; orderDate: string; vehicles: DateReportVehicle[];
+  grand: { totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; netExtraAfterAdjustment: number; netMissingAfterAdjustment: number };
+};
+type DateActivityVehicle = {
+  vehicleNumber: string; groupId: number; sessions: ScanActivitySession[]; events: ScanEvent[];
+};
+type DateActivity = { plant: string; orderDate: string; vehicles: DateActivityVehicle[] };
+
 type Fmt = "CSV" | "Excel" | "PDF";
 type Row = (string | number)[];
 
@@ -403,6 +422,9 @@ export type ReportsDialogSession = {
   plant: string;
   receivingSessionId?: number | null;
   partIndex?: number | null;
+  // Unloading only — enables the "Order Date — All Vehicles" section below (date-report/
+  // date-report/scan-activity), which has no equivalent on the Order Import side.
+  orderDate?: string | null;
 };
 
 type ReportsDialogProps = {
@@ -423,12 +445,23 @@ type ReportsDialogProps = {
 export default function ReportsDialog({ session, onClose, basePath = "order-import" }: ReportsDialogProps) {
   const { toast } = useToast();
   const [busy, setBusy] = useState<string | null>(null);
-  const [viewData, setViewData] = useState<{ title: string; rows: Row[] } | null>(null);
+  // timingNote: Started/Ended text shown under the title — the table itself never carries a
+  // timing row here (rows[0] is always read as the column header), so this is the only place
+  // the in-browser View shows it (the CSV/Excel/PDF exports already get it via buildTimingRows).
+  const [viewData, setViewData] = useState<{ title: string; rows: Row[]; timingNote?: string } | null>(null);
   // Hourly report's View is its own expandable-list UI (not the generic flat DataTable the
   // other reports share via viewData) — see the dialog near the bottom of this component.
   const [hourlyView, setHourlyView] = useState<{
     title: string; scope: "part" | "group"; data: ScanActivity;
     groups: HourlyGroup[]; grand: { items: number; pallets: number; scans: number };
+  } | null>(null);
+  // "Order Date — All Vehicles" View — one collapsed-by-default accordion item per vehicle
+  // (same expandable pattern the Hourly view above uses per hour), each holding either that
+  // vehicle's own Summary table or its own Activity table, built via buildVehicleSummaryRows/
+  // buildVehicleActivityRows below.
+  const [vehicleGroupView, setVehicleGroupView] = useState<{
+    title: string; kind: "summary" | "activity";
+    sections: { key: string; vehicleNumber: string; headerNote: string; rows: Row[] }[];
   } | null>(null);
 
   const fetchPartReport = (sessionId: number) =>
@@ -437,6 +470,31 @@ export default function ReportsDialog({ session, onClose, basePath = "order-impo
     apiRequest("GET", `/api/${basePath}/sessions/${groupId}/group-report`).then((r) => r.json()) as Promise<GroupReport>;
   const fetchActivity = (sessionId: number, scope: "part" | "group") =>
     apiRequest("GET", `/api/${basePath}/sessions/${sessionId}/scan-activity?scope=${scope}`).then((r) => r.json()) as Promise<ScanActivity>;
+  // Unloading only — see DateReport/DateActivity's comment above.
+  const fetchDateReport = (plant: string, orderDate: string) =>
+    apiRequest("GET", `/api/unloading/date-report?plant=${encodeURIComponent(plant)}&orderDate=${encodeURIComponent(orderDate)}`)
+      .then((r) => r.json()) as Promise<DateReport>;
+  const fetchDateActivity = (plant: string, orderDate: string) =>
+    apiRequest("GET", `/api/unloading/date-report/scan-activity?plant=${encodeURIComponent(plant)}&orderDate=${encodeURIComponent(orderDate)}`)
+      .then((r) => r.json()) as Promise<DateActivity>;
+
+  // One vehicle's own Summary table — same "Final Summary" row shape buildGroupRows already
+  // builds for a single vehicle's group, just handed that vehicle's own {parts, consolidated}
+  // instead of fetching them separately. includeTiming stays false: the vehicle's Started/
+  // Ended/Active-For already appears in the accordion header (buildVehicleHeaderNote), not as a
+  // fake extra header row inside the table itself.
+  function buildVehicleSummaryRows(plant: string, v: DateReportVehicle): Row[] {
+    return buildGroupRows({ groupId: v.groupId, plant, parts: v.parts, consolidated: v.consolidated }, "final", false);
+  }
+  function buildVehicleActivityRows(v: DateActivityVehicle): Row[] {
+    return buildActivityRows({ scope: "group", totalEvents: v.events.length, events: v.events, sessions: v.sessions }, "group", false);
+  }
+  function buildVehicleHeaderNote(startTime: string | null, endTime: string | null): string {
+    if (!startTime) return "Not started yet";
+    const started = `Started ${fmtIST(startTime)}`;
+    if (!endTime) return `${started} · still in progress`;
+    return `${started} · Ended ${fmtIST(endTime)} · Active for ${fmtDuration(startTime, endTime)}`;
+  }
 
   async function downloadPart(fmt: Fmt) {
     if (!session) return;
@@ -512,9 +570,11 @@ export default function ReportsDialog({ session, onClose, basePath = "order-impo
     setBusy("view-part");
     try {
       // includeTiming false — the View table always reads rows[0] as its column header, so the
-      // timing block (only meaningful in the flat CSV/Excel/PDF exports) is left out here.
-      const rows = buildPartRows(await fetchPartReport(session.id), false);
-      setViewData({ title: `Part Report — ${session.csvFileName}`, rows });
+      // timing block (only meaningful in the flat CSV/Excel/PDF exports) is left out of the rows
+      // themselves; shown instead via timingNote below the title.
+      const part = await fetchPartReport(session.id);
+      const rows = buildPartRows(part, false);
+      setViewData({ title: `Part Report — ${session.csvFileName}`, rows, timingNote: buildVehicleHeaderNote(part.scanActivatedAt, part.scanCompletedAt) });
     } catch {
       toast({ title: "Failed to load report", variant: "destructive" });
     } finally { setBusy(null); }
@@ -548,8 +608,15 @@ export default function ReportsDialog({ session, onClose, basePath = "order-impo
     const groupId = session.receivingSessionId;
     setBusy(`view-group-${kind}`);
     try {
-      const rows = buildGroupRows(await fetchGroupReport(groupId), kind, false);
-      setViewData({ title: `FIFO ${kind === "partwise" ? "CSV-wise" : "Final"} Report — Group #${groupId}`, rows });
+      const report = await fetchGroupReport(groupId);
+      const rows = buildGroupRows(report, kind, false);
+      const starts = report.parts.map((p) => p.scanActivatedAt).filter((t): t is string => !!t).sort();
+      const ends = report.parts.map((p) => p.scanCompletedAt).filter((t): t is string => !!t).sort();
+      const allComplete = report.parts.length > 0 && ends.length === report.parts.length;
+      setViewData({
+        title: `FIFO ${kind === "partwise" ? "CSV-wise" : "Final"} Report — Group #${groupId}`, rows,
+        timingNote: buildVehicleHeaderNote(starts[0] ?? null, allComplete ? ends[ends.length - 1] : null),
+      });
     } catch {
       toast({ title: "Failed to load report", variant: "destructive" });
     } finally { setBusy(null); }
@@ -577,6 +644,97 @@ export default function ReportsDialog({ session, onClose, basePath = "order-impo
       setHourlyView({ title: `Hourly Report — Group #${groupId} (all parts)`, scope: "group", data, groups, grand });
     } catch {
       toast({ title: "Failed to load hourly report", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+
+  // ─── "Order Date — All Vehicles" (Unloading only) — Total Summary / Activity across every
+  // vehicle that unloaded against this order date, not just this one vehicle's own group. ──────
+  function dateReportRowsFlat(report: DateReport): Row[] {
+    const rows: Row[] = [["Vehicle", "Started", "Ended", "Active For", "Status"]];
+    report.vehicles.forEach((v) => rows.push([
+      v.vehicleNumber, fmtIST(v.startTime), fmtIST(v.endTime), fmtDuration(v.startTime, v.endTime),
+      v.allComplete ? "Completed" : "In Progress",
+    ]));
+    rows.push([]);
+    report.vehicles.forEach((v) => {
+      rows.push([`Vehicle ${v.vehicleNumber}`]);
+      buildVehicleSummaryRows(report.plant, v).forEach((r) => rows.push(r));
+      rows.push([]);
+    });
+    const g = report.grand;
+    rows.push(["GRAND TOTAL (all vehicles)", "", "Expected", g.totalExpected, "Received", g.totalReceived,
+      "Extra", g.totalExtra, "Missing", g.totalMissing, "Net Extra", g.netExtraAfterAdjustment, "Net Missing", g.netMissingAfterAdjustment]);
+    return rows;
+  }
+  function dateActivityRowsFlat(activity: DateActivity): Row[] {
+    const rows: Row[] = [];
+    activity.vehicles.forEach((v) => {
+      rows.push([`Vehicle ${v.vehicleNumber}`]);
+      buildVehicleActivityRows(v).forEach((r) => rows.push(r));
+      rows.push([]);
+    });
+    return rows;
+  }
+
+  async function downloadDateSummary(fmt: Fmt) {
+    if (!session?.orderDate) return;
+    setBusy(`date-summary-${fmt}`);
+    try {
+      const report = await fetchDateReport(session.plant, session.orderDate);
+      exportRows(fmt, `total-summary-${safe(session.plant)}-${session.orderDate}`, `Total Summary — ${session.plant} · ${session.orderDate} (all vehicles)`, dateReportRowsFlat(report));
+    } catch {
+      toast({ title: "Failed to download report", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+  async function downloadDateActivity(fmt: Fmt) {
+    if (!session?.orderDate) return;
+    setBusy(`date-activity-${fmt}`);
+    try {
+      const activity = await fetchDateActivity(session.plant, session.orderDate);
+      exportRows(fmt, `scan-activity-${safe(session.plant)}-${session.orderDate}`, `Scan Activity — ${session.plant} · ${session.orderDate} (all vehicles)`, dateActivityRowsFlat(activity));
+    } catch {
+      toast({ title: "Failed to download activity", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+  async function viewDateSummary() {
+    if (!session?.orderDate) return;
+    setBusy("view-date-summary");
+    try {
+      const report = await fetchDateReport(session.plant, session.orderDate);
+      setVehicleGroupView({
+        title: `Total Summary — ${session.plant} · ${session.orderDate}`,
+        kind: "summary",
+        sections: report.vehicles.map((v) => ({
+          key: String(v.groupId), vehicleNumber: v.vehicleNumber,
+          headerNote: buildVehicleHeaderNote(v.startTime, v.endTime),
+          rows: buildVehicleSummaryRows(report.plant, v),
+        })),
+      });
+    } catch {
+      toast({ title: "Failed to load report", variant: "destructive" });
+    } finally { setBusy(null); }
+  }
+  async function viewDateActivity() {
+    if (!session?.orderDate) return;
+    setBusy("view-date-activity");
+    try {
+      const activity = await fetchDateActivity(session.plant, session.orderDate);
+      setVehicleGroupView({
+        title: `Scan Activity — ${session.plant} · ${session.orderDate}`,
+        kind: "activity",
+        sections: activity.vehicles.map((v) => {
+          const starts = v.sessions.map((s) => s.scanActivatedAt).filter((t): t is string => !!t).sort();
+          const ends = v.sessions.map((s) => s.scanCompletedAt).filter((t): t is string => !!t).sort();
+          const allComplete = v.sessions.length > 0 && ends.length === v.sessions.length;
+          return {
+            key: String(v.groupId), vehicleNumber: v.vehicleNumber,
+            headerNote: buildVehicleHeaderNote(starts[0] ?? null, allComplete ? ends[ends.length - 1] : null),
+            rows: buildVehicleActivityRows(v),
+          };
+        }),
+      });
+    } catch {
+      toast({ title: "Failed to load activity", variant: "destructive" });
     } finally { setBusy(null); }
   }
 
@@ -659,6 +817,20 @@ export default function ReportsDialog({ session, onClose, basePath = "order-impo
                 </div>
               </div>
             )}
+
+            {basePath === "unloading" && session?.orderDate && (
+              <div>
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-400">
+                  Order Date — All Vehicles ({session.orderDate})
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <DownloadMenu label="Total Summary" variant="default" busyKey="date-summary"
+                    onPick={downloadDateSummary} onView={viewDateSummary} />
+                  <DownloadMenu label="Activity" icon={<ListChecks className="h-3.5 w-3.5" />} busyKey="date-activity"
+                    onPick={downloadDateActivity} onView={viewDateActivity} />
+                </div>
+              </div>
+            )}
           </div>
 
           <DialogFooter>
@@ -676,7 +848,7 @@ export default function ReportsDialog({ session, onClose, basePath = "order-impo
           <DialogHeader>
             <DialogTitle className="text-base">{viewData?.title}</DialogTitle>
             <DialogDescription className="text-xs">
-              {viewData ? `${Math.max(0, viewData.rows.length - 1)} row(s)` : ""}
+              {viewData ? `${Math.max(0, viewData.rows.length - 1)} row(s)${viewData.timingNote ? ` · ${viewData.timingNote}` : ""}` : ""}
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-auto">
@@ -825,6 +997,92 @@ export default function ReportsDialog({ session, onClose, basePath = "order-impo
                 label="Download"
                 busyKey="hourly-view-download"
                 onPick={(f) => exportRows(f, `hourly-report-${safe(hourlyView.title)}`, hourlyView.title, buildHourlyRows(hourlyView.data, hourlyView.scope))}
+              />
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* "Order Date — All Vehicles" View (Unloading only) — same expandable-list pattern as the
+          Hourly view above, one accordion item per VEHICLE instead of per hour. Each item holds
+          either that vehicle's own Summary table or its own Activity table (rows built by
+          buildVehicleSummaryRows/buildVehicleActivityRows), with its Started/Ended/Active-For in
+          the trigger itself rather than as a fake row inside the table. */}
+      <Dialog open={!!vehicleGroupView} onOpenChange={(open) => { if (!open) setVehicleGroupView(null); }}>
+        <DialogContent className="max-w-4xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="text-base">{vehicleGroupView?.title}</DialogTitle>
+            <DialogDescription className="text-xs">
+              {vehicleGroupView ? `${vehicleGroupView.sections.length} vehicle(s)` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto rounded border">
+            {vehicleGroupView && vehicleGroupView.sections.length === 0 && (
+              <p className="p-4 text-sm text-gray-400">No vehicles found for this order date</p>
+            )}
+            {vehicleGroupView && vehicleGroupView.sections.length > 0 && (
+              <Accordion type="multiple" className="px-2">
+                {vehicleGroupView.sections.map((sec) => (
+                  <AccordionItem key={sec.key} value={sec.key}>
+                    <AccordionTrigger className="py-2.5 text-sm hover:no-underline">
+                      <span className="font-medium">{sec.vehicleNumber}</span>
+                      <span className="mr-2 text-xs font-normal text-gray-500">{sec.headerNote}</span>
+                    </AccordionTrigger>
+                    <AccordionContent className="pb-3">
+                      {sec.rows.length <= 1 ? (
+                        <p className="text-xs text-gray-400">No data for this vehicle.</p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <div className="mb-2 flex justify-end">
+                            <DownloadMenu
+                              label="Download this vehicle"
+                              busyKey={`vehicle-${sec.key}`}
+                              onPick={(f) => exportRows(
+                                f,
+                                `${vehicleGroupView!.kind}-${safe(vehicleGroupView!.title)}-${safe(sec.vehicleNumber)}`,
+                                `${vehicleGroupView!.title} — ${sec.vehicleNumber}`,
+                                sec.rows,
+                              )}
+                            />
+                          </div>
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="text-left text-gray-400">
+                                {sec.rows[0].map((h, i) => (
+                                  <th key={i} className="py-1 pr-3 font-medium whitespace-nowrap">{String(h)}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sec.rows.slice(1).filter((r) => r.length > 0).map((r, i) => (
+                                <tr key={i} className="border-t border-gray-100">
+                                  {r.map((c, j) => (
+                                    <td key={j} className="py-1 pr-3 whitespace-pre-line">{c === "" || c == null ? "—" : String(c)}</td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </AccordionContent>
+                  </AccordionItem>
+                ))}
+              </Accordion>
+            )}
+          </div>
+          <DialogFooter className="mt-2 gap-2 sm:justify-between">
+            <Button variant="outline" onClick={() => setVehicleGroupView(null)}>Close</Button>
+            {vehicleGroupView && (
+              <DownloadMenu
+                label="Download all"
+                busyKey="vehicle-view-download"
+                onPick={(f) => exportRows(
+                  f,
+                  `${vehicleGroupView.kind}-${safe(vehicleGroupView.title)}`,
+                  vehicleGroupView.title,
+                  vehicleGroupView.sections.flatMap((sec) => [[`Vehicle ${sec.vehicleNumber} — ${sec.headerNote}`], ...sec.rows, []]),
+                )}
               />
             )}
           </DialogFooter>

@@ -245,3 +245,128 @@ export async function computeUnloadPartReport(sessionId: number): Promise<Unload
   const part = report?.parts.find((p) => p.id === sessionId);
   return part ? { ...part, groupId } : null;
 }
+
+// A group (computeUnloadGroupReport) is already scoped to one vehicle + one order date — it's
+// the vehicle's own FIFO chain of CSV uploads. But on a busy day several DIFFERENT vehicles all
+// unload against the same order date, each getting its own separate group_id (grouping is keyed
+// by plant+vehicle+date — see unloadImportSessions.groupId in shared/schema.ts). Nothing existing
+// ties those sibling vehicles together for one "how did today go" view — this does, purely at
+// read time, by finding every group_id that shares this plant+orderDate and running the existing
+// per-vehicle group report for each.
+export type UnloadDateReportVehicle = {
+  vehicleNumber: string; groupId: number;
+  // Earliest scanActivatedAt across this vehicle's parts, and latest scanCompletedAt — but only
+  // once EVERY part is completed; a vehicle still mid-unload has no real "end" yet.
+  startTime: string | null; endTime: string | null; allComplete: boolean;
+  parts: UnloadGroupReport['parts']; consolidated: UnloadGroupReport['consolidated'];
+};
+export type UnloadDateReport = {
+  plant: string; orderDate: string;
+  vehicles: UnloadDateReportVehicle[];
+  grand: { totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; netExtraAfterAdjustment: number; netMissingAfterAdjustment: number };
+};
+
+export async function computeUnloadDateReport(plant: string, orderDate: string): Promise<UnloadDateReport | null> {
+  const { rows: groupRows } = await pool.query(
+    `SELECT DISTINCT group_id AS "groupId" FROM unload_import_sessions
+     WHERE plant = $1 AND order_date = $2 AND is_deleted = false AND group_id IS NOT NULL`,
+    [plant, orderDate],
+  );
+  if (groupRows.length === 0) return null;
+
+  const vehicles: UnloadDateReportVehicle[] = [];
+  for (const { groupId } of groupRows as { groupId: number }[]) {
+    const report = await computeUnloadGroupReport(groupId);
+    if (!report) continue;
+    const starts = report.parts.map((p) => p.scanActivatedAt).filter((t): t is string => !!t);
+    const allComplete = report.parts.every((p) => p.scanStatus === 'completed');
+    const ends = report.parts.map((p) => p.scanCompletedAt).filter((t): t is string => !!t);
+    vehicles.push({
+      vehicleNumber: report.vehicleNumber, groupId,
+      startTime: starts.length > 0 ? starts.reduce((a, b) => (a < b ? a : b)) : null,
+      endTime: allComplete && ends.length === report.parts.length ? ends.reduce((a, b) => (a > b ? a : b)) : null,
+      allComplete,
+      parts: report.parts, consolidated: report.consolidated,
+    });
+  }
+  // Earliest-starting vehicle first — the order they'd have actually arrived/unloaded in.
+  vehicles.sort((a, b) => (a.startTime ?? '').localeCompare(b.startTime ?? ''));
+
+  const grand = vehicles.reduce((acc, v) => ({
+    totalExpected: acc.totalExpected + v.consolidated.totalExpected,
+    totalReceived: acc.totalReceived + v.consolidated.totalReceived,
+    totalExtra: acc.totalExtra + v.consolidated.totalExtra,
+    totalMissing: acc.totalMissing + v.consolidated.totalMissing,
+    netExtraAfterAdjustment: acc.netExtraAfterAdjustment + v.consolidated.netExtraAfterAdjustment,
+    netMissingAfterAdjustment: acc.netMissingAfterAdjustment + v.consolidated.netMissingAfterAdjustment,
+  }), { totalExpected: 0, totalReceived: 0, totalExtra: 0, totalMissing: 0, netExtraAfterAdjustment: 0, netMissingAfterAdjustment: 0 });
+
+  return { plant, orderDate, vehicles, grand };
+}
+
+// Same plant+orderDate scope as computeUnloadDateReport, but the raw scan-event log per vehicle
+// instead of the netted summary — mirrors what GET .../scan-activity?scope=group returns for one
+// vehicle, just fanned out across every vehicle that touched this order date.
+export type UnloadDateActivityVehicle = {
+  vehicleNumber: string; groupId: number;
+  sessions: { id: number; partIndex: number | null; csvFileName: string | null; scanActivatedAt: string | null; scanCompletedAt: string | null }[];
+  events: ScanActivityEventRow[];
+};
+export type UnloadDateActivity = { plant: string; orderDate: string; vehicles: UnloadDateActivityVehicle[] };
+
+export type ScanActivityEventRow = {
+  sessionId: number; barcode: string | null; itemName: string | null; sapCode: string | null;
+  pallets: number | null; looseQty: number | null; totalQty: number | null;
+  isExtra: boolean | null; stv: string | null;
+  scannedByCode: string | null; scannedByName: string | null; scannedAt: string | null;
+  voided: boolean | null; voidedAt: string | null; voidReason: string | null; isCredit: boolean | null;
+  partIndex: number | null; csvFileName: string | null;
+};
+
+export async function computeUnloadDateActivity(plant: string, orderDate: string): Promise<UnloadDateActivity | null> {
+  const { rows: sessionRows } = await pool.query(
+    `SELECT id, group_id AS "groupId", vehicle_number AS "vehicleNumber", part_index AS "partIndex", csv_file_name AS "csvFileName",
+            scan_activated_at AS "scanActivatedAt", scan_completed_at AS "scanCompletedAt"
+     FROM unload_import_sessions
+     WHERE plant = $1 AND order_date = $2 AND is_deleted = false
+     ORDER BY vehicle_number ASC, part_index ASC, id ASC`,
+    [plant, orderDate],
+  );
+  if (sessionRows.length === 0) return null;
+
+  const sessionIds = sessionRows.map((r: any) => r.id);
+  const { rows: eventRows } = await pool.query(
+    `SELECT session_id AS "sessionId", barcode, item_name AS "itemName", sap_code AS "sapCode",
+            pallets, loose_qty AS "looseQty", total_qty AS "totalQty",
+            is_extra AS "isExtra", stv, scanned_by_code AS "scannedByCode",
+            scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
+            voided, voided_at AS "voidedAt", void_reason AS "voidReason", is_credit AS "isCredit"
+     FROM unload_scan_events WHERE session_id = ANY($1::int[]) ORDER BY scanned_at ASC, id ASC`,
+    [sessionIds],
+  );
+
+  const sessionMeta = new Map(sessionRows.map((r: any) => [r.id, r]));
+  const byGroup = new Map<number, UnloadDateActivityVehicle>();
+  for (const r of sessionRows as any[]) {
+    if (!byGroup.has(r.groupId)) byGroup.set(r.groupId, { vehicleNumber: r.vehicleNumber, groupId: r.groupId, sessions: [], events: [] });
+    byGroup.get(r.groupId)!.sessions.push({
+      id: r.id, partIndex: r.partIndex, csvFileName: r.csvFileName,
+      scanActivatedAt: r.scanActivatedAt ? new Date(r.scanActivatedAt).toISOString() : null,
+      scanCompletedAt: r.scanCompletedAt ? new Date(r.scanCompletedAt).toISOString() : null,
+    });
+  }
+  for (const e of eventRows as any[]) {
+    const meta = sessionMeta.get(e.sessionId);
+    const bucket = meta ? byGroup.get(meta.groupId) : undefined;
+    if (!bucket) continue;
+    bucket.events.push({ ...e, partIndex: meta.partIndex, csvFileName: meta.csvFileName });
+  }
+
+  const vehicles = Array.from(byGroup.values()).sort((a, b) => {
+    const aStart = a.sessions.map((s) => s.scanActivatedAt).filter((t): t is string => !!t).sort()[0] ?? '';
+    const bStart = b.sessions.map((s) => s.scanActivatedAt).filter((t): t is string => !!t).sort()[0] ?? '';
+    return aStart.localeCompare(bStart);
+  });
+
+  return { plant, orderDate, vehicles };
+}

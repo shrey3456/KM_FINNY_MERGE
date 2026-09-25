@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
@@ -8,6 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { TableCard } from "@/components/ui/table-card";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
   Download, FileBarChart, Truck, Clock, Loader2, ChevronDown,
@@ -45,6 +46,7 @@ type ItemTotal = { barcode: string; itemName: string | null; expectedQty: number
 type Activity = {
   barcode: string; itemName: string | null; qty: number; pallets?: number; stv?: string | null;
   isExtra: boolean; scannedByName: string | null; scannedAt: string;
+  groupKey?: string | null; groupLabel?: string | null;
 };
 type ReportData = {
   date: string;
@@ -58,6 +60,11 @@ type ReportData = {
 };
 type VehicleDetail = {
   date: string; vehicle: string; plant: string | null;
+  startTime: string | null; endTime: string | null;
+  itemTotals: ItemTotal[]; activities: Activity[];
+};
+type LoadingSlipDetail = {
+  date: string; order: string; partyName: string | null; plant: string | null; vehicleNumber: string | null;
   startTime: string | null; endTime: string | null;
   itemTotals: ItemTotal[]; activities: Activity[];
 };
@@ -78,6 +85,18 @@ function fmtIST(dt: string | null): string {
   if (!dt) return "—";
   const d = new Date(dt);
   return isNaN(d.getTime()) ? "—" : d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+}
+
+function dailyReportPlantsFromUser(): string[] | null {
+  try {
+    const user = JSON.parse(localStorage.getItem("currentUser") || "{}");
+    const role = String(user.role ?? "").trim().toLowerCase();
+    if (["admin", "super-admin", "superadmin", "super_admin", "super admin"].includes(role)) return null;
+    const raw = typeof user.plants === "string" ? JSON.parse(user.plants) : user.plants;
+    return Array.isArray(raw) ? raw.map((p) => String(p).trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
 }
 
 // Same CSV/Excel/PDF export mechanism the existing per-order Reports dialog uses
@@ -149,7 +168,7 @@ function SectionIcon({ icon: Icon, tone = "text-[#001d6e] bg-[#001d6e]/10" }: { 
 }
 
 const TABS: { key: Tab; label: string; breakdownLabel: string }[] = [
-  { key: "loading", label: "Loading", breakdownLabel: "Vehicle" },
+  { key: "loading", label: "Loading", breakdownLabel: "Slip / Order" },
   { key: "unloading", label: "Unloading", breakdownLabel: "Vehicle" },
   // Scan Operation has no vehicle concept in its schema — it's the scanning phase of a CSV
   // import session, so its breakdown groups by CSV/order instead.
@@ -165,16 +184,40 @@ export default function DailyReports() {
   // The date always defaults to today (IST) on a fresh visit — it is not remembered, since
   // "today" changing every day is exactly the point of that default.
   const [date, setDate] = useState(todayIST());
+  const [selectedPlant, setSelectedPlant] = usePersistentFilter("dailyReports:plant", "");
   const activeTab = TABS.find((t) => t.key === tab)!;
+  const { data: allPlants = [] } = useQuery<Array<{ name: string }>>({
+    queryKey: ["/api/plants", "daily-reports"],
+    queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
+    staleTime: 60000,
+  });
+  const assignedPlants = dailyReportPlantsFromUser();
+  const plantOptions = (assignedPlants === null ? allPlants.map((p) => p.name) : assignedPlants)
+    .filter((name, index, list) => list.findIndex((v) => v.toLowerCase() === name.toLowerCase()) === index)
+    .sort((a, b) => a.localeCompare(b));
+  useEffect(() => {
+    if (selectedPlant && !plantOptions.some((plant) => plant.toLowerCase() === selectedPlant.toLowerCase())) setSelectedPlant("");
+  }, [selectedPlant, plantOptions.join("|")]);
 
   // Which vehicle's/CSV's own detail popup is open — Unloading and Scan respectively.
   const [openVehicle, setOpenVehicle] = useState<string | null>(null);
+  const [openOrder, setOpenOrder] = useState<string | null>(null);
   const [openCsv, setOpenCsv] = useState<string | null>(null);
+  const [openDetailTab, setOpenDetailTab] = useState<"items" | "activities">("items");
+  const effectiveReportTab = tab === "scan"
+    ? reportTab
+    : reportTab === "activities" ? "activities" : "summary";
+
+  const selectTab = (next: Tab) => {
+    setTab(next);
+    if (next !== "scan") setReportTab("summary");
+  };
 
   const reportQuery = useQuery({
-    queryKey: ["/api/daily-reports", tab, date],
+    queryKey: ["/api/daily-reports", tab, date, selectedPlant],
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/daily-reports/${tab}?date=${encodeURIComponent(date)}`);
+      const plantQuery = selectedPlant ? `&plant=${encodeURIComponent(selectedPlant)}` : "";
+      const res = await apiRequest("GET", `/api/daily-reports/${tab}?date=${encodeURIComponent(date)}${plantQuery}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.message ?? "Failed to load the report");
@@ -264,7 +307,7 @@ export default function DailyReports() {
       id: "label", header: activeTab.breakdownLabel, accessor: (r) => r.label, totalable: false,
       cellClassName: "font-medium text-gray-900",
       render: (r) => {
-        const clickable = (tab === "unloading" || tab === "scan") && r.key !== "—";
+        const clickable = (tab === "loading" || tab === "unloading" || tab === "scan") && r.key !== "—";
         return clickable ? <span className="text-[#001d6e] underline decoration-dotted">{r.label}</span> : r.label;
       },
     },
@@ -278,13 +321,24 @@ export default function DailyReports() {
   ];
 
   return (
-    <div className="container-fluid max-w-full space-y-5 px-4 py-6 md:px-6">
+    <div className="container-fluid max-w-full space-y-5 overflow-x-hidden px-3 py-6 sm:px-4 md:px-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="flex items-center text-2xl font-bold tracking-tight">
           <FileBarChart className="mr-2 h-6 w-6 text-[#001d6e]" />
           <span className="text-[#001d6e]">Reports</span>
         </h2>
-        <DateInput value={date} onChange={setDate} clearable={false} />
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <Select value={selectedPlant || "__all__"} onValueChange={(value) => setSelectedPlant(value === "__all__" ? "" : value)}>
+            <SelectTrigger className="h-9 w-[min(12rem,calc(100vw-2rem))] text-sm">
+              <SelectValue placeholder="All plants" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All plants</SelectItem>
+              {plantOptions.map((plant) => <SelectItem key={plant} value={plant}>{plant}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <DateInput value={date} onChange={setDate} clearable={false} />
+        </div>
       </div>
 
       {/* Loading / Unloading / Scan — whichever tab is selected, that section's report opens. */}
@@ -293,7 +347,7 @@ export default function DailyReports() {
           <button
             key={t.key}
             type="button"
-            onClick={() => setTab(t.key)}
+            onClick={() => selectTab(t.key)}
             className={
               tab === t.key
                 ? "rounded-full bg-[#001d6e] px-4 py-1.5 text-sm font-semibold text-white ring-2 ring-[#001d6e]/30"
@@ -320,7 +374,7 @@ export default function DailyReports() {
                 </p>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <StatBox label="Orders" value={data.totalSummary.orderCount} />
-                  <StatBox label={activeTab.key === "scan" ? "CSVs" : "Vehicles"} value={data.totalSummary.vehicleCount} />
+                  <StatBox label={activeTab.key === "scan" ? "CSVs" : activeTab.key === "loading" ? "Slips" : "Vehicles"} value={data.totalSummary.vehicleCount} />
                   <StatBox label="Expected" value={data.totalSummary.expectedQty} />
                   <StatBox label="Actual" value={data.totalSummary.actualQty} />
                 </div>
@@ -340,13 +394,13 @@ export default function DailyReports() {
             </Card>
           </div>
 
-          {/* Total Summary Report / Activities Report / Breakdown — one tab row, all three. */}
+          {/* Loading/Unloading use Summary + Activities. Scan Operations also keeps its CSV breakdown. */}
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => setReportTab("summary")}
               className={
-                reportTab === "summary"
+                effectiveReportTab === "summary"
                   ? "rounded-full bg-[#001d6e] px-4 py-1.5 text-sm font-semibold text-white ring-2 ring-[#001d6e]/30"
                   : "rounded-full border border-gray-200 bg-white px-4 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
               }
@@ -357,81 +411,183 @@ export default function DailyReports() {
               type="button"
               onClick={() => setReportTab("activities")}
               className={
-                reportTab === "activities"
+                effectiveReportTab === "activities"
                   ? "rounded-full bg-[#001d6e] px-4 py-1.5 text-sm font-semibold text-white ring-2 ring-[#001d6e]/30"
                   : "rounded-full border border-gray-200 bg-white px-4 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
               }
             >
               Activities Report
             </button>
-            <button
+            {tab === "scan" && <button
               type="button"
               onClick={() => setReportTab("breakdown")}
               className={
-                reportTab === "breakdown"
+                effectiveReportTab === "breakdown"
                   ? "rounded-full bg-[#001d6e] px-4 py-1.5 text-sm font-semibold text-white ring-2 ring-[#001d6e]/30"
                   : "rounded-full border border-gray-200 bg-white px-4 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
               }
             >
               {activeTab.breakdownLabel} Breakdown
-            </button>
+            </button>}
           </div>
 
-          {reportTab === "summary" ? (
+          {effectiveReportTab === "summary" && (tab === "loading" || tab === "unloading") ? (
             <TableCard
-              icon={Package}
-              title="Total Summary Report"
+              icon={tab === "unloading" ? Truck : FileSpreadsheet}
+              title={tab === "unloading" ? "Vehicle Summary" : "Loading Slip Summary"}
               subtitle={
                 <span>
-                  Start: <span className="font-medium text-gray-600">{fmtIST(data.activitySummary.startTime)}</span>
-                  {"  ·  "}End: <span className="font-medium text-gray-600">{fmtIST(data.activitySummary.endTime)}</span>
+                  {data.breakdown.length} {tab === "unloading" ? "vehicle" : "slip"}{data.breakdown.length === 1 ? "" : "s"} for {data.date}
                 </span>
               }
-              className="rounded-xl shadow-none border-gray-300"
-              headerActions={<DownloadMenu onExport={handleExportSummaryReport} />}
+              className="rounded-xl border-gray-300 shadow-none"
             >
-              <DataTable<ItemTotal>
+              <div className="hidden md:block">
+              <DataTable<ReportRow>
                 className="space-y-0"
                 containerClassName="rounded-none border-0"
-                columns={summaryColumns}
-                data={data.itemTotals ?? []}
-                getRowId={(row) => row.barcode}
-                emptyState={data.itemTotals === undefined ? "Not available yet for this operation" : "No items for this date"}
+                columns={breakdownColumns}
+                data={data.breakdown}
+                getRowId={(row, idx) => `${row.key}-${idx}`}
+                emptyState="No activity for this date"
+                onRowClick={(row) => {
+                  setOpenDetailTab("items");
+                  if (tab === "unloading") setOpenVehicle(row.key);
+                  else setOpenOrder(row.key);
+                }}
+                isRowClickable={() => true}
                 enableZebraStripes
                 enableTotalsRow
                 totalsLabel="TOTAL"
-                totalsLabelColumnId="itemName"
+                totalsLabelColumnId="label"
                 enableColumnResizing
-                enableColumnVisibility
                 showMobileSwipeHint
                 isStickyHeader
                 maxHeight="420px"
                 headerClassName="bg-gray-50 text-gray-500"
               />
+              </div>
+              <div className="md:hidden">
+                <ReportRowCards rows={data.breakdown} tab={tab} onRowClick={(row) => {
+                  setOpenDetailTab("items");
+                  if (tab === "unloading") setOpenVehicle(row.key); else setOpenOrder(row.key);
+                }} />
+              </div>
             </TableCard>
-          ) : reportTab === "activities" ? (
+          ) : effectiveReportTab === "summary" && tab === "scan" ? (
+            <TableCard
+              icon={FileSpreadsheet}
+              title="Total Summary Report"
+              subtitle={`${data.itemTotals?.length ?? 0} merged item${(data.itemTotals?.length ?? 0) === 1 ? "" : "s"} across all CSVs for ${data.date}`}
+              className="rounded-xl border-gray-300 shadow-none"
+              headerActions={<DownloadMenu onExport={handleExportSummaryReport} />}
+            >
+              <div className="hidden md:block">
+                <DataTable<ItemTotal>
+                  className="space-y-0"
+                  containerClassName="rounded-none border-0"
+                  columns={summaryColumns}
+                  data={data.itemTotals ?? []}
+                  getRowId={(row) => row.barcode}
+                  emptyState={data.itemTotals === undefined ? "Not available yet for this operation" : "No items for this date"}
+                  enableZebraStripes
+                  enableTotalsRow
+                  totalsLabel="TOTAL"
+                  totalsLabelColumnId="itemName"
+                  enableColumnResizing
+                  showMobileSwipeHint
+                  isStickyHeader
+                  maxHeight="420px"
+                  headerClassName="bg-gray-50 text-gray-500"
+                />
+              </div>
+              <div className="space-y-2 p-3 md:hidden">
+                {(data.itemTotals ?? []).map((item) => (
+                  <div key={item.barcode} className="rounded-lg border border-gray-200 p-3 text-sm">
+                    <p className="font-medium text-gray-900">{item.itemName || "—"}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-gray-500">{item.barcode}</p>
+                    <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-gray-600">
+                      <span>Expected: <strong>{item.expectedQty}</strong></span>
+                      <span>Actual: <strong className="text-emerald-600">{item.actualQty}</strong></span>
+                      <span>Extra: <strong className="text-amber-600">{item.extraQty}</strong></span>
+                      <span>Pallets: <strong>{item.pallets.toFixed(2)}</strong></span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </TableCard>
+          ) : effectiveReportTab === "activities" && tab === "scan" ? (
             <TableCard
               icon={ListChecks}
               title="Activities Report"
-              subtitle={data.activities ? `${data.activities.length} event${data.activities.length === 1 ? "" : "s"}` : undefined}
+              subtitle={`${data.activities?.length ?? 0} merged events across all CSVs for ${data.date}`}
               className="rounded-xl shadow-none border-gray-300"
               headerActions={<DownloadMenu onExport={handleExportActivitiesReport} />}
             >
-              <DataTable<Activity>
+              <div className="hidden md:block">
+                <DataTable<Activity>
+                  className="space-y-0"
+                  containerClassName="rounded-none border-0"
+                  columns={activitiesColumns}
+                  data={data.activities ?? []}
+                  getRowId={(_row, idx) => String(idx)}
+                  emptyState={data.activities === undefined ? "Not available yet for this operation" : "No scans for this date"}
+                  enableZebraStripes
+                  enableColumnResizing
+                  showMobileSwipeHint
+                  isStickyHeader
+                  maxHeight="420px"
+                  headerClassName="bg-gray-50 text-gray-500"
+                />
+              </div>
+              <div className="space-y-2 p-3 md:hidden">
+                {(data.activities ?? []).map((activity, index) => (
+                  <div key={`${activity.barcode}-${index}`} className="rounded-lg border border-gray-200 p-3 text-xs">
+                    <div className="flex justify-between gap-3">
+                      <span className="font-medium text-gray-900">{activity.itemName || "—"}</span>
+                      <span className="font-semibold text-emerald-600">{activity.qty}</span>
+                    </div>
+                    <p className="mt-1 break-all font-mono text-gray-500">{activity.barcode}</p>
+                    <p className="mt-1 text-gray-500">{fmtIST(activity.scannedAt)} · {activity.scannedByName || "—"}</p>
+                  </div>
+                ))}
+              </div>
+            </TableCard>
+          ) : effectiveReportTab === "activities" ? (
+            <TableCard
+              icon={ListChecks}
+              title="Activities Report"
+              subtitle={`${data.breakdown.length} ${tab === "unloading" ? "vehicle" : tab === "loading" ? "slip" : "CSV"}${data.breakdown.length === 1 ? "" : "s"}`}
+              className="rounded-xl shadow-none border-gray-300"
+            >
+              <div className="hidden md:block">
+              <DataTable<ReportRow>
                 className="space-y-0"
                 containerClassName="rounded-none border-0"
-                columns={activitiesColumns}
-                data={data.activities ?? []}
-                getRowId={(_row, idx) => String(idx)}
-                emptyState={data.activities === undefined ? "Not available yet for this operation" : "No scans for this date"}
+                columns={breakdownColumns}
+                data={data.breakdown}
+                getRowId={(row, idx) => `${row.key}-${idx}`}
+                emptyState="No activity for this date"
+                onRowClick={(row) => {
+                  setOpenDetailTab("activities");
+                  if (tab === "unloading") setOpenVehicle(row.key);
+                  else if (tab === "loading") setOpenOrder(row.key);
+                  else setOpenCsv(row.key);
+                }}
+                isRowClickable={() => true}
                 enableZebraStripes
                 enableColumnResizing
-                enableColumnVisibility
                 showMobileSwipeHint
-                isStickyHeader
-                maxHeight="420px"
                 headerClassName="bg-gray-50 text-gray-500"
               />
+              </div>
+              <div className="md:hidden">
+                <ReportRowCards rows={data.breakdown} tab={tab} onRowClick={(row) => {
+                  setOpenDetailTab("activities");
+                  if (tab === "unloading") setOpenVehicle(row.key);
+                  else if (tab === "loading") setOpenOrder(row.key); else setOpenCsv(row.key);
+                }} />
+              </div>
             </TableCard>
           ) : (
             <TableCard
@@ -440,6 +596,7 @@ export default function DailyReports() {
               subtitle={`${data.breakdown.length} row${data.breakdown.length === 1 ? "" : "s"}`}
               className="rounded-xl shadow-none border-gray-300"
             >
+              <div className="hidden md:block">
               <DataTable<ReportRow>
                 className="space-y-0"
                 containerClassName="rounded-none border-0"
@@ -449,33 +606,142 @@ export default function DailyReports() {
                 emptyState="No activity for this date"
                 onRowClick={(row) => {
                   if (row.key === "—") return;
-                  if (tab === "unloading") setOpenVehicle(row.key);
-                  else if (tab === "scan") setOpenCsv(row.key);
+                  if (tab === "scan") setOpenCsv(row.key);
                 }}
-                isRowClickable={(row) => (tab === "unloading" || tab === "scan") && row.key !== "—"}
+                isRowClickable={(row) => tab === "scan" && row.key !== "—"}
                 enableZebraStripes
                 enableColumnResizing
-                enableColumnVisibility
                 showMobileSwipeHint
                 headerClassName="bg-gray-50 text-gray-500"
               />
+              </div>
+              <div className="md:hidden">
+                <ReportRowCards rows={data.breakdown} tab={tab} onRowClick={(row) => {
+                  if (tab === "scan") { setOpenDetailTab("activities"); setOpenCsv(row.key); }
+                }} />
+              </div>
             </TableCard>
           )}
         </>
       ) : null}
 
-      <VehicleDetailDialog date={date} vehicle={openVehicle} onClose={() => setOpenVehicle(null)} />
-      <CsvDetailDialog date={date} csv={openCsv} onClose={() => setOpenCsv(null)} />
+      <VehicleDetailDialog date={date} vehicle={openVehicle} initialTab={openDetailTab} onClose={() => setOpenVehicle(null)} />
+      <LoadingSlipDetailDialog date={date} order={openOrder} initialTab={openDetailTab} onClose={() => setOpenOrder(null)} />
+      <CsvDetailDialog date={date} csv={openCsv} initialTab={openDetailTab} onClose={() => setOpenCsv(null)} />
     </div>
   );
 }
 
-// The drill-down behind clicking a vehicle in Unloading's breakdown table — that vehicle's own
+// The drill-down behind clicking a Loading Summary slip/order.
+function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: string; order: string | null; initialTab: "items" | "activities"; onClose: () => void }) {
+  const [detailTab, setDetailTab] = useState<"items" | "activities">(initialTab);
+  useEffect(() => { if (order) setDetailTab(initialTab); }, [order, initialTab]);
+  const detailQuery = useQuery({
+    queryKey: ["/api/daily-reports/loading/slip", date, order],
+    enabled: !!order,
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/daily-reports/loading/slip?date=${encodeURIComponent(date)}&order=${encodeURIComponent(order!)}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message ?? "Failed to load this loading slip's report");
+      }
+      return res.json() as Promise<LoadingSlipDetail>;
+    },
+  });
+  const detail = detailQuery.data;
+
+  return (
+    <Dialog open={!!order} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="flex max-h-[96vh] w-[calc(100vw-1rem)] max-w-[96vw] flex-col overflow-hidden p-4 sm:max-w-6xl sm:p-6">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
+            <FileSpreadsheet className="h-5 w-5" /> {order}
+          </DialogTitle>
+          <DialogDescription>
+            {detail?.partyName ?? ""}{detail?.vehicleNumber ? ` · ${detail.vehicleNumber}` : ""} · {detail?.plant ?? ""} · {date}
+          </DialogDescription>
+        </DialogHeader>
+
+        {detailQuery.isLoading ? (
+          <div className="flex items-center justify-center py-10 text-gray-400"><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…</div>
+        ) : detailQuery.isError ? (
+          <p className="text-sm text-red-600">{(detailQuery.error as Error).message}</p>
+        ) : detail ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3 sm:flex sm:gap-4">
+              <StatBox label="Expected" value={detail.itemTotals.reduce((sum, item) => sum + item.expectedQty, 0)} />
+              <StatBox label="Received" value={detail.itemTotals.reduce((sum, item) => sum + item.actualQty, 0)} />
+              <StatBox label="Extra" value={detail.itemTotals.reduce((sum, item) => sum + item.extraQty, 0)} />
+              <StatBox label="Pallets" text={detail.itemTotals.reduce((sum, item) => sum + item.pallets, 0).toFixed(2)} />
+            </div>
+            <div className="flex items-center gap-2">
+              {initialTab === "items" && (
+                <Button size="sm" variant={detailTab === "items" ? "default" : "outline"} onClick={() => setDetailTab("items")}>
+                  Item-wise Total ({detail.itemTotals.length})
+                </Button>
+              )}
+              {initialTab === "activities" && (
+                <Button size="sm" variant={detailTab === "activities" ? "default" : "outline"} onClick={() => setDetailTab("activities")}>
+                  Activity Report ({detail.activities.length})
+                </Button>
+              )}
+            </div>
+            {detailTab === "items" ? (
+              <DataTable<ItemTotal>
+                columns={summaryColumnsForDetail}
+                data={detail.itemTotals}
+                getRowId={(row) => row.barcode}
+                enableZebraStripes
+                enableTotalsRow
+                totalsLabel="TOTAL"
+                totalsLabelColumnId="itemName"
+                emptyState="No items"
+                headerClassName="bg-gray-50 text-gray-500"
+                maxHeight="calc(100vh - 300px)"
+              />
+            ) : (
+              <DataTable<Activity>
+                columns={activitiesColumnsForDetail}
+                data={detail.activities}
+                getRowId={(_row, idx) => String(idx)}
+                enableZebraStripes
+                emptyState="No scans"
+                headerClassName="bg-gray-50 text-gray-500"
+                maxHeight="calc(100vh - 300px)"
+              />
+            )}
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const summaryColumnsForDetail: DataTableColumn<ItemTotal>[] = [
+  { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
+  { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => r.itemName || "—" },
+  { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty },
+  { id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty },
+  { id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty },
+  { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets, render: (r) => r.pallets.toFixed(2) },
+];
+
+const activitiesColumnsForDetail: DataTableColumn<Activity>[] = [
+  { id: "scannedAt", header: "Time", width: 150, accessor: (r) => r.scannedAt, totalable: false, render: (r) => fmtIST(r.scannedAt) },
+  { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
+  { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => r.itemName || "—" },
+  { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty },
+  { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? 0, render: (r) => r.pallets?.toFixed(2) ?? "—" },
+  { id: "scannedByName", header: "By", accessor: (r) => r.scannedByName, totalable: false, render: (r) => r.scannedByName || "—" },
+];
+
+// The drill-down behind clicking a vehicle in Unloading's Summary table — that vehicle's own
 // Start/End time (End = when its session was actually marked Complete, not its last scan), an
 // item-wise total, and the full list of its individual scan events, with its own CSV download
 // separate from the main page's summary export.
-function VehicleDetailDialog({ date, vehicle, onClose }: { date: string; vehicle: string | null; onClose: () => void }) {
-  const [detailTab, setDetailTab] = useState<"items" | "activities">("items");
+function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: string; vehicle: string | null; initialTab: "items" | "activities"; onClose: () => void }) {
+  const [detailTab, setDetailTab] = useState<"items" | "activities">(initialTab);
+  useEffect(() => { if (vehicle) setDetailTab(initialTab); }, [vehicle, initialTab]);
   const detailQuery = useQuery({
     queryKey: ["/api/daily-reports/unloading/vehicle", date, vehicle],
     enabled: !!vehicle,
@@ -513,7 +779,7 @@ function VehicleDetailDialog({ date, vehicle, onClose }: { date: string; vehicle
 
   return (
     <Dialog open={!!vehicle} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+      <DialogContent className="flex max-h-[96vh] w-[calc(100vw-1rem)] max-w-[96vw] flex-col overflow-hidden p-4 sm:max-w-6xl sm:p-6">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
             <Truck className="h-5 w-5" /> {vehicle}
@@ -548,18 +814,20 @@ function VehicleDetailDialog({ date, vehicle, onClose }: { date: string; vehicle
             </div>
 
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setDetailTab("items")}
-                className={
-                  detailTab === "items"
-                    ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
-                    : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
-                }
-              >
-                Item-wise Total ({detail.itemTotals.length})
-              </button>
-              <button
+              {initialTab === "items" && (
+                <button
+                  type="button"
+                  onClick={() => setDetailTab("items")}
+                  className={
+                    detailTab === "items"
+                      ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                      : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  }
+                >
+                  Item-wise Total ({detail.itemTotals.length})
+                </button>
+              )}
+              {initialTab === "activities" && <button
                 type="button"
                 onClick={() => setDetailTab("activities")}
                 className={
@@ -569,7 +837,7 @@ function VehicleDetailDialog({ date, vehicle, onClose }: { date: string; vehicle
                 }
               >
                 Activity Report ({detail.activities.length})
-              </button>
+              </button>}
             </div>
 
             {detailTab === "items" ? (
@@ -640,8 +908,9 @@ function VehicleDetailDialog({ date, vehicle, onClose }: { date: string; vehicle
 // equivalent of VehicleDetailDialog above (Order Scan has no vehicle concept, so this groups by
 // CSV/session instead), with its own Start/End, item-wise total, and activity report (including
 // Pallets/STV per event, which Scan's events actually carry).
-function CsvDetailDialog({ date, csv, onClose }: { date: string; csv: string | null; onClose: () => void }) {
-  const [detailTab, setDetailTab] = useState<"items" | "activities">("items");
+function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv: string | null; initialTab: "items" | "activities"; onClose: () => void }) {
+  const [detailTab, setDetailTab] = useState<"items" | "activities">(initialTab);
+  useEffect(() => { if (csv) setDetailTab(initialTab); }, [csv, initialTab]);
   const detailQuery = useQuery({
     queryKey: ["/api/daily-reports/scan/csv", date, csv],
     enabled: !!csv,
@@ -682,7 +951,7 @@ function CsvDetailDialog({ date, csv, onClose }: { date: string; csv: string | n
 
   return (
     <Dialog open={!!csv} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+      <DialogContent className="flex max-h-[96vh] w-[calc(100vw-1rem)] max-w-[96vw] flex-col overflow-hidden p-4 sm:max-w-6xl sm:p-6">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
             <FileSpreadsheet className="h-5 w-5" /> {csv}
@@ -717,7 +986,7 @@ function CsvDetailDialog({ date, csv, onClose }: { date: string; csv: string | n
             </div>
 
             <div className="flex items-center gap-2">
-              <button
+              {initialTab === "items" && <button
                 type="button"
                 onClick={() => setDetailTab("items")}
                 className={
@@ -727,8 +996,8 @@ function CsvDetailDialog({ date, csv, onClose }: { date: string; csv: string | n
                 }
               >
                 Item-wise Total ({detail.itemTotals.length})
-              </button>
-              <button
+              </button>}
+              {initialTab === "activities" && <button
                 type="button"
                 onClick={() => setDetailTab("activities")}
                 className={
@@ -738,7 +1007,7 @@ function CsvDetailDialog({ date, csv, onClose }: { date: string; csv: string | n
                 }
               >
                 Activity Report ({detail.activities.length})
-              </button>
+              </button>}
             </div>
 
             {detailTab === "items" ? (
@@ -806,6 +1075,36 @@ function CsvDetailDialog({ date, csv, onClose }: { date: string; csv: string | n
         ) : null}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ReportRowCards({ rows, tab, onRowClick }: { rows: ReportRow[]; tab: Tab; onRowClick: (row: ReportRow) => void }) {
+  if (rows.length === 0) return <p className="py-10 text-center text-sm text-gray-400">No activity for this date</p>;
+  const identityLabel = tab === "unloading" ? "Vehicle" : tab === "loading" ? "Slip / Order" : "CSV / Order";
+  return (
+    <div className="space-y-2 p-3">
+      {rows.map((row, index) => (
+        <button
+          key={`${row.key}-${index}`}
+          type="button"
+          onClick={() => onRowClick(row)}
+          className="block w-full rounded-lg border border-gray-200 bg-white p-3 text-left shadow-sm transition-colors hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5"
+        >
+          <div className="flex min-w-0 items-center justify-between gap-3">
+            <span className="min-w-0 truncate font-semibold text-[#001d6e]">{row.label}</span>
+            <span className="shrink-0 text-[11px] text-gray-500">{identityLabel}</span>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-600">
+            <span>Plant: <strong className="text-gray-900">{row.plant ?? "—"}</strong></span>
+            <span>Orders: <strong className="text-gray-900">{row.orderCount}</strong></span>
+            <span>Expected: <strong className="text-gray-900">{row.expectedQty.toLocaleString()}</strong></span>
+            <span>Actual: <strong className="text-emerald-600">{row.actualQty.toLocaleString()}</strong></span>
+            <span>Events: <strong className="text-gray-900">{row.eventCount}</strong></span>
+            <span>Start: <strong className="text-gray-900">{fmtIST(row.startTime)}</strong></span>
+          </div>
+        </button>
+      ))}
+    </div>
   );
 }
 

@@ -9,6 +9,7 @@ import {
   type StockPullContribution,
 } from '../lib/statePool';
 import { pushOrderStatusToNotion, pushStoreKeeperInfoToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
+import { computeLoadDateReport, computeLoadDateActivity } from '../lib/loadDateReport';
 
 // Loading — two things happen here:
 //   1. Link a vehicle (from Vehicle Master) onto a Proforma Slip: sets the slip's vehicleNumber,
@@ -685,6 +686,41 @@ router.get('/loading/vehicles/search', requirePageAccess('loading'), async (req:
 // hiding rows here. Server-paginated (20/page, matching Scan History) and enriched with the
 // slip's live completion/ownership status so the client can show Reopen/Claim only where they
 // apply, without a second round trip per row.
+// GET /api/loading/date-report — Total Summary across EVERY proforma slip loaded against this
+// plant+order date. Loading has no vehicle/FIFO grouping (each slip is its own independent
+// order), so this is a straight roll-up by plant+orderDate — mirrors Unloading's
+// GET /api/unloading/date-report (see computeLoadDateReport's comment in loadDateReport.ts).
+router.get('/loading/date-report', requirePageAccess('loading'), async (req: Request, res: Response) => {
+  try {
+    const plant = String(req.query.plant ?? '').trim();
+    const orderDate = String(req.query.orderDate ?? '').trim();
+    if (!plant || !orderDate) return res.status(400).json({ message: 'plant and orderDate are required' });
+    if (!canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const report = await computeLoadDateReport(plant, orderDate);
+    if (!report) return res.status(404).json({ message: 'No proforma slips found for this plant and order date' });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build date report' });
+  }
+});
+
+// GET /api/loading/date-report/scan-activity — same plant+order-date scope, raw scan events per slip.
+router.get('/loading/date-report/scan-activity', requirePageAccess('loading'), async (req: Request, res: Response) => {
+  try {
+    const plant = String(req.query.plant ?? '').trim();
+    const orderDate = String(req.query.orderDate ?? '').trim();
+    if (!plant || !orderDate) return res.status(400).json({ message: 'plant and orderDate are required' });
+    if (!canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const activity = await computeLoadDateActivity(plant, orderDate);
+    if (!activity) return res.status(404).json({ message: 'No proforma slips found for this plant and order date' });
+    res.json(activity);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build date activity' });
+  }
+});
+
 router.get('/loading/records', requirePageAccess('loading'), async (req: Request, res: Response) => {
   try {
     const limit  = Math.max(1, Math.min(100, parseInt(String(req.query.limit  ?? '20'), 10) || 20));
