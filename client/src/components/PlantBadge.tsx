@@ -5,13 +5,15 @@ import { apiRequest } from "@/lib/queryClient";
 
 interface PlantBadgeProps {
   plant: string | null | undefined;
+  /** Short display label; the full plant name remains available as a tooltip. */
+  label?: string;
   className?: string;
   onClick?: React.MouseEventHandler<HTMLSpanElement>;
 }
 
 type PlantColor = { name: string; bgColor: string; textColor: string; borderColor: string };
 
-export function PlantBadge({ plant, className, onClick }: PlantBadgeProps) {
+export function PlantBadge({ plant, label, className, onClick }: PlantBadgeProps) {
   // Colors come straight from Plant Management (the plants table) — no hardcoded per-name map, so
   // whatever an admin configures there is exactly what shows here. Shared/cached query key.
   const { data: plants } = useQuery<PlantColor[]>({
@@ -34,8 +36,9 @@ export function PlantBadge({ plant, className, onClick }: PlantBadgeProps) {
       )}
       style={cfg ? { backgroundColor: cfg.bgColor, color: cfg.textColor, borderColor: cfg.borderColor } : undefined}
       onClick={onClick}
+      title={plant.toUpperCase()}
     >
-      {plant.toUpperCase()}
+      {label ?? plant.toUpperCase()}
     </span>
   );
 }

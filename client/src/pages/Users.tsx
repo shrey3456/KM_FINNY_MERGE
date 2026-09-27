@@ -96,6 +96,18 @@ function parseJsonArray(val: string | null | undefined): string[] {
   try { return JSON.parse(val || "[]"); } catch { return []; }
 }
 
+// Keep the directory compact without losing the full plant name (available on badge hover).
+const PLANT_PREFIXES: Record<string, string> = {
+  VALSAD: "VAL",
+  INDORE: "IND",
+  LUCKNOW: "LKO",
+};
+
+function plantPrefix(plant: string): string {
+  const normalized = plant.trim().toUpperCase();
+  return PLANT_PREFIXES[normalized] ?? normalized.slice(0, 3);
+}
+
 // Navy banner used at the top of every user dialog, so all three read as one themed family.
 function DialogBanner({
   icon: Icon,
@@ -247,13 +259,14 @@ const Users = () => {
   const { user: viewer } = useAuth();
   const canSeePins = viewer?.role === 'admin';
   const [logoutTarget, setLogoutTarget] = useState<User | null>(null);
-  const DEFAULT_VISIBLE_COLUMN_IDS = ['avatar', 'name', 'username', 'pin', 'designation', 'role', 'plants', 'actions'];
+  // Start with the business identifier people use to find a colleague, not an avatar-only column.
+  const DEFAULT_VISIBLE_COLUMN_IDS = ['userCode', 'name', 'username', 'department', 'designation', 'role', 'plants', 'actions'];
   // Column visibility/order are real preferences, not working context for one sitting — saved to
   // localStorage (not sessionStorage) so choosing which columns to see survives closing the
   // browser/logging out, and only changes again when the user actually touches it here.
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(() => {
     try {
-      const raw = localStorage.getItem("users:visibleColumnIds");
+      const raw = localStorage.getItem("users:visibleColumnIds:v2");
       const parsed = raw ? JSON.parse(raw) : null;
       return Array.isArray(parsed) ? new Set(parsed) : new Set(DEFAULT_VISIBLE_COLUMN_IDS);
     } catch {
@@ -261,7 +274,7 @@ const Users = () => {
     }
   });
   useEffect(() => {
-    try { localStorage.setItem("users:visibleColumnIds", JSON.stringify(Array.from(visibleColumnIds))); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("users:visibleColumnIds:v2", JSON.stringify(Array.from(visibleColumnIds))); } catch { /* storage unavailable */ }
   }, [visibleColumnIds]);
   // PIN is a new column, and anyone who had already touched the column toggle has a saved set
   // that predates it — they would never see it without going looking. So it is switched on once,
@@ -279,7 +292,7 @@ const Users = () => {
   // Reset order restores.
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     try {
-      const raw = localStorage.getItem("users:columnOrder");
+      const raw = localStorage.getItem("users:columnOrder:v2");
       const parsed = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -287,7 +300,7 @@ const Users = () => {
     }
   });
   useEffect(() => {
-    try { localStorage.setItem("users:columnOrder", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("users:columnOrder:v2", JSON.stringify(columnOrder)); } catch { /* storage unavailable */ }
   }, [columnOrder]);
 
   const { toast } = useToast();
@@ -400,10 +413,17 @@ const Users = () => {
     ? users.filter((user: User) =>
         user.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
         (user.name && user.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+        (user.userCode && user.userCode.toLowerCase().includes(searchTerm.toLowerCase())) ||
+        (user.department && user.department.toLowerCase().includes(searchTerm.toLowerCase())) ||
         (user.role && user.role.toLowerCase().includes(searchTerm.toLowerCase())) ||
         (user.designation && user.designation.toLowerCase().includes(searchTerm.toLowerCase()))
       )
     : Array.isArray(users) ? users : [];
+  // User Code is the predictable initial order. Clicking any sortable table header replaces it
+  // with that column's ascending/descending sort; equal values retain this code ordering.
+  const orderedUsers = [...filteredUsers].sort((a: User, b: User) =>
+    (a.userCode || '').localeCompare(b.userCode || '', undefined, { numeric: true, sensitivity: 'base' }),
+  );
 
   const isAdmin = true;
 
@@ -771,33 +791,28 @@ const Users = () => {
 
   const userColumns: DataTableColumn<User>[] = [
     {
-      id: 'avatar',
-      header: 'User',
-      width: 70,
-      align: 'center',
-      render: (user) => (
-        <div className="flex justify-center">
-          <Avatar className="h-8 w-8">
-            <AvatarFallback className="bg-primary/10 text-primary text-[10px]">
-              {(user.name || user.username).substring(0, 2).toUpperCase()}
-            </AvatarFallback>
-          </Avatar>
-        </div>
-      ),
+      id: 'userCode',
+      header: 'User Code',
+      width: 100,
+      fixedWidth: true,
+      sortable: true,
+      accessor: (user) => user.userCode,
+      cellClassName: 'font-mono text-xs font-semibold tracking-wide text-[#001d6e]',
+      render: (user) => user.userCode || '—',
     },
     {
       id: 'name',
       header: 'Name',
-      width: 160,
+      width: 125,
       sortable: true,
       accessor: (user) => user.name,
       cellClassName: 'font-medium text-gray-900',
-      render: (user) => user.name || '-',
+      render: (user) => user.name ? user.name.toUpperCase() : '—',
     },
     {
       id: 'username',
       header: 'Username',
-      width: 160,
+      width: 120,
       sortable: true,
       accessor: (user) => user.username,
       render: (user) => user.username,
@@ -807,7 +822,7 @@ const Users = () => {
     ...(canSeePins ? [{
       id: 'pin',
       header: 'PIN',
-      width: 90,
+      width: 70,
       sortable: true,
       accessor: (user: User) => user.pin ?? '',
       cellClassName: 'tabular-nums',
@@ -821,15 +836,27 @@ const Users = () => {
     {
       id: 'designation',
       header: 'Designation',
-      width: 140,
+      width: 105,
       sortable: true,
       accessor: (user) => user.designation,
       render: (user) => user.designation || '-',
     },
     {
+      id: 'department',
+      header: 'Department',
+      width: 120,
+      sortable: true,
+      accessor: (user) => user.department,
+      render: (user) => user.department ? (
+        <span className="inline-flex max-w-full truncate rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700" title={user.department}>
+          {user.department}
+        </span>
+      ) : <span className="text-gray-400">—</span>,
+    },
+    {
       id: 'role',
       header: 'Role',
-      width: 110,
+      width: 90,
       sortable: true,
       accessor: (user) => user.role,
       render: (user) => (
@@ -848,7 +875,7 @@ const Users = () => {
     {
       id: 'plants',
       header: 'Plants',
-      width: 160,
+      width: 115,
       render: (user) => {
         const userPlants = parseJsonArray((user as any).plants);
         return (
@@ -856,8 +883,8 @@ const Users = () => {
             {userPlants.length === 0 ? (
               <span className="text-gray-400">-</span>
             ) : (
-              userPlants.map((p: string) => (
-                <PlantBadge key={p} plant={p} className="text-[10px]" />
+                userPlants.map((p: string) => (
+                <PlantBadge key={p} plant={p} label={plantPrefix(p)} className="text-[10px]" />
               ))
             )}
           </div>
@@ -867,7 +894,7 @@ const Users = () => {
     {
       id: 'actions',
       header: 'Actions',
-      width: 120,
+      width: 96,
       align: 'left',
       hideable: false,  
       preventRowClick: true,
@@ -895,40 +922,40 @@ const Users = () => {
   ];
 
   return (
-    <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 lg:p-6">
+    <div className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-50/70 p-3 sm:p-5 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px]">
-        <div className="mb-6">
-          <h2 className="text-2xl font-bold">Users</h2>
-          <p className="text-gray-600">Manage user accounts and permissions</p>
+        <div className="mb-4 sm:mb-5">
+          <h2 className="text-xl font-bold tracking-tight text-gray-900 sm:text-2xl">User Management</h2>
+          <p className="mt-1 text-sm text-gray-500">Manage accounts, departments, access, and assigned plants.</p>
         </div>
 
-        <Card className="overflow-hidden">
+        <Card className="overflow-hidden border-slate-200 bg-white shadow-sm">
           {/* Header bar — title + search, filters directly beneath */}
           <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-3">
                 <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-full bg-[#001d6e] text-white">
                   <UsersIcon className="h-4 w-4 sm:h-5 sm:w-5" />
                 </div>
                 <div>
-                  <div className="text-lg sm:text-xl font-bold tracking-tight text-gray-900">User Management</div>
-                  <div className="text-xs text-gray-400 leading-none mt-0.5">
+                  <div className="text-base font-bold tracking-tight text-gray-900 sm:text-lg">Directory</div>
+                  <div className="mt-0.5 text-xs leading-none text-gray-400">
                     {searchTerm
                       ? `${filteredUsers.length} of ${Array.isArray(users) ? users.length : 0} users`
                       : `${Array.isArray(users) ? users.length : 0} users`}
                   </div>
                 </div>
               </div>
-              <div className="relative w-full sm:w-auto sm:shrink-0">
-                <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+              <div className="relative w-full sm:w-72 sm:shrink-0">
+                <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
                 <input
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder="Search users…"
-                  className="h-7 w-full sm:w-64 rounded-md border border-gray-200 bg-gray-50 pl-7 pr-6 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-[#001d6e]/30 focus:bg-white"
+                  className="h-9 w-full rounded-lg border border-gray-200 bg-slate-50 pl-9 pr-8 text-sm text-gray-700 placeholder:text-gray-400 transition focus:border-[#001d6e]/40 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#001d6e]/10"
                 />
                 {searchTerm && (
-                  <button onClick={() => setSearchTerm('')} className="absolute right-2 top-1.5 text-gray-400 hover:text-gray-600">
+                  <button onClick={() => setSearchTerm('')} className="absolute right-2.5 top-2.5 text-gray-400 hover:text-gray-600">
                     <X className="h-3.5 w-3.5" />
                   </button>
                 )}
@@ -936,7 +963,7 @@ const Users = () => {
             </div>
 
             {/* Filters */}
-            <div className="flex flex-col md:flex-row md:items-center gap-2 mt-3">
+            <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center">
               <DataTableColumnToggle
               columnOrder={columnOrder}
               onColumnOrderChange={setColumnOrder}
@@ -956,7 +983,7 @@ const Users = () => {
                 buttonClassName={FILTER_BTN_CLASS}
               />
               <Button
-                className={`${FILTER_BTN_CLASS} flex items-center gap-1 md:ml-auto`}
+                className={`${FILTER_BTN_CLASS} flex items-center gap-1 sm:ml-auto`}
                 onClick={() => setIsAddDialogOpen(true)}
                 disabled={!isAdmin}
               >
@@ -967,9 +994,9 @@ const Users = () => {
           </div>
 
           <CardContent className="p-0">
-            {/* Seven columns total ~890px — a phone can only reach them by swiping sideways, so
-                below 480px (and in portrait) each user becomes a stacked card instead. */}
-            <div className="min-[480px]:hidden landscape:hidden">
+            {/* Cards are reserved for genuinely narrow screens; wider layouts use the data grid so
+                the available workspace is not left empty. */}
+            <div className="min-[1100px]:hidden">
               {isLoading ? (
                 <SectionSkeleton lines={4} />
               ) : filteredUsers.length === 0 ? (
@@ -978,13 +1005,14 @@ const Users = () => {
                 </p>
               ) : (
                 <>
-                  {filteredUsers
+                  {orderedUsers
                     .slice(pageIndex * USERS_PAGE_SIZE, (pageIndex + 1) * USERS_PAGE_SIZE)
                     .map((user) => {
                       const userPlants = parseJsonArray((user as any).plants);
                       const isAdminRole = user.role === "admin" || user.role === "super-admin";
                       return (
-                        <div key={user.userCode} className="flex items-start gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0">
+                        <div key={user.userCode} className="border-b border-slate-100 px-4 py-4 last:border-b-0 sm:px-5">
+                          <div className="flex items-start gap-3">
                           <Avatar className="mt-0.5 h-9 w-9 shrink-0">
                             <AvatarFallback className="bg-primary/10 text-[11px] text-primary">
                               {(user.name || user.username).substring(0, 2).toUpperCase()}
@@ -992,9 +1020,13 @@ const Users = () => {
                           </Avatar>
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-[15px] font-semibold leading-snug text-gray-900">
-                              {user.name || "-"}
+                              {user.name ? user.name.toUpperCase() : "—"}
                             </p>
                             <p className="mt-0.5 truncate text-xs text-gray-400">{user.username}</p>
+                            <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                              <span className="rounded bg-[#001d6e]/8 px-1.5 py-0.5 font-mono text-[11px] font-semibold tracking-wide text-[#001d6e]">{user.userCode || 'No code'}</span>
+                              {user.department && <span className="max-w-[170px] truncate rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">{user.department}</span>}
+                            </div>
                             <div className="mt-1.5 flex flex-wrap items-center gap-1">
                               <Badge
                                 variant="outline"
@@ -1016,27 +1048,28 @@ const Users = () => {
                             {userPlants.length > 0 && (
                               <div className="mt-1.5 flex flex-wrap gap-1">
                                 {userPlants.map((pl: string) => (
-                                  <PlantBadge key={pl} plant={pl} className="text-[10px]" />
+                                  <PlantBadge key={pl} plant={pl} label={plantPrefix(pl)} className="text-[10px]" />
                                 ))}
                               </div>
                             )}
                           </div>
-                          <div className="flex shrink-0 gap-1">
-                            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEditDialog(user)}>
+                          <div className="flex shrink-0 gap-0.5">
+                            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg" onClick={() => openEditDialog(user)}>
                               <Edit className="h-4 w-4" />
                               <span className="sr-only">Edit</span>
                             </Button>
                             <Button
-                              variant="ghost" size="icon" className="h-8 w-8 text-amber-600"
+                              variant="ghost" size="icon" className="h-8 w-8 rounded-lg text-amber-600"
                               onClick={() => setLogoutTarget(user)}
                             >
                               <LogOut className="h-4 w-4" />
                               <span className="sr-only">Sign out</span>
                             </Button>
-                            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openDeleteDialog(user)}>
+                            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg" onClick={() => openDeleteDialog(user)}>
                               <Trash className="h-4 w-4" />
                               <span className="sr-only">Delete</span>
                             </Button>
+                          </div>
                           </div>
                         </div>
                       );
@@ -1096,10 +1129,10 @@ const Users = () => {
             </div>
 
             <DataTable<User>
-              className="hidden space-y-0 min-[480px]:block landscape:block"
+              className="hidden space-y-0 min-[1100px]:block"
               containerClassName="rounded-none border-0"
               columns={userColumns}
-              data={filteredUsers}
+              data={orderedUsers}
               getRowId={(user) => user.userCode}
               isLoading={isLoading}
               loadingLabel="Loading users…"
@@ -1121,7 +1154,6 @@ const Users = () => {
             onColumnOrderChange={setColumnOrder}
               onColumnVisibilityChange={setVisibleColumnIds}
               enableZebraStripes
-              showMobileSwipeHint
               headerClassName="bg-[#001d6e] text-white hover:bg-[#0a2b7e] hover:text-white border-[#1a3a9c]"
             />
           </CardContent>

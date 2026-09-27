@@ -417,7 +417,6 @@ export default function Unloading() {
   // the REAL (unrotated) window width, not the rotated container's effective width, so a rotated
   // kiosk kept getting the desktop grid crammed into a narrow band. Same reason Order Scan forces
   // its own single-column layout on for bigView instead of relying on breakpoints.
-  const bigView = rotated || isPortrait;
   // The vehicle list's compact mode (short action labels) also has to kick in on a plain narrow
   // window, which is neither rotated nor portrait — breakpoint classes can't be used for this
   // because a rotated kiosk's REAL window is wide even though its content area is narrow.
@@ -430,6 +429,10 @@ export default function Unloading() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
+  // A narrow viewport must use the same stacked scan layout as rotated/portrait mode; otherwise
+  // the totals card and scanner can remain in a desktop split and squeeze the scanner into a
+  // thin column on smaller screens.
+  const bigView = rotated || isPortrait || isNarrowViewport;
   const compactVehicleTable = bigView || isNarrowViewport;
   // Bounded, self-scrolling frame for tables in rotated mode — mirrors Order Scan's own
   // kioskTableBoxClass exactly (client/src/pages/Scanning/Scan.tsx). Without this, a table left
@@ -440,7 +443,7 @@ export default function Unloading() {
   // that turns the subtree 90°, so content-space height runs along the viewport's WIDTH (vw)
   // instead of its height (vh).
   const kioskTableBoxClass = bigView
-    ? `overflow-auto kiosk-scroll ${quarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
+    ? `overflow-y-auto overflow-x-hidden kiosk-scroll ${quarterTurn ? "max-h-[62vw]" : "max-h-[62vh]"}`
     : "";
   // ── Rotated-view scroll fix — same as Order Scan's own (client/src/pages/Scanning/Scan.tsx):
   // a 90°-rotated container's native scroll moves content sideways on screen, not up/down, so a
@@ -1337,7 +1340,7 @@ export default function Unloading() {
   ) : null;
 
   return (
-    <div className="flex-1 overflow-y-auto p-4 lg:p-6">
+    <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-4 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
         {/* The kiosk-rotate wrapper below is position:fixed over the whole viewport, so it visually
             covers this header once rotated — hidden then, and the rotated box renders the same
@@ -2077,6 +2080,7 @@ export default function Unloading() {
                       </div>
                     )}
                   </div>
+                  <div className={bigView ? "hidden" : "hidden xl:block"}>
                   <DataTable<SessionItem>
                     containerClassName="rounded-none border-0"
                     headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-sm"
@@ -2096,6 +2100,39 @@ export default function Unloading() {
                     isStickyHeader={bigView}
                     maxHeight={bigView ? (quarterTurn ? "62vw" : "62vh") : undefined}
                   />
+                  </div>
+                  <div className={bigView ? "space-y-2 p-3" : "space-y-2 p-3 xl:hidden"}>
+                    {filteredItems.length === 0 ? (
+                      <p className="py-8 text-center text-sm text-gray-400">{itemSearchText || itemStatusFilter ? "No items match your filters." : "No items on this batch."}</p>
+                    ) : filteredItems.map((item) => {
+                      const extra = Math.max(0, item.scanned - item.expected);
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => setExpandedItemId((cur) => (cur === item.id ? null : item.id))}
+                          className="block w-full rounded-lg border border-gray-200 bg-white p-3 text-left shadow-sm"
+                        >
+                          <div className="flex min-w-0 items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="break-words text-sm font-semibold text-gray-900">{item.itemName ?? "—"}</p>
+                              <p className="mt-1 break-all font-mono text-[11px] text-gray-400">{item.barcode ?? "—"}{item.sapCode ? ` · SAP ${item.sapCode}` : ""}</p>
+                            </div>
+                            <span className={`shrink-0 rounded px-2 py-1 text-[11px] font-semibold ${item.isComplete ? "bg-emerald-100 text-emerald-700" : item.scanned > 0 ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                              {item.isComplete ? "Received" : item.scanned > 0 ? "Partial" : "Pending"}
+                            </span>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-600">
+                            <span>Expected <strong className="text-gray-900">{item.expected}</strong></span>
+                            <span>Received <strong className="text-emerald-600">{item.scanned}</strong></span>
+                            <span>Remaining <strong className="text-[#001d6e]">{item.remaining}</strong></span>
+                            <span>Extra <strong className="text-amber-600">{extra}</strong></span>
+                          </div>
+                          {(item.itemsPerPallet ?? 0) > 0 && <p className="mt-2 text-[11px] font-semibold text-gray-500">{item.itemsPerPallet} per pallet</p>}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 {/* ── Auto Scan feedback popup — same popup Order Scan/Loading show for 5s after

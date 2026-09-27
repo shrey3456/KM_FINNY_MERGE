@@ -516,20 +516,8 @@ export class MemStorage implements IStorage {
       // Populate messages map
       savedMessages.forEach((message: Message) => this.messages.set(message.id, message));
 
-      // Add default admin user if no users exist
-      if (this.users.size === 0) {
-        await this.createUser({
-          username: "vraj@km-tribe",
-          pin: "9999", // PIN set to 9999 as required
-          name: "Vraj", 
-          firstName: null,
-          lastName: null,
-          designation: null,
-          department: "Management",
-          accessType: null,
-          role: "admin"
-        });
-      }
+      // Never seed an account with a known credential. An empty development store must be
+      // configured deliberately, just like a production database.
 
       // Create default backup settings if none exist
       if (this.backupSettings.size === 0) {

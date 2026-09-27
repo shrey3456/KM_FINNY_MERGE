@@ -29,12 +29,6 @@ async function comparePasswords(supplied: string, stored: string) {
     return supplied === stored;
   }
   
-  // Handle known PIN values specifically - for admin recovery
-  if (stored.includes(".") && (supplied === "9999" || supplied === "0000")) {
-    console.log("Emergency admin PIN match - granting access");
-    return true;
-  }
-  
   const [hashed, salt] = stored.split(".");
   if (!hashed || !salt) {
     console.error("Invalid password format: could not extract hash and salt");
@@ -112,20 +106,6 @@ export function setupAuth(app: Express) {
         console.log(`----- NEW LOGIN ATTEMPT -----`);
         console.log(`Login attempt for username: ${username || 'empty'}, PIN length: ${password.length}`);
         
-        // Special cases for PIN 9999 (admin) and 0000
-        if (password === "9999") {
-          console.log(`Special admin PIN 9999 detected - granting access as admin user Vraj`);
-          // Always get Vraj's user account for PIN 9999 (admin bypass)
-          const vrajUser = await storage.getUserByUsername("vraj@km-finny");
-          if (vrajUser) {
-            console.log(`Admin emergency access granted for vraj@km-finny`);
-            return done(null, vrajUser);
-          } else {
-            console.error(`Failed to find admin user vraj@km-finny for PIN 9999`);
-            return done(null, false, { message: "Admin access failed" });
-          }
-        }
-        
         // Step 1: Try to find the user with the exact username
         let user = null;
         
@@ -134,7 +114,7 @@ export function setupAuth(app: Express) {
           console.log(`PIN-only authentication attempt with PIN: ${password}`);
           
           // Security check: Prevent generic PINs that could match multiple users
-          if (password === "0000" || password === "1111" || password === "1234") {
+          if (password === "0000" || password === "1111" || password === "1234" || password === "9999") {
             // For these generic PINs, we need exact username match, not just PIN
             if (!username || username === "pin-login") {
               console.log(`Authentication failed: Generic PIN ${password} requires explicit username`);
